@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Updated the TLS library (`rustls` 0.23.42 → 0.23.46)** to fix RUSTSEC-2026-0285, where TLS 1.3
+  handshake messages could be accepted across encryption-level boundaries. Silo uses it for its
+  HTTPS connections (catalog, GitHub, updates). No behavior change. (#167)
+
 ## [0.7.3] - 2026-08-12
 
 ### Removed
