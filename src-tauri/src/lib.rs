@@ -1073,14 +1073,20 @@ async fn detect_conflicts(
 }
 
 // ── Game launch ──
+// Off the main thread: detection walks Steam libraries and, on macOS, may shell out to
+// Spotlight (`mdfind`); launch re-detects to pick Steam vs. the `.app` bundle.
 #[tauri::command]
-fn detect_game() -> Option<gamelaunch::GameInfo> {
-    gamelaunch::detect()
+async fn detect_game() -> Result<Option<gamelaunch::GameInfo>, String> {
+    tauri::async_runtime::spawn_blocking(gamelaunch::detect)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn launch_game() -> Result<(), String> {
-    gamelaunch::launch()
+async fn launch_game() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(gamelaunch::launch)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Write text to a user-chosen path (used by the diagnostics report export). Confined to a

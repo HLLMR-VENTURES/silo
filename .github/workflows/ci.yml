@@ -61,6 +61,28 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+  rust-macos:
+    name: Rust (macOS clippy + test)
+    # The `cfg(target_os = "macos")` code (.app detection, `open -a` launch) never compiles
+    # on the ubuntu job — without this it would first be built at release-tag time.
+    # No system deps needed: Tauri uses the OS WebKit on macOS. fmt is OS-independent, so
+    # it stays on the ubuntu job only.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+      - name: Clippy (deny warnings)
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test
+
   audit:
     name: Security audit (cargo-audit)
     runs-on: ubuntu-latest

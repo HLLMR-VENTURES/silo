@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **macOS: the game is now detected as a `.app` bundle.** Silo looked for a bare
+  `FarmingSimulator2025` file, but Mac games are app bundles (folders), so detection failed and the
+  Launch button stayed hidden. Silo now finds the bundle in your Steam library, in `/Applications`
+  or `~/Applications`, and falls back to Spotlight (bundle id `com.giants-software.fs25`). (#171)
+- **macOS: Launch works for Mac App Store and GIANTS-direct installs.** Steam installs still launch
+  through Steam; other installs open the game's app bundle directly. Guided bisection uses the same
+  launch. (#171)
+- **macOS / Linux: folder mods now project onto drives that refuse symlinks** (exFAT, FAT). Silo
+  falls back to a marked copy, as it already did on Windows. On every OS, the copy fallback no
+  longer runs when a folder with that name already exists, so it can't merge into your own folder.
+  (#171)
+
+### Changed
+
+- **CI now builds and tests on macOS**, so macOS-only code is checked before a release. (#171)
+
 ### Security
 
 - **Updated the TLS library (`rustls` 0.23.42 → 0.23.46)** to fix RUSTSEC-2026-0285, where TLS 1.3
