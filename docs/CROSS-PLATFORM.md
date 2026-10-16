@@ -28,6 +28,13 @@ Linux and reaches into that prefix.
 
 `<lib>` is any Steam **library root** — games can live on other drives.
 
+On **macOS** the game is a `.app` bundle (a folder), not a bare binary. `gamelaunch.rs`
+takes any `*.app` directly inside the Steam install folder (the exact bundle name is
+unverified (?)), else an FS25-named bundle in `/Applications` or `~/Applications`
+(Mac App Store / GIANTS-direct), else Spotlight (`mdfind` on bundle id
+`com.giants-software.fs25`). Steam installs launch via `steam://rungameid/2300320`;
+the others launch with `open -a <bundle>`.
+
 ## Store / launcher discovery (don't hardcode drives)
 
 FS25 is sold via **Steam**, **Epic**, and the **GIANTS** launcher. Detect, don't guess:
