@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-16
+
 ### Added
 
 - **Choose your mods folder.** Settings → Mods folder → **Change…** picks any folder. If FS25 reads
@@ -40,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **CI now builds and tests on macOS**, so macOS-only code is checked before a release. (#171)
+- **Updated Tauri to 2.12 and its plugins** (dialog, opener, process, deep-link, single-instance,
+  updater), with matching frontend packages. (#165, #169)
 
 ### Security
 
