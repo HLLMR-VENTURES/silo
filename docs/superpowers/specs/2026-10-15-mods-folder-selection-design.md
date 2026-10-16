@@ -1,7 +1,7 @@
 # Mods folder selection — design
 
 - **Date:** 2026-10-15
-- **Issues:** #162 (mod folder other than the default). Foundation for #166 (configurable archive location), which gets its own spec.
+- **Issues:** #162 (mod folder other than the default); the macOS discovery part of #171. Foundation for #166 (configurable archive location), which gets its own spec.
 - **Status:** approved design, not yet implemented
 
 ## Problem
@@ -18,7 +18,7 @@ Silo only ever manages `<FS25 user dir>/mods`:
 1. Silo follows the folder the game actually reads (FS25's override when active, else the default).
 2. The user can choose any folder; when it differs from what the game reads, Silo offers to point the game at it too.
 3. Each folder keeps its own organize state; switching never disturbs the folder left behind, and switching back restores it.
-4. Linux/Proton: auto-detect the FS25 user dir inside the Proton prefix and translate paths between the game's Windows view and the host.
+4. Linux/Proton: auto-detect the FS25 user dir inside the Proton prefix and translate paths between the game's Windows view and the host. macOS: also find the sandboxed Mac App Store data folder (#171).
 
 ## Non-goals
 
@@ -39,7 +39,7 @@ Silo only ever manages `<FS25 user dir>/mods`:
 
 ## Backend
 
-### `fsgame` — Linux discovery
+### `fsgame` — Linux and macOS discovery
 
 `user_dir()` gains a Linux branch returning the FS25 user dir and the Proton prefix it lives in:
 
@@ -47,7 +47,14 @@ Silo only ever manages `<FS25 user dir>/mods`:
 2. For each root, parse `steamapps/libraryfolders.vdf` to list every library folder (the root itself included).
 3. In each library, check `steamapps/compatdata/2300320/pfx/drive_c/users/steamuser/Documents/My Games/FarmingSimulator2025`. First existing match wins.
 
-New return shape (all platforms): `GameLocation { user_dir: PathBuf, prefix: Option<PathBuf> }`. Windows and macOS keep their current paths with `prefix: None`. The VDF parse is a small pure function (the format is nested `"key" "value"` / `"key" { … }`); only `path` values are needed.
+macOS checks two candidates (#171). The Mac App Store build is sandboxed, and its own `log.txt` shows its data under the app container:
+
+1. `~/Library/Containers/com.giants-software.fs25/Data/Library/Application Support/FarmingSimulator2025` (Mac App Store; verified from game logs in GIANTS forum threads t=211655 and t=212401).
+2. `~/Library/Application Support/FarmingSimulator2025` (Steam / GIANTS direct; community-consistent, still to confirm on a real Mac).
+
+On any platform, when several candidates exist, prefer the one containing `log.txt` (the game has actually run there), then the one containing `mods/`, then the first in order. A user dir whose `mods/` folder doesn't exist yet is still valid: Silo offers to create `mods/` rather than reporting no folder (Mac users often have no `mods/` until their first download).
+
+New return shape (all platforms): `GameLocation { user_dir: PathBuf, prefix: Option<PathBuf> }`. Windows keeps its current path; Windows and macOS have `prefix: None`. Candidate selection is a pure function over "which of these paths exist" so it unit-tests without real installs. The VDF parse is a small pure function (the format is nested `"key" "value"` / `"key" { … }`); only `path` values are needed.
 
 ### New module `modsroot` (pure logic, unit-tested)
 
@@ -137,6 +144,7 @@ Rust unit tests (pure logic, no running app):
 
 - `libraryfolders.vdf` parsing from a real-shaped sample (several libraries).
 - Proton prefix discovery in a fake directory tree (native and Flatpak roots; game in a secondary library).
+- macOS candidate selection: App Store container vs Application Support, `log.txt` beats `mods/` beats order, a user dir without `mods/` still resolves.
 - `PathMap`: `C:` ↔ `drive_c`, `Z:` ↔ `/`, a custom `d:` link, unknown letter ⇒ `None`, `to_game` with no mapping ⇒ `Z:` fallback, separator normalization.
 - `resolve`: precedence (choice > active override > default), an inactive override ignored, `mismatch` true/false.
 - `read_override` / `write_override` against a real-shaped `gameSettings.xml`; other content preserved; missing element.
