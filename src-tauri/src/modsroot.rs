@@ -1,6 +1,56 @@
 //! Which mods folder Silo manages (#162). Pure logic plus the one trusted "active root".
 
+use crate::xmlconfig;
 use std::path::Path;
+
+/// FS25's own mods-folder redirect in `gameSettings.xml`:
+/// `<modsDirectoryOverride active="…" directory="…"/>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Override {
+    pub active: bool,
+    pub directory: String,
+}
+
+const OV_ACTIVE: &str = "gameSettings.modsDirectoryOverride@active";
+const OV_DIR: &str = "gameSettings.modsDirectoryOverride@directory";
+
+fn override_paths() -> [String; 2] {
+    [OV_ACTIVE.to_string(), OV_DIR.to_string()]
+}
+
+/// Read the override, or `None` when `gameSettings.xml` has no such element.
+pub fn read_override(xml: &str) -> Option<Override> {
+    let v = xmlconfig::get_values(xml, &override_paths());
+    let directory = v.get(OV_DIR)?.clone();
+    let active = v
+        .get(OV_ACTIVE)
+        .map(|a| a.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    Some(Override { active, directory })
+}
+
+/// Turn the override on and point it at `game_path` (a path in the game's own view — see
+/// `PathMap::to_game`). Errors when the element or its attributes are missing, because
+/// `xmlconfig::set_values` can only change values that already exist.
+pub fn write_override(xml: &str, game_path: &str) -> Result<String, String> {
+    let v = xmlconfig::get_values(xml, &override_paths());
+    if !v.contains_key(OV_ACTIVE) || !v.contains_key(OV_DIR) {
+        return Err("gameSettings.xml has no modsDirectoryOverride setting to update".into());
+    }
+    xmlconfig::set_values(
+        xml,
+        &[
+            xmlconfig::Edit {
+                path: OV_ACTIVE.into(),
+                value: "true".into(),
+            },
+            xmlconfig::Edit {
+                path: OV_DIR.into(),
+                value: game_path.into(),
+            },
+        ],
+    )
+}
 
 /// Normalize a path string into a folder identity key. Windows: strip the `\\?\` verbatim
 /// prefix, unify separators, lowercase (NTFS is case-insensitive). Elsewhere: keep case.
@@ -60,5 +110,38 @@ mod tests {
     fn unix_keys_keep_case_and_drop_trailing_slash() {
         assert_eq!(normalize_key("/mnt/HDD/mods/", false), "/mnt/HDD/mods");
         assert_eq!(normalize_key("/", false), "/");
+    }
+
+    const GS: &str = "\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\" ?>\n<gameSettings revision=\"15\">\n    <modsDirectoryOverride active=\"false\" directory=\"C:/Temp\"/>\n    <defaultMultiplayerPort>10823</defaultMultiplayerPort>\n</gameSettings>\n";
+
+    #[test]
+    fn reads_the_override() {
+        assert_eq!(
+            read_override(GS),
+            Some(Override {
+                active: false,
+                directory: "C:/Temp".into()
+            })
+        );
+        assert_eq!(read_override("<gameSettings><x/></gameSettings>"), None);
+    }
+
+    #[test]
+    fn writes_the_override_and_preserves_everything_else() {
+        let out = write_override(GS, "D:/FS25 Mods").unwrap();
+        assert_eq!(
+            read_override(&out),
+            Some(Override {
+                active: true,
+                directory: "D:/FS25 Mods".into()
+            })
+        );
+        assert!(out.starts_with('\u{feff}'), "BOM kept");
+        assert!(out.contains("<defaultMultiplayerPort>10823</defaultMultiplayerPort>"));
+    }
+
+    #[test]
+    fn refuses_to_write_when_the_element_is_missing() {
+        assert!(write_override("<gameSettings><x/></gameSettings>", "D:/m").is_err());
     }
 }
