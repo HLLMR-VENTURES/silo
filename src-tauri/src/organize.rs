@@ -626,21 +626,31 @@ fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
 fn make_link(src: &Path, link: &Path, kind: &str) -> std::io::Result<()> {
     if kind == "dir" {
         #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(src, link)
-        }
+        let symlink = |s: &Path, l: &Path| std::os::unix::fs::symlink(s, l);
         #[cfg(windows)]
-        {
-            std::os::windows::fs::symlink_dir(src, link).or_else(|_| copy_dir_projection(src, link))
-        }
+        let symlink = |s: &Path, l: &Path| std::os::windows::fs::symlink_dir(s, l);
+        link_dir_or_copy(src, link, symlink)
     } else {
         std::fs::hard_link(src, link).or_else(|_| std::fs::copy(src, link).map(|_| ()))
     }
 }
 
+/// Dir projection: `symlink`, or a marked copy when the filesystem refuses links (exFAT/FAT
+/// drives, no symlink privilege). Never falls back when `link` already exists — copying into
+/// a folder that's already there would merge into it and stamp it as ours.
+fn link_dir_or_copy(
+    src: &Path,
+    link: &Path,
+    symlink: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match symlink(src, link) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => copy_dir_projection(src, link),
+        other => other,
+    }
+}
+
 /// Copy a directory as a projection and drop the ownership marker, so a later flatten /
 /// deactivate can prove Silo created it (a copied dir has no link identity to compare).
-#[cfg(windows)]
 fn copy_dir_projection(src: &Path, dst: &Path) -> std::io::Result<()> {
     copy_dir_all(src, dst)?;
     std::fs::write(dst.join(SILO_MARKER), b"silo\n")
@@ -870,6 +880,41 @@ mod tests {
         // With Silo's ownership marker → ours.
         std::fs::write(link.join(SILO_MARKER), b"silo\n").unwrap();
         assert!(is_silo_projection(&link, &src, "dir"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn dir_projection_copies_when_links_are_refused() {
+        let base = std::env::temp_dir().join(format!("silo_dircopy_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let src = base.join("archived_dir");
+        std::fs::create_dir_all(src.join("textures")).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<x/>").unwrap();
+        std::fs::write(src.join("textures").join("a.dds"), b"dds").unwrap();
+        let refuse = |_: &Path, _: &Path| -> std::io::Result<()> {
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported)) // e.g. exFAT
+        };
+
+        // Filesystem refuses links → a marked copy, which reads as ours.
+        let link = base.join("FS25_FooDir");
+        link_dir_or_copy(&src, &link, refuse).unwrap();
+        assert_eq!(std::fs::read(link.join("modDesc.xml")).unwrap(), b"<x/>");
+        assert_eq!(
+            std::fs::read(link.join("textures").join("a.dds")).unwrap(),
+            b"dds"
+        );
+        assert!(is_silo_projection(&link, &src, "dir"));
+
+        // Name already taken (the user's own folder) → no copy merged into it, no marker.
+        let taken = base.join("FS25_UserDir");
+        std::fs::create_dir_all(&taken).unwrap();
+        let exists = |_: &Path, _: &Path| -> std::io::Result<()> {
+            Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+        };
+        assert!(link_dir_or_copy(&src, &taken, exists).is_err());
+        assert!(!taken.join("modDesc.xml").exists());
+        assert!(!is_silo_projection(&taken, &src, "dir"));
 
         let _ = std::fs::remove_dir_all(&base);
     }

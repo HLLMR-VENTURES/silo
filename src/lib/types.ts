@@ -147,8 +147,11 @@ export interface Conflict {
 
 export interface GameInfo {
   appId: string;
+  /** The executable; on macOS, the `.app` bundle. */
   exe: string;
   installDir: string;
+  /** `steam` launches via Steam; `standalone` (macOS App Store / GIANTS) opens the bundle. */
+  store: "steam" | "standalone";
 }
 
 export interface SettingsField {
