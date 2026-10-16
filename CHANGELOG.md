@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **"Cancel" now actually cancels.** Every confirmation dialog ignored Cancel and went ahead anyway,
+  including *Restore vanilla*, deleting or updating a shared collection, deleting a loadout,
+  activating/deactivating the whole library, launching with critical conflicts, and installing a
+  GitHub update. The dialog plugin makes the browser's `confirm` asynchronous, and Silo wasn't
+  waiting for the answer. All confirmations now wait for your choice, and the build fails if an
+  unawaited one is ever added again. (#177)
 - **macOS: the game is now detected as a `.app` bundle.** Silo looked for a bare
   `FarmingSimulator2025` file, but Mac games are app bundles (folders), so detection failed and the
   Launch button stayed hidden. Silo now finds the bundle in your Steam library, in `/Applications`

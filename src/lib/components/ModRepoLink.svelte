@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { ModEntry, UpdateInfo } from "../types";
-  import { setModRepo, guessRepo, checkModUpdate, downloadUpdate, openExternal } from "../api";
+  import { setModRepo, guessRepo, checkModUpdate, downloadUpdate, openExternal, confirmDialog } from "../api";
 
   let {
     mod,
@@ -65,7 +65,7 @@
 
   async function installUpdate() {
     if (!update?.release.assetUrl) return;
-    if (!confirm(`Download and install ${update.release.tag}? The current file is backed up to .bak.`))
+    if (!(await confirmDialog(`Download and install ${update.release.tag}? The current file is backed up to .bak.`)))
       return;
     installing = true;
     ghError = null;
