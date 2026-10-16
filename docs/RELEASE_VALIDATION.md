@@ -6,6 +6,36 @@ gap between the RC protocol and visible proof it ran.
 
 ---
 
+## v0.8.0 — 2026-10-16
+
+### Artifact identity
+| Field | Value |
+|---|---|
+| Version | 0.8.0 (exe FileVersion + ProductVersion + registry `DisplayVersion` agree) |
+| Source | GitHub release `v0.8.0` (non-prerelease "Latest"), release-workflow run 38976382678, all 6 jobs green (macOS arm64 + x64, Linux, Windows signed, SBOM, checksums) |
+| Installer | `Silo_0.8.0_x64-setup.exe`, SHA-256 `3aa868c89d25172746b6fb7825d0454516e90cfc9965806ea46c3a3bb053fed4` (matches `SHA256SUMS.txt`) |
+| Authenticode | **Valid**, signer `CN=David Hellmer`, Microsoft RSA timestamp; installed `silo.exe` also Valid |
+| Updater manifest | `latest.json` v0.8.0, 11 platform keys each with a signature + v0.8.0 URL; Windows key layout identical to v0.7.3 (`windows-x86_64` → MSI, `-nsis` → setup.exe); `releases/latest/download/latest.json` serves 0.8.0 after publish |
+| Install path | Silent per-user NSIS (`/S`) **over an existing 0.7.3** install at `%LOCALAPPDATA%\Silo` |
+| Environment | Windows 11 Pro 26200, standard user, no elevation; real library of **737 mods** (736 organized, 1 dev folder mod active), cloud-synced Documents (copy projections) |
+
+### Live tests
+- **Upgrade 0.7.3 → 0.8.0 is non-destructive: ✅ PASS.** A size+mtime listing of the whole `mods/` tree (741 files) before installing vs. after installing, launching, and closing 0.8.0: **0-line diff**.
+- **DB migration (organize/projection scoped per folder): ✅ PASS.** The first 0.8.0 launch rebuilt `organized`/`projection` with `(root, …)` primary keys and claimed all **736** rows for the default folder's key; `integrity_check: ok`; `mod_cache` 737. The library rendered as before (same active set, no banners). `silo.db` was backed up before the first migrating launch.
+- **Mods-folder switch (#162) on a debug build of the release code: ✅ PASS** (operator-driven). Change… → empty scratch folder → "Only in Silo" → mismatch banner → "Use the game's folder" restored the library; `gameSettings.xml` MD5 unchanged (`dc8225f8…`).
+
+### Findings
+- **#177 (high, fixed in this release):** Cancel was ignored on every confirmation dialog since 2026-07-14. `tauri-plugin-dialog` makes `window.confirm` async, and the bare `if (!confirm(...))` guards got a truthy Promise. Found during the #162 test, when Cancel still rewrote `gameSettings.xml`; restored byte-for-byte from the `.bak`. Fixed in #178 with an awaited `confirmDialog()` and a build guard (`scripts/check-confirm.mjs`).
+
+### Not run live
+- The RC_TESTING Phase 2 abuse batteries (kill mid-op, manufactured FS failures) on a sacrificial library copy. Organize/flatten crash-safety is covered by its regression tests; the new per-folder isolation has a unit test (`records_from_one_folder_never_authorize_changes_in_another`).
+- macOS and Linux packages: built and signed by CI, not run here (#171; Linux detection is with the #166 reporter).
+
+### Sign-off
+- Upgrade integrity, migration and the release's headline flow: **PASS**. Published as Latest.
+
+---
+
 ## v0.2.4 — 2026-08-01
 
 ### Artifact identity
