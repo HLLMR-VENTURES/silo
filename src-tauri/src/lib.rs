@@ -1017,6 +1017,234 @@ fn get_organized(app: tauri::AppHandle) -> Result<Vec<db::OrganizedRow>, String>
     Ok(db::load_organized(&conn, &key))
 }
 
+// ── Mods folder selection (#162) ──
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KnownRoot {
+    path: String,
+    mod_count: i64,
+    current: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModsRootStatus {
+    path: Option<String>,
+    source: modsroot::Source,
+    game_reads: Option<String>,
+    mismatch: bool,
+    available: bool,
+    /// The FS25 user dir exists but has no `mods/` yet (common on Mac until a first download).
+    mods_folder_missing: bool,
+    known: Vec<KnownRoot>,
+    can_write_game_setting: bool,
+    game_setting_problem: Option<String>,
+    unresolved_override: Option<String>,
+}
+
+fn path_map(loc: &fsgame::GameLocation) -> modsroot::PathMap {
+    match &loc.prefix {
+        Some(p) => modsroot::PathMap::from_prefix(p),
+        None => modsroot::PathMap::identity(),
+    }
+}
+
+fn loose_zip_count(dir: &std::path::Path) -> i64 {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .map(|x| x.eq_ignore_ascii_case("zip"))
+                        .unwrap_or(false)
+                })
+                .count() as i64
+        })
+        .unwrap_or(0)
+}
+
+/// Resolve the live mods folder, publish it as the trusted write root, and describe it.
+fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
+    let loc = fsgame::locate();
+    let default = loc.as_ref().map(|l| l.user_dir.join("mods"));
+    let map = loc.as_ref().map(path_map).unwrap_or_default();
+    let (ov, game_setting_problem) = match loc.as_ref() {
+        None => (None, Some("FS25 user folder not found".to_string())),
+        Some(l) => match std::fs::read_to_string(l.user_dir.join("gameSettings.xml")) {
+            Err(_) => (
+                None,
+                Some("gameSettings.xml not found — start FS25 once to create it".to_string()),
+            ),
+            Ok(xml) => match modsroot::read_override(&xml) {
+                Some(o) => (Some(o), None),
+                None => (
+                    None,
+                    Some("gameSettings.xml has no modsDirectoryOverride setting".to_string()),
+                ),
+            },
+        },
+    };
+    // Rows from before folders were tracked belong to the default folder: it was the only one.
+    if let Some(d) = default.as_ref() {
+        let _ = db::claim_unscoped(conn, &modsroot::canonical_key(d));
+    }
+    let choice = db::get_app_setting(conn, modsroot::CHOICE_KEY).map(PathBuf::from);
+    let r = modsroot::resolve(
+        choice,
+        ov.as_ref(),
+        default.clone(),
+        &map,
+        modsroot::same_folder,
+    );
+    let available = r.path.as_ref().map(|p| p.is_dir()).unwrap_or(false);
+    let mods_folder_missing = !available
+        && r.source == modsroot::Source::Default
+        && loc.as_ref().map(|l| l.user_dir.is_dir()).unwrap_or(false);
+    modsroot::set_active(if available { r.path.clone() } else { None });
+
+    let current_key = r.path.as_ref().map(|p| modsroot::canonical_key(p));
+    let mut paths: Vec<PathBuf> =
+        modsroot::parse_known(db::get_app_setting(conn, modsroot::KNOWN_KEY).as_deref())
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+    for p in default.iter().chain(r.path.iter()) {
+        if p.is_dir() && !paths.iter().any(|k| modsroot::same_folder(k, p)) {
+            paths.push(p.clone());
+        }
+    }
+    let known = paths
+        .iter()
+        .map(|p| {
+            let key = modsroot::canonical_key(p);
+            KnownRoot {
+                path: p.to_string_lossy().into_owned(),
+                mod_count: db::count_organized(conn, &key) + loose_zip_count(p),
+                current: current_key.as_deref() == Some(key.as_str()),
+            }
+        })
+        .collect();
+
+    ModsRootStatus {
+        path: r.path.map(|p| p.to_string_lossy().into_owned()),
+        source: r.source,
+        game_reads: r.game_reads.map(|p| p.to_string_lossy().into_owned()),
+        mismatch: r.mismatch,
+        available,
+        mods_folder_missing,
+        known,
+        can_write_game_setting: game_setting_problem.is_none(),
+        game_setting_problem,
+        unresolved_override: r.unresolved_override,
+    }
+}
+
+/// Point FS25's `modsDirectoryOverride` at `folder`. `guarded_xml_write` keeps the original as
+/// `gameSettings.xml.bak` and swaps the new file in atomically.
+fn point_game_at(folder: &std::path::Path) -> Result<(), String> {
+    let loc = fsgame::locate().ok_or_else(|| "FS25 user folder not found".to_string())?;
+    let gs = loc.user_dir.join("gameSettings.xml");
+    let roots = [loc.user_dir.clone()];
+    let xml = paths::guarded_xml_read(&roots, &gs)?;
+    let out = modsroot::write_override(&xml, &path_map(&loc).to_game(folder))?;
+    paths::guarded_xml_write(&roots, &gs, &out)
+}
+
+/// The live mods folder and everything the Settings / banners need to describe it.
+#[tauri::command]
+async fn mods_root_status(app: tauri::AppHandle) -> Result<ModsRootStatus, String> {
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db::open(&db)?;
+        Ok(compute_mods_root_status(&conn))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Use `path` as the mods folder (remembered, added to the known list). Never moves files.
+#[tauri::command]
+async fn set_mods_root(app: tauri::AppHandle, path: String) -> Result<ModsRootStatus, String> {
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        modsroot::validate_folder(std::path::Path::new(&path))?;
+        let conn = db::open(&db)?;
+        let known = modsroot::add_known(
+            db::get_app_setting(&conn, modsroot::KNOWN_KEY).as_deref(),
+            &path,
+        );
+        db::set_app_setting(&conn, modsroot::KNOWN_KEY, Some(&known))?;
+        db::set_app_setting(&conn, modsroot::CHOICE_KEY, Some(&path))?;
+        Ok(compute_mods_root_status(&conn))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Forget the user's choice and follow the folder FS25 reads.
+#[tauri::command]
+async fn clear_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus, String> {
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db::open(&db)?;
+        db::set_app_setting(&conn, modsroot::CHOICE_KEY, None)?;
+        Ok(compute_mods_root_status(&conn))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Point FS25 at the folder Silo currently manages.
+#[tauri::command]
+async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus, String> {
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let folder = modsroot::active().ok_or_else(|| "No mods folder selected".to_string())?;
+        point_game_at(&folder)?;
+        let conn = db::open(&db)?;
+        Ok(compute_mods_root_status(&conn))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Create `<user dir>/mods` when FS25 hasn't made it yet.
+#[tauri::command]
+async fn create_mods_folder(app: tauri::AppHandle) -> Result<ModsRootStatus, String> {
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let loc = fsgame::locate().ok_or_else(|| "FS25 user folder not found".to_string())?;
+        std::fs::create_dir_all(loc.user_dir.join("mods")).map_err(|e| e.to_string())?;
+        let conn = db::open(&db)?;
+        Ok(compute_mods_root_status(&conn))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// True when a folder holds no mods yet (no `.zip`, no folder with a `modDesc.xml`, no
+/// `archive/`), so the UI can ask "use it anyway?".
+#[tauri::command]
+async fn folder_looks_empty(path: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = std::path::Path::new(&path);
+        let rd = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+        let has_mod = rd.flatten().any(|e| {
+            let p = e.path();
+            e.file_name() == "archive"
+                || p.extension()
+                    .map(|x| x.eq_ignore_ascii_case("zip"))
+                    .unwrap_or(false)
+                || p.join("modDesc.xml").is_file()
+        });
+        Ok(!has_mod)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ── Loadouts (named active-mod sets) ──
 #[tauri::command]
 fn get_loadouts(app: tauri::AppHandle) -> Result<Vec<db::Loadout>, String> {
@@ -2125,6 +2353,12 @@ pub fn run() {
             set_active,
             flatten,
             get_organized,
+            mods_root_status,
+            set_mods_root,
+            clear_mods_root,
+            point_game_at_mods_root,
+            create_mods_folder,
+            folder_looks_empty,
             get_loadouts,
             save_loadout,
             delete_loadout,
