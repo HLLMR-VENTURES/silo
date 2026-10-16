@@ -14,6 +14,7 @@ pub mod github;
 pub mod icons;
 pub mod logscan;
 pub mod moddesc;
+pub mod modsroot;
 pub mod mpsync;
 pub mod net;
 pub mod organize;
