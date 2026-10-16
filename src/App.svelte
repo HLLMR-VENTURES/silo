@@ -1,7 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    defaultModsPaths,
+    modsRootStatus,
+    setModsRoot,
+    clearModsRoot,
+    pointGameAtModsRoot,
+    createModsFolder,
+    folderLooksEmpty,
+    pickFolder,
+    type ModsRootStatus,
     scanMods,
     onScanProgress,
     parseCollectionDeepLink,
@@ -116,6 +123,8 @@
   import { fmtSize } from "./lib/format";
 
   let roots = $state<string[]>([]);
+  let modsStatus = $state<ModsRootStatus | null>(null);
+  let overrideNoticeOpen = $state(false);
   let mods = $state<ModEntry[]>([]);
   let foreignFiles = $state<ForeignFile[]>([]);
   let scanning = $state(false);
@@ -1343,6 +1352,118 @@
     progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0,
   );
 
+  /** Why switching folders isn't safe right now, or null. */
+  async function switchBlockReason(): Promise<string | null> {
+    if (scanning) return "Wait for the scan to finish.";
+    if (busy) return `Wait for “${busy}” to finish.`;
+    const snap = await bisectSnapshotGet().catch(() => null);
+    if (snap) return "Finish or cancel the guided bisection first — it belongs to this folder.";
+    return null;
+  }
+
+  /** Adopt a new status; if the live folder changed, reload everything folder-specific. */
+  async function applyModsStatus(st: ModsRootStatus) {
+    const prev = roots[0] ?? null;
+    modsStatus = st;
+    roots = st.available && st.path ? [st.path] : [];
+    if ((roots[0] ?? null) === prev) return;
+    result = null;
+    mods = [];
+    activeSet = new Set();
+    foreignFiles = [];
+    if (roots.length) {
+      await runScan();
+      hardlinkSupport()
+        .then((ok) => (cloudSynced = !ok))
+        .catch(() => {});
+    }
+    await loadSavegames();
+  }
+
+  async function switchModsFolder(path: string) {
+    const why = await switchBlockReason();
+    if (why) {
+      errorMsg = why;
+      return;
+    }
+    try {
+      if (
+        (await folderLooksEmpty(path)) &&
+        !confirm("This folder has no mods yet — use it anyway?")
+      )
+        return;
+      const st = await setModsRoot(path);
+      // Switch first: if updating FS25's setting then fails, Silo is still on the chosen folder
+      // and the mismatch banner explains (the error shows too).
+      await applyModsStatus(st);
+      if (
+        st.mismatch &&
+        st.canWriteGameSetting &&
+        confirm(
+          `Point Farming Simulator at this folder too?\n\nFS25 currently reads:\n${st.gameReads ?? "(unknown)"}\n\n` +
+            "OK updates FS25's setting (a backup of gameSettings.xml is kept). Close FS25 first — " +
+            "the game rewrites that file when it exits.\nCancel keeps the change in Silo only.",
+        )
+      ) {
+        await pointGameHere();
+      }
+    } catch (e) {
+      errorMsg = String(e);
+    }
+  }
+
+  async function changeModsFolder() {
+    const why = await switchBlockReason();
+    if (why) {
+      errorMsg = why;
+      return;
+    }
+    const path = await pickFolder();
+    if (path) await switchModsFolder(path);
+  }
+
+  async function useGameFolder() {
+    const why = await switchBlockReason();
+    if (why) {
+      errorMsg = why;
+      return;
+    }
+    try {
+      await applyModsStatus(await clearModsRoot());
+    } catch (e) {
+      errorMsg = String(e);
+    }
+  }
+
+  async function pointGameHere() {
+    try {
+      await applyModsStatus(await pointGameAtModsRoot());
+    } catch (e) {
+      errorMsg = String(e);
+    }
+  }
+
+  async function retryModsFolder() {
+    try {
+      await applyModsStatus(await modsRootStatus());
+    } catch (e) {
+      errorMsg = String(e);
+    }
+  }
+
+  async function makeModsFolder() {
+    try {
+      await applyModsStatus(await createModsFolder());
+    } catch (e) {
+      errorMsg = String(e);
+    }
+  }
+
+  function dismissOverrideNotice() {
+    overrideNoticeOpen = false;
+    localStorage.setItem("silo.overrideNoticeShown", "1");
+  }
+
   async function runScan(auto = true) {
     if (scanning) return;
     scanning = true;
@@ -1417,7 +1538,14 @@
         errorMsg = String(e);
       }
       try {
-        roots = await defaultModsPaths();
+        modsStatus = await modsRootStatus();
+        roots = modsStatus.available && modsStatus.path ? [modsStatus.path] : [];
+        if (
+          modsStatus.source === "gameOverride" &&
+          localStorage.getItem("silo.overrideNoticeShown") !== "1"
+        ) {
+          overrideNoticeOpen = true;
+        }
       } catch (e) {
         errorMsg = String(e);
       }
@@ -1608,6 +1736,10 @@
       }}
       onOptimizeLinks={optimizeLinks}
       onClose={() => (settingsOpen = false)}
+      {modsStatus}
+      onChangeModsFolder={changeModsFolder}
+      onUseGameFolder={useGameFolder}
+      onSwitchModsFolder={switchModsFolder}
     />
   {/if}
 
@@ -1808,6 +1940,49 @@
         <span class="tnum">…\My Games\FarmingSimulator2025</span> from your cloud sync.
       </div>
       <button class="cn-x" onclick={dismissCloudNotice} title="Dismiss">✕</button>
+    </div>
+  {/if}
+
+  {#if modsStatus && modsStatus.source === "user" && !modsStatus.available}
+    <div class="cloud-notice">
+      <span class="cn-ico">⚠</span>
+      <div class="cn-text">
+        <b>Your mods folder isn't available:</b> <span class="tnum">{modsStatus.path}</span>.
+        Nothing was scanned. Reconnect the drive, or pick another folder.
+      </div>
+      <button class="cn-act" onclick={retryModsFolder}>Retry</button>
+      <button class="cn-act" onclick={changeModsFolder}>Choose another</button>
+      <button class="cn-act" onclick={useGameFolder}>Use the game's folder</button>
+    </div>
+  {:else if modsStatus?.modsFolderMissing}
+    <div class="cloud-notice">
+      <span class="cn-ico">ⓘ</span>
+      <div class="cn-text">Farming Simulator hasn't created its <b>mods</b> folder yet.</div>
+      <button class="cn-act" onclick={makeModsFolder}>Create it</button>
+      <button class="cn-act" onclick={changeModsFolder}>Choose a folder</button>
+    </div>
+  {:else if modsStatus?.mismatch}
+    <div class="cloud-notice">
+      <span class="cn-ico">⚠</span>
+      <div class="cn-text">
+        <b>FS25 is reading a different mods folder</b>
+        {#if modsStatus.gameReads}(<span class="tnum">{modsStatus.gameReads}</span>){/if} — mods
+        you activate here won't load in-game.
+      </div>
+      {#if modsStatus.canWriteGameSetting}
+        <button class="cn-act" onclick={pointGameHere}>Point FS25 here</button>
+      {/if}
+      <button class="cn-act" onclick={useGameFolder}>Switch Silo to the game's folder</button>
+    </div>
+  {/if}
+
+  {#if overrideNoticeOpen && modsStatus?.path}
+    <div class="cloud-notice">
+      <span class="cn-ico">ⓘ</span>
+      <div class="cn-text">
+        Silo now uses the mods folder FS25 is set to: <span class="tnum">{modsStatus.path}</span>.
+      </div>
+      <button class="cn-x" onclick={dismissOverrideNotice} title="Dismiss">✕</button>
     </div>
   {/if}
 
@@ -2093,6 +2268,19 @@
   }
   .cn-text {
     flex: 1 1 auto;
+  }
+  .cn-act {
+    flex: 0 0 auto;
+    border: 1px solid color-mix(in srgb, var(--info) 40%, transparent);
+    background: transparent;
+    color: var(--text);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 3px 8px;
+    border-radius: var(--radius-sm);
+  }
+  .cn-act:hover {
+    background: color-mix(in srgb, var(--info) 15%, transparent);
   }
   .cn-x {
     flex: 0 0 auto;
