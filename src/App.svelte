@@ -44,6 +44,7 @@
     onRelinkProgress,
     hardlinkSupport,
     type ForeignFile,
+    confirmDialog,
   } from "./lib/api";
   import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
   import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -353,9 +354,9 @@
   async function launch() {
     if (
       criticalCount > 0 &&
-      !confirm(
+      !(await confirmDialog(
         `Your active set has ${criticalCount} critical conflict${criticalCount === 1 ? "" : "s"}. Launch anyway?`,
-      )
+      ))
     )
       return;
     try {
@@ -511,9 +512,9 @@
         ? `\n\nNote: ${missing.length} mod(s) the save used aren't in your library and will be left out.`
         : "";
     if (
-      !confirm(
+      !(await confirmDialog(
         `Create a loadout “${s.name}” with ${present.length} mod(s) from this save?${note}`,
-      )
+      ))
     )
       return;
     try {
@@ -582,7 +583,7 @@
   }
 
   async function removeLoadout(l: Loadout) {
-    if (!confirm(`Delete loadout “${l.name}”? (Your mods aren't affected.)`)) return;
+    if (!(await confirmDialog(`Delete loadout “${l.name}”? (Your mods aren't affected.)`))) return;
     try {
       await deleteLoadout(l.id);
       await loadLoadouts();
@@ -770,9 +771,9 @@
 
   async function restoreVanilla() {
     if (
-      !confirm(
+      !(await confirmDialog(
         "Restore a vanilla flat mods/ folder?\n\nThis moves every mod back out of archive/ and removes all links. Your mods are not deleted — this just undoes Silo's organization.",
-      )
+      ))
     )
       return;
     busy = "Restoring vanilla layout…";
@@ -1260,7 +1261,7 @@
       const tail = cloudSynced
         ? " Your mods folder is cloud-synced, so each one is copied/removed individually — this can take a while."
         : "";
-      if (!confirm(`${verb} all ${changing.length} mods in your library?${tail}`)) return;
+      if (!(await confirmDialog(`${verb} all ${changing.length} mods in your library?${tail}`))) return;
     }
     const next = new Set(activeSet);
     for (const m of filtered) {

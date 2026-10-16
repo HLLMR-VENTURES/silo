@@ -14,6 +14,7 @@
     collectionsList,
     collectionDelete,
     collectionUpdate,
+    confirmDialog,
   } from "../api";
   import type { CollectionSummary } from "../api";
   import type {
@@ -109,10 +110,10 @@
   async function doUpdate(c: CollectionSummary) {
     if (updatingRef) return;
     if (
-      !confirm(
+      !(await confirmDialog(
         `Update “${c.name}” to your current active set (${zipCount} packaged mod${zipCount === 1 ? "" : "s"})? ` +
           `The mod list is replaced; the share link stays the same.`,
-      )
+      ))
     )
       return;
     updatingRef = c.reference;
@@ -134,7 +135,7 @@
 
   async function doDelete(c: CollectionSummary) {
     if (!c.canDelete || deletingRef) return;
-    if (!confirm(`Delete “${c.name}”? This removes it from your GitHub and breaks its share link.`))
+    if (!(await confirmDialog(`Delete “${c.name}”? This removes it from your GitHub and breaks its share link.`)))
       return;
     deletingRef = c.reference;
     myErr = null;
