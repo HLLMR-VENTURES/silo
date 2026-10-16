@@ -102,12 +102,14 @@ pub fn open(db_path: &Path) -> Result<Connection, String> {
              subcategory TEXT
          );
          CREATE TABLE IF NOT EXISTS organized (
-             tech_name   TEXT PRIMARY KEY,
+             root        TEXT NOT NULL DEFAULT '',
+             tech_name   TEXT NOT NULL,
              file_name   TEXT NOT NULL,
              kind        TEXT NOT NULL,
              category    TEXT NOT NULL,
              subcategory TEXT,
-             active      INTEGER NOT NULL DEFAULT 0
+             active      INTEGER NOT NULL DEFAULT 0,
+             PRIMARY KEY (root, tech_name)
          );
          CREATE TABLE IF NOT EXISTS loadout (
              id   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,9 +139,11 @@ pub fn open(db_path: &Path) -> Result<Connection, String> {
          -- untouched projection — so it can be removed without a full content-hash. A file the
          -- user swapped in has a different mtime and won't match, so it's never wrongly deleted.
          CREATE TABLE IF NOT EXISTS projection (
-             file_name TEXT PRIMARY KEY,
+             root      TEXT NOT NULL DEFAULT '',
+             file_name TEXT NOT NULL,
              size      INTEGER NOT NULL,
-             mtime_ms  INTEGER NOT NULL
+             mtime_ms  INTEGER NOT NULL,
+             PRIMARY KEY (root, file_name)
          );",
     )
     .map_err(|e| e.to_string())?;
@@ -149,7 +153,77 @@ pub fn open(db_path: &Path) -> Result<Connection, String> {
         "ALTER TABLE curation ADD COLUMN rating INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    migrate_scope_by_root(&conn)?;
     Ok(conn)
+}
+
+fn has_column(conn: &Connection, table: &str, col: &str) -> bool {
+    let Ok(mut st) = conn.prepare(&format!("PRAGMA table_info({table})")) else {
+        return false;
+    };
+    let names = st.query_map([], |r| r.get::<_, String>(1));
+    names
+        .map(|it| it.flatten().any(|n| n == col))
+        .unwrap_or(false)
+}
+
+/// v0.8 (#162): scope the organize manifest and projection records to a mods folder. SQLite
+/// can't change a primary key in place, so both tables are rebuilt in one transaction; old
+/// rows get `root = ''` until `claim_unscoped` stamps them with the default folder. Skipped
+/// when already migrated. A failure rolls back and leaves the old schema intact.
+fn migrate_scope_by_root(conn: &Connection) -> Result<(), String> {
+    if has_column(conn, "organized", "root") && has_column(conn, "projection", "root") {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "BEGIN;
+         CREATE TABLE organized_new (
+             root TEXT NOT NULL DEFAULT '', tech_name TEXT NOT NULL, file_name TEXT NOT NULL,
+             kind TEXT NOT NULL, category TEXT NOT NULL, subcategory TEXT,
+             active INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (root, tech_name));
+         INSERT INTO organized_new(root, tech_name, file_name, kind, category, subcategory, active)
+             SELECT '', tech_name, file_name, kind, category, subcategory, active FROM organized;
+         DROP TABLE organized;
+         ALTER TABLE organized_new RENAME TO organized;
+         CREATE TABLE projection_new (
+             root TEXT NOT NULL DEFAULT '', file_name TEXT NOT NULL, size INTEGER NOT NULL,
+             mtime_ms INTEGER NOT NULL, PRIMARY KEY (root, file_name));
+         INSERT INTO projection_new(root, file_name, size, mtime_ms)
+             SELECT '', file_name, size, mtime_ms FROM projection;
+         DROP TABLE projection;
+         ALTER TABLE projection_new RENAME TO projection;
+         COMMIT;",
+    )
+    .map_err(|e| {
+        let _ = conn.execute_batch("ROLLBACK;");
+        format!("database migration failed: {e}")
+    })
+}
+
+/// Stamp rows written before folders were tracked (`root = ''`) with `root`. Before v0.8 Silo
+/// only ever managed the default folder, so callers pass that folder's key. Idempotent; a
+/// stale unscoped row that collides with an existing scoped one is dropped.
+pub fn claim_unscoped(conn: &Connection, root: &str) -> Result<(), String> {
+    for sql in [
+        "UPDATE OR IGNORE organized SET root = ?1 WHERE root = ''",
+        "UPDATE OR IGNORE projection SET root = ?1 WHERE root = ''",
+    ] {
+        conn.execute(sql, [root]).map_err(|e| e.to_string())?;
+    }
+    conn.execute_batch(
+        "DELETE FROM organized WHERE root = ''; DELETE FROM projection WHERE root = '';",
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// How many mods Silo has organized in this folder.
+pub fn count_organized(conn: &Connection, root: &str) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM organized WHERE root = ?1",
+        [root],
+        |r| r.get(0),
+    )
+    .unwrap_or(0)
 }
 
 /// Load all tags, grouped later by the caller.
@@ -320,14 +394,15 @@ pub fn delete_loadout(conn: &mut Connection, id: i64) -> Result<(), String> {
     tx.commit().map_err(|e| e.to_string())
 }
 
-/// Load the organize manifest.
-pub fn load_organized(conn: &Connection) -> Vec<OrganizedRow> {
-    let Ok(mut stmt) = conn
-        .prepare("SELECT tech_name, file_name, kind, category, subcategory, active FROM organized")
-    else {
+/// Load the organize manifest for one mods folder (`root` = its `modsroot::canonical_key`).
+pub fn load_organized(conn: &Connection, root: &str) -> Vec<OrganizedRow> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT tech_name, file_name, kind, category, subcategory, active
+         FROM organized WHERE root = ?1",
+    ) else {
         return Vec::new();
     };
-    let rows = stmt.query_map([], |r| {
+    let rows = stmt.query_map([root], |r| {
         Ok(OrganizedRow {
             tech_name: r.get(0)?,
             file_name: r.get(1)?,
@@ -340,15 +415,16 @@ pub fn load_organized(conn: &Connection) -> Vec<OrganizedRow> {
     rows.map(|r| r.flatten().collect()).unwrap_or_default()
 }
 
-pub fn upsert_organized(conn: &Connection, row: &OrganizedRow) -> Result<(), String> {
+pub fn upsert_organized(conn: &Connection, root: &str, row: &OrganizedRow) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO organized(tech_name, file_name, kind, category, subcategory, active)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(tech_name) DO UPDATE SET
+        "INSERT INTO organized(root, tech_name, file_name, kind, category, subcategory, active)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(root, tech_name) DO UPDATE SET
              file_name = excluded.file_name, kind = excluded.kind,
              category = excluded.category, subcategory = excluded.subcategory,
              active = excluded.active",
         rusqlite::params![
+            root,
             row.tech_name,
             row.file_name,
             row.kind,
@@ -363,63 +439,75 @@ pub fn upsert_organized(conn: &Connection, row: &OrganizedRow) -> Result<(), Str
 
 pub fn set_organized_active(
     conn: &Connection,
+    root: &str,
     tech_name: &str,
     active: bool,
 ) -> Result<(), String> {
     conn.execute(
-        "UPDATE organized SET active = ?2 WHERE tech_name = ?1",
-        rusqlite::params![tech_name, active as i64],
+        "UPDATE organized SET active = ?3 WHERE root = ?1 AND tech_name = ?2",
+        rusqlite::params![root, tech_name, active as i64],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-pub fn delete_organized(conn: &Connection, tech_name: &str) -> Result<(), String> {
-    conn.execute("DELETE FROM organized WHERE tech_name = ?1", [tech_name])
-        .map_err(|e| e.to_string())?;
+pub fn delete_organized(conn: &Connection, root: &str, tech_name: &str) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM organized WHERE root = ?1 AND tech_name = ?2",
+        rusqlite::params![root, tech_name],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 /// Record a projected file's identity (size + mtime) so a later remove can confirm it's Silo's
 /// own untouched copy without hashing it.
-pub fn record_projection(conn: &Connection, file_name: &str, size: u64, mtime_ms: i64) {
+pub fn record_projection(conn: &Connection, root: &str, file_name: &str, size: u64, mtime_ms: i64) {
     let _ = conn.execute(
-        "INSERT INTO projection(file_name, size, mtime_ms) VALUES(?1, ?2, ?3)
-         ON CONFLICT(file_name) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms",
-        rusqlite::params![file_name, size as i64, mtime_ms],
+        "INSERT INTO projection(root, file_name, size, mtime_ms) VALUES(?1, ?2, ?3, ?4)
+         ON CONFLICT(root, file_name) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms",
+        rusqlite::params![root, file_name, size as i64, mtime_ms],
     );
 }
 
-/// The recorded (size, mtime_ms) for a projected file, if any.
-pub fn projection_stats(conn: &Connection, file_name: &str) -> Option<(u64, i64)> {
+/// The recorded (size, mtime_ms) for a projected file in this folder, if any.
+pub fn projection_stats(conn: &Connection, root: &str, file_name: &str) -> Option<(u64, i64)> {
     conn.query_row(
-        "SELECT size, mtime_ms FROM projection WHERE file_name = ?1",
-        [file_name],
+        "SELECT size, mtime_ms FROM projection WHERE root = ?1 AND file_name = ?2",
+        rusqlite::params![root, file_name],
         |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)?)),
     )
     .ok()
 }
 
 /// Drop a projection's provenance (it's been removed from the flat root).
-pub fn forget_projection(conn: &Connection, file_name: &str) {
-    let _ = conn.execute("DELETE FROM projection WHERE file_name = ?1", [file_name]);
+pub fn forget_projection(conn: &Connection, root: &str, file_name: &str) {
+    let _ = conn.execute(
+        "DELETE FROM projection WHERE root = ?1 AND file_name = ?2",
+        rusqlite::params![root, file_name],
+    );
 }
 
-/// Make the `organized` manifest match what's physically in `archive/`. Upserts a row for
-/// every archived mod (so `set_active` can project it) and drops rows for mods that are no
-/// longer archived. This heals a manifest that has drifted from disk — e.g. a fresh DB with
+/// Make one folder's `organized` manifest match what's physically in its `archive/`. Upserts a
+/// row for every archived mod (so `set_active` can project it) and drops rows for mods that are
+/// no longer archived. This heals a manifest that has drifted from disk — e.g. a fresh DB with
 /// a populated `archive/` — which otherwise leaves archived mods visible but un-activatable.
-pub fn reconcile_organized(conn: &mut Connection, desired: &[OrganizedRow]) -> Result<(), String> {
+/// Other folders' rows are never touched.
+pub fn reconcile_organized(
+    conn: &mut Connection,
+    root: &str,
+    desired: &[OrganizedRow],
+) -> Result<(), String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let keep: std::collections::HashSet<&str> =
         desired.iter().map(|r| r.tech_name.as_str()).collect();
-    for existing in load_organized(&tx) {
+    for existing in load_organized(&tx, root) {
         if !keep.contains(existing.tech_name.as_str()) {
-            delete_organized(&tx, &existing.tech_name)?;
+            delete_organized(&tx, root, &existing.tech_name)?;
         }
     }
     for row in desired {
-        upsert_organized(&tx, row)?;
+        upsert_organized(&tx, root, row)?;
     }
     tx.commit().map_err(|e| e.to_string())
 }
@@ -616,6 +704,70 @@ pub fn prune_missing(conn: &mut Connection, present: &HashSet<String>) -> Result
 mod tests {
     use super::*;
 
+    fn temp_db(tag: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!("silo_db_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base.join("silo.db")
+    }
+
+    #[test]
+    fn migrates_a_pre_root_database_and_is_idempotent() {
+        let path = temp_db("migrate");
+        {
+            // The v0.7 schema, with one row in each table.
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE organized (tech_name TEXT PRIMARY KEY, file_name TEXT NOT NULL,
+                     kind TEXT NOT NULL, category TEXT NOT NULL, subcategory TEXT,
+                     active INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE projection (file_name TEXT PRIMARY KEY, size INTEGER NOT NULL,
+                     mtime_ms INTEGER NOT NULL);
+                 INSERT INTO organized VALUES ('FS25_A','FS25_A.zip','zip','Vehicles',NULL,1);
+                 INSERT INTO projection VALUES ('FS25_A.zip', 10, 20);",
+            )
+            .unwrap();
+        }
+        let conn = open(&path).unwrap();
+        // Old rows arrive unscoped (root = '') until claimed.
+        assert_eq!(load_organized(&conn, "").len(), 1);
+        claim_unscoped(&conn, "c:\\mods").unwrap();
+        assert_eq!(load_organized(&conn, "c:\\mods")[0].tech_name, "FS25_A");
+        assert_eq!(
+            projection_stats(&conn, "c:\\mods", "FS25_A.zip"),
+            Some((10, 20))
+        );
+        assert!(load_organized(&conn, "").is_empty());
+        drop(conn);
+        // Re-opening must not rebuild again or lose rows.
+        let conn = open(&path).unwrap();
+        assert_eq!(load_organized(&conn, "c:\\mods").len(), 1);
+    }
+
+    #[test]
+    fn the_same_mod_can_be_organized_in_two_folders() {
+        let conn = open(&temp_db("twofolders")).unwrap();
+        let row = |active| OrganizedRow {
+            tech_name: "FS25_A".into(),
+            file_name: "FS25_A.zip".into(),
+            kind: "zip".into(),
+            category: "Vehicles".into(),
+            subcategory: None,
+            active,
+        };
+        upsert_organized(&conn, "a", &row(true)).unwrap();
+        upsert_organized(&conn, "b", &row(false)).unwrap();
+        assert!(load_organized(&conn, "a")[0].active);
+        assert!(!load_organized(&conn, "b")[0].active);
+        assert_eq!(count_organized(&conn, "a"), 1);
+        delete_organized(&conn, "b", "FS25_A").unwrap();
+        assert_eq!(
+            count_organized(&conn, "a"),
+            1,
+            "deleting in b leaves a alone"
+        );
+    }
+
     #[test]
     fn reconcile_adopts_disk_and_prunes_gone() {
         let base = std::env::temp_dir().join(format!("silo_reconcile_{}", std::process::id()));
@@ -626,6 +778,7 @@ mod tests {
         // A stale manifest row for a mod no longer archived on disk.
         upsert_organized(
             &conn,
+            "r",
             &OrganizedRow {
                 tech_name: "FS25_Gone".into(),
                 file_name: "FS25_Gone.zip".into(),
@@ -646,9 +799,9 @@ mod tests {
             subcategory: None,
             active: false,
         }];
-        reconcile_organized(&mut conn, &desired).unwrap();
+        reconcile_organized(&mut conn, "r", &desired).unwrap();
 
-        let rows = load_organized(&conn);
+        let rows = load_organized(&conn, "r");
         assert_eq!(rows.len(), 1, "manifest should match disk exactly");
         assert_eq!(rows[0].tech_name, "FS25_New", "archived mod adopted");
         assert!(

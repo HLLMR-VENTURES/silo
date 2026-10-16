@@ -83,8 +83,10 @@ async fn scan_mods(
 ) -> Result<scan::ScanResult, String> {
     let roots: Vec<PathBuf> = match roots {
         Some(v) if !v.is_empty() => v.into_iter().map(PathBuf::from).collect(),
-        _ => fsgame::default_mods_paths(),
+        _ => allowed_roots(),
     };
+    // The organize manifest is per folder; scope the reconcile to the folder being scanned.
+    let scan_key = roots.first().map(|r| modsroot::canonical_key(r));
 
     tauri::async_runtime::spawn_blocking(move || {
         // Warm cache: parsed entries persist between launches, keyed by
@@ -137,7 +139,9 @@ async fn scan_mods(
                 })
             })
             .collect();
-        let _ = db::reconcile_organized(&mut conn, &organized_rows);
+        if let Some(key) = scan_key.as_deref() {
+            let _ = db::reconcile_organized(&mut conn, key, &organized_rows);
+        }
 
         Ok::<_, String>(out.result)
     })
@@ -843,12 +847,15 @@ fn set_override(app: tauri::AppHandle, row: db::CategoryOverride) -> Result<(), 
 
 // ── Organize / projection engine (writes to the game folder) ──
 
-/// The mod roots Silo is allowed to write to. Today that's the auto-detected game mod
-/// folder(s); a future custom-root feature will add to this set through a native folder
-/// picker. This is the single source of truth for "where may we write" — Rust, not the
-/// webview, is the authority.
+/// The mod roots Silo is allowed to write to: the folder the mods-root commands resolved
+/// (user choice > FS25 override > default, see `modsroot`), or — before they have run — the
+/// auto-detected default. This is the single source of truth for "where may we write";
+/// Rust, not the webview, is the authority.
 fn allowed_roots() -> Vec<PathBuf> {
-    fsgame::default_mods_paths()
+    match modsroot::active() {
+        Some(p) => vec![p],
+        None => fsgame::default_mods_paths(),
+    }
 }
 
 /// Resolve a frontend-supplied root to a TRUSTED one. Empty → the first detected root.
@@ -1003,7 +1010,11 @@ async fn flatten(app: tauri::AppHandle, root: Option<String>) -> Result<organize
 #[tauri::command]
 fn get_organized(app: tauri::AppHandle) -> Result<Vec<db::OrganizedRow>, String> {
     let conn = db::open(&db_path(&app)?)?;
-    Ok(db::load_organized(&conn))
+    let key = allowed_roots()
+        .first()
+        .map(|r| modsroot::canonical_key(r))
+        .unwrap_or_default();
+    Ok(db::load_organized(&conn, &key))
 }
 
 // ── Loadouts (named active-mod sets) ──

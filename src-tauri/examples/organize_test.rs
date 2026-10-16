@@ -151,7 +151,7 @@ fn main() {
     }
     assert(!exists(&root.join("archive")), "archive tree removed");
     assert(
-        silo_lib::db::load_organized(&conn).is_empty(),
+        silo_lib::db::load_organized(&conn, &silo_lib::modsroot::canonical_key(&root)).is_empty(),
         "manifest cleared",
     );
 
