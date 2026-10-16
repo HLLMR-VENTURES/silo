@@ -136,8 +136,9 @@ pub fn plan_organize(root: &Path, mods: &[ModInput]) -> Vec<PlannedMove> {
 /// Move flat-root mods into `archive/<Category>/` and record the manifest. Mods
 /// already recorded (organized) are skipped.
 pub fn apply_organize(conn: &Connection, root: &Path, mods: &[ModInput]) -> Report {
+    let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
-    let already: HashSet<String> = db::load_organized(conn)
+    let already: HashSet<String> = db::load_organized(conn, &key)
         .into_iter()
         .map(|r| r.tech_name)
         .collect();
@@ -181,7 +182,7 @@ pub fn apply_organize(conn: &Connection, root: &Path, mods: &[ModInput]) -> Repo
             subcategory: m.subcategory.clone(),
             active: false,
         };
-        if let Err(e) = db::upsert_organized(conn, &row) {
+        if let Err(e) = db::upsert_organized(conn, &key, &row) {
             rep.errors.push(format!("{}: manifest: {e}", m.tech_name));
             continue;
         }
@@ -189,7 +190,7 @@ pub fn apply_organize(conn: &Connection, root: &Path, mods: &[ModInput]) -> Repo
             Ok(()) => rep.changed += 1,
             Err(e) => {
                 // Roll back the row we just wrote — nothing was moved.
-                let _ = db::delete_organized(conn, &m.tech_name);
+                let _ = db::delete_organized(conn, &key, &m.tech_name);
                 rep.errors.push(format!("{}: move: {e}", m.tech_name));
             }
         }
@@ -200,8 +201,9 @@ pub fn apply_organize(conn: &Connection, root: &Path, mods: &[ModInput]) -> Repo
 /// Reconcile the flat-root projection to exactly `active`: link the ones that
 /// should be active, remove links for the ones that shouldn't.
 pub fn set_active(conn: &Connection, root: &Path, active: &HashSet<String>) -> Report {
+    let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
-    for row in db::load_organized(conn) {
+    for row in db::load_organized(conn, &key) {
         let link = root.join(&row.file_name);
         let src = archive_path(root, &row.category, &row.file_name);
         let want = active.contains(&row.tech_name);
@@ -215,10 +217,10 @@ pub fn set_active(conn: &Connection, root: &Path, active: &HashSet<String>) -> R
                     // identified structurally (junction / marker), cheaply.
                     if row.kind == "zip" {
                         if let Some((size, mtime)) = file_stats(&link) {
-                            db::record_projection(conn, &row.file_name, size, mtime);
+                            db::record_projection(conn, &key, &row.file_name, size, mtime);
                         }
                     }
-                    if let Err(e) = db::set_organized_active(conn, &row.tech_name, true) {
+                    if let Err(e) = db::set_organized_active(conn, &key, &row.tech_name, true) {
                         rep.errors.push(format!("{}: manifest: {e}", row.tech_name));
                     }
                     rep.changed += 1;
@@ -239,7 +241,7 @@ pub fn set_active(conn: &Connection, root: &Path, active: &HashSet<String>) -> R
                     row.tech_name
                 ));
                 rep.skipped += 1;
-            } else if !(matches_provenance(conn, &link, &row.file_name)
+            } else if !(matches_provenance(conn, &key, &link, &row.file_name)
                 || is_silo_projection(&link, &src, &row.kind))
             {
                 rep.errors.push(format!(
@@ -250,8 +252,9 @@ pub fn set_active(conn: &Connection, root: &Path, active: &HashSet<String>) -> R
             } else {
                 match remove_link(&link) {
                     Ok(()) => {
-                        db::forget_projection(conn, &row.file_name);
-                        if let Err(e) = db::set_organized_active(conn, &row.tech_name, false) {
+                        db::forget_projection(conn, &key, &row.file_name);
+                        if let Err(e) = db::set_organized_active(conn, &key, &row.tech_name, false)
+                        {
                             rep.errors.push(format!("{}: manifest: {e}", row.tech_name));
                         }
                         rep.changed += 1;
@@ -285,8 +288,8 @@ fn file_stats(path: &Path) -> Option<(u64, i64)> {
 /// Fast, hash-free ownership check: the flat file is provably Silo's own untouched projection if
 /// its current `(size, mtime)` still match what we recorded when we wrote it. A file the user
 /// swapped in has a different mtime and won't match — so it's never wrongly treated as ours.
-fn matches_provenance(conn: &Connection, link: &Path, file_name: &str) -> bool {
-    let Some((size, mtime)) = db::projection_stats(conn, file_name) else {
+fn matches_provenance(conn: &Connection, key: &str, link: &Path, file_name: &str) -> bool {
+    let Some((size, mtime)) = db::projection_stats(conn, key, file_name) else {
         return false;
     };
     matches!(file_stats(link), Some((s, m)) if s == size && m == mtime)
@@ -308,6 +311,7 @@ pub fn relink_projections(
     root: &Path,
     mut progress: impl FnMut(usize, usize),
 ) -> RelinkReport {
+    let key = crate::modsroot::canonical_key(root);
     let mut rep = RelinkReport::default();
     // On a cloud-synced folder hardlinks are impossible — every attempt would error 396. Report
     // the situation cleanly instead of grinding out one failure per mod.
@@ -317,7 +321,7 @@ pub fn relink_projections(
     }
     // Only active zips can be projected as a plain file; dir projections are marker-identified
     // and cheap already, so they never need repair.
-    let rows: Vec<OrganizedRow> = db::load_organized(conn)
+    let rows: Vec<OrganizedRow> = db::load_organized(conn, &key)
         .into_iter()
         .filter(|r| r.active && r.kind == "zip")
         .collect();
@@ -401,8 +405,9 @@ fn relink_over(src: &Path, flat: &Path) -> std::io::Result<()> {
 /// active) re-project it so it's Silo-managed again. Reversible — the old copy is kept under
 /// `backups/`.
 pub fn adopt_foreign(conn: &Connection, root: &Path, file_name: &str) -> Result<(), String> {
+    let key = crate::modsroot::canonical_key(root);
     crate::paths::safe_file_name(file_name).map_err(|e| e.to_string())?;
-    let row = db::load_organized(conn)
+    let row = db::load_organized(conn, &key)
         .into_iter()
         .find(|r| r.file_name == file_name)
         .ok_or_else(|| "Not a Silo-managed mod".to_string())?;
@@ -430,8 +435,9 @@ pub fn adopt_foreign(conn: &Connection, root: &Path, file_name: &str) -> Result<
 /// re-project the archived original (if the mod is active). Reversible — their file is kept
 /// under `backups/`.
 pub fn restore_projection(conn: &Connection, root: &Path, file_name: &str) -> Result<(), String> {
+    let key = crate::modsroot::canonical_key(root);
     crate::paths::safe_file_name(file_name).map_err(|e| e.to_string())?;
-    let row = db::load_organized(conn)
+    let row = db::load_organized(conn, &key)
         .into_iter()
         .find(|r| r.file_name == file_name)
         .ok_or_else(|| "Not a Silo-managed mod".to_string())?;
@@ -466,8 +472,9 @@ fn backup_path(root: &Path, file_name: &str) -> Result<PathBuf, String> {
 /// to the root, remove only empty archive directories (never an unrecognized file), and
 /// clear the manifest.
 pub fn flatten(conn: &Connection, root: &Path) -> Report {
+    let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
-    for row in db::load_organized(conn) {
+    for row in db::load_organized(conn, &key) {
         let link = root.join(&row.file_name);
         let src = archive_path(root, &row.category, &row.file_name);
 
@@ -507,7 +514,7 @@ pub fn flatten(conn: &Connection, root: &Path) -> Report {
             ));
         }
         // else: neither archive nor root file — nothing to restore; just clear the row.
-        if let Err(e) = db::delete_organized(conn, &row.tech_name) {
+        if let Err(e) = db::delete_organized(conn, &key, &row.tech_name) {
             rep.errors.push(format!("{}: manifest: {e}", row.tech_name));
             continue;
         }
@@ -732,6 +739,7 @@ fn mod_version(path: &Path, kind: &str) -> Option<String> {
 /// actually present against their archived source. Reuses [`is_silo_projection`], so a real
 /// hardlink/symlink/copy projection is never flagged — only a file Silo can't prove it created.
 pub fn detect_foreign_projections(conn: &Connection, root: &Path) -> Vec<ForeignFile> {
+    let key = crate::modsroot::canonical_key(root);
     let archive = root.join(ARCHIVE);
     if !archive.is_dir() {
         return Vec::new();
@@ -771,10 +779,11 @@ pub fn detect_foreign_projections(conn: &Connection, root: &Path) -> Vec<Foreign
         // Fast path: provenance match → provably ours, no hash. Else the careful check (which
         // hashes a copy). Either way, (re)record provenance for a confirmed zip so the next scan
         // — and any deactivate — is O(1) instead of re-hashing gigabytes.
-        if matches_provenance(conn, &link, &file_name) || is_silo_projection(&link, src, kind) {
+        if matches_provenance(conn, &key, &link, &file_name) || is_silo_projection(&link, src, kind)
+        {
             if kind == "zip" {
                 if let Some((size, mtime)) = file_stats(&link) {
-                    db::record_projection(conn, &file_name, size, mtime);
+                    db::record_projection(conn, &key, &file_name, size, mtime);
                 }
             }
             continue;
@@ -957,6 +966,8 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let conn = db::open(&base.join("silo.db")).unwrap();
 
+        let key = crate::modsroot::canonical_key(&base);
+
         let row = OrganizedRow {
             tech_name: "FS25_Foo".into(),
             file_name: "FS25_Foo.zip".into(),
@@ -965,7 +976,7 @@ mod tests {
             subcategory: None,
             active: false,
         };
-        db::upsert_organized(&conn, &row).unwrap();
+        db::upsert_organized(&conn, &key, &row).unwrap();
         let original = base.join("FS25_Foo.zip");
         std::fs::write(&original, b"PK\x03\x04 the user's only copy").unwrap();
         // No archive/Vehicles/FS25_Foo.zip exists.
@@ -974,7 +985,7 @@ mod tests {
 
         assert!(original.exists(), "the only copy must NOT be deleted");
         assert!(
-            db::load_organized(&conn).is_empty(),
+            db::load_organized(&conn, &key).is_empty(),
             "the stale manifest row should be cleared"
         );
         assert!(
@@ -1046,12 +1057,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
         let cat = base.join(ARCHIVE).join("Vehicles");
         std::fs::create_dir_all(&cat).unwrap();
         let bytes = b"PK\x03\x04 canonical archived build";
         std::fs::write(cat.join("FS25_Foo.zip"), bytes).unwrap();
         db::upsert_organized(
             &conn,
+            &key,
             &OrganizedRow {
                 tech_name: "FS25_Foo".into(),
                 file_name: "FS25_Foo.zip".into(),
@@ -1072,23 +1085,23 @@ mod tests {
         let flat = base.join("FS25_Foo.zip");
         assert!(flat.exists());
         assert!(
-            db::projection_stats(&conn, "FS25_Foo.zip").is_some(),
+            db::projection_stats(&conn, &key, "FS25_Foo.zip").is_some(),
             "provenance recorded on activate"
         );
-        assert!(matches_provenance(&conn, &flat, "FS25_Foo.zip"));
+        assert!(matches_provenance(&conn, &key, &flat, "FS25_Foo.zip"));
 
         // Deactivate: provenance matches → removed, provenance forgotten, archive untouched.
         let rep = set_active(&conn, &base, &std::collections::HashSet::new());
         assert_eq!(rep.changed, 1);
         assert!(!flat.exists(), "our own projection is removed");
-        assert!(db::projection_stats(&conn, "FS25_Foo.zip").is_none());
+        assert!(db::projection_stats(&conn, &key, "FS25_Foo.zip").is_none());
         assert!(cat.join("FS25_Foo.zip").exists(), "archive kept");
 
         // Now the user drops in their OWN different build at that name, and marks it active in the
         // manifest (as if it were projected). A stale/absent provenance record must NOT let it be
         // deleted — different bytes, so both the fast path and the hash check refuse.
         std::fs::write(&flat, b"the user's OWN irreplaceable build").unwrap();
-        db::set_organized_active(&conn, "FS25_Foo", true).unwrap();
+        db::set_organized_active(&conn, &key, "FS25_Foo", true).unwrap();
         let rep = set_active(&conn, &base, &std::collections::HashSet::new());
         assert_eq!(rep.skipped, 1, "a swapped-in file is left untouched");
         assert_eq!(
@@ -1106,11 +1119,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
         let cat = base.join(ARCHIVE).join("Vehicles");
         std::fs::create_dir_all(&cat).unwrap();
         std::fs::write(cat.join("FS25_Foo.zip"), b"OLD archived build").unwrap();
         db::upsert_organized(
             &conn,
+            &key,
             &OrganizedRow {
                 tech_name: "FS25_Foo".into(),
                 file_name: "FS25_Foo.zip".into(),
@@ -1153,11 +1168,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
         let cat = base.join(ARCHIVE).join("Vehicles");
         std::fs::create_dir_all(&cat).unwrap();
         std::fs::write(cat.join("FS25_Foo.zip"), b"MANAGED build").unwrap();
         db::upsert_organized(
             &conn,
+            &key,
             &OrganizedRow {
                 tech_name: "FS25_Foo".into(),
                 file_name: "FS25_Foo.zip".into(),
@@ -1196,12 +1213,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
         let cat = base.join(ARCHIVE).join("Vehicles");
         std::fs::create_dir_all(&cat).unwrap();
         let bytes = b"PK\x03\x04 the canonical archived mod";
         std::fs::write(cat.join("FS25_Foo.zip"), bytes).unwrap();
         db::upsert_organized(
             &conn,
+            &key,
             &OrganizedRow {
                 tech_name: "FS25_Foo".into(),
                 file_name: "FS25_Foo.zip".into(),
@@ -1245,11 +1264,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
         let cat = base.join(ARCHIVE).join("Vehicles");
         std::fs::create_dir_all(&cat).unwrap();
         std::fs::write(cat.join("FS25_Foo.zip"), b"MANAGED build").unwrap();
         db::upsert_organized(
             &conn,
+            &key,
             &OrganizedRow {
                 tech_name: "FS25_Foo".into(),
                 file_name: "FS25_Foo.zip".into(),
@@ -1275,6 +1296,52 @@ mod tests {
             "the user's file must be preserved byte-for-byte"
         );
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn records_from_one_folder_never_authorize_changes_in_another() {
+        let base = std::env::temp_dir().join(format!("silo_iso_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (a, b) = (base.join("a"), base.join("b"));
+        std::fs::create_dir_all(a.join("archive").join("Vehicles")).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+
+        // Folder A: one organized mod, projected (active).
+        std::fs::write(a.join("archive/Vehicles/FS25_Foo.zip"), b"PK\x03\x04 foo").unwrap();
+        let key_a = crate::modsroot::canonical_key(&a);
+        let row = OrganizedRow {
+            tech_name: "FS25_Foo".into(),
+            file_name: "FS25_Foo.zip".into(),
+            kind: "zip".into(),
+            category: "Vehicles".into(),
+            subcategory: None,
+            active: false,
+        };
+        db::upsert_organized(&conn, &key_a, &row).unwrap();
+        let on: HashSet<String> = ["FS25_Foo".to_string()].into_iter().collect();
+        set_active(&conn, &a, &on);
+        assert!(a.join("FS25_Foo.zip").exists());
+
+        // Folder B: the user's own file at the same name, unknown to Silo.
+        std::fs::write(b.join("FS25_Foo.zip"), b"PK\x03\x04 the user's own file").unwrap();
+
+        // Deactivating everything in B must not touch B's file, and must not touch A.
+        set_active(&conn, &b, &HashSet::new());
+        flatten(&conn, &b);
+        assert!(
+            b.join("FS25_Foo.zip").exists(),
+            "B's file is not Silo's — never removed"
+        );
+        assert!(
+            a.join("FS25_Foo.zip").exists(),
+            "A's projection is untouched"
+        );
+        assert!(
+            db::load_organized(&conn, &key_a)[0].active,
+            "A's state is untouched"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

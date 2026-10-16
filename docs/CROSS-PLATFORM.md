@@ -16,8 +16,21 @@ Linux and reaches into that prefix.
 | OS | Path |
 |----|------|
 | Windows | `%USERPROFILE%\Documents\My Games\FarmingSimulator2025\` |
-| macOS (?) | `~/Library/Application Support/FarmingSimulator2025/` |
-| Linux/Proton (?) | `<prefix>/drive_c/users/steamuser/Documents/My Games/FarmingSimulator2025/` where `<prefix>` = `~/.steam/steam/steamapps/compatdata/<APPID>/pfx` |
+| macOS — Mac App Store | `~/Library/Containers/com.giants-software.fs25/Data/Library/Application Support/FarmingSimulator2025/` (sandboxed; verified from game logs, #171) |
+| macOS — Steam / GIANTS | `~/Library/Application Support/FarmingSimulator2025/` (community-consistent; confirm on a real Mac) |
+| Linux/Proton | `<prefix>/drive_c/users/steamuser/Documents/My Games/FarmingSimulator2025/`, `<prefix>` = `<steam library>/steamapps/compatdata/2300320/pfx` |
+
+`fsgame::locate()` tries every candidate: on Linux, each Steam library listed in
+`libraryfolders.vdf` under the native (`~/.steam/steam`, `~/.local/share/Steam`) and Flatpak
+(`~/.var/app/com.valvesoftware.Steam/.local/share/Steam`) roots; on macOS, the App Store container
+first. Among existing candidates it prefers one with `log.txt` (the game ran there), then one with
+`mods/`.
+
+**Mods folder.** FS25's `gameSettings.xml` `<modsDirectoryOverride active="…" directory="…"/>` can
+redirect the mods folder anywhere; Silo follows it (`modsroot`), lets the user choose another folder,
+and can write the override back (with a `.bak`). FS25 writes the directory with forward slashes. On
+Linux the value is a Wine path, translated through the prefix's `dosdevices/` drive links (`Z:` →
+`/`).
 
 ### Game install dir (SDK schemas, pdlc)
 | OS | Path (Steam) |

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import type { GameInfo } from "../../types";
   import { openFolder, secretStorageSecure } from "../../api";
+  import type { ModsRootStatus } from "../../api";
   import GitHubAuth from "../GitHubAuth.svelte";
 
   // When the OS keychain is unavailable, connecting an account falls back to storing the
@@ -36,6 +37,10 @@
     onRestoreVanilla,
     onOptimizeLinks,
     onClose,
+    modsStatus,
+    onChangeModsFolder,
+    onUseGameFolder,
+    onSwitchModsFolder,
   }: {
     theme: "system" | "light" | "dark";
     roots: string[];
@@ -57,7 +62,20 @@
     onRestoreVanilla: () => void;
     onOptimizeLinks: () => void;
     onClose: () => void;
+    modsStatus: ModsRootStatus | null;
+    onChangeModsFolder: () => void;
+    onUseGameFolder: () => void;
+    onSwitchModsFolder: (path: string) => void;
   } = $props();
+
+  const others = $derived((modsStatus?.known ?? []).filter((k) => !k.current));
+  function sourceLabel(s: ModsRootStatus["source"]): string {
+    return s === "user"
+      ? "Chosen in Silo"
+      : s === "gameOverride"
+        ? "Following FS25's setting"
+        : "FS25 default";
+  }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -84,13 +102,43 @@
           Open ↗
         </button>
       {/if}
+      <button class="set-link" disabled={!!busy || scanning} onclick={onChangeModsFolder}>
+        Change…
+      </button>
     </div>
-    {#if roots.length}
-      {#each roots as r (r)}
-        <div class="set-path">{r}</div>
-      {/each}
+    {#if modsStatus?.path}
+      <div class="set-path" class:muted={!modsStatus.available}>{modsStatus.path}</div>
+      <div class="set-hint">
+        {sourceLabel(modsStatus.source)}{modsStatus.available ? "" : " · not available"}
+      </div>
+      {#if modsStatus.source === "user"}
+        <button class="set-link" disabled={!!busy || scanning} onclick={onUseGameFolder}>
+          Use the game's folder
+        </button>
+      {/if}
     {:else}
       <div class="set-path muted">No mods folder detected.</div>
+    {/if}
+    {#if modsStatus?.unresolvedOverride}
+      <div class="set-hint">
+        FS25's override points at <span class="tnum">{modsStatus.unresolvedOverride}</span>, which
+        Silo can't map to a folder on this computer. Choose the folder with Change….
+      </div>
+    {/if}
+    {#if modsStatus?.gameSettingProblem}
+      <div class="set-hint">Silo can't update FS25's setting: {modsStatus.gameSettingProblem}.</div>
+    {/if}
+    {#if others.length}
+      <div class="set-hint">Other folders Silo knows:</div>
+      {#each others as k (k.path)}
+        <button
+          class="set-link known"
+          disabled={!!busy || scanning}
+          onclick={() => onSwitchModsFolder(k.path)}
+        >
+          {k.path} · {k.modCount} mods
+        </button>
+      {/each}
     {/if}
   </div>
 
@@ -415,5 +463,11 @@
   .set-danger:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+  .known {
+    display: block;
+    text-align: left;
+    word-break: break-all;
+    margin-top: 2px;
   }
 </style>

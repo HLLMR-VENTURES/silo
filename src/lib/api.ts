@@ -65,6 +65,52 @@ export function defaultModsPaths(): Promise<string[]> {
   return invoke<string[]>("default_mods_paths");
 }
 
+export type ModsRootSource = "user" | "gameOverride" | "default";
+
+export interface KnownRoot {
+  path: string;
+  modCount: number;
+  current: boolean;
+}
+
+/** The live mods folder (#162): where it came from, whether FS25 reads it, what else is known. */
+export interface ModsRootStatus {
+  path: string | null;
+  source: ModsRootSource;
+  gameReads: string | null;
+  mismatch: boolean;
+  available: boolean;
+  modsFolderMissing: boolean;
+  known: KnownRoot[];
+  canWriteGameSetting: boolean;
+  gameSettingProblem: string | null;
+  unresolvedOverride: string | null;
+}
+
+export function modsRootStatus(): Promise<ModsRootStatus> {
+  return invoke<ModsRootStatus>("mods_root_status");
+}
+export function setModsRoot(path: string): Promise<ModsRootStatus> {
+  return invoke<ModsRootStatus>("set_mods_root", { path });
+}
+export function clearModsRoot(): Promise<ModsRootStatus> {
+  return invoke<ModsRootStatus>("clear_mods_root");
+}
+export function pointGameAtModsRoot(): Promise<ModsRootStatus> {
+  return invoke<ModsRootStatus>("point_game_at_mods_root");
+}
+export function createModsFolder(): Promise<ModsRootStatus> {
+  return invoke<ModsRootStatus>("create_mods_folder");
+}
+export function folderLooksEmpty(path: string): Promise<boolean> {
+  return invoke<boolean>("folder_looks_empty", { path });
+}
+/** System folder picker. Null if cancelled. */
+export async function pickFolder(): Promise<string | null> {
+  const p = await open({ directory: true, multiple: false });
+  return typeof p === "string" ? p : null;
+}
+
 /** App version (from tauri.conf/Cargo), e.g. "0.2.0" — the single source the UI shows. */
 export function appVersion(): Promise<string> {
   return invoke<string>("app_version");

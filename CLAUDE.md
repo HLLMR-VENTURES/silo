@@ -46,18 +46,23 @@ Beyond the MVP management layer above:
   Provenance, not antivirus — the moat, since no competitor holds a cross-source canonical-hash DB.
 - **Organize preview** — the manual Organize shows a read-only dry run (what moves where)
   before touching a file; dismissible for power users.
+- **Mods folder selection** (`modsroot`, #162) — follows FS25's `modsDirectoryOverride`, lets the
+  user pick any folder (optionally writing the override back, with a `.bak`), and keeps organize
+  state per folder (`root` key on `organized` / `projection`). `allowed_roots()` returns the
+  resolved active root, so every write command follows the chosen folder. Linux/Proton prefix
+  and Mac App Store discovery live in `fsgame::locate()`.
 
 Backend: **SiloAPI** (separate repo `HLLMR/silo-api`, live at `https://silo-api.hllmr.com`).
 
 ## Stack & structure
 
 Rust core modules (`src-tauri/src/`): `scan` `moddesc` `category` `icons` `db` `store`
-`fsgame` `organize` `savegame` `conflicts` `settings_form` `xmlconfig` `gamelaunch`
-`github` `siloapi` (catalog client) · `logscan` (crash triage) · `bisect` (guided
-bisection) · `bindings` (input map) · `mpsync` (MP manifest) · `bridge` (filltype
-companion generator) · `provenance` (integrity/manifest hashing) · `paths` `secrets`
+`fsgame` `modsroot` (mods-folder resolution) `organize` `savegame` `conflicts` `settings_form`
+`xmlconfig` `gamelaunch` `github` `siloapi` (catalog client) · `logscan` (crash triage) ·
+`bisect` (guided bisection) · `bindings` (input map) · `mpsync` (MP manifest) · `bridge`
+(filltype companion generator) · `provenance` (integrity/manifest hashing) · `paths` `secrets`
 `xmltext` (safety/util). Each is pure logic behind thin `#[tauri::command]` wrappers with
-unit tests (63 Rust tests). Frontend panels in `src/lib/components/`.
+unit tests (127 Rust tests). Frontend panels in `src/lib/components/`.
 
 - **Tauri v2**: Rust core in `src-tauri/`, web frontend in `src/`.
 - **Frontend: Svelte 5 (runes) + Vite + TypeScript**, hand-authored CSS design
