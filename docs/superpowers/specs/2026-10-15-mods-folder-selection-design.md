@@ -64,7 +64,7 @@ New return shape (all platforms): `GameLocation { user_dir: PathBuf, prefix: Opt
   - Linux: built from the prefix's `dosdevices/` entries (`c:` → `../drive_c`, `z:` → `/`, any other letter → its link target).
   - `to_host("Z:\\mnt\\hdd\\mods") -> Some("/mnt/hdd/mods")`; unknown drive letter ⇒ `None` (reported as unresolvable — never guessed).
   - `to_game(host) -> String` — longest matching drive mapping wins; no match ⇒ `Z:` + the host path (Wine always maps `Z:` to `/`).
-  - Separators normalized; the game's value is written with backslashes.
+  - Separators normalized; the game's value is written with forward slashes, as FS25 itself writes it (`directory="C:/Temp"`).
 - **`resolve(choice: Option<PathBuf>, ov: Option<Override>, default: Option<PathBuf>, map: &PathMap) -> Resolved`**
   - `game_reads` = `map.to_host(ov.directory)` if `ov.active`, else `default`.
   - `path` = `choice` if set, else `game_reads`.
@@ -82,9 +82,11 @@ New return shape (all platforms): `GameLocation { user_dir: PathBuf, prefix: Opt
 
 ### Commands
 
-- **`mods_root_status() -> ModsRootStatus`** — `{ path, source, gameReads, mismatch, available, known: [{ path, modCount }], canWriteGameSetting, unresolvedOverride? }`. Replaces the frontend's `defaultModsPaths()` call. `async` + `spawn_blocking` (it reads files and probes folders).
-- **`set_mods_root(path, updateGame: bool)`** — validates (exists, writable), stores the choice, adds it to `known`, optionally writes the game override, returns the new status.
+- **`mods_root_status() -> ModsRootStatus`** — `{ path, source, gameReads, mismatch, available, modsFolderMissing, known: [{ path, modCount, current }], canWriteGameSetting, gameSettingProblem?, unresolvedOverride? }`. Replaces the frontend's `defaultModsPaths()` call. `async` + `spawn_blocking` (it reads files and probes folders).
+- **`set_mods_root(path)`** — validates (exists, writable), stores the choice, adds it to `known`, returns the new status. It never writes the game setting; that's its own command, so the UI can switch first and then ask.
+- **`point_game_at_mods_root()`** — writes FS25's override to the current folder (`.bak` kept), returns the new status.
 - **`clear_mods_root()`** — removes the choice (back to following the game), returns the new status.
+- **`create_mods_folder()`** — creates `<user dir>/mods` when FS25 hasn't yet; **`folder_looks_empty(path)`** — backs the "no mods yet" confirmation.
 
 `default_mods_paths` stays for compatibility but is no longer called by the app.
 
@@ -111,7 +113,7 @@ Shared, per-mod data stays global (keyed by techName): `curation`, `category_ove
 ### Pick flow
 
 1. Validate: must exist and be writable. If it has no `.zip` files or mod folders, confirm: *"This folder has no mods yet — use it anyway?"*
-2. If it differs from `gameReads`, ask: **"Point Farming Simulator at this folder too?"** — *Update FS25's setting* (primary) / *Only in Silo*. The dialog's note says the change applies on the next game launch, so close FS25 first (the game rewrites `gameSettings.xml` on exit). If `canWriteGameSetting` is false, only *Only in Silo* is offered, with the reason.
+2. Switch to it, then, if it differs from `gameReads`, ask with a confirm dialog: **"Point Farming Simulator at this folder too?"** — OK updates FS25's setting, Cancel keeps it in Silo only. The dialog's note says the change applies on the next game launch, so close FS25 first (the game rewrites `gameSettings.xml` on exit). If `canWriteGameSetting` is false, only *Only in Silo* is offered, with the reason.
 3. Switch: clear library state, `runScan()` on the new path, re-run the cloud-sync / hardlink probe, reload savegames (they don't move, but they're cross-checked against the new library).
 
 ### Mismatch banner

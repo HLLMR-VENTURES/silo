@@ -37,6 +37,16 @@ closes the app). A packaged build is `npm run tauri:build`.
 - [x] `[app]` Category rail filters; search filters by title/author/tech name; Favorites/Hidden toggles work.
 - [x] `[app]` Select-all checkbox activates/deactivates the filtered set.
 
+## 1b. Mods folder selection  _(auto-verified: modsroot resolve/override/path-map, per-folder DB isolation, migration)_
+- [ ] `[app]` First launch after upgrading: the library looks exactly as before (same active set, no "foreign file" errors); Settings → Mods folder shows **FS25 default**.
+- [ ] `[game]` Turn on FS25's mods directory override to a scratch folder (`gameSettings.xml`: `active="true"`). Launch Silo → it uses that folder and shows the one-time "Silo now uses the mods folder FS25 is set to" notice.
+- [ ] `[app]` Settings → Mods folder → **Change…** → pick another folder → confirm "Point Farming Simulator at this folder too?" → `gameSettings.xml` now points there and `gameSettings.xml.bak` exists.
+- [ ] `[game]` Launch FS25 → the mods from the new folder load.
+- [ ] `[app]` Switch back via **Other folders Silo knows** → the original folder's active set is intact.
+- [ ] `[app]` Choose a folder and decline the game update → the mismatch banner shows; **Point FS25 here** clears it.
+- [ ] `[app]` Rename the chosen folder while Silo is closed → launch → the "isn't available" banner shows and nothing is scanned; renaming it back + **Retry** recovers.
+- [ ] `[linux]` (tester) Silo finds the Proton prefix user folder; an override set in-game round-trips.
+
 ## 2. Curation & detail drawer  _(auto-verified: curation/tags/rating store)_
 - [x] `[app]` Click a mod row → detail drawer opens with icon, metadata, deps (with present/missing status).
 - [x] `[app]` Favorite / Broken / Hidden toggles persist across a rescan; star rating persists; tags add/remove & filter; notes save on blur.

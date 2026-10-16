@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Choose your mods folder.** Settings → Mods folder → **Change…** picks any folder. If FS25 reads
+  a different one, Silo offers to point the game at it too, keeping a backup of `gameSettings.xml`.
+  Silo also follows FS25's own *mods directory override* automatically, and remembers each folder's
+  organized library separately, so switching back restores it. (#162)
+- **Linux (Steam Proton) and Mac App Store detection.** Silo now finds the FS25 user folder inside
+  the Proton prefix in any Steam library (native or Flatpak), and in the sandboxed Mac App Store
+  container. (#162, #171)
+
 ### Fixed
 
 - **macOS: the game is now detected as a `.app` bundle.** Silo looked for a bare
