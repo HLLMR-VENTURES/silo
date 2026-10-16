@@ -1,7 +1,123 @@
 //! Which mods folder Silo manages (#162). Pure logic plus the one trusted "active root".
 
 use crate::xmlconfig;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
+
+/// `app_setting` keys.
+pub const CHOICE_KEY: &str = "mods_root_choice";
+pub const KNOWN_KEY: &str = "mods_root_known";
+
+/// Where the live folder came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Source {
+    User,
+    GameOverride,
+    Default,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    /// The folder Silo manages.
+    pub path: Option<PathBuf>,
+    pub source: Source,
+    /// The folder the game reads.
+    pub game_reads: Option<PathBuf>,
+    /// A user choice that differs from what the game reads.
+    pub mismatch: bool,
+    /// An active override whose game path could not be translated to a host path.
+    pub unresolved_override: Option<String>,
+}
+
+/// Decide the live folder: user choice > active game override > default. `same` compares
+/// folders (inject `same_folder` in production; plain equality in tests).
+pub fn resolve(
+    choice: Option<PathBuf>,
+    ov: Option<&Override>,
+    default: Option<PathBuf>,
+    map: &PathMap,
+    same: impl Fn(&Path, &Path) -> bool,
+) -> Resolved {
+    let mut unresolved_override = None;
+    let override_path = match ov {
+        Some(o) if o.active => {
+            let p = map.to_host(&o.directory);
+            if p.is_none() {
+                unresolved_override = Some(o.directory.clone());
+            }
+            p
+        }
+        _ => None,
+    };
+    let from_override = override_path.is_some();
+    let game_reads = override_path.or(default);
+    let (path, source) = match choice {
+        Some(c) => (Some(c), Source::User),
+        None => (
+            game_reads.clone(),
+            if from_override {
+                Source::GameOverride
+            } else {
+                Source::Default
+            },
+        ),
+    };
+    let mismatch = source == Source::User
+        && match (&path, &game_reads) {
+            (Some(a), Some(b)) => !same(a, b),
+            (Some(_), None) => true,
+            _ => false,
+        };
+    Resolved {
+        path,
+        source,
+        game_reads,
+        mismatch,
+        unresolved_override,
+    }
+}
+
+/// The single trusted write root, published by the mods-root commands. `lib::allowed_roots`
+/// reads it, so every organize/install command follows the folder the user picked.
+static ACTIVE: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+pub fn set_active(p: Option<PathBuf>) {
+    if let Ok(mut g) = ACTIVE.write() {
+        *g = p;
+    }
+}
+
+pub fn active() -> Option<PathBuf> {
+    ACTIVE.read().ok().and_then(|g| g.clone())
+}
+
+/// The known-folders list stored as a JSON array of path strings.
+pub fn parse_known(json: Option<&str>) -> Vec<String> {
+    json.and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
+        .unwrap_or_default()
+}
+
+/// Add `path` to the known list (once) and return the new JSON.
+pub fn add_known(json: Option<&str>, path: &str) -> String {
+    let mut v = parse_known(json);
+    if !v.iter().any(|k| k == path) {
+        v.push(path.to_string());
+    }
+    serde_json::to_string(&v).unwrap_or_else(|_| "[]".into())
+}
+
+/// A folder Silo may manage: it exists and Silo can write to it.
+pub fn validate_folder(p: &Path) -> Result<(), String> {
+    if !p.is_dir() {
+        return Err("That folder doesn't exist".into());
+    }
+    let probe = p.join(".silo-write-probe");
+    std::fs::write(&probe, b"silo").map_err(|_| "Silo can't write to that folder".to_string())?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
 
 /// FS25's own mods-folder redirect in `gameSettings.xml`:
 /// `<modsDirectoryOverride active="…" directory="…"/>`.
@@ -285,5 +401,101 @@ mod tests {
     fn to_game_falls_back_to_z_without_a_root_mapping() {
         let m = PathMap::new(vec![('c', PathBuf::from("/home/u/pfx/drive_c"))]);
         assert_eq!(m.to_game(Path::new("/srv/fs25")), "Z:/srv/fs25");
+    }
+
+    fn same(a: &Path, b: &Path) -> bool {
+        a == b
+    }
+    fn ov(active: bool, dir: &str) -> Override {
+        Override {
+            active,
+            directory: dir.into(),
+        }
+    }
+
+    #[test]
+    fn resolve_precedence_choice_then_active_override_then_default() {
+        let id = PathMap::identity();
+        let def = Some(PathBuf::from("/def"));
+
+        let r = resolve(None, None, def.clone(), &id, same);
+        assert_eq!(
+            (r.path.clone(), r.source, r.mismatch),
+            (def.clone(), Source::Default, false)
+        );
+
+        let o = ov(true, "/ov");
+        let r = resolve(None, Some(&o), def.clone(), &id, same);
+        assert_eq!(
+            (r.path.clone(), r.source),
+            (Some(PathBuf::from("/ov")), Source::GameOverride)
+        );
+        assert_eq!(r.game_reads, Some(PathBuf::from("/ov")));
+
+        let r = resolve(
+            Some(PathBuf::from("/mine")),
+            Some(&o),
+            def.clone(),
+            &id,
+            same,
+        );
+        assert_eq!(
+            (r.path.clone(), r.source, r.mismatch),
+            (Some(PathBuf::from("/mine")), Source::User, true)
+        );
+
+        let r = resolve(Some(PathBuf::from("/ov")), Some(&o), def, &id, same);
+        assert!(
+            !r.mismatch,
+            "choosing the folder the game reads is not a mismatch"
+        );
+    }
+
+    #[test]
+    fn resolve_ignores_an_inactive_override_and_reports_untranslatable_ones() {
+        let def = Some(PathBuf::from("/def"));
+        let r = resolve(
+            None,
+            Some(&ov(false, "/ov")),
+            def.clone(),
+            &PathMap::identity(),
+            same,
+        );
+        assert_eq!(r.source, Source::Default);
+
+        let m = PathMap::new(vec![('z', PathBuf::from("/"))]);
+        let r = resolve(None, Some(&ov(true, "Q:/x")), def.clone(), &m, same);
+        assert_eq!(r.unresolved_override.as_deref(), Some("Q:/x"));
+        assert_eq!((r.path, r.source), (def, Source::Default));
+    }
+
+    #[test]
+    fn known_list_adds_once_and_survives_bad_json() {
+        let a = add_known(None, "/a");
+        let ab = add_known(Some(&a), "/b");
+        assert_eq!(
+            parse_known(Some(&add_known(Some(&ab), "/a"))),
+            vec!["/a", "/b"]
+        );
+        assert!(parse_known(Some("not json")).is_empty());
+    }
+
+    #[test]
+    fn active_root_round_trips() {
+        set_active(Some(PathBuf::from("/x")));
+        assert_eq!(active(), Some(PathBuf::from("/x")));
+        set_active(None);
+        assert_eq!(active(), None);
+    }
+
+    #[test]
+    fn validate_folder_rejects_missing_and_accepts_writable() {
+        let base = std::env::temp_dir().join(format!("silo_modsroot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(validate_folder(&base).is_err());
+        std::fs::create_dir_all(&base).unwrap();
+        assert!(validate_folder(&base).is_ok());
+        assert!(!base.join(".silo-write-probe").exists(), "probe cleaned up");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
