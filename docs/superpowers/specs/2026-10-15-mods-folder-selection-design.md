@@ -113,7 +113,7 @@ Shared, per-mod data stays global (keyed by techName): `curation`, `category_ove
 ### Pick flow
 
 1. Validate: must exist and be writable. If it has no `.zip` files or mod folders, confirm: *"This folder has no mods yet — use it anyway?"*
-2. Switch to it, then, if it differs from `gameReads`, ask with a confirm dialog: **"Point Farming Simulator at this folder too?"** — OK updates FS25's setting, Cancel keeps it in Silo only. The dialog's note says the change applies on the next game launch, so close FS25 first (the game rewrites `gameSettings.xml` on exit). If `canWriteGameSetting` is false, only *Only in Silo* is offered, with the reason.
+2. Switch to it, then, if it differs from `gameReads`, ask (via the awaited `confirmDialog`, see #177): **"Point Farming Simulator at this folder too?"** — *Update FS25's setting* / *Only in Silo*. The dialog's note says the change applies on the next game launch, so close FS25 first (the game rewrites `gameSettings.xml` on exit). If `canWriteGameSetting` is false, only *Only in Silo* is offered, with the reason.
 3. Switch: clear library state, `runScan()` on the new path, re-run the cloud-sync / hardlink probe, reload savegames (they don't move, but they're cross-checked against the new library).
 
 ### Mismatch banner

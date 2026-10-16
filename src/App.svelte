@@ -1390,7 +1390,10 @@
     try {
       if (
         (await folderLooksEmpty(path)) &&
-        !confirm("This folder has no mods yet — use it anyway?")
+        !(await confirmDialog("This folder has no mods yet — use it anyway?", {
+          okLabel: "Use this folder",
+          cancelLabel: "Cancel",
+        }))
       )
         return;
       const st = await setModsRoot(path);
@@ -1400,11 +1403,12 @@
       if (
         st.mismatch &&
         st.canWriteGameSetting &&
-        confirm(
+        (await confirmDialog(
           `Point Farming Simulator at this folder too?\n\nFS25 currently reads:\n${st.gameReads ?? "(unknown)"}\n\n` +
-            "OK updates FS25's setting (a backup of gameSettings.xml is kept). Close FS25 first — " +
-            "the game rewrites that file when it exits.\nCancel keeps the change in Silo only.",
-        )
+            "Silo keeps a backup of gameSettings.xml. Close FS25 first — the game rewrites that " +
+            "file when it exits.",
+          { okLabel: "Update FS25's setting", cancelLabel: "Only in Silo" },
+        ))
       ) {
         await pointGameHere();
       }
