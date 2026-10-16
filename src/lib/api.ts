@@ -3,7 +3,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { save, open } from "@tauri-apps/plugin-dialog";
+import { save, open, confirm as pluginConfirm } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir, openPath, openUrl } from "@tauri-apps/plugin-opener";
 import type {
   ScanResult,
@@ -47,6 +47,19 @@ import type {
   CollectionProgress,
   BridgeSpec,
 } from "./types";
+
+/**
+ * Ask the user to confirm. ALWAYS `await` this. tauri-plugin-dialog replaces the webview's
+ * `window.confirm` with an async function, so calling it bare returns a Promise that is
+ * always truthy and the action runs no matter what the user clicks (#177). Never call the
+ * global confirm directly; `scripts/check-confirm.mjs` fails the build if one appears.
+ */
+export async function confirmDialog(
+  message: string,
+  opts: { okLabel?: string; cancelLabel?: string; kind?: "info" | "warning" | "error" } = {},
+): Promise<boolean> {
+  return await pluginConfirm(message, { title: "Silo", kind: opts.kind ?? "warning", ...opts });
+}
 
 export function defaultModsPaths(): Promise<string[]> {
   return invoke<string[]>("default_mods_paths");
