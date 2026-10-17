@@ -111,10 +111,11 @@ pub fn ensure_write_under(allowed_roots: &[std::path::PathBuf], dest: &Path) -> 
 /// the target must be a plain `.xml` file that already exists and whose parent resolves inside
 /// one of `allowed_roots` (the FS25 user dir). The current file is backed up to `<name>.bak`
 /// (older versions rotate and the original is kept; see `back_up_config`) and that backup MUST
-/// succeed — Silo never overwrites without a recoverable copy. The new bytes go to a temp sibling, are flushed, then atomically renamed into place; if the swap
-/// fails the original is restored from the backup, so a disk/permission error can't leave a
-/// half-written config. Closes the "wrote outside the intended folder" and "overwrote despite a
-/// failed backup" gaps a frontend-supplied path otherwise allowed.
+/// succeed — Silo never overwrites without a recoverable copy. The new bytes go to a temp
+/// sibling, are flushed, then atomically renamed into place; if the swap fails the original is
+/// restored from the backup, so a disk/permission error can't leave a half-written config.
+/// Closes the "wrote outside the intended folder" and "overwrote despite a failed backup" gaps
+/// a frontend-supplied path otherwise allowed.
 pub fn guarded_xml_write(
     allowed_roots: &[PathBuf],
     dest: &Path,
