@@ -11,6 +11,9 @@ pub struct LogParts {
     pub warnings: String,
     /// The end of the log (`recent_log`).
     pub recent: String,
+    /// Why the log file couldn't be opened this session, if it couldn't (only stderr got the
+    /// log then, so the file holds nothing from this run).
+    pub unavailable: Option<String>,
 }
 
 /// The bundle: a `header` line, the `report`, and (when given) the recent warnings and log,
@@ -31,8 +34,13 @@ pub fn bundle(
                 format!("```\n{s}\n```")
             }
         };
+        let note = log
+            .unavailable
+            .as_deref()
+            .map(|e| format!("Log file unavailable this session: {e}\n\n"))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "\n\n## Recent warnings\n\n{}\n\n## Recent log\n\n{}\n",
+            "\n\n## Recent warnings\n\n{}\n\n## Recent log\n\n{note}{}\n",
             fenced(&log.warnings),
             fenced(&log.recent)
         ));
@@ -433,6 +441,7 @@ mod tests {
         let parts = LogParts {
             warnings: warn.into(),
             recent,
+            unavailable: None,
         };
         let with_log = bundle(
             "Silo 1.0.0 on windows",
@@ -457,6 +466,24 @@ mod tests {
         assert!(quiet.contains("## Recent warnings\n\nNone."), "{quiet}");
         let without = bundle("h", report, None, Some("C:\\Users\\hllmr"), Some("hllmr"));
         assert!(!without.contains("Recent log") && !without.contains("hllmr"));
+    }
+
+    /// When the log file couldn't be opened this session, the bundle says why (redacted too).
+    #[test]
+    fn the_bundle_says_when_the_log_file_was_unavailable() {
+        let parts = LogParts {
+            unavailable: Some("Access denied: C:\\Users\\hllmr\\AppData\\Local\\x".into()),
+            ..LogParts::default()
+        };
+        let out = bundle("h", "r", Some(&parts), Some("C:\\Users\\hllmr"), None);
+        assert!(
+            out.contains(
+                "## Recent log\n\nLog file unavailable this session: Access denied: ~\\AppData\\Local\\x"
+            ),
+            "{out}"
+        );
+        let fine = bundle("h", "r", Some(&LogParts::default()), None, None);
+        assert!(!fine.contains("unavailable"));
     }
 
     fn log_dir(name: &str) -> std::path::PathBuf {

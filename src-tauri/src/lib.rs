@@ -3097,6 +3097,7 @@ async fn diagnostics_bundle(
     include_log: bool,
 ) -> Result<String, String> {
     let log_dir = app.path().app_log_dir().ok();
+    let log_error = app.try_state::<LogFileError>().and_then(|s| s.0.clone());
     let version = app.package_info().version.to_string();
     off_main(move || {
         let header = format!("Silo {version} on {}", std::env::consts::OS);
@@ -3108,6 +3109,7 @@ async fn diagnostics_bundle(
             diagnostics::LogParts {
                 warnings: diagnostics::recent_warnings(&files, 50, 16 * 1024),
                 recent: diagnostics::recent_log(&files, 300, 64 * 1024),
+                unavailable: log_error,
             }
         });
         let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
@@ -4283,6 +4285,9 @@ async fn detect_foreign_files(
 /// stderr. Release builds have no console, so the file is the only record of what Silo did. It
 /// holds full paths; "Copy diagnostics" removes the home folder and user name (`diagnostics`).
 /// Never log secrets (tokens, gist contents) through it.
+/// Why the log file couldn't be opened this session (`None` when it was), for diagnostics.
+struct LogFileError(Option<String>);
+
 fn log_plugin<R: tauri::Runtime>(to_file: bool) -> tauri::plugin::TauriPlugin<R> {
     use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
     let mut targets = vec![Target::new(TargetKind::Stderr)];
@@ -4337,10 +4342,12 @@ pub fn run() {
             // Started here, not on the builder: a plugin that fails on the builder stops the app,
             // and a log folder Silo can't write (or an old log another program holds open) must
             // never keep Silo from starting. Then it logs to stderr only.
-            if let Err(e) = app.handle().plugin(log_plugin(true)) {
+            let log_error = app.handle().plugin(log_plugin(true)).err().map(|e| {
                 let _ = app.handle().plugin(log_plugin(false));
                 log::warn!("couldn't open the log file: {e}");
-            }
+                e.to_string()
+            });
+            app.manage(LogFileError(log_error));
             log::info!(
                 "Silo {} starting on {}",
                 app.package_info().version,
