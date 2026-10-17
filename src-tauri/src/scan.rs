@@ -160,11 +160,10 @@ fn collect_root_candidates(root: &Path) -> Vec<Candidate> {
     out
 }
 
-/// Mods parked in `mods/archive/<Category>/` (Silo-managed, one level of folders).
-fn collect_archive_candidates(root: &Path) -> Vec<Candidate> {
+/// Mods parked in an archive folder's `<Category>/` subfolders (Silo-managed, one level of folders).
+fn collect_archive_candidates(archive: &Path) -> Vec<Candidate> {
     let mut out = Vec::new();
-    let archive = root.join("archive");
-    let Ok(cats) = fs::read_dir(&archive) else {
+    let Ok(cats) = fs::read_dir(archive) else {
         return out;
     };
     for cat in cats.flatten() {
@@ -478,9 +477,37 @@ fn resolve_entry(c: &Candidate, cache: &HashMap<String, CacheEntry>) -> (ModEntr
     (build_entry(c), true)
 }
 
-/// Core scan: walk the roots, resolving each candidate from `cache` when possible
-/// and parsing the rest in parallel. Reports progress via a callback (invoked from
-/// many rayon threads, hence Sync). No Tauri dependency — testable / CLI-reusable.
+/// Core scan over mods folders with explicit archive folders. Archives are read in order and a
+/// techName already seen in an earlier archive is skipped (during a paused archive move the new
+/// archive is listed first). No Tauri dependency — testable / CLI-reusable.
+pub fn scan_layouts<F>(
+    layouts: Vec<(PathBuf, Vec<PathBuf>)>,
+    cache: &HashMap<String, CacheEntry>,
+    progress: F,
+) -> ScanOutput
+where
+    F: Fn(usize, usize) + Sync + Send,
+{
+    let started = std::time::Instant::now();
+    let mut root_cands: Vec<Candidate> = Vec::new();
+    let mut archive_cands: Vec<Candidate> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for (root, archives) in &layouts {
+        root_cands.extend(collect_root_candidates(root));
+        for a in archives {
+            // Skip only names seen in an EARLIER archive; a single archive's own contents are
+            // kept as-is so a one-archive scan behaves exactly as before.
+            let cands = collect_archive_candidates(a);
+            let names: Vec<String> = cands.iter().map(|c| c.tech_name.clone()).collect();
+            archive_cands.extend(cands.into_iter().filter(|c| !seen.contains(&c.tech_name)));
+            seen.extend(names);
+        }
+    }
+    let roots: Vec<PathBuf> = layouts.into_iter().map(|(r, _)| r).collect();
+    finish_scan(roots, root_cands, archive_cands, cache, progress, started)
+}
+
+/// Scan with each root's default archive (`<root>/archive`).
 pub fn scan_cached<F>(
     roots: Vec<PathBuf>,
     cache: &HashMap<String, CacheEntry>,
@@ -489,15 +516,29 @@ pub fn scan_cached<F>(
 where
     F: Fn(usize, usize) + Sync + Send,
 {
-    let started = std::time::Instant::now();
+    let layouts = roots
+        .into_iter()
+        .map(|r| {
+            let a = r.join("archive");
+            (r, vec![a])
+        })
+        .collect();
+    scan_layouts(layouts, cache, progress)
+}
 
-    let mut root_cands: Vec<Candidate> = Vec::new();
-    let mut archive_cands: Vec<Candidate> = Vec::new();
-    for root in &roots {
-        root_cands.extend(collect_root_candidates(root));
-        archive_cands.extend(collect_archive_candidates(root));
-    }
-
+/// Resolve each candidate from `cache` when possible and parse the rest in parallel.
+/// Reports progress via a callback (invoked from many rayon threads, hence Sync).
+fn finish_scan<F>(
+    roots: Vec<PathBuf>,
+    root_cands: Vec<Candidate>,
+    archive_cands: Vec<Candidate>,
+    cache: &HashMap<String, CacheEntry>,
+    progress: F,
+    started: std::time::Instant,
+) -> ScanOutput
+where
+    F: Fn(usize, usize) + Sync + Send,
+{
     // Tech-names present in the archive (organized) and in the flat root (loaded).
     let archived: HashSet<String> = archive_cands.iter().map(|c| c.tech_name.clone()).collect();
     let in_root: HashSet<String> = root_cands.iter().map(|c| c.tech_name.clone()).collect();
@@ -707,5 +748,61 @@ mod settings_detect_tests {
         std::fs::write(d.join("v.lua"), b"function v:saveToXMLFile() end").unwrap();
         assert_eq!(detect_settings(&d, "dir"), (false, SettingsSource::None));
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn moddesc_zip(path: &std::path::Path, title: &str) {
+        let f = std::fs::File::create(path).unwrap();
+        let mut w = zip::ZipWriter::new(f);
+        w.start_file("modDesc.xml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        use std::io::Write;
+        write!(
+            w,
+            "<modDesc descVersion=\"92\"><title><en>{title}</en></title><version>1.0.0.0</version></modDesc>"
+        )
+        .unwrap();
+        w.finish().unwrap();
+    }
+
+    #[test]
+    fn reads_two_archives_without_duplicating_a_mod() {
+        let base = std::env::temp_dir().join(format!("silo_scan2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        let new_arch = base.join("new");
+        let old_arch = base.join("old");
+        for d in [&mods, &new_arch.join("Tools"), &old_arch.join("Tools")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        moddesc_zip(&new_arch.join("Tools/FS25_Moved.zip"), "Moved");
+        moddesc_zip(&old_arch.join("Tools/FS25_Moved.zip"), "Moved");
+        moddesc_zip(&old_arch.join("Tools/FS25_NotYet.zip"), "Not yet");
+
+        let out = scan_layouts(
+            vec![(mods.clone(), vec![new_arch.clone(), old_arch.clone()])],
+            &HashMap::new(),
+            |_, _| {},
+        );
+        let names: Vec<_> = out
+            .result
+            .mods
+            .iter()
+            .map(|m| m.tech_name.clone())
+            .collect();
+        assert_eq!(names.iter().filter(|n| *n == "FS25_Moved").count(), 1);
+        assert!(names.contains(&"FS25_NotYet".to_string()));
+        let moved = out
+            .result
+            .mods
+            .iter()
+            .find(|m| m.tech_name == "FS25_Moved")
+            .unwrap();
+        assert!(moved.path.contains("new"), "the new archive wins");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
