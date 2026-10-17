@@ -883,19 +883,22 @@ pub(crate) fn cleanup_empty_archive(
     if !archive.exists() {
         return Ok(leftover);
     }
-    // Returns true if `dir` is empty once processing finishes.
-    fn walk(dir: &Path, leftover: &mut Vec<PathBuf>) -> std::io::Result<bool> {
+    // Returns true if `dir` is empty once processing finishes. At the top level, Silo's own
+    // archive note (`relocate::ARCHIVE_NOTE`) counts as absent.
+    fn walk(dir: &Path, top: bool, leftover: &mut Vec<PathBuf>) -> std::io::Result<bool> {
         let mut empty = true;
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
             // Use symlink semantics: never follow/recurse a link.
             if entry.file_type()?.is_dir() {
-                if walk(&path, leftover)? {
+                if walk(&path, false, leftover)? {
                     let _ = std::fs::remove_dir(&path);
                 } else {
                     empty = false;
                 }
+            } else if top && entry.file_name() == crate::relocate::ARCHIVE_NOTE {
+                continue;
             } else {
                 leftover.push(path);
                 empty = false;
@@ -903,7 +906,8 @@ pub(crate) fn cleanup_empty_archive(
         }
         Ok(empty)
     }
-    if walk(archive, &mut leftover)? && remove_root {
+    if walk(archive, true, &mut leftover)? && remove_root {
+        let _ = std::fs::remove_file(archive.join(crate::relocate::ARCHIVE_NOTE));
         let _ = std::fs::remove_dir(archive);
     }
     Ok(leftover)
@@ -1656,6 +1660,33 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleaning_an_empty_archive_removes_silos_own_note() {
+        let base = std::env::temp_dir().join(format!("silo_clean_note_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let archive = base.join("hdd");
+        std::fs::create_dir_all(archive.join("Vehicles")).unwrap();
+        std::fs::write(archive.join(crate::relocate::ARCHIVE_NOTE), b"{}").unwrap();
+        let leftover = cleanup_empty_archive(&archive, true).unwrap();
+        assert!(
+            leftover.is_empty(),
+            "the note is not reported as a leftover: {leftover:?}"
+        );
+        assert!(!archive.exists());
+        // Kept when the root is kept (a user-chosen folder stays as it is).
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(archive.join(crate::relocate::ARCHIVE_NOTE), b"{}").unwrap();
+        assert!(cleanup_empty_archive(&archive, false).unwrap().is_empty());
+        assert!(archive.join(crate::relocate::ARCHIVE_NOTE).exists());
+        // An archive that still holds something keeps its note too.
+        let orphan = archive.join("Tools").join("orphan.zip");
+        std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+        std::fs::write(&orphan, b"PK").unwrap();
+        assert_eq!(cleanup_empty_archive(&archive, true).unwrap(), vec![orphan]);
+        assert!(archive.join(crate::relocate::ARCHIVE_NOTE).exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn is_silo_projection_distinguishes_ours_from_the_users() {

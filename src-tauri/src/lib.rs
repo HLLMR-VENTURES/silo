@@ -1823,7 +1823,18 @@ fn resolve_active(conn: &rusqlite::Connection, mods: &std::path::Path) -> modsro
     let marker = relocate::load_marker(conn, &key);
     let stored = match &marker {
         Some(m) => Some(m.from.clone()),
-        None => db::get_app_setting(conn, &relocate::archive_setting_key(&key)).map(PathBuf::from),
+        None => match db::get_app_setting(conn, &relocate::archive_setting_key(&key)) {
+            Some(s) => Some(PathBuf::from(s)),
+            // No setting: a lost database may have forgotten a custom archive the notes name.
+            None => relocate::rediscover_archive(mods).inspect(|found| {
+                if relocate::store_archive_setting(conn, &key, mods, found).is_ok() {
+                    notices::push(format!(
+                        "Silo found your library archive at {} and is using it again.",
+                        found.display()
+                    ));
+                }
+            }),
+        },
     };
     let layout = match stored {
         Some(archive) => organize::Layout::new(mods.to_path_buf(), archive).unwrap_or_else(|e| {
@@ -5061,6 +5072,31 @@ mod tests {
             move_to: None,
         };
         assert!(scan_archives(&conn, &mods, Some(&default)).1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_lost_database_finds_a_custom_archive_from_its_notes() {
+        let base = temp_base("rediscover");
+        let (mods, hdd) = (base.join("mods"), base.join("hdd"));
+        std::fs::create_dir_all(&hdd).unwrap();
+        crate::relocate::note_archive(&mods, Some(&hdd));
+        // A brand-new database: it knows nothing about the archive.
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        assert_eq!(super::resolve_active(&conn, &mods).layout.archive, hdd);
+        let key = crate::modsroot::canonical_key(&mods);
+        assert_eq!(
+            crate::db::get_app_setting(&conn, &crate::relocate::archive_setting_key(&key)),
+            Some(hdd.to_string_lossy().into_owned()),
+            "stored again, so the next start doesn't need the notes"
+        );
+        let notices = crate::notices::take_mentioning(&hdd.display().to_string());
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.contains("found your library archive")),
+            "{notices:?}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -774,7 +774,84 @@ pub fn store_archive_setting(
     } else {
         Some(archive.to_string_lossy().into_owned())
     };
-    db::set_app_setting(conn, &archive_setting_key(mods_key), value.as_deref())
+    db::set_app_setting(conn, &archive_setting_key(mods_key), value.as_deref())?;
+    note_archive(mods, value.as_deref().map(Path::new));
+    Ok(())
+}
+
+/// Silo's note in a custom archive (naming its mods folder) and in that mods folder (naming the
+/// archive). If Silo's database is lost, the pair lets it find the archive again. FS25 only
+/// loads zips and folders, and a scan skips loose files, so neither reads it as a mod.
+pub const ARCHIVE_NOTE: &str = ".silo-archive.json";
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveNote {
+    silo: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    archive: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mods_folder: Option<PathBuf>,
+}
+
+fn read_note(dir: &Path) -> Option<ArchiveNote> {
+    serde_json::from_str(&std::fs::read_to_string(dir.join(ARCHIVE_NOTE)).ok()?).ok()
+}
+
+/// Write the pair for a custom `archive`, or remove the mods folder's note for the default
+/// (`None`). Best effort: a missing note only costs rediscovery, never the change itself.
+pub(crate) fn note_archive(mods: &Path, archive: Option<&Path>) {
+    let write = |dir: &Path, note: &ArchiveNote| {
+        let json = serde_json::to_string_pretty(note).unwrap_or_default();
+        if let Err(e) = std::fs::write(dir.join(ARCHIVE_NOTE), json) {
+            eprintln!(
+                "[Silo] couldn't write {} in {}: {e}",
+                ARCHIVE_NOTE,
+                dir.display()
+            );
+        }
+    };
+    match archive {
+        Some(a) => {
+            write(
+                a,
+                &ArchiveNote {
+                    silo: 1,
+                    archive: None,
+                    mods_folder: Some(mods.to_path_buf()),
+                },
+            );
+            write(
+                mods,
+                &ArchiveNote {
+                    silo: 1,
+                    archive: Some(a.to_path_buf()),
+                    mods_folder: None,
+                },
+            );
+        }
+        None => {
+            let _ = std::fs::remove_file(mods.join(ARCHIVE_NOTE));
+        }
+    }
+}
+
+/// The archive the notes point to, for a mods folder the database knows no archive for: the
+/// mods folder's note names an archive whose own note names this mods folder back, or whose
+/// folder isn't there right now (an unplugged drive can't confirm; the missing-archive banner
+/// then takes over). Never while the default archive holds mods.
+pub fn rediscover_archive(mods: &Path) -> Option<PathBuf> {
+    // The note first: without one (the usual case) the default archive isn't listed at all.
+    let archive = read_note(mods)?.archive?;
+    let default = Layout::default_for(mods).archive;
+    if filed_mods(&default).map(|v| !v.is_empty()).unwrap_or(true) {
+        return None;
+    }
+    if !archive.exists() {
+        return Some(archive);
+    }
+    let back = read_note(&archive)?.mods_folder?;
+    crate::modsroot::same_folder(&back, mods).then_some(archive)
 }
 
 /// Every mod (zip, or folder with a `modDesc.xml`) filed under `archive/<category>/`, skipping
@@ -2249,6 +2326,82 @@ mod tests {
             }
         };
         assert!(filed_mods_with(&f.old, &list).is_err());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    fn note_fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("silo_note_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (mods, hdd) = (base.join("mods"), base.join("hdd"));
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(&hdd).unwrap();
+        (base, mods, hdd)
+    }
+
+    #[test]
+    fn a_custom_archive_is_found_again_after_the_database_is_lost() {
+        let (base, mods, hdd) = note_fixture("found");
+        note_archive(&mods, Some(&hdd));
+        assert!(mods.join(ARCHIVE_NOTE).is_file() && hdd.join(ARCHIVE_NOTE).is_file());
+        assert_eq!(rediscover_archive(&mods).as_deref(), Some(hdd.as_path()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_pointer_the_archive_doesnt_confirm_is_ignored() {
+        let (base, mods, hdd) = note_fixture("unconfirmed");
+        let other = base.join("other-mods");
+        std::fs::create_dir_all(&other).unwrap();
+        note_archive(&other, Some(&hdd)); // hdd's note now names other-mods
+        std::fs::write(
+            mods.join(ARCHIVE_NOTE),
+            serde_json::json!({ "silo": 1, "archive": hdd }).to_string(),
+        )
+        .unwrap();
+        assert_eq!(rediscover_archive(&mods), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_unplugged_archive_is_still_found() {
+        let (base, mods, hdd) = note_fixture("unplugged");
+        note_archive(&mods, Some(&hdd));
+        std::fs::remove_dir_all(&hdd).unwrap(); // the drive is gone
+        assert_eq!(rediscover_archive(&mods).as_deref(), Some(hdd.as_path()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_default_archive_holding_mods_wins_over_a_stale_pointer() {
+        let (base, mods, hdd) = note_fixture("default_wins");
+        note_archive(&mods, Some(&hdd));
+        let cat = mods.join("archive").join("Misc");
+        std::fs::create_dir_all(&cat).unwrap();
+        std::fs::write(cat.join("FS25_A.zip"), b"zip").unwrap();
+        assert_eq!(rediscover_archive(&mods), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn going_back_to_the_default_archive_removes_the_pointer() {
+        let (base, mods, hdd) = note_fixture("back_default");
+        note_archive(&mods, Some(&hdd));
+        note_archive(&mods, None);
+        assert!(!mods.join(ARCHIVE_NOTE).exists());
+        assert_eq!(rediscover_archive(&mods), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn storing_the_archive_setting_writes_and_clears_the_notes() {
+        let f = fx("store_notes");
+        store_archive_setting(&f.conn, &f.key, &f.mods, &f.new).unwrap();
+        assert_eq!(
+            rediscover_archive(&f.mods).as_deref(),
+            Some(f.new.as_path())
+        );
+        store_archive_setting(&f.conn, &f.key, &f.mods, &f.mods.join("archive")).unwrap();
+        assert!(!f.mods.join(ARCHIVE_NOTE).exists());
         let _ = std::fs::remove_dir_all(&f.base);
     }
 

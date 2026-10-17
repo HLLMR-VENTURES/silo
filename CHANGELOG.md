@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   damaged file, restores its latest backup copy (or starts fresh), and tells you what happened.
   Your mods are never touched. (#PR)
 
+- **Silo can find a library archive on another drive again.** A custom archive now holds a small
+  `.silo-archive.json` note and your mods folder points to it, so Silo finds the archive even if
+  its database is lost. (#PR)
+
 ### Security
 
 - **Stricter file-name checks.** File names with a colon, a trailing dot or space, or a reserved
