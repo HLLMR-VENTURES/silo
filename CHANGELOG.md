@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Automatic database backups.** Silo keeps a copy of its library database (tags, notes,
+  ratings, loadouts, settings) from each of the last five days you used it, in its app data
+  folder, plus one copy taken just before an upgrade changes the database. Backups never
+  include your GitHub token. (#216)
+
 ### Fixed
 
 - **Your original game settings are kept.** The first time Silo edits gameSettings.xml or a mod's
@@ -26,6 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of freezing the window. (#214)
 
 - **The open-folder links in Settings work.** They silently did nothing before. (#215)
+
+- **Going back to an older Silo can't damage your library.** Silo now records its database
+  version and won't touch a database made by a newer Silo; it asks you to install the latest
+  version instead. (#216)
+
+- **A damaged database no longer breaks Silo.** If Silo's database can't be read, Silo keeps the
+  damaged file, restores its latest backup copy (or starts fresh), and tells you what happened.
+  Your mods are never touched. (#216)
+
+- **Silo can find a library archive on another drive again.** A custom archive now holds a small
+  `.silo-archive.json` note and your mods folder points to it, so Silo finds the archive even if
+  its database is lost. (#216)
 
 ### Security
 

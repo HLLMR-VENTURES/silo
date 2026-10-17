@@ -17,6 +17,7 @@ pub mod moddesc;
 pub mod modsroot;
 pub mod mpsync;
 pub mod net;
+pub mod notices;
 pub mod organize;
 pub mod paths;
 mod picked;
@@ -1822,7 +1823,20 @@ fn resolve_active(conn: &rusqlite::Connection, mods: &std::path::Path) -> modsro
     let marker = relocate::load_marker(conn, &key);
     let stored = match &marker {
         Some(m) => Some(m.from.clone()),
-        None => db::get_app_setting(conn, &relocate::archive_setting_key(&key)).map(PathBuf::from),
+        None => match db::get_app_setting(conn, &relocate::archive_setting_key(&key)) {
+            Some(s) => Some(PathBuf::from(s)),
+            // No setting: a lost database may have forgotten a custom archive the notes name.
+            None => relocate::rediscover_archive(mods)
+                .filter(|found| rediscovered_archive_fits(conn, mods, found))
+                .inspect(|found| {
+                    if relocate::store_archive_setting(conn, &key, mods, found).is_ok() {
+                        notices::push(format!(
+                            "Silo found your library archive at {} and is using it again.",
+                            found.display()
+                        ));
+                    }
+                }),
+        },
     };
     let layout = match stored {
         Some(archive) => organize::Layout::new(mods.to_path_buf(), archive).unwrap_or_else(|e| {
@@ -1838,6 +1852,32 @@ fn resolve_active(conn: &rusqlite::Connection, mods: &std::path::Path) -> modsro
         layout,
         move_to: marker.map(|m| m.to),
     }
+}
+
+/// An archive found again from its notes passes the same checks as one the user picks: the
+/// `Layout` rules and the fences (other mods folders and their archives, FS25's own folder,
+/// Silo's data folder, which is where the database lives).
+fn rediscovered_archive_fits(
+    conn: &rusqlite::Connection,
+    mods: &std::path::Path,
+    found: &std::path::Path,
+) -> bool {
+    let layout = organize::Layout::default_for(mods);
+    let app_data = conn
+        .path()
+        .map(std::path::Path::new)
+        .and_then(std::path::Path::parent)
+        .filter(|p| !p.as_os_str().is_empty());
+    let problems = fence_problems(&layout, found, &fences(conn, &layout, app_data));
+    if !problems.is_empty() {
+        eprintln!(
+            "[Silo] not using the archive {} named in {}: {}",
+            found.display(),
+            relocate::ARCHIVE_NOTE,
+            problems.join(" ")
+        );
+    }
+    problems.is_empty()
 }
 
 /// Resolve the live mods folder, publish it (and its archive) as the trusted write roots, and
@@ -4147,6 +4187,12 @@ fn app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+/// Notices from startup work, each returned once (see `notices`).
+#[tauri::command]
+async fn take_startup_notices() -> Vec<String> {
+    notices::take()
+}
+
 /// True when this machine can store account tokens in the OS keychain. When false, the UI
 /// warns that a connected token would be kept in the local DB unencrypted.
 #[tauri::command]
@@ -4208,6 +4254,21 @@ pub fn run() {
             tauri::async_runtime::spawn_blocking(move || {
                 match db_path(&handle).and_then(|p| db::open(&p)) {
                     Ok(conn) => {
+                        // A daily copy of the database to fall back on if it's ever damaged.
+                        if let Ok(p) = db_path(&handle) {
+                            match db::snapshot(
+                                &conn,
+                                &db::snapshot_dir(&p),
+                                5,
+                                std::time::Duration::from_secs(20 * 3600),
+                            ) {
+                                Ok(Some(s)) => {
+                                    eprintln!("[Silo] database snapshot saved: {}", s.display())
+                                }
+                                Ok(None) => {}
+                                Err(e) => eprintln!("[Silo] database snapshot failed: {e}"),
+                            }
+                        }
                         let _ = compute_mods_root_status(&conn);
                         eprintln!("[Silo] library layout resolved at startup");
                     }
@@ -4318,6 +4379,7 @@ pub fn run() {
             save_mod_settings,
             save_mod_settings_raw,
             app_version,
+            take_startup_notices,
             secret_storage_secure,
             detect_foreign_files,
             adopt_foreign_file,
@@ -5038,6 +5100,54 @@ mod tests {
             move_to: None,
         };
         assert!(scan_archives(&conn, &mods, Some(&default)).1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_lost_database_finds_a_custom_archive_from_its_notes() {
+        let base = temp_base("rediscover");
+        let (mods, hdd) = (base.join("mods"), base.join("hdd"));
+        std::fs::create_dir_all(&hdd).unwrap();
+        crate::relocate::note_archive(&mods, Some(&hdd));
+        // A brand-new database (in its own data folder): it knows nothing about the archive.
+        let conn = crate::db::open(&base.join("appdata").join("silo.db")).unwrap();
+        assert_eq!(super::resolve_active(&conn, &mods).layout.archive, hdd);
+        let key = crate::modsroot::canonical_key(&mods);
+        assert_eq!(
+            crate::db::get_app_setting(&conn, &crate::relocate::archive_setting_key(&key)),
+            Some(hdd.to_string_lossy().into_owned()),
+            "stored again, so the next start doesn't need the notes"
+        );
+        let notices = crate::notices::take_mentioning(&hdd.display().to_string());
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.contains("found your library archive")),
+            "{notices:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_rediscovered_archive_must_clear_the_fences() {
+        let base = temp_base("rediscover_fenced");
+        let mods = base.join("mods");
+        let app_data = base.join("appdata");
+        let inside_app_data = app_data.join("archive");
+        std::fs::create_dir_all(&inside_app_data).unwrap();
+        crate::relocate::note_archive(&mods, Some(&inside_app_data));
+        let conn = crate::db::open(&app_data.join("silo.db")).unwrap();
+        assert_eq!(
+            super::resolve_active(&conn, &mods).layout.archive,
+            crate::organize::Layout::default_for(&mods).archive,
+            "an archive inside Silo's own data folder isn't taken up"
+        );
+        let key = crate::modsroot::canonical_key(&mods);
+        assert_eq!(
+            crate::db::get_app_setting(&conn, &crate::relocate::archive_setting_key(&key)),
+            None
+        );
+        assert!(crate::notices::take_mentioning(&inside_app_data.display().to_string()).is_empty());
         let _ = std::fs::remove_dir_all(&base);
     }
 
