@@ -138,11 +138,13 @@ fn candidate_from(path: PathBuf, name: &str, ft: std::fs::FileType) -> Option<Ca
     None
 }
 
-/// True for the scratch entries Silo leaves mid-operation (archive move, relink, or organize's
-/// `.{name}.silo-tmp`). They can hold a full copy of a mod and must never be scanned as one.
+/// True for the scratch entries Silo leaves mid-operation (an archive move's in-flight copy or
+/// the old copy it is deleting, relink, or organize's `.{name}.silo-tmp`). They can hold a full
+/// copy of a mod and must never be scanned as one.
 fn is_silo_temp(name: &str) -> bool {
     let l = name.to_lowercase();
     l.ends_with(".silo-move-tmp")
+        || l.ends_with(".silo-move-old")
         || l.ends_with(".silo-relink-tmp")
         || (l.starts_with('.') && l.ends_with(".silo-tmp"))
 }
@@ -899,6 +901,7 @@ mod layout_tests {
         let desc = "<modDesc descVersion=\"92\"><version>1.0.0.0</version></modDesc>";
         for dir in [
             cat.join("FS25_X.silo-move-tmp"),
+            cat.join("FS25_V.silo-move-old"),
             cat.join("FS25_Y.silo-relink-tmp"),
             cat.join(".FS25_Z.silo-tmp"),
             mods.join("FS25_X.silo-move-tmp"),
@@ -909,6 +912,7 @@ mod layout_tests {
         }
         // Zip flavours of the same temp names are ignored too.
         moddesc_zip(&cat.join("FS25_W.zip.silo-move-tmp"), "W");
+        moddesc_zip(&cat.join("FS25_U.zip.silo-move-old"), "U");
         // A real mod alongside them is still found.
         moddesc_zip(&cat.join("FS25_Real.zip"), "Real");
 
@@ -921,6 +925,8 @@ mod layout_tests {
     #[test]
     fn is_silo_temp_matches_move_relink_and_dot_tmp_names() {
         assert!(is_silo_temp("FS25_X.silo-move-tmp"));
+        assert!(is_silo_temp("FS25_X.zip.silo-move-old"));
+        assert!(is_silo_temp("FS25_X.SILO-MOVE-OLD"));
         assert!(is_silo_temp("FS25_X.SILO-RELINK-TMP"));
         assert!(is_silo_temp(".FS25_X.silo-tmp"));
         assert!(!is_silo_temp("FS25_X.silo-tmp")); // only the dot-prefixed form is organize's
