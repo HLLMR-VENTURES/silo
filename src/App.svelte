@@ -35,6 +35,9 @@
     getTags,
     setTags,
     getModRepos,
+    getModSources,
+    markSourceChecked,
+    openExternal,
     checkModUpdate,
     catalogCheckUpdates,
     downloadUpdate,
@@ -92,7 +95,9 @@
     Conflict,
     GameInfo,
     UpdateRow,
+    SourceRow,
   } from "./lib/types";
+  import { checkYourselfList, type CheckYourselfRow } from "./lib/sources";
 
   const CATEGORIES = [
     "Maps",
@@ -1040,9 +1045,40 @@
     }
   }
 
+  // Source pages (where each mod came from, #196): techName -> saved page. Silo never requests
+  // these; Open page hands them to the browser.
+  let sourceMap = $state<Record<string, SourceRow>>({});
+  async function loadSources() {
+    try {
+      const rows = await getModSources();
+      sourceMap = Object.fromEntries(rows.map((r) => [r.techName, r]));
+    } catch (e) {
+      errorMsg = String(e);
+    }
+  }
+  function setSource(techName: string, row: SourceRow | null) {
+    const next = { ...sourceMap };
+    if (row) next[techName] = row;
+    else delete next[techName];
+    sourceMap = next;
+  }
+  async function markChecked(row: CheckYourselfRow) {
+    try {
+      const at = await markSourceChecked(row.techName);
+      const s = sourceMap[row.techName];
+      if (s) setSource(row.techName, { ...s, lastChecked: at });
+    } catch (e) {
+      errorMsg = String(e);
+    }
+  }
+
   let updatesOpen = $state(false);
   let updateChecking = $state(false);
   let updateResults = $state<UpdateRow[]>([]);
+  // Mods with a saved page that this check couldn't answer: the user checks those by hand.
+  const checkYourself = $derived(
+    updateChecking ? [] : checkYourselfList(mods, sourceMap, updateResults),
+  );
   const linkedCount = $derived(Object.keys(repoMap).length);
 
   // "Needs update" is on-demand: the first time it's switched on it runs a quiet update check,
@@ -1997,6 +2033,7 @@
         );
         await loadTags();
         await loadRepos();
+        await loadSources();
         await loadLoadouts();
         await loadSavegames();
         gameInfo = await detectGame();
@@ -2323,6 +2360,8 @@
         else delete next[dm.techName];
         repoMap = next;
       }}
+      source={sourceMap[dm.techName] ?? null}
+      onSourceChange={(row) => setSource(dm.techName, row)}
       onInstalled={() => {
         detailMod = null;
         runScan(false);
@@ -2336,7 +2375,10 @@
       {availableUpdates}
       {updateChecking}
       {busy}
+      {checkYourself}
       onInstall={installFromRow}
+      onOpenSource={(s) => openExternal(s.url)}
+      onMarkChecked={markChecked}
       onClose={() => (updatesOpen = false)}
     />
   {/if}

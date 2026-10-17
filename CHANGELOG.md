@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Remember where a mod came from.** In a mod's details, save the page you downloaded it from.
+  Silo keeps the link, opens it in your browser, and lists these mods under *Check these
+  yourself* when you check for updates, along with when you last looked. Thanks to @iwatkot for
+  the idea and design input (#196).
+
 ### Changed
 
 - **Silo no longer sends your mod list in the background.** Every scan used to send the names

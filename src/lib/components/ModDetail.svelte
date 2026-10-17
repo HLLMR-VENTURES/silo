@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ModEntry, CurationRow, Conflict, CatalogModDetail } from "../types";
+  import type { ModEntry, CurationRow, Conflict, CatalogModDetail, SourceRow } from "../types";
   import type { ForeignFile } from "../api";
   import { getModIcon, revealInFolder, catalogDetailByTech, openExternal } from "../api";
   import { label as sourceLabel, loadCatalogImage } from "../browse";
@@ -7,6 +7,7 @@
   import ModStatus from "./ModStatus.svelte";
   import ModCuration from "./ModCuration.svelte";
   import ModRepoLink from "./ModRepoLink.svelte";
+  import ModSourceLink from "./ModSourceLink.svelte";
   import ProvenanceCheck from "./ProvenanceCheck.svelte";
 
   type Flag = "favorite" | "hidden" | "broken";
@@ -33,6 +34,9 @@
     onFilterTag: (tag: string) => void;
     repo: { owner: string; repo: string } | null;
     onRepoChange: (r: { owner: string; repo: string } | null) => void;
+    /** The page this mod came from, if the user saved one. */
+    source: SourceRow | null;
+    onSourceChange: (row: SourceRow | null) => void;
     onInstalled: () => void;
     /** A build sitting in the mods folder that isn't Silo's managed copy (usually a manual update
      *  the user dropped in). Null when the projected file matches. */
@@ -63,6 +67,8 @@
     onFilterTag,
     repo,
     onRepoChange,
+    source,
+    onSourceChange,
     onInstalled,
     foreign,
     onAdoptForeign,
@@ -314,6 +320,8 @@
     {onTagsChange}
     {onFilterTag}
   />
+
+  <ModSourceLink {mod} {source} {onSourceChange} {onRepoChange} />
 
   <ModRepoLink {mod} {repo} {onRepoChange} {onInstalled} />
 
