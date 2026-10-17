@@ -88,26 +88,39 @@ async fn scan_mods(
     };
     // The organize manifest is per folder; scope the reconcile to the folder being scanned.
     let scan_key = roots.first().map(|r| modsroot::canonical_key(r));
-    // Each mods folder with its archive(s): the active folder's chosen archive, and during a
-    // move both archives — the destination first, so it wins for mods already moved.
     let active = modsroot::active();
-    let layouts: Vec<(PathBuf, Vec<PathBuf>)> = roots
-        .iter()
-        .map(|r| match &active {
-            Some(a) if modsroot::same_folder(&a.layout.mods, r) => {
-                let mut archives: Vec<PathBuf> = a.move_to.iter().cloned().collect();
-                archives.push(a.layout.archive.clone());
-                (r.clone(), archives)
-            }
-            _ => (r.clone(), vec![organize::Layout::default_for(r).archive]),
-        })
-        .collect();
 
     tauri::async_runtime::spawn_blocking(move || {
         // Warm cache: parsed entries persist between launches, keyed by
         // path+mtime+size, so unchanged mods skip archive parsing entirely.
         let mut conn = db::open(&db_path(&app)?)?;
         let cache = db::load_cache(&conn);
+
+        // Each mods folder with its archive(s). During an unfinished move both archives are
+        // read, the current direction's destination first so it wins for mods already moved;
+        // otherwise the active folder's chosen archive (or a folder's default).
+        let layouts: Vec<(PathBuf, Vec<PathBuf>)> = roots
+            .iter()
+            .map(|r| {
+                if let Some(m) = relocate::load_marker(&conn, &modsroot::canonical_key(r)) {
+                    let archives = match m.direction {
+                        relocate::Direction::Forward => vec![m.to, m.from],
+                        relocate::Direction::Back => vec![m.from, m.to],
+                    };
+                    return (r.clone(), archives);
+                }
+                match &active {
+                    Some(a) if modsroot::same_folder(&a.layout.mods, r) => {
+                        (r.clone(), vec![a.layout.archive.clone()])
+                    }
+                    _ => (r.clone(), vec![organize::Layout::default_for(r).archive]),
+                }
+            })
+            .collect();
+        // Mid-move the files are in flux between two archives: never rewrite the manifest then.
+        let moving = scan_key
+            .as_deref()
+            .is_some_and(|k| relocate::load_marker(&conn, k).is_some());
 
         let emitter = app.clone();
         let out = scan::scan_layouts(layouts, &cache, move |done, total| {
@@ -154,7 +167,7 @@ async fn scan_mods(
                 })
             })
             .collect();
-        if let Some(key) = scan_key.as_deref() {
+        if let Some(key) = scan_key.as_deref().filter(|_| !moving) {
             let _ = db::reconcile_organized(&mut conn, key, &organized_rows);
         }
 
@@ -1168,7 +1181,6 @@ fn resolve_active(conn: &rusqlite::Connection, mods: &std::path::Path) -> modsro
     modsroot::Active {
         layout,
         move_to: marker.map(|m| m.to),
-        move_running: false,
     }
 }
 
@@ -1441,7 +1453,7 @@ async fn detect_game() -> Result<Option<gamelaunch::GameInfo>, String> {
 
 #[tauri::command]
 async fn launch_game() -> Result<(), String> {
-    if modsroot::active().map(|a| a.move_running).unwrap_or(false) {
+    if relocate::is_running() {
         return Err("Silo is moving your library archive — pause the move to play.".into());
     }
     tauri::async_runtime::spawn_blocking(gamelaunch::launch)

@@ -85,10 +85,9 @@ pub fn resolve(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Active {
     pub layout: crate::organize::Layout,
-    /// The other archive of an unfinished move (its destination; or its origin when cancelling).
+    /// The other archive of an unfinished move (`layout.archive` is where it started). Whether
+    /// a move is copying right now is `relocate::is_running()`.
     pub move_to: Option<PathBuf>,
-    /// A move is copying right now (not paused) — Launch is blocked.
-    pub move_running: bool,
 }
 
 static ACTIVE: RwLock<Option<Active>> = RwLock::new(None);
@@ -496,7 +495,6 @@ mod tests {
         set_active(Some(Active {
             layout: l.clone(),
             move_to: None,
-            move_running: false,
         }));
         assert_eq!(active().map(|a| a.layout), Some(l));
         set_active(None);
