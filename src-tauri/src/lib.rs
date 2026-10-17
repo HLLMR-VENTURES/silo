@@ -184,9 +184,7 @@ async fn scan_mods(
                 &organized_rows,
             );
             if !quiet {
-                eprintln!(
-                    "[Silo] scan: library changed while scanning; manifest left for the next scan"
-                );
+                log::info!("scan: library changed while scanning; manifest left for the next scan");
             }
         }
 
