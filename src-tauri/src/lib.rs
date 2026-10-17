@@ -1788,8 +1788,9 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
     }
 }
 
-/// Point FS25's `modsDirectoryOverride` at `folder`. `guarded_xml_write` keeps the original as
-/// `gameSettings.xml.bak` and swaps the new file in atomically.
+/// Point FS25's `modsDirectoryOverride` at `folder`. `guarded_xml_write` keeps the untouched
+/// original (`gameSettings.xml.silo-original.bak`) and the last three versions (`.bak`,
+/// `.bak.2`, `.bak.3`), then swaps the new file in atomically.
 fn point_game_at(folder: &std::path::Path) -> Result<(), String> {
     let loc = fsgame::locate().ok_or_else(|| "FS25 user folder not found".to_string())?;
     let gs = loc.user_dir.join("gameSettings.xml");
