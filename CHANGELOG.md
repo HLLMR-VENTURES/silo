@@ -65,9 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with an archive, Silo says why and won't change files there until you choose another folder.
   Before, two layouts could share files and organizing one moved the other's mods. (#PR)
 
-- **Optimize links handles an archive on a network share.** A drive Silo can't identify now
-  counts as another drive everywhere, so Optimize links no longer tries a hardlink for each mod and
-  fails, and the move dialog says the same as what the move does. (#PR)
+- **Optimize links handles an archive on a network share.** On a drive Silo can't identify, it
+  now tests once whether a hardlink works instead of assuming, so Optimize links no longer tries a
+  hardlink for each mod and fails, and the move dialog says the same as what the move does.
+  (#PR)
 
 - **Cancelling an archive move leaves no empty folders behind.** Category folders Silo made in
   the new location are removed when they're empty, also for mods whose copy was stopped partway.

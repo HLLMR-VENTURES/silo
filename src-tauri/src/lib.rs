@@ -2671,8 +2671,6 @@ struct MoveCheck {
     mod_count: usize,
     bytes: u64,
     free: Option<u64>,
-    /// `new` shares a drive with the mods folder (hardlinks work).
-    same_drive: bool,
     problems: Vec<String>,
 }
 
@@ -2697,9 +2695,7 @@ fn check_move(
         .count();
     let new_mount = organize::mount_of(new);
     let free = new_mount.as_ref().map(|(_, f)| *f);
-    // An unknown mount is another drive here (the space check still runs) and in
-    // `organize::same_volume` (links), so the preflight says what the move will do.
-    let same_drive = organize::known_same_mount(&organize::mount_of(&layout.mods), &new_mount);
+    // For space, an unknown mount is another drive: the whole archive must fit.
     let archive_same_drive =
         organize::known_same_mount(&organize::mount_of(&layout.archive), &new_mount);
     let unknown = relocate::unknown_mods(&layout.archive, &rows);
@@ -2724,7 +2720,6 @@ fn check_move(
         mod_count: rows.len(),
         bytes,
         free,
-        same_drive,
         problems,
     }
 }
@@ -2908,8 +2903,13 @@ async fn archive_move_preflight(
             && fence_problems(&layout, &new, &fences(&conn, &layout, app_data.as_deref()))
                 .is_empty();
         let check = check_move(&conn, &layout, &key, &new, target);
-        // What `LinkPolicy` will allow there (the probe, and never out of a Mac App Store
-        // sandbox).
+        // Links as `LinkPolicy` will decide them there: a drive the disk list doesn't know is
+        // probed (only once the folder is cleared), and symlinks never leave a Mac App Store
+        // sandbox. The space check above keeps "unknown = another drive".
+        let same_drive =
+            organize::same_volume_or_probe(organize::volume_relation(&layout.mods, &new), || {
+                probed && organize::hardlinks_between(&layout.mods, &new)
+            });
         let symlinks_available = probed
             && organize::symlinks_usable(&organize::Layout {
                 mods: layout.mods.clone(),
@@ -2919,7 +2919,7 @@ async fn archive_move_preflight(
             mod_count: check.mod_count,
             bytes: check.bytes,
             free_bytes: check.free,
-            same_drive: check.same_drive,
+            same_drive,
             symlinks_available,
             loose_mods: relocate::loose_mods(&new).len(),
             problems: check.problems,
