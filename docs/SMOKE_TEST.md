@@ -64,12 +64,13 @@ capture the forensic baseline from `RC_TESTING.md` first.
 - [ ] `[app]` **Archive unavailable — re-point:** with the archive still missing, copy its folder (with its `<Category>/` subfolders) somewhere else → banner **Choose another** → pick the copy → the confirm says nothing is moved → **Use this folder** → the banner clears, the library rescans and lists every mod from the copy as parked; activate one and confirm it lands in the mods folder. Then unplug again and use Settings → **Use default** → the confirm says it starts fresh and the old drive's mods stay untouched → afterwards the archive reads *Inside your mods folder (default)*, the old folder is unchanged on disk, and nothing was copied anywhere. Activating / parking a mod that was linked from the old drive works (its stale link is replaced). **Way back:** reconnect the old drive → Settings → **Change…** → pick the old archive → the move is refused (it holds filed mods) but Silo offers **Use this folder** (moves nothing) → the library lists the old archive's mods again.
 - [ ] `[app]` **Cross-drive copies notice:** with the archive on another drive where links aren't possible (Windows without Developer Mode), Settings → **Optimize links** reports "Your library archive is on another drive and Windows can't link across drives without Developer Mode — active mods stay as copies." and changes nothing. The Change… confirm dialog also suggests Developer Mode.
 
-**Release gate** — do not ship the archive location until each of these passes. They need a real game and can't be unit-tested:
-- [ ] `[game]` **Windows, Developer Mode on:** FS25 loads **symlinked active zips** (archive on another drive; the mods folder entry is a symlink into the archive).
+**Release gate** — these need a real game and can't be unit-tested. Windows is required before
+shipping; macOS and Linux are experimental platforms, verified by testers as they report in:
+- [x] `[game]` **Windows, Developer Mode on:** FS25 loads **symlinked active zips** (archive on another drive; the mods folder entry is a symlink into the archive). _Passed 2026-10-17 for v0.9.0: 6 zips symlinked from `E:` into a mods folder on `F:`; `log.txt` listed all 6 as available mods with their hashes and versions._
 - [ ] `[game]` **macOS, Steam install:** FS25 loads symlinked active zips from an archive on another volume.
 - [ ] `[game]` **macOS, Mac App Store install:** the mods folder is inside the app's sandbox container, so active zips and **folder (unzipped) mods** are **copied, not linked** — confirm they load and no symlink is created.
 - [ ] `[game]` **Linux / Proton:** FS25 loads symlinked active zips (ask the #166 reporter to verify on CachyOS).
-- [ ] If symlinked zips do **not** load on Windows, `supports_symlinks` must return `false` on Windows before release (copy only).
+- [x] If symlinked zips do **not** load on Windows, `supports_symlinks` must return `false` on Windows before release (copy only). _Not needed: they load._
 
 ## 2. Curation & detail drawer  _(auto-verified: curation/tags/rating store)_
 - [x] `[app]` Click a mod row → detail drawer opens with icon, metadata, deps (with present/missing status).
