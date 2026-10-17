@@ -59,6 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to Silo, no longer rewrites Silo's record of your library while another change is running.
   (#218)
 
+- **A mods folder can't share files with an archive.** Silo refuses a mods folder that is another
+  mods folder's archive, sits inside one (a category folder), holds one, or whose own archive
+  would be one. Before, two layouts could share files and organizing one moved the other's mods.
+  (#PR)
+
 ### Security
 
 - **Stricter file-name checks.** File names with a colon, a trailing dot or space, or a reserved

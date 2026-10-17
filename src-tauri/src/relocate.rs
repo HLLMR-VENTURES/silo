@@ -70,9 +70,12 @@ impl MoveMarker {
     }
 }
 
+/// Prefix of every `archive_setting_key`; the rest of the key is the mods folder's key.
+pub const ARCHIVE_SETTING_PREFIX: &str = "archive_root:";
+
 /// `app_setting` key holding a mods folder's custom archive (absent ⇒ the default).
 pub fn archive_setting_key(mods_key: &str) -> String {
-    format!("archive_root:{mods_key}")
+    format!("{ARCHIVE_SETTING_PREFIX}{mods_key}")
 }
 
 fn marker_key(mods_key: &str) -> String {

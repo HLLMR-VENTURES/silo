@@ -2088,6 +2088,13 @@ async fn set_mods_root(app: tauri::AppHandle, path: String) -> Result<ModsRootSt
         ) {
             return Err(picked::NOT_PICKED.into());
         }
+        // Before the write probe: a folder sharing files with another layout's archive.
+        let archives = other_archive_keys(&conn, p, &known_mods_folders(&conn, default.as_deref()));
+        if let Some(why) =
+            mods_folder_problem(&key_path(p), &key_path(&archive_of(&conn, p)), &archives)
+        {
+            return Err(why);
+        }
         modsroot::validate_folder(p)?;
         let known = modsroot::add_known(
             db::get_app_setting(&conn, modsroot::KNOWN_KEY).as_deref(),
@@ -2294,19 +2301,38 @@ struct Fences {
     app_data: Option<PathBuf>,
 }
 
+/// Every mods folder Silo knows: the known list, plus FS25's default mods folder (`default`),
+/// which counts even when it was never picked.
+fn known_mods_folders(
+    conn: &rusqlite::Connection,
+    default: Option<&std::path::Path>,
+) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> =
+        modsroot::parse_known(db::get_app_setting(conn, modsroot::KNOWN_KEY).as_deref())
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+    v.extend(default.map(PathBuf::from));
+    v
+}
+
+/// A mods folder's archive: the one chosen for it, or the default `<mods>/archive`.
+fn archive_of(conn: &rusqlite::Connection, mods: &std::path::Path) -> PathBuf {
+    db::get_app_setting(
+        conn,
+        &relocate::archive_setting_key(&modsroot::canonical_key(mods)),
+    )
+    .map(PathBuf::from)
+    .unwrap_or_else(|| organize::Layout::default_for(mods).archive)
+}
+
 fn fences(
     conn: &rusqlite::Connection,
     layout: &organize::Layout,
     app_data: Option<&std::path::Path>,
 ) -> Fences {
     let user_dir = fsgame::locate().map(|l| l.user_dir);
-    let mut others: Vec<PathBuf> =
-        modsroot::parse_known(db::get_app_setting(conn, modsroot::KNOWN_KEY).as_deref())
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
-    // FS25's default mods folder counts even when it was never picked.
-    others.extend(user_dir.as_ref().map(|u| u.join("mods")));
+    let others = known_mods_folders(conn, user_dir.as_ref().map(|u| u.join("mods")).as_deref());
     let mine = key_path(&layout.mods);
     let mut other_mods: Vec<PathBuf> = Vec::new();
     let mut other_archives: Vec<PathBuf> = Vec::new();
@@ -2315,14 +2341,8 @@ fn fences(
         if k == mine || other_mods.contains(&k) {
             continue;
         }
-        let archive = db::get_app_setting(
-            conn,
-            &relocate::archive_setting_key(&modsroot::canonical_key(&p)),
-        )
-        .map(PathBuf::from)
-        .unwrap_or_else(|| organize::Layout::default_for(&p).archive);
         other_mods.push(k);
-        other_archives.push(key_path(&archive));
+        other_archives.push(key_path(&archive_of(conn, &p)));
     }
     Fences {
         mods: mine,
@@ -2334,14 +2354,73 @@ fn fences(
     }
 }
 
+/// Pure: `a` and `b` (identity keys) are the same folder, or one is inside the other.
+fn overlaps(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a == b || a.starts_with(b) || b.starts_with(a)
+}
+
+/// Pure: one of `a` and `b` (identity keys) is inside the other (not the same folder).
+fn nests(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a != b && overlaps(a, b)
+}
+
+/// Every archive Silo knows of except `mods`' own, as identity keys: each stored archive
+/// choice (`archive_root:*`, whichever mods folder it belongs to) and each other known mods
+/// folder's archive (chosen, or its default `<X>/archive`).
+fn other_archive_keys(
+    conn: &rusqlite::Connection,
+    mods: &std::path::Path,
+    known: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mine = modsroot::canonical_key(mods);
+    let mut v: Vec<PathBuf> = Vec::new();
+    let stored = db::app_settings_with_prefix(conn, relocate::ARCHIVE_SETTING_PREFIX);
+    for (k, archive) in stored {
+        if k != relocate::archive_setting_key(&mine) {
+            v.push(key_path(std::path::Path::new(&archive)));
+        }
+    }
+    for k in known {
+        if modsroot::canonical_key(k) != mine {
+            v.push(key_path(&archive_of(conn, k)));
+        }
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Pure: why `mods` can't be a mods folder — it overlaps another folder's archive (it is one,
+/// a category inside one, or holds one), or its own archive (`own_archive`: chosen, or the
+/// default `<mods>/archive`) would. Two layouts sharing files would shuffle each other's
+/// parked mods. All identity keys.
+fn mods_folder_problem(
+    mods: &std::path::Path,
+    own_archive: &std::path::Path,
+    archives: &[PathBuf],
+) -> Option<String> {
+    if archives.iter().any(|a| overlaps(mods, a)) {
+        return Some(
+            "That folder overlaps another mods folder's archive — pick one outside it.".into(),
+        );
+    }
+    if archives.iter().any(|a| overlaps(own_archive, a)) {
+        return Some(
+            "That folder's archive would be another mods folder's archive — pick another folder."
+                .into(),
+        );
+    }
+    None
+}
+
 /// Pure: where a new archive (`new`, an identity key) runs into a folder it must keep clear
 /// of. Equality with the current archive / another archive is `path_problems`' to report.
 fn overlap_problems(new: &std::path::Path, f: &Fences) -> Vec<String> {
     if new.parent().is_none() {
         return vec!["Pick a folder, not a whole drive.".into()];
     }
-    let overlaps = |a: &PathBuf| new == a || new.starts_with(a) || a.starts_with(new);
-    let nests = |a: &PathBuf| new != a && (new.starts_with(a) || a.starts_with(new));
+    let overlaps = |a: &PathBuf| overlaps(new, a);
+    let nests = |a: &PathBuf| nests(new, a);
     let mut v = Vec::new();
     if nests(&f.current_archive) {
         v.push(
@@ -4780,6 +4859,101 @@ mod tests {
         let p = overlap_problems(Path::new("/home/me/fs25/mods2/sub"), &f);
         assert!(has(&p, "another mods folder Silo knows"));
         assert!(!has(&p, "Farming Simulator 25"));
+    }
+
+    #[test]
+    fn a_mods_folder_clear_of_every_archive_is_fine() {
+        let archives = vec![
+            PathBuf::from("/hdd/lib"),
+            PathBuf::from("/other/mods/archive"),
+        ];
+        assert_eq!(
+            super::mods_folder_problem(
+                Path::new("/ssd/mods"),
+                Path::new("/ssd/mods/archive"),
+                &archives
+            ),
+            None
+        );
+        // A sibling that only shares a name prefix isn't inside.
+        assert_eq!(
+            super::mods_folder_problem(
+                Path::new("/hdd/lib2"),
+                Path::new("/hdd/lib2/archive"),
+                &archives
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_mods_folder_that_is_in_or_holds_another_archive_is_refused() {
+        let archives = vec![PathBuf::from("/hdd/lib")];
+        // The archive itself, a category inside it, or a folder holding it.
+        for p in ["/hdd/lib", "/hdd/lib/Tools", "/hdd"] {
+            let own = PathBuf::from(p).join("archive");
+            let why = super::mods_folder_problem(Path::new(p), &own, &archives);
+            assert!(
+                why.as_deref()
+                    .is_some_and(|w| w.contains("another mods folder's archive")),
+                "{p}: {why:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mods_folder_whose_own_archive_is_another_folders_is_refused() {
+        // The default `<X>/archive` is another folder's chosen archive...
+        let archives = vec![PathBuf::from("/x/archive")];
+        assert!(
+            super::mods_folder_problem(Path::new("/x"), Path::new("/x/archive"), &archives)
+                .is_some()
+        );
+        // ...or its own chosen archive sits inside another folder's.
+        let archives = vec![PathBuf::from("/hdd/lib")];
+        let why =
+            super::mods_folder_problem(Path::new("/ssd/mods"), Path::new("/hdd/lib/a"), &archives);
+        assert!(why.is_some_and(|w| w.contains("archive")));
+    }
+
+    #[test]
+    fn other_archive_keys_lists_stored_and_default_archives_but_not_its_own() {
+        let base = temp_base("otherarchives");
+        let mine = base.join("mine");
+        let other = base.join("other");
+        let unlisted = base.join("unlisted");
+        let lib = base.join("lib");
+        let mine_lib = base.join("mine-lib");
+        let stale = base.join("stale-lib");
+        for d in [&mine, &other, &unlisted, &lib, &mine_lib, &stale] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let set = |mods: &Path, archive: &Path| {
+            crate::db::set_app_setting(
+                &conn,
+                &crate::relocate::archive_setting_key(&crate::modsroot::canonical_key(mods)),
+                Some(&archive.to_string_lossy()),
+            )
+            .unwrap();
+        };
+        set(&mine, &mine_lib);
+        set(&unlisted, &stale); // a mods folder no longer in the known list
+        let known = vec![mine.clone(), other.clone(), base.join("mods")];
+        set(&base.join("mods"), &lib);
+        let got: HashSet<PathBuf> = super::other_archive_keys(&conn, &mine, &known)
+            .into_iter()
+            .collect();
+        let want: HashSet<PathBuf> = [
+            super::key_path(&other.join("archive")),
+            super::key_path(&lib),
+            super::key_path(&stale),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(got, want);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

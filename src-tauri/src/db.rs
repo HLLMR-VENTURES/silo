@@ -830,6 +830,18 @@ pub fn set_app_setting(conn: &Connection, key: &str, value: Option<&str>) -> Res
     Ok(())
 }
 
+/// Every app setting whose key starts with `prefix`, as (key, value) pairs. Matched exactly
+/// (no `LIKE` wildcards), in key order.
+pub fn app_settings_with_prefix(conn: &Connection, prefix: &str) -> Vec<(String, String)> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT key, value FROM app_setting WHERE substr(key, 1, length(?1)) = ?1 ORDER BY key",
+    ) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map([prefix], |r| Ok((r.get(0)?, r.get(1)?)));
+    rows.map(|r| r.flatten().collect()).unwrap_or_default()
+}
+
 /// Rewrite the database file, reclaiming free pages. SQLite leaves deleted row bytes in
 /// free pages until this runs — so after scrubbing a legacy plaintext secret we VACUUM to
 /// ensure the old token can't be carved out of the file. Best-effort; never fatal.
