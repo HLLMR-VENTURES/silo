@@ -628,6 +628,7 @@
   async function applyActive(techNames: string[]) {
     const rep = await setActive(techNames);
     if (rep.errors.length) errorMsg = rep.errors.slice(0, 3).join("; ");
+    if (rep.notices?.length) infoMsg = rep.notices.join(" ");
     return rep;
   }
 
@@ -803,6 +804,7 @@
     try {
       const rep = await flatten();
       if (rep.errors.length) errorMsg = rep.errors.slice(0, 3).join("; ");
+      if (rep.notices?.length) infoMsg = rep.notices.join(" ");
     } catch (e) {
       errorMsg = String(e);
     }
