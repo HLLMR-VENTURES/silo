@@ -1,6 +1,7 @@
 // Curated field/preset schemas for editing specific FS25 config XML files via the
 // generic ConfigEditor. Values are written verbatim; the game validates on launch,
-// and Silo backs up the original to <file>.bak, so these are safe to tweak.
+// and Silo keeps the untouched original (<file>.silo-original.bak) plus the three versions
+// before each edit (<file>.bak, .bak.2, .bak.3), so these are safe to tweak.
 
 export interface CfgField {
   path: string;

@@ -212,7 +212,7 @@ async fn get_mod_icon(
     icon_filename: Option<String>,
 ) -> Option<String> {
     let icon = icon_filename?;
-    let cache_dir = app.path().app_cache_dir().ok()?.join("icons");
+    let cache_dir = app.path().app_cache_dir().ok()?.join("icons-v2");
     tauri::async_runtime::spawn_blocking(move || {
         icons::cached_data_url(&cache_dir, std::path::Path::new(&path), &kind, &icon)
     })
@@ -1788,8 +1788,9 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
     }
 }
 
-/// Point FS25's `modsDirectoryOverride` at `folder`. `guarded_xml_write` keeps the original as
-/// `gameSettings.xml.bak` and swaps the new file in atomically.
+/// Point FS25's `modsDirectoryOverride` at `folder`. `guarded_xml_write` keeps the untouched
+/// original (`gameSettings.xml.silo-original.bak`) and the last three versions (`.bak`,
+/// `.bak.2`, `.bak.3`), then swaps the new file in atomically.
 fn point_game_at(folder: &std::path::Path) -> Result<(), String> {
     let loc = fsgame::locate().ok_or_else(|| "FS25 user folder not found".to_string())?;
     let gs = loc.user_dir.join("gameSettings.xml");
@@ -3870,6 +3871,10 @@ pub fn run() {
                     Err(e) => {
                         eprintln!("[Silo] couldn't resolve the library layout at startup: {e}")
                     }
+                }
+                // Icon thumbnails from the old (unstable) cache naming; `icons-v2` replaced it.
+                if let Ok(c) = handle.path().app_cache_dir() {
+                    let _ = std::fs::remove_dir_all(c.join("icons"));
                 }
             });
             Ok(())

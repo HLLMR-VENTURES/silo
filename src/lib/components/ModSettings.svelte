@@ -154,7 +154,7 @@
     </div>
   {/each}
 
-  <div class="ms-foot">Edits back up the original to <code>.xml.bak</code> first.</div>
+  <div class="ms-foot">Silo keeps the original and the three versions before your latest edit as <code>.bak</code> files.</div>
 </div>
 
 <style>

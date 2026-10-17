@@ -11,10 +11,13 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
+    # tauri-action creates the draft release and uploads the installers.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -79,7 +82,7 @@ jobs:
           TS_ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
           TS_PROFILE: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
         run: |
-          cargo install trusted-signing-cli --locked
+          cargo install trusted-signing-cli --version 0.11.0 --locked
           # Pass endpoint/account/certificate as explicit flags (env-var names differ across
           # CLI versions); %1 is the file Tauri substitutes. Auth (tenant/client/secret) is
           # read from env by the CLI. Written at build time so no secrets live in the tree.
@@ -148,10 +151,12 @@ jobs:
       - name: Generate and attach SHA256SUMS.txt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          tag="${{ github.ref_name }}"
-          repo="${{ github.repository }}"
+          tag="$TAG"
+          repo="$REPO"
           # The build matrix uploads to a DRAFT release; drafts aren't returned by
           # /releases/tags/:tag, so find it by scanning the releases list for this tag.
           rel=$(gh api "repos/$repo/releases" --paginate \
@@ -206,10 +211,12 @@ jobs:
       - name: Attach SBOM to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          tag="${{ github.ref_name }}"
-          repo="${{ github.repository }}"
+          tag="$TAG"
+          repo="$REPO"
           # Drafts aren't returned by /releases/tags/:tag — scan the list for this tag's id.
           rel=$(gh api "repos/$repo/releases" --paginate \
                 --jq "map(select(.tag_name==\"$tag\")) | .[0].id")

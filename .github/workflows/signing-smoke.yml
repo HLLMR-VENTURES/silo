@@ -6,12 +6,15 @@ name: Signing smoke test
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   sign:
     runs-on: windows-latest
     steps:
       - name: Install Trusted Signing CLI
-        run: cargo install trusted-signing-cli --locked
+        run: cargo install trusted-signing-cli --version 0.11.0 --locked
 
       - name: CLI version + usage (confirm exact flags/env names)
         run: |

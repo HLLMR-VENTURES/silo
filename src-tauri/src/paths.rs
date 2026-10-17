@@ -9,7 +9,9 @@ use std::path::{Component, Path, PathBuf};
 
 /// Accept a value only as a plain file name: exactly one normal path component, no
 /// separators, no `.`/`..`, not absolute, no NUL. Rejects `../escape`, `a/b`, `C:\x`, etc.
-/// so `root.join(name)` provably stays directly under `root`.
+/// so `root.join(name)` provably stays directly under `root`. Also refuses names Windows
+/// treats specially: a colon (an NTFS alternate stream, `mod.zip:x`), a trailing dot or space
+/// (silently stripped), and reserved device names (`CON`, `nul.zip`, `COM1`).
 pub fn safe_file_name(name: &str) -> Result<&str, String> {
     let ok = !name.is_empty()
         && !name.contains(['/', '\\', '\0'])
@@ -20,12 +22,55 @@ pub fn safe_file_name(name: &str) -> Result<&str, String> {
         && matches!(
             Path::new(name).components().next(),
             Some(Component::Normal(_))
-        );
+        )
+        && !name.contains(':')
+        && !name.ends_with(['.', ' '])
+        && !is_device_name(name);
     if ok {
         Ok(name)
     } else {
         Err(format!("refusing an unsafe file name: {name:?}"))
     }
+}
+
+/// Windows reserves these names whatever the extension (`nul.zip` is the NUL device), so a
+/// mod file can never be called that on any system Silo syncs with. Microsoft's list includes
+/// `CONIN$`, `CONOUT$`, and `COM`/`LPT` followed by a digit or a superscript ¹ ² ³.
+fn is_device_name(name: &str) -> bool {
+    // ASCII-only uppercasing leaves the superscript digits untouched.
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    // `get` keeps the split on a char boundary, so a multi-byte name can't panic here.
+    matches!(
+        (stem.get(..3), stem.get(3..)),
+        (
+            Some("COM" | "LPT"),
+            Some(
+                "0" | "1"
+                    | "2"
+                    | "3"
+                    | "4"
+                    | "5"
+                    | "6"
+                    | "7"
+                    | "8"
+                    | "9"
+                    | "\u{b9}"
+                    | "\u{b2}"
+                    | "\u{b3}"
+            )
+        )
+    )
 }
 
 /// True when `target` (after resolving symlinks/`..`) lives inside `root`. Both must
@@ -65,11 +110,12 @@ pub fn ensure_write_under(allowed_roots: &[std::path::PathBuf], dest: &Path) -> 
 /// Safely overwrite a config / mod-settings XML file. Same authority model as the organizer:
 /// the target must be a plain `.xml` file that already exists and whose parent resolves inside
 /// one of `allowed_roots` (the FS25 user dir). The current file is backed up to `<name>.bak`
-/// and that backup MUST succeed — Silo never overwrites without a recoverable copy. The new
-/// bytes go to a temp sibling, are flushed, then atomically renamed into place; if the swap
-/// fails the original is restored from the backup, so a disk/permission error can't leave a
-/// half-written config. Closes the "wrote outside the intended folder" and "overwrote despite a
-/// failed backup" gaps a frontend-supplied path otherwise allowed.
+/// (older versions rotate and the original is kept; see `back_up_config`) and that backup MUST
+/// succeed — Silo never overwrites without a recoverable copy. The new bytes go to a temp
+/// sibling, are flushed, then atomically renamed into place; if the swap fails the original is
+/// restored from the backup, so a disk/permission error can't leave a half-written config.
+/// Closes the "wrote outside the intended folder" and "overwrote despite a failed backup" gaps
+/// a frontend-supplied path otherwise allowed.
 pub fn guarded_xml_write(
     allowed_roots: &[PathBuf],
     dest: &Path,
@@ -90,9 +136,8 @@ pub fn guarded_xml_write(
     ensure_write_under(allowed_roots, dest)?;
 
     // Backup REQUIRED — abort before touching the original if we can't preserve a copy.
-    let bak = dest.with_extension("xml.bak");
-    std::fs::copy(dest, &bak)
-        .map_err(|e| format!("aborted — couldn't back up the file first: {e}"))?;
+    back_up_config(dest)?;
+    let bak = backup_slot(dest, 1);
 
     // Write to a temp sibling, flush, then atomically replace (rename replaces on all OSes).
     let tmp = dest.with_extension("xml.silo-tmp");
@@ -108,6 +153,94 @@ pub fn guarded_xml_write(
         // Restore the original from the backup so a failed swap can't corrupt it.
         let _ = std::fs::copy(&bak, dest);
         return Err(format!("config write failed and was rolled back: {e}"));
+    }
+    Ok(())
+}
+
+/// Previous versions kept beside an edited config: `.bak`, `.bak.2`, `.bak.3`.
+const CONFIG_BACKUPS: usize = 3;
+
+/// `dest`'s file name with `suffix` appended, built on the raw `OsString` so a name that isn't
+/// valid UTF-8 (possible on Linux) keeps its exact bytes.
+fn with_suffix(dest: &Path, suffix: &str) -> PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    dest.with_file_name(name)
+}
+
+fn backup_slot(dest: &Path, n: usize) -> PathBuf {
+    if n == 1 {
+        with_suffix(dest, ".bak")
+    } else {
+        with_suffix(dest, &format!(".bak.{n}"))
+    }
+}
+
+/// Back up `dest` before it is replaced. The first time, keep the original as
+/// `<name>.silo-original.bak` (an existing single `.bak` from an older Silo is older, so it's
+/// used instead); that file is never replaced. Then shift `.bak` → `.bak.2` → `.bak.3` (the
+/// oldest drops) and copy `dest` to `.bak`. Any failure aborts before `dest` is touched.
+fn back_up_config(dest: &Path) -> Result<(), String> {
+    let abort = |e: std::io::Error| format!("aborted — couldn't back up the file first: {e}");
+    let original = with_suffix(dest, ".silo-original.bak");
+    if !original.exists() {
+        let source = if backup_slot(dest, 1).is_file() {
+            backup_slot(dest, 1)
+        } else {
+            dest.to_path_buf()
+        };
+        keep_original(&source, &original).map_err(abort)?;
+    }
+    let oldest = backup_slot(dest, CONFIG_BACKUPS);
+    if oldest.exists() {
+        std::fs::remove_file(&oldest).map_err(abort)?;
+    }
+    for n in (1..CONFIG_BACKUPS).rev() {
+        let from = backup_slot(dest, n);
+        if from.exists() {
+            std::fs::rename(&from, backup_slot(dest, n + 1)).map_err(abort)?;
+        }
+    }
+    std::fs::copy(dest, backup_slot(dest, 1)).map_err(abort)?;
+    Ok(())
+}
+
+/// Copy `source` to `original` so that `original` only ever appears complete, even if Silo
+/// stops mid-copy: copy into `<original>.tmp`, flush it, then hard-link it into place (a link
+/// never replaces an existing file) and drop the temp. On a filesystem without hard links, fall
+/// back to a create-new copy. A partial temp from an earlier crash is removed first.
+fn keep_original(source: &Path, original: &Path) -> std::io::Result<()> {
+    use std::io::ErrorKind;
+    let tmp = with_suffix(original, ".tmp");
+    match std::fs::remove_file(&tmp) {
+        Err(e) if e.kind() != ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    copy_new(source, &tmp)?;
+    let placed = match std::fs::hard_link(&tmp, original) {
+        Ok(()) => Ok(()),
+        // Another edit kept the original first; it is never replaced.
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(_) => copy_new(source, original),
+    };
+    let _ = std::fs::remove_file(&tmp);
+    placed
+}
+
+/// Copy `source` to a new file `to` (never replacing one) and flush it. A partial copy is
+/// removed again on failure.
+fn copy_new(source: &Path, to: &Path) -> std::io::Result<()> {
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
+    let copied = std::fs::File::open(source)
+        .and_then(|mut src| std::io::copy(&mut src, &mut out))
+        .and_then(|_| out.sync_all());
+    if let Err(e) = copied {
+        drop(out);
+        let _ = std::fs::remove_file(to);
+        return Err(e);
     }
     Ok(())
 }
@@ -192,6 +325,48 @@ mod tests {
     }
 
     #[test]
+    fn rejects_stream_and_device_names() {
+        for bad in [
+            "mod.zip:evil",
+            "a:b",
+            "CON",
+            "con.zip",
+            "Nul.txt",
+            "nul.tar.gz",
+            "AUX",
+            "PRN.zip",
+            "COM1",
+            "com9.zip",
+            "COM0.zip",
+            "LPT1.xml",
+            "lpt9",
+            "COM\u{b9}.zip",
+            "lpt\u{b2}",
+            "LPT\u{b3}.xml",
+            "CONIN$",
+            "conout$.zip",
+            "mod.zip.",
+            "mod.zip ",
+            " ",
+        ] {
+            assert!(safe_file_name(bad).is_err(), "should reject {bad:?}");
+        }
+        for ok in [
+            "CONSOLE.zip",
+            "FS25_con.zip",
+            "COM10.zip",
+            "FS25_Aux_Tools.zip",
+            "LPTX.zip",
+            "COM\u{b9}0.zip",
+            "CONIN.zip",
+            ".silo-archive.json",
+            "FS25_Mod v1.2.zip",
+        ] {
+            assert!(safe_file_name(ok).is_ok(), "should accept {ok:?}");
+        }
+    }
+
+    #[test]
     fn guarded_xml_write_backs_up_and_confines() {
         let root = std::env::temp_dir().join(format!("silo_cfg_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -230,6 +405,93 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn config_edits_keep_the_original_and_three_previous_versions() {
+        let root = std::env::temp_dir().join(format!("silo_cfg_rot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let roots = vec![root.clone()];
+        let dest = root.join("gameSettings.xml");
+        std::fs::write(&dest, "<v0/>").unwrap();
+        for v in 1..=5 {
+            guarded_xml_write(&roots, &dest, &format!("<v{v}/>")).unwrap();
+        }
+        let read = |n: &str| std::fs::read_to_string(root.join(n)).unwrap();
+        assert_eq!(read("gameSettings.xml"), "<v5/>");
+        assert_eq!(
+            read("gameSettings.xml.silo-original.bak"),
+            "<v0/>",
+            "never replaced"
+        );
+        assert_eq!(read("gameSettings.xml.bak"), "<v4/>");
+        assert_eq!(read("gameSettings.xml.bak.2"), "<v3/>");
+        assert_eq!(read("gameSettings.xml.bak.3"), "<v2/>");
+        assert!(!root.join("gameSettings.xml.bak.4").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_backup_from_an_older_silo_becomes_the_original() {
+        // Silo 0.9 kept a single .bak: the oldest copy there is, so the best "original".
+        let root = std::env::temp_dir().join(format!("silo_cfg_old_bak_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let dest = root.join("gameSettings.xml");
+        std::fs::write(&dest, "<v1/>").unwrap();
+        std::fs::write(root.join("gameSettings.xml.bak"), "<v0/>").unwrap();
+        guarded_xml_write(std::slice::from_ref(&root), &dest, "<v2/>").unwrap();
+        let read = |n: &str| std::fs::read_to_string(root.join(n)).unwrap();
+        assert_eq!(read("gameSettings.xml.silo-original.bak"), "<v0/>");
+        assert_eq!(read("gameSettings.xml.bak"), "<v1/>");
+        assert_eq!(read("gameSettings.xml.bak.2"), "<v0/>");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_stale_partial_original_is_replaced_and_cleaned_up() {
+        // A crash mid-copy leaves only the temp file; the original must never be the partial.
+        let root = std::env::temp_dir().join(format!("silo_cfg_stale_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let dest = root.join("gameSettings.xml");
+        std::fs::write(&dest, "<v0 full='yes'/>").unwrap();
+        std::fs::write(root.join("gameSettings.xml.silo-original.bak.tmp"), "<v0").unwrap();
+        guarded_xml_write(std::slice::from_ref(&root), &dest, "<v1/>").unwrap();
+        let read = |n: &str| std::fs::read_to_string(root.join(n)).unwrap();
+        assert_eq!(
+            read("gameSettings.xml.silo-original.bak"),
+            "<v0 full='yes'/>"
+        );
+        assert!(!root.join("gameSettings.xml.silo-original.bak.tmp").exists());
+        assert_eq!(read("gameSettings.xml"), "<v1/>");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Linux only: macOS (APFS) refuses file names that aren't valid UTF-8.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn backups_keep_a_non_utf8_file_name() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::env::temp_dir().join(format!("silo_cfg_bytes_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let named = |b: &[u8]| root.join(OsStr::from_bytes(b));
+        let dest = named(b"caf\xe9.xml");
+        std::fs::write(&dest, "<v1/>").unwrap();
+        std::fs::write(named(b"caf\xe9.xml.bak"), "<v0/>").unwrap();
+        guarded_xml_write(std::slice::from_ref(&root), &dest, "<v2/>").unwrap();
+        let read = |b: &[u8]| std::fs::read_to_string(named(b)).unwrap();
+        assert_eq!(
+            read(b"caf\xe9.xml.silo-original.bak"),
+            "<v0/>",
+            "older .bak found"
+        );
+        assert_eq!(read(b"caf\xe9.xml.bak"), "<v1/>");
+        assert_eq!(read(b"caf\xe9.xml.bak.2"), "<v0/>");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
