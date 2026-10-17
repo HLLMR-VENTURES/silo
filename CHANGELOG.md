@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   host, so look-alike or malformed URLs (for example one using a backslash to disguise its real
   host) are refused.
 
+- **Stricter checks on GitHub requests.** Repository names and gist IDs are validated before
+  Silo uses them, GitHub API addresses are built safely, and mod updates download only from
+  GitHub. (#202)
+
 ## [0.9.0] - 2026-10-17
 
 ### Added

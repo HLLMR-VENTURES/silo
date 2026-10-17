@@ -240,6 +240,11 @@ fn set_mod_repo(
     owner: String,
     repo: String,
 ) -> Result<(), String> {
+    // Empty owner or repo means "unlink" (db::set_repo deletes the row); anything else must
+    // be a real GitHub repository name before it's stored and later used in API calls.
+    if !owner.trim().is_empty() && !repo.trim().is_empty() {
+        github::check_repo(owner.trim(), repo.trim())?;
+    }
     let conn = db::open(&db_path(&app)?)?;
     db::set_repo(&conn, &tech_name, &owner, &repo)
 }
@@ -263,6 +268,7 @@ async fn check_mod_update(
     repo: String,
     current: String,
 ) -> Result<github::UpdateInfo, String> {
+    github::check_repo(&owner, &repo)?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<github::UpdateInfo, String> {
         let conn = db::open(&db)?;
@@ -433,6 +439,7 @@ async fn gh_repo_stats(
     owner: String,
     repo: String,
 ) -> Result<github::RepoStats, String> {
+    github::check_repo(&owner, &repo)?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<github::RepoStats, String> {
         let conn = db::open(&db)?;
@@ -450,6 +457,7 @@ async fn gh_star(
     repo: String,
     on: bool,
 ) -> Result<bool, String> {
+    github::check_repo(&owner, &repo)?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
         let conn = db::open(&db)?;
@@ -468,6 +476,7 @@ async fn gh_watch(
     repo: String,
     on: bool,
 ) -> Result<bool, String> {
+    github::check_repo(&owner, &repo)?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
         let conn = db::open(&db)?;
@@ -2927,6 +2936,17 @@ async fn collection_delete(
     kind: String,
     reference: String,
 ) -> Result<(), String> {
+    // Validate the reference before any request: a gist id must be a real gist id, and a
+    // repo reference a real `owner/repo` (repos are refused below, but never on bad input).
+    match kind.as_str() {
+        "gist" => github::check_gist_id(&reference)?,
+        _ => {
+            let (owner, repo) = reference
+                .split_once('/')
+                .unwrap_or((reference.as_str(), ""));
+            github::check_repo(owner, repo)?;
+        }
+    }
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let conn = db::open(&db)?;
