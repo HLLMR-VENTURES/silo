@@ -735,10 +735,60 @@ pub fn store_archive_setting(
     db::set_app_setting(conn, &archive_setting_key(mods_key), value.as_deref())
 }
 
-/// Mods (zips, or folders with a `modDesc.xml`) under `archive/<category>/` that have no
-/// organized row — a move would leave them behind. Preflight calls this before any marker is
-/// written; a forward run re-checks it at every start. Silo's own scratch entries
-/// (`scan::is_silo_temp`) are ignored.
+/// Every mod (zip, or folder with a `modDesc.xml`) filed under `archive/<category>/`, skipping
+/// Silo's own scratch entries (`scan::is_silo_temp`). A missing archive folder holds none; any
+/// other read error — the archive or a category folder exists but can't be listed — is returned,
+/// so a caller never mistakes an unreadable archive for an empty one.
+pub fn filed_mods(archive: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let list = |p: &Path| -> Listing {
+        std::fs::read_dir(p)?
+            .map(|e| {
+                let e = e?;
+                Ok((e.path(), e.file_type()?.is_dir()))
+            })
+            .collect()
+    };
+    filed_mods_with(archive, &list)
+}
+
+/// A directory listing as (path, is_dir) pairs.
+type Listing = std::io::Result<Vec<(PathBuf, bool)>>;
+
+/// `filed_mods` over an injected directory lister.
+fn filed_mods_with(
+    archive: &Path,
+    list: &dyn Fn(&Path) -> Listing,
+) -> std::io::Result<Vec<PathBuf>> {
+    let cats = match list(archive) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out = Vec::new();
+    for (cat, is_dir) in cats {
+        if !is_dir {
+            continue;
+        }
+        for (p, _) in list(&cat)? {
+            let n = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if crate::scan::is_silo_temp(&n) {
+                continue;
+            }
+            if n.ends_with(".zip") || p.join("modDesc.xml").is_file() {
+                out.push(p);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Mods filed under `archive/<category>/` (`filed_mods`) that have no organized row — a move
+/// would leave them behind. Preflight calls this before any marker is written; a forward run
+/// re-checks it at every start. An unreadable archive lists none here (each mod then fails
+/// its own step, and the move pauses with nothing removed).
 pub fn unknown_mods(archive: &Path, rows: &[OrganizedRow]) -> Vec<PathBuf> {
     let windows = cfg!(windows);
     let key = |p: &Path| crate::modsroot::normalize_key(&p.to_string_lossy(), windows);
@@ -746,30 +796,11 @@ pub fn unknown_mods(archive: &Path, rows: &[OrganizedRow]) -> Vec<PathBuf> {
         .iter()
         .map(|r| key(&organize::archive_path(archive, &r.category, &r.file_name)))
         .collect();
-    let mut out = Vec::new();
-    let Ok(cats) = std::fs::read_dir(archive) else {
-        return out;
-    };
-    for c in cats.flatten() {
-        if !c.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let Ok(es) = std::fs::read_dir(c.path()) else {
-            continue;
-        };
-        for e in es.flatten() {
-            let p = e.path();
-            let n = e.file_name().to_string_lossy().to_lowercase();
-            if crate::scan::is_silo_temp(&n) {
-                continue;
-            }
-            let is_mod = n.ends_with(".zip") || p.join("modDesc.xml").is_file();
-            if is_mod && !known.contains(&key(&p)) {
-                out.push(p);
-            }
-        }
-    }
-    out
+    filed_mods(archive)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| !known.contains(&key(p)))
+        .collect()
 }
 
 /// Rows whose destination `<new>/<category>/<file>` already exists, or whose file name or
@@ -2045,6 +2076,24 @@ mod tests {
             "{:?}",
             out.errors
         );
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn filed_mods_reports_any_read_error_and_treats_a_missing_archive_as_empty() {
+        let f = fx("filed");
+        add_zip(&f, "FS25_A", false);
+        assert_eq!(filed_mods(&f.old).unwrap(), vec![zip_at(&f.old, "FS25_A")]);
+        assert!(filed_mods(&f.base.join("nowhere")).unwrap().is_empty());
+        // A category folder that can't be listed is an error, not "no mods".
+        let list = |p: &Path| -> Listing {
+            if p == f.old.as_path() {
+                Ok(vec![(f.old.join("Tools"), true)])
+            } else {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            }
+        };
+        assert!(filed_mods_with(&f.old, &list).is_err());
         let _ = std::fs::remove_dir_all(&f.base);
     }
 

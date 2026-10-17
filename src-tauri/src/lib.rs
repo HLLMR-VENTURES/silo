@@ -171,8 +171,9 @@ async fn scan_mods(
 /// are read (the current direction's destination first, so it wins for mods already moved) and
 /// the manifest is left alone — the files are in flux. Otherwise the folder's own archive: the
 /// published one for the active folder (`active`), the stored choice (or the default) for any
-/// other. A custom archive that isn't there (its drive unplugged) reads as empty, so the
-/// manifest is left alone then too — rewriting it would forget the whole library.
+/// other. A custom archive that isn't there (its drive unplugged), or any archive that exists
+/// but can't be read, scans as empty — so the manifest is left alone then too: rewriting it
+/// would forget the whole library.
 fn scan_archives(
     conn: &rusqlite::Connection,
     root: &std::path::Path,
@@ -189,7 +190,7 @@ fn scan_archives(
         Some(a) if modsroot::same_folder(&a.layout.mods, root) => a.layout.clone(),
         _ => resolve_active(conn, root).layout,
     };
-    let ok = !layout.archive_missing();
+    let ok = !layout.archive_missing() && relocate::filed_mods(&layout.archive).is_ok();
     (vec![layout.archive], ok)
 }
 
@@ -2061,9 +2062,12 @@ async fn archive_use_default(
 
 /// Any mod (zip, or folder with a `modDesc.xml`) filed in one of the archive's category
 /// folders — the same candidates a move would carry (Silo's own temps don't count). A missing
-/// folder holds none.
+/// folder holds none; one that exists but can't be read is assumed to hold mods, so nothing
+/// is ever re-pointed away from mods Silo couldn't see.
 fn archive_holds_mods(layout: &organize::Layout) -> bool {
-    !relocate::unknown_mods(&layout.archive, &[]).is_empty()
+    relocate::filed_mods(&layout.archive)
+        .map(|v| !v.is_empty())
+        .unwrap_or(true)
 }
 
 /// Pure: why the archive can't be re-pointed right now, if it can't. Re-pointing (changing
@@ -3894,6 +3898,30 @@ mod tests {
         );
         std::fs::write(tools.join("FS25_C.zip"), b"PK").unwrap();
         assert!(archive_holds_mods(&layout));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_unreadable_archive_holds_mods_and_is_never_reconciled() {
+        let base = temp_base("unreadable");
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let mods = base.join("mods");
+        // Something exists at the default archive's path, but it can't be listed.
+        std::fs::write(mods.join("archive"), b"not a folder").unwrap();
+        let layout = Layout::default_for(&mods);
+        assert!(
+            archive_holds_mods(&layout),
+            "unreadable ⇒ assume it holds mods (no re-point)"
+        );
+        let active = crate::modsroot::Active {
+            layout,
+            move_to: None,
+        };
+        let (_, reconcile) = scan_archives(&conn, &mods, Some(&active));
+        assert!(
+            !reconcile,
+            "an unreadable archive must never wipe the manifest"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

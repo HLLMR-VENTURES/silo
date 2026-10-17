@@ -1723,13 +1723,13 @@
 
   /** Point Silo at another archive folder (`path`, or null = the default) without moving
    *  anything, then rescan so the library reconciles against it. `why`: the current archive is
-   *  missing, or it holds no mods and `path` already has mods filed in it. */
-  async function repointArchive(path: string | null, why: "missing" | "empty") {
+   *  missing, or it holds no mods and a move to `path` was refused (`refusal`: the first reason). */
+  async function repointArchive(path: string | null, why: "missing" | "empty", refusal = "") {
     const old = archive?.path ?? "its old folder";
     const msg =
       why === "empty"
-        ? `${path} already has mods filed in its subfolders, so your library can't be moved into it — but your current archive holds no mods. Use ${path} as your library as it is?\n\n` +
-          "Nothing is moved or copied. Silo lists the mods already there as parked."
+        ? `Silo can't move your library to ${path}${refusal ? ` (${unDot(refusal)})` : ""}. ` +
+          "Your current archive is empty, so Silo can use this folder as your library instead — nothing is moved."
         : path === null
           ? `Your library archive at ${old} isn't available. Start fresh with the default archive inside your mods folder?\n\n` +
             "Nothing is moved or copied. Mods still on the old drive stay there, untouched — if you restored your archive somewhere, use Choose another and pick that folder instead."
@@ -1777,9 +1777,9 @@
         busy = null;
       }
       if (pf.problems.length) {
-        // Nothing to move, and the folder is fine except for the mods already filed in it:
-        // use it as the library as it is.
-        if (pf.canRepoint) await repointArchive(path, "empty");
+        // Nothing to move and the folder clears every path check: offer to use it as the
+        // library as it is.
+        if (pf.canRepoint) await repointArchive(path, "empty", pf.problems[0]);
         else errorMsg = pf.problems.join(" ");
         return;
       }
