@@ -286,7 +286,12 @@ fn set_db_aside(path: &Path) -> std::io::Result<PathBuf> {
     Ok(kept)
 }
 
-/// The number in a snapshot's name, `silo-<unix_ms>.db`; None for any other file.
+fn now_ms() -> u64 {
+    unix_now().as_millis() as u64
+}
+
+/// The number in a snapshot's name, `silo-<unix_ms>.db`; None for any other file (a `.tmp`
+/// still being written, a pre-migration copy).
 fn snapshot_ms(name: &str) -> Option<u64> {
     let digits = name.strip_prefix("silo-")?.strip_suffix(".db")?;
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -295,8 +300,9 @@ fn snapshot_ms(name: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-/// Snapshot files in `dir`, newest first.
-fn snapshots_newest_first(dir: &Path) -> Vec<(u64, PathBuf)> {
+/// Snapshot files in `dir`, newest first. One dated after `now_ms` (written while the clock was
+/// wrong) is suspect: those sort last, so they're never "the newest" and are pruned first.
+fn snapshots_newest_first(dir: &Path, now_ms: u64) -> Vec<(u64, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -308,27 +314,100 @@ fn snapshots_newest_first(dir: &Path) -> Vec<(u64, PathBuf)> {
             path.is_file().then_some((ms, path))
         })
         .collect();
-    found.sort_by_key(|(ms, _)| std::cmp::Reverse(*ms));
+    found.sort_by_key(|(ms, _)| (*ms > now_ms, std::cmp::Reverse(*ms)));
     found
 }
 
-/// A snapshot SQLite reads cleanly and this Silo understands.
+/// Read-only check of a database copy: SQLite reads it cleanly, it holds Silo's tables (an
+/// empty file passes `quick_check`), and its version passes `version_ok`.
+fn verify_copy(path: &Path, version_ok: &dyn Fn(i64) -> bool) -> Result<(), String> {
+    let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())?;
+    let verdict: String = c
+        .query_row("PRAGMA quick_check(1)", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if verdict != "ok" {
+        return Err(format!("the copy is damaged ({verdict})"));
+    }
+    if !has_tables(&c)? {
+        return Err("the copy is empty".into());
+    }
+    let v = schema_version(&c)?;
+    if !version_ok(v) {
+        return Err(format!("the copy has database version {v}"));
+    }
+    Ok(())
+}
+
+fn has_tables(conn: &Connection) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table')",
+        [],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// A snapshot that can stand in for the database: clean, not empty, and a version this Silo
+/// reads (a pre-versioning 0 never comes from `snapshot`, so it means something went wrong).
 fn is_usable_snapshot(path: &Path) -> bool {
-    let Ok(c) = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-    else {
-        return false;
-    };
-    let clean = c
-        .query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0))
-        .is_ok_and(|v| v == "ok");
-    clean && schema_version(&c).is_ok_and(|v| v <= SCHEMA_VERSION)
+    verify_copy(path, &|v| (1..=SCHEMA_VERSION).contains(&v)).is_ok()
 }
 
 fn newest_good_snapshot(dir: &Path) -> Option<PathBuf> {
-    snapshots_newest_first(dir)
+    snapshots_newest_first(dir, now_ms())
         .into_iter()
         .map(|(_, path)| path)
         .find(|path| is_usable_snapshot(path))
+}
+
+/// A unique scratch name beside `target` for a copy being written.
+fn tmp_beside(target: &Path) -> PathBuf {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    target.with_file_name(format!("{name}.{}-{n}.tmp", std::process::id()))
+}
+
+/// Write a consistent copy of `conn`'s database to `target`: `VACUUM INTO` a scratch file
+/// beside it, drop secrets, verify it, and only then rename it into place. On any failure the
+/// scratch file is removed and nothing is left at `target`.
+fn write_copy(
+    conn: &Connection,
+    target: &Path,
+    version_ok: &dyn Fn(i64) -> bool,
+) -> Result<(), String> {
+    let tmp = tmp_beside(target);
+    let made = conn
+        .execute("VACUUM INTO ?1", [tmp.to_string_lossy().into_owned()])
+        .map_err(|e| e.to_string())
+        .and_then(|_| scrub_secrets(&tmp))
+        .and_then(|()| verify_copy(&tmp, version_ok))
+        .and_then(|()| std::fs::rename(&tmp, target).map_err(|e| e.to_string()));
+    if made.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    made
+}
+
+/// Scratch copies (`silo-*.tmp`) an earlier run left behind. Only ones older than an hour, so a
+/// copy another thread is writing right now is never touched.
+fn remove_stale_tmps(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > std::time::Duration::from_secs(3600));
+        if name.starts_with("silo-") && name.ends_with(".tmp") && old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 fn recover(db_path: &Path, snapshots: &Path) -> Result<String, String> {
@@ -357,45 +436,54 @@ fn recover(db_path: &Path, snapshots: &Path) -> Result<String, String> {
     }
 }
 
-/// Copy the database to `dir/silo-<unix_ms>.db` with `VACUUM INTO` (consistent even while Silo
-/// runs) unless the newest snapshot is younger than `min_gap`, then keep only the newest `keep`.
+/// Copy the database to `dir/silo-<unix_ms>.db` (`write_copy`: consistent even while Silo runs,
+/// verified before it gets that name) unless the newest snapshot is younger than `min_gap`,
+/// then keep only the newest `keep`.
 pub fn snapshot(
     conn: &Connection,
     dir: &Path,
     keep: usize,
     min_gap: std::time::Duration,
 ) -> Result<Option<PathBuf>, String> {
-    let now = unix_now().as_millis() as u64;
-    if let Some((newest, _)) = snapshots_newest_first(dir).first() {
-        if now
-            .checked_sub(*newest)
-            .is_some_and(|age| age < min_gap.as_millis() as u64)
-        {
-            return Ok(None);
-        }
+    let now = now_ms();
+    let newest = snapshots_newest_first(dir, now)
+        .first()
+        .map(|(ms, _)| *ms)
+        .filter(|ms| *ms <= now);
+    if newest.is_some_and(|ms| now - ms < min_gap.as_millis() as u64) {
+        return Ok(None);
     }
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let target = (now..)
-        .map(|ms| dir.join(format!("silo-{ms}.db")))
-        .find(|t| !t.exists())
+    remove_stale_tmps(dir);
+    let (ms, target) = (now..)
+        .map(|ms| (ms, dir.join(format!("silo-{ms}.db"))))
+        .find(|(_, t)| !t.exists())
         .ok_or("no free snapshot name")?;
-    conn.execute("VACUUM INTO ?1", [target.to_string_lossy().into_owned()])
-        .map_err(|e| e.to_string())?;
-    if let Err(e) = scrub_secrets(&target) {
-        let _ = std::fs::remove_file(&target); // never keep a copy that still holds a token
-        return Err(e);
-    }
-    for (_, old) in snapshots_newest_first(dir).into_iter().skip(keep) {
+    write_copy(conn, &target, &|v| v == SCHEMA_VERSION)?;
+    for (_, old) in snapshots_newest_first(dir, now_ms().max(ms))
+        .into_iter()
+        .skip(keep)
+    {
         let _ = std::fs::remove_file(old);
     }
     Ok(Some(target))
 }
 
-/// Drop secrets from a fresh snapshot, free pages included. A token is only in the database
-/// where there's no OS keychain (or as an older build's copy not yet moved); a backup must not
-/// keep it after the user logs out.
-fn scrub_secrets(snapshot: &Path) -> Result<(), String> {
-    let c = Connection::open(snapshot).map_err(|e| e.to_string())?;
+/// Drop secrets from a fresh copy, free pages included. A token is only in the database where
+/// there's no OS keychain (or as an older build's copy not yet moved); a backup must not keep
+/// it after the user logs out.
+fn scrub_secrets(copy: &Path) -> Result<(), String> {
+    let c = Connection::open(copy).map_err(|e| e.to_string())?;
+    let has_settings: bool = c
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_setting')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !has_settings {
+        return Ok(()); // a very old database: nothing to drop
+    }
     let mut removed = 0;
     for key in crate::secrets::SECRET_KEYS {
         removed += c
@@ -1349,6 +1437,16 @@ mod tests {
         let path = temp_db("snap_rotate");
         let dir = snapshot_dir(&path);
         let c = open(&path).unwrap();
+        // A copy an earlier run left half-written, an hour and more ago.
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale = dir.join("silo-1.db.1-1.tmp");
+        std::fs::write(&stale, b"half a copy").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200))
+            .unwrap();
         for _ in 0..7 {
             snapshot(&c, &dir, 5, std::time::Duration::ZERO).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(3));
@@ -1384,6 +1482,66 @@ mod tests {
             !bytes.windows(16).any(|w| w == b"ghp_secret_value"),
             "not even in free pages"
         );
+    }
+
+    #[test]
+    fn an_empty_newer_snapshot_is_skipped_for_an_older_good_one() {
+        let path = temp_db("snap_empty_newer");
+        let dir = snapshot_dir(&path);
+        {
+            let mut c = open(&path).unwrap();
+            save_loadout(&mut c, None, "Good", &[]).unwrap();
+            let good = snapshot(&c, &dir, 5, std::time::Duration::ZERO)
+                .unwrap()
+                .unwrap();
+            let ms = snapshot_ms(&good.file_name().unwrap().to_string_lossy()).unwrap();
+            // The good copy is older; a 0-byte file (what a failed VACUUM INTO used to leave)
+            // carries the newer, already-past date.
+            std::fs::rename(&good, dir.join(format!("silo-{}.db", ms - 10_000))).unwrap();
+            std::fs::write(dir.join(format!("silo-{ms}.db")), b"").unwrap();
+        }
+        damage(&path);
+        let conn = open(&path).unwrap();
+        assert_eq!(load_loadouts(&conn)[0].name, "Good");
+    }
+
+    #[test]
+    fn a_failed_snapshot_leaves_nothing_behind() {
+        let path = temp_db("snap_fail");
+        let dir = snapshot_dir(&path);
+        // Nothing to copy: the copy would be an empty database, which is never kept.
+        let empty = Connection::open_in_memory().unwrap();
+        assert!(snapshot(&empty, &dir, 5, std::time::Duration::ZERO).is_err());
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .map(|rd| rd.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    #[test]
+    fn a_snapshot_dated_in_the_future_is_never_the_newest() {
+        let path = temp_db("snap_future");
+        let dir = snapshot_dir(&path);
+        {
+            let mut c = open(&path).unwrap();
+            let id = save_loadout(&mut c, None, "Future", &[]).unwrap();
+            let f = snapshot(&c, &dir, 5, std::time::Duration::ZERO)
+                .unwrap()
+                .unwrap();
+            let far = unix_now().as_millis() as u64 + 10 * 86_400_000;
+            std::fs::rename(&f, dir.join(format!("silo-{far}.db"))).unwrap();
+            delete_loadout(&mut c, id).unwrap();
+            save_loadout(&mut c, None, "Past", &[]).unwrap();
+            assert!(
+                snapshot(&c, &dir, 5, std::time::Duration::from_secs(3600))
+                    .unwrap()
+                    .is_some(),
+                "a future date doesn't count as a recent snapshot"
+            );
+        }
+        damage(&path);
+        let conn = open(&path).unwrap();
+        assert_eq!(load_loadouts(&conn)[0].name, "Past");
     }
 
     #[test]
