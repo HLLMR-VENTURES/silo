@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Automatic database backups.** Silo keeps a copy of its library database (tags, notes,
   ratings, loadouts, settings) from each of the last five days you used it, in its app data
-  folder. (#PR)
+  folder, plus one copy taken just before an upgrade changes the database. Backups never
+  include your GitHub token. (#PR)
 
 ### Fixed
 
