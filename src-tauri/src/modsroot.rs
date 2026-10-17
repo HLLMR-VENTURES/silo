@@ -3,6 +3,7 @@
 use crate::xmlconfig;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
 /// `app_setting` keys.
@@ -92,10 +93,20 @@ pub struct Active {
 
 static ACTIVE: RwLock<Option<Active>> = RwLock::new(None);
 
+/// Set once the mods folder has been resolved at least once (at startup or by a mods-root
+/// command), so "no active layout" can be told apart from "not worked out yet".
+static RESOLVED: AtomicBool = AtomicBool::new(false);
+
 pub fn set_active(a: Option<Active>) {
     if let Ok(mut g) = ACTIVE.write() {
         *g = a;
     }
+    RESOLVED.store(true, Ordering::SeqCst);
+}
+
+/// Whether `active()` reflects a resolution (it may still be `None`: no usable mods folder).
+pub fn resolved() -> bool {
+    RESOLVED.load(Ordering::SeqCst)
 }
 
 pub fn active() -> Option<Active> {
@@ -499,6 +510,10 @@ mod tests {
         assert_eq!(active().map(|a| a.layout), Some(l));
         set_active(None);
         assert!(active().is_none());
+        assert!(
+            resolved(),
+            "publishing — even \"no folder\" — marks the layout resolved"
+        );
     }
 
     #[test]

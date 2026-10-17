@@ -911,22 +911,30 @@ fn primary_layout(root: Option<String>) -> Result<organize::Layout, String> {
     })
 }
 
-/// Refuse writes to the library while an archive move is unfinished.
+const STILL_LOADING: &str = "Silo is still loading your library — try again in a moment.";
+
+/// Refuse writes to the library while an archive move is unfinished — or before the active
+/// layout has been worked out (an unfinished move can't be ruled out yet). Once resolved with
+/// no usable mods folder there's nothing to move, so choosing a folder stays possible.
 fn ensure_no_move() -> Result<(), String> {
     match modsroot::active() {
         Some(a) if a.move_to.is_some() => Err("Finish or cancel the archive move first.".into()),
-        _ => Ok(()),
+        Some(_) => Ok(()),
+        None if !modsroot::resolved() => Err(STILL_LOADING.into()),
+        None => Ok(()),
     }
 }
 
 /// Refuse organize writes while a custom archive's drive is missing (nothing is deleted; the
-/// banner offers Retry / Choose another).
+/// banner offers Retry / Choose another), or while no layout is known.
 fn ensure_archive_available() -> Result<(), String> {
     match modsroot::active() {
+        None if !modsroot::resolved() => Err(STILL_LOADING.into()),
+        None => Err("No mods folder selected".into()),
         Some(a) if !a.layout.archive_is_default() && !a.layout.archive.is_dir() => Err(
             "Your library archive isn't available — reconnect its drive or choose another.".into(),
         ),
-        _ => Ok(()),
+        Some(_) => Ok(()),
     }
 }
 
@@ -2445,6 +2453,24 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|app| {
+            // Resolve and publish the active layout (mods folder, archive, any unfinished move)
+            // before the UI asks, so the write guards never act on an unknown layout. Off the
+            // main thread: it reads gameSettings.xml and the DB.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                match db_path(&handle).and_then(|p| db::open(&p)) {
+                    Ok(conn) => {
+                        let _ = compute_mods_root_status(&conn);
+                        eprintln!("[Silo] library layout resolved at startup");
+                    }
+                    Err(e) => {
+                        eprintln!("[Silo] couldn't resolve the library layout at startup: {e}")
+                    }
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             default_mods_paths,
             scan_mods,
