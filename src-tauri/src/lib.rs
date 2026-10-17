@@ -574,6 +574,19 @@ struct UpdateOutcome {
 
 const UPDATE_GAME_RUNNING: &str = "Close Farming Simulator 25 first, then update.";
 
+/// FS25 writes gameSettings.xml (and mods their settings) back when the game exits, so a change
+/// made while it runs is silently undone.
+const CONFIG_GAME_RUNNING: &str = "Close Farming Simulator 25 first. The game saves its own \
+     settings when it exits, so a change made now would be lost.";
+
+fn config_write_refusal(game_running: bool) -> Result<(), String> {
+    if game_running {
+        Err(CONFIG_GAME_RUNNING.into())
+    } else {
+        Ok(())
+    }
+}
+
 /// Update an installed mod from a GitHub release asset (`update` module): download beside it
 /// without the library lock, then swap it in under the lock, keeping the previous version in
 /// `backups/`. Refused while FS25 runs (its files may be open).
@@ -1870,6 +1883,7 @@ async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
+        config_write_refusal(gamelaunch::fs25_running())?;
         let folder = modsroot::active()
             .map(|a| a.layout.mods)
             .ok_or_else(|| "No mods folder selected".to_string())?;
@@ -3791,6 +3805,7 @@ async fn get_config(
 #[tauri::command]
 async fn set_config(path: String, edits: Vec<xmlconfig::Edit>) -> Result<(), String> {
     off_main(move || {
+        config_write_refusal(gamelaunch::fs25_running())?;
         let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
         let roots = [user];
         let p = std::path::Path::new(&path);
@@ -3828,6 +3843,7 @@ async fn get_mod_settings(mod_name: String) -> Result<Vec<settings_form::Setting
 #[tauri::command]
 async fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Result<(), String> {
     off_main(move || {
+        config_write_refusal(gamelaunch::fs25_running())?;
         let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
         let roots = [user];
         let p = std::path::Path::new(&path);
@@ -3841,6 +3857,7 @@ async fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Res
 #[tauri::command]
 async fn save_mod_settings_raw(path: String, content: String) -> Result<(), String> {
     off_main(move || {
+        config_write_refusal(gamelaunch::fs25_running())?;
         let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
         paths::guarded_xml_write(&[user], std::path::Path::new(&path), &content)
     })
@@ -4783,6 +4800,15 @@ mod tests {
         // Fine-grained PATs report no scopes; "*" means assume capable.
         assert!(scope_grants("*", "gist"));
         assert!(scope_grants("*", "public_repo"));
+    }
+
+    #[test]
+    fn fs25_settings_writes_wait_for_the_game_to_close() {
+        assert_eq!(
+            super::config_write_refusal(true).unwrap_err(),
+            super::CONFIG_GAME_RUNNING
+        );
+        assert!(super::config_write_refusal(false).is_ok());
     }
 
     #[test]
