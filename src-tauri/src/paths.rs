@@ -9,7 +9,9 @@ use std::path::{Component, Path, PathBuf};
 
 /// Accept a value only as a plain file name: exactly one normal path component, no
 /// separators, no `.`/`..`, not absolute, no NUL. Rejects `../escape`, `a/b`, `C:\x`, etc.
-/// so `root.join(name)` provably stays directly under `root`.
+/// so `root.join(name)` provably stays directly under `root`. Also refuses names Windows
+/// treats specially: a colon (an NTFS alternate stream, `mod.zip:x`), a trailing dot or space
+/// (silently stripped), and reserved device names (`CON`, `nul.zip`, `COM1`).
 pub fn safe_file_name(name: &str) -> Result<&str, String> {
     let ok = !name.is_empty()
         && !name.contains(['/', '\\', '\0'])
@@ -20,12 +22,30 @@ pub fn safe_file_name(name: &str) -> Result<&str, String> {
         && matches!(
             Path::new(name).components().next(),
             Some(Component::Normal(_))
-        );
+        )
+        && !name.contains(':')
+        && !name.ends_with(['.', ' '])
+        && !is_device_name(name);
     if ok {
         Ok(name)
     } else {
         Err(format!("refusing an unsafe file name: {name:?}"))
     }
+}
+
+/// Windows reserves these names whatever the extension (`nul.zip` is the NUL device), so a
+/// mod file can never be called that on any system Silo syncs with.
+fn is_device_name(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit())
 }
 
 /// True when `target` (after resolving symlinks/`..`) lives inside `root`. Both must
@@ -236,6 +256,41 @@ mod tests {
             "with\0nul",
         ] {
             assert!(safe_file_name(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_stream_and_device_names() {
+        for bad in [
+            "mod.zip:evil",
+            "a:b",
+            "CON",
+            "con.zip",
+            "Nul.txt",
+            "nul.tar.gz",
+            "AUX",
+            "PRN.zip",
+            "COM1",
+            "com9.zip",
+            "COM0.zip",
+            "LPT1.xml",
+            "lpt9",
+            "mod.zip.",
+            "mod.zip ",
+            " ",
+        ] {
+            assert!(safe_file_name(bad).is_err(), "should reject {bad:?}");
+        }
+        for ok in [
+            "CONSOLE.zip",
+            "FS25_con.zip",
+            "COM10.zip",
+            "FS25_Aux_Tools.zip",
+            "LPTX.zip",
+            ".silo-archive.json",
+            "FS25_Mod v1.2.zip",
+        ] {
+            assert!(safe_file_name(ok).is_ok(), "should accept {ok:?}");
         }
     }
 

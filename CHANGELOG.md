@@ -73,6 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Silo uses them, GitHub API addresses are built safely, and mod updates download only from
   GitHub. (#202)
 
+- **Stricter file-name checks.** File names with a colon, a trailing dot or space, or a reserved
+  Windows device name (such as `CON` or `NUL`) are refused. (#PR)
+
 ## [0.9.0] - 2026-10-17
 
 ### Added
