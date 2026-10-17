@@ -662,6 +662,9 @@ struct InstallProgress {
 /// Download a browsed mod's .zip into the library root and return the filename.
 /// Streams the download, emitting `install:progress` events per mod id so the UI can
 /// show a bar. The frontend rescans (and auto-files) afterwards.
+///
+/// The download runs before the library lock is taken (so a slow mod never blocks other
+/// changes); the lock is held only to place the finished file.
 #[tauri::command]
 async fn install_remote_mod(
     app: tauri::AppHandle,
@@ -674,18 +677,18 @@ async fn install_remote_mod(
     let root = primary_root(root)?;
     let emitter = app.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let _write = library_write()?;
         let resolved = siloapi::resolve_download(&base, &id, source.as_deref())?;
         // The filename comes from the catalog — validate it's a plain basename so a
         // hostile response can't redirect the write outside the mods folder.
         paths::safe_file_name(&resolved.filename)?;
         let dest = root.join(&resolved.filename);
-        if dest.exists() {
-            return Err(format!("{} is already in your library", resolved.filename));
+        if path_taken(&dest) {
+            return Err(already_in_library(&dest));
         }
-        siloapi::download_to(
+        let part = claim_part(&dest)?;
+        siloapi::download_to_part(
             &resolved.url,
-            &dest,
+            part.path(),
             resolved.expected_sha256.as_deref(),
             |done, total| {
                 let _ = emitter.emit(
@@ -698,10 +701,86 @@ async fn install_remote_mod(
                 );
             },
         )?;
+        let _write = library_write()?;
+        place_part(part.path(), &dest)?;
         Ok(resolved.filename)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Downloads whose `.zip.part` is in use. Downloads run outside the library lock, so two at
+/// once for the same file must not share (and corrupt) one part file.
+static PARTS_IN_FLIGHT: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// A download's claim on its `.zip.part` file. Dropping it removes whatever part is left
+/// (a failed or abandoned download) and frees the name.
+struct PartClaim {
+    path: PathBuf,
+}
+
+impl PartClaim {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for PartClaim {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        let mut held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        held.retain(|p| p != &self.path);
+    }
+}
+
+/// Claim the part file a download of `dest` streams into, refusing while another download
+/// of the same file is running.
+fn claim_part(dest: &std::path::Path) -> Result<PartClaim, String> {
+    let path = dest.with_extension("zip.part");
+    let mut held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+    if held.contains(&path) {
+        return Err(format!("{} is already downloading", file_label(dest)));
+    }
+    held.push(path.clone());
+    Ok(PartClaim { path })
+}
+
+/// Anything at `p`, including a broken link (which `Path::exists` would call absent).
+fn path_taken(p: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok()
+}
+
+fn file_label(p: &std::path::Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
+}
+
+fn already_in_library(dest: &std::path::Path) -> String {
+    format!("{} is already in your library", file_label(dest))
+}
+
+/// Move a finished download into the library at `dest`, never replacing anything there.
+/// Hardlink then drop the part (the link fails if `dest` exists); on a filesystem without
+/// hardlinks, check right before the rename. A taken `dest` removes the part and refuses.
+/// Call under the library lock.
+fn place_part(part: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    let refuse = || {
+        let _ = std::fs::remove_file(part);
+        Err(already_in_library(dest))
+    };
+    match std::fs::hard_link(part, dest) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(part);
+            return Ok(());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return refuse(),
+        Err(_) => {} // no hardlinks here: check + rename below
+    }
+    if path_taken(dest) {
+        return refuse();
+    }
+    std::fs::rename(part, dest).map_err(|e| e.to_string())
 }
 
 #[derive(serde::Deserialize)]
@@ -954,18 +1033,47 @@ fn lock_result(
     }
 }
 
-/// Take the library write lock, waiting behind another ordinary write but never behind an
-/// archive move (refused at once, like `ensure_no_move`), then re-check that no move started
-/// meanwhile. Hold the guard for the whole write.
+/// How long a write waits behind another one before giving up.
+const LIBRARY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+const LIBRARY_STILL_BUSY: &str =
+    "Silo is busy with another change to your library. Try again in a moment.";
+
+/// Take the library write lock, waiting behind another ordinary write (up to `LIBRARY_WAIT`)
+/// but never behind an archive move (refused at once, like `ensure_no_move`), then re-check
+/// that no move started meanwhile. Hold the guard for the whole write.
 fn library_write() -> Result<std::sync::MutexGuard<'static, ()>, String> {
-    loop {
+    library_write_within(LIBRARY_WAIT)
+}
+
+/// `library_write` with an explicit deadline.
+fn library_write_within(
+    max: std::time::Duration,
+) -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    wait_for_library(max, || {
         ensure_no_move()?;
         if move_in_progress() {
             return Err("Finish or cancel the archive move first.".into());
         }
+        Ok(())
+    })
+}
+
+/// Poll for the library lock until `max` has passed. `ready` runs before every attempt and
+/// again once the lock is held; its refusal ends the wait at once.
+fn wait_for_library(
+    max: std::time::Duration,
+    ready: impl Fn() -> Result<(), String>,
+) -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    let start = std::time::Instant::now();
+    loop {
+        ready()?;
         if let Some(guard) = lock_result(LIBRARY_WRITE.try_lock()) {
-            ensure_no_move()?;
+            ready()?;
             return Ok(guard);
+        }
+        if start.elapsed() >= max {
+            return Err(LIBRARY_STILL_BUSY.into());
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -2922,6 +3030,10 @@ struct ApplyProgress {
 ///
 /// Every download reuses the same guarded path as a Browse install (basename check, stream
 /// to `.part`, archive + identity validation, skip-if-present) — no new file-write surface.
+///
+/// Two phases: every download runs first, without the library lock, into its own `.part`;
+/// then the lock is taken only to place the parts (re-checking each destination is still
+/// free) and save the loadout. Any part left over on an error is removed.
 #[tauri::command]
 async fn collection_apply(
     app: tauri::AppHandle,
@@ -2935,7 +3047,6 @@ async fn collection_apply(
     let root = primary_root(root)?;
     let emitter = app.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<ApplyReport, String> {
-        let _write = library_write()?;
         let mut conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token");
         let coll = read_collection_json(&url_or_id, token.as_deref())?;
@@ -2955,6 +3066,8 @@ async fn collection_apply(
         let mut rows: Vec<ApplyRow> = Vec::with_capacity(total);
         let mut installed_count = 0usize;
         let mut failed_count = 0usize;
+        // Finished downloads waiting to be placed under the lock (their rows are filled then).
+        let mut pending: Vec<PendingPlace> = Vec::new();
 
         for (i, m) in coll.mods.iter().enumerate() {
             let _ = emitter.emit(
@@ -3001,32 +3114,40 @@ async fn collection_apply(
                         continue;
                     }
                     let dest = root.join(&resolved.filename);
-                    if dest.exists() {
-                        rows.push(ApplyRow {
-                            tech_name: m.tech_name.clone(),
-                            filename: Some(resolved.filename.clone()),
-                            status: "present".into(),
-                            verdict: None,
-                            detail: None,
-                        });
+                    // Already there, or another mod in this collection downloads the same file.
+                    if path_taken(&dest) || pending.iter().any(|p| p.dest == dest) {
+                        rows.push(present_row(&m.tech_name, &resolved.filename));
                         continue;
                     }
-                    match siloapi::download_to(
+                    let part = match claim_part(&dest) {
+                        Ok(part) => part,
+                        Err(e) => {
+                            rows.push(fail_row(&m.tech_name, e));
+                            failed_count += 1;
+                            continue;
+                        }
+                    };
+                    match siloapi::download_to_part(
                         &resolved.url,
-                        &dest,
+                        part.path(),
                         resolved.expected_sha256.as_deref(),
                         |_done, _total| {},
                     ) {
                         Ok(()) => {
-                            installed_count += 1;
+                            // Same bytes as the placed file will have; hashed before the lock.
+                            let verdict =
+                                verdict_against_pin(part.path(), m.manifest_hash.as_deref());
+                            pending.push(PendingPlace {
+                                row: rows.len(),
+                                part,
+                                dest,
+                                verdict,
+                            });
                             rows.push(ApplyRow {
                                 tech_name: m.tech_name.clone(),
                                 filename: Some(resolved.filename.clone()),
                                 status: "installed".into(),
-                                verdict: Some(verdict_against_pin(
-                                    &dest,
-                                    m.manifest_hash.as_deref(),
-                                )),
+                                verdict: None,
                                 detail: None,
                             });
                         }
@@ -3045,6 +3166,28 @@ async fn collection_apply(
                         verdict: None,
                         detail: Some("Download-gated — get it from its page.".into()),
                     });
+                }
+            }
+        }
+
+        // Phase 2, under the lock: place each download whose destination is still free, then
+        // save the loadout. Dropping a `PendingPlace` (any early return) removes its part.
+        let _write = library_write()?;
+        for p in pending {
+            let row = &mut rows[p.row];
+            if path_taken(&p.dest) {
+                // Appeared while we downloaded (another install): keep theirs.
+                row.status = "present".into();
+            } else {
+                match place_part(p.part.path(), &p.dest) {
+                    Ok(()) => {
+                        installed_count += 1;
+                        row.verdict = Some(p.verdict);
+                    }
+                    Err(e) => {
+                        *row = fail_row(&row.tech_name, e);
+                        failed_count += 1;
+                    }
                 }
             }
         }
@@ -3071,6 +3214,25 @@ async fn collection_apply(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// A collection download that finished and waits to be placed under the library lock.
+struct PendingPlace {
+    /// Index of its row in the report.
+    row: usize,
+    part: PartClaim,
+    dest: PathBuf,
+    verdict: String,
+}
+
+fn present_row(tech_name: &str, filename: &str) -> ApplyRow {
+    ApplyRow {
+        tech_name: tech_name.to_string(),
+        filename: Some(filename.to_string()),
+        status: "present".into(),
+        verdict: None,
+        detail: None,
+    }
 }
 
 fn fail_row(tech_name: &str, detail: String) -> ApplyRow {
@@ -3728,6 +3890,77 @@ mod tests {
             r,
             Err("Finish or cancel the archive move first.".to_string())
         );
+    }
+
+    #[test]
+    fn the_library_lock_gives_up_instead_of_waiting_forever() {
+        use std::time::Duration;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        // Hold the lock briefly from another thread (poison-tolerant, never panics holding it).
+        let holder = std::thread::spawn(move || {
+            let _g = super::LIBRARY_WRITE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            tx.send(()).unwrap();
+            let _ = done_rx.recv_timeout(Duration::from_secs(5));
+        });
+        rx.recv().unwrap();
+        // The wait itself, independent of the move/loading state other tests may flip.
+        let start = std::time::Instant::now();
+        let waited = super::wait_for_library(Duration::from_millis(300), || Ok(()));
+        let waited_for = start.elapsed();
+        // The real entry point gives up too (busy, or refused by the move/loading checks).
+        let start = std::time::Instant::now();
+        let res = super::library_write_within(Duration::from_millis(300));
+        let took = start.elapsed();
+        done_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(waited.err(), Some(super::LIBRARY_STILL_BUSY.to_string()));
+        assert!(waited_for >= Duration::from_millis(300), "{waited_for:?}");
+        assert!(waited_for < Duration::from_secs(2), "{waited_for:?}");
+        assert!(res.is_err());
+        assert!(took < Duration::from_secs(2), "{took:?}");
+    }
+
+    #[test]
+    fn placing_a_download_never_overwrites_the_library() {
+        let base = temp_base("place_part");
+        let mods = base.join("mods");
+        // Destination free: the part becomes the mod.
+        let dest = mods.join("FS25_New.zip");
+        let part = dest.with_extension("zip.part");
+        std::fs::write(&part, b"new").unwrap();
+        super::place_part(&part, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+        assert!(!part.exists());
+        // Destination taken: refused, the existing file untouched, the part removed.
+        let taken = mods.join("FS25_Have.zip");
+        std::fs::write(&taken, b"mine").unwrap();
+        let part = taken.with_extension("zip.part");
+        std::fs::write(&part, b"theirs").unwrap();
+        let err = super::place_part(&part, &taken).unwrap_err();
+        assert_eq!(err, "FS25_Have.zip is already in your library");
+        assert_eq!(std::fs::read(&taken).unwrap(), b"mine");
+        assert!(!part.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_download_claims_its_part_file_until_done() {
+        let base = temp_base("claim_part");
+        let dest = base.join("mods").join("FS25_Busy.zip");
+        let claim = super::claim_part(&dest).unwrap();
+        assert_eq!(claim.path(), dest.with_extension("zip.part").as_path());
+        std::fs::write(claim.path(), b"half").unwrap();
+        // A second download of the same file can't share (and corrupt) the part.
+        assert!(super::claim_part(&dest).is_err());
+        let part = claim.path().to_path_buf();
+        drop(claim);
+        // Dropping the claim removes any leftover part and frees the name.
+        assert!(!part.exists());
+        assert!(super::claim_part(&dest).is_ok());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn temp_base(tag: &str) -> PathBuf {

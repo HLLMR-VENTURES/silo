@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **New look for the website and README.** "More farming. Less fixing." Copy now describes
   crash triage as ranking the likely culprit, and drops claims we couldn't back up.
 
+### Fixed
+
+- **A stalled download can't freeze Silo anymore.** Network requests now time out instead of
+  waiting forever, and mods download before Silo locks your library, so other changes aren't
+  blocked while a download runs. (#202)
+
 ### Security
 
 - **Stricter image-host check.** The image proxy now parses URLs properly before checking the

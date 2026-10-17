@@ -449,16 +449,31 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-/// Download a resolved .zip to `dest`, streaming so the caller can report progress.
-/// Validates PK magic, caps at 500 MB, writes to a `.part` file then renames on
-/// success (so a failed download never leaves a half-written mod). `on_progress` is
-/// called with (bytes_done, total_bytes) — total is None when the server omits
-/// Content-Length. Kept Tauri-agnostic; the command layer turns it into events.
-pub fn download_to<F: Fn(u64, Option<u64>)>(
+/// Download a resolved .zip to the temp file `part`, streaming so the caller can report
+/// progress. Validates PK magic, caps at 500 MB, and checks the whole archive (central
+/// directory, `modDesc.xml`, and the catalog's SHA-256 when known). On any failure `part` is
+/// removed, so a failed download never leaves a half-written file; on success the caller
+/// places `part` (it needs no library lock until then). `on_progress` is called with
+/// (bytes_done, total_bytes) — total is None when the server omits Content-Length. Kept
+/// Tauri-agnostic; the command layer turns it into events.
+pub fn download_to_part<F: Fn(u64, Option<u64>)>(
     url: &str,
-    dest: &std::path::Path,
+    part: &std::path::Path,
     expected_sha256: Option<&str>,
     on_progress: F,
+) -> Result<(), String> {
+    let result = fetch_and_validate(url, part, expected_sha256, &on_progress);
+    if result.is_err() {
+        let _ = std::fs::remove_file(part);
+    }
+    result
+}
+
+fn fetch_and_validate(
+    url: &str,
+    part: &std::path::Path,
+    expected_sha256: Option<&str>,
+    on_progress: &dyn Fn(u64, Option<u64>),
 ) -> Result<(), String> {
     const CAP: u64 = 500 * 1024 * 1024;
     // SSRF guard: the URL is catalog/frontend-influenced. Downloads must be public https —
@@ -473,8 +488,8 @@ pub fn download_to<F: Fn(u64, Option<u64>)>(
         .and_then(|s| s.parse().ok())
         .filter(|&t| t <= CAP);
 
-    let part = dest.with_extension("zip.part");
-    let mut file = std::fs::File::create(&part).map_err(|e| e.to_string())?;
+    // Errors return early; `download_to_part` removes the part (the handle is closed by then).
+    let mut file = std::fs::File::create(part).map_err(|e| e.to_string())?;
     let mut reader = resp.into_reader();
 
     let mut buf = [0u8; 64 * 1024];
@@ -483,41 +498,32 @@ pub fn download_to<F: Fn(u64, Option<u64>)>(
     let mut last_emit: u64 = 0;
     on_progress(0, total);
 
-    let result = (|| -> Result<(), String> {
-        loop {
-            let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
-            }
-            // Validate the zip's PK magic from the first two bytes.
-            if head.len() < 2 {
-                let need = (2 - head.len()).min(n);
-                head.extend_from_slice(&buf[..need]);
-                if head.len() == 2 && &head[..] != b"PK" {
-                    return Err("Downloaded file is not a valid .zip".to_string());
-                }
-            }
-            done += n as u64;
-            if done > CAP {
-                return Err("Download exceeds the 500 MB safety cap".to_string());
-            }
-            file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-            // Throttle progress events to ~1 MB steps to avoid flooding the UI.
-            if done - last_emit >= 1024 * 1024 {
-                last_emit = done;
-                on_progress(done, total);
-            }
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
         }
+        // Validate the zip's PK magic from the first two bytes.
         if head.len() < 2 {
-            return Err("Downloaded file is not a valid .zip".to_string());
+            let need = (2 - head.len()).min(n);
+            head.extend_from_slice(&buf[..need]);
+            if head.len() == 2 && &head[..] != b"PK" {
+                return Err("Downloaded file is not a valid .zip".to_string());
+            }
         }
-        Ok(())
-    })();
-
-    if let Err(e) = result {
-        drop(file);
-        let _ = std::fs::remove_file(&part);
-        return Err(e);
+        done += n as u64;
+        if done > CAP {
+            return Err("Download exceeds the 500 MB safety cap".to_string());
+        }
+        file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        // Throttle progress events to ~1 MB steps to avoid flooding the UI.
+        if done - last_emit >= 1024 * 1024 {
+            last_emit = done;
+            on_progress(done, total);
+        }
+    }
+    if head.len() < 2 {
+        return Err("Downloaded file is not a valid .zip".to_string());
     }
     file.flush().map_err(|e| e.to_string())?;
     drop(file);
@@ -526,33 +532,26 @@ pub fn download_to<F: Fn(u64, Option<u64>)>(
     // proves the first two bytes; a truncated or garbage download can still start with "PK".
     // Require the central directory to parse AND a modDesc.xml to exist (every real FS mod
     // has one) — this is what stops "Silo installed a broken mod" reports.
-    let validate = (|| -> Result<(), String> {
-        let f = std::fs::File::open(&part).map_err(|e| e.to_string())?;
+    {
+        let f = std::fs::File::open(part).map_err(|e| e.to_string())?;
         let mut ar = zip::ZipArchive::new(f)
             .map_err(|_| "Downloaded file isn't a valid .zip (corrupt or truncated)".to_string())?;
         ar.by_name("modDesc.xml")
             .map_err(|_| "Downloaded archive has no modDesc.xml — not an FS25 mod".to_string())?;
-        // Identity: a valid ZIP of the WRONG mod is still the wrong mod. If the catalog has a
-        // canonical hash for this exact mod+version, the bytes must match it byte-for-byte —
-        // this catches a mismatched/tampered asset before it enters the library.
-        if let Some(expected) = expected_sha256 {
-            let got = crate::provenance::sha256_file(&part)?;
-            if !got.eq_ignore_ascii_case(expected) {
-                return Err(
-                    "Downloaded file doesn't match the catalog's known build for this mod \
-                     (wrong or tampered file) — refusing it."
-                        .to_string(),
-                );
-            }
-        }
-        Ok(())
-    })();
-    if let Err(e) = validate {
-        let _ = std::fs::remove_file(&part);
-        return Err(e);
     }
-
-    std::fs::rename(&part, dest).map_err(|e| e.to_string())?;
+    // Identity: a valid ZIP of the WRONG mod is still the wrong mod. If the catalog has a
+    // canonical hash for this exact mod+version, the bytes must match it byte-for-byte —
+    // this catches a mismatched/tampered asset before it enters the library.
+    if let Some(expected) = expected_sha256 {
+        let got = crate::provenance::sha256_file(part)?;
+        if !got.eq_ignore_ascii_case(expected) {
+            return Err(
+                "Downloaded file doesn't match the catalog's known build for this mod \
+                 (wrong or tampered file) — refusing it."
+                    .to_string(),
+            );
+        }
+    }
     on_progress(done, total);
     Ok(())
 }
