@@ -22,6 +22,30 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 const ARCHIVE: &str = "archive";
+
+/// Where a mods folder's pieces live. `mods` is the flat folder the game reads; `archive` holds
+/// parked mods as `<archive>/<Category>/<file>`. Default: `<mods>/archive` (#166 makes it
+/// configurable per mods folder).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layout {
+    pub mods: PathBuf,
+    pub archive: PathBuf,
+}
+
+impl Layout {
+    pub fn default_for(mods: &Path) -> Layout {
+        Layout {
+            mods: mods.to_path_buf(),
+            archive: mods.join(ARCHIVE),
+        }
+    }
+
+    /// True when the archive is the default `<mods>/archive` (Silo may remove it when empty).
+    pub fn archive_is_default(&self) -> bool {
+        self.archive == self.mods.join(ARCHIVE)
+    }
+}
+
 /// Dropped inside a copy-fallback **directory** projection so we can later prove Silo
 /// created it (a dir has no hardlink identity to compare). Hardlink/symlink projections
 /// are identified structurally and need no marker.
@@ -105,20 +129,21 @@ fn sanitize(category: &str) -> String {
         .collect()
 }
 
-fn archive_dir(root: &Path, category: &str) -> PathBuf {
-    root.join(ARCHIVE).join(sanitize(category))
+pub(crate) fn archive_dir(archive: &Path, category: &str) -> PathBuf {
+    archive.join(sanitize(category))
 }
 
-fn archive_path(root: &Path, category: &str, file_name: &str) -> PathBuf {
-    archive_dir(root, category).join(file_name)
+pub(crate) fn archive_path(archive: &Path, category: &str, file_name: &str) -> PathBuf {
+    archive_dir(archive, category).join(file_name)
 }
 
-/// Dry run: which flat-root mods would move into the archive.
-pub fn plan_organize(root: &Path, mods: &[ModInput]) -> Vec<PlannedMove> {
+/// Dry run: which mods in `source` (the flat mods folder, or the archive's top level when
+/// adopting) would move into `<archive>/<Category>/`.
+pub fn plan_organize(source: &Path, mods: &[ModInput]) -> Vec<PlannedMove> {
     let mut plan = Vec::new();
     for m in mods {
-        let from = root.join(&m.file_name);
-        // Only plan mods that are actually sitting in the flat root right now.
+        let from = source.join(&m.file_name);
+        // Only plan mods that are actually sitting in the source folder right now.
         if !from.exists() {
             continue;
         }
@@ -133,9 +158,16 @@ pub fn plan_organize(root: &Path, mods: &[ModInput]) -> Vec<PlannedMove> {
     plan
 }
 
-/// Move flat-root mods into `archive/<Category>/` and record the manifest. Mods
-/// already recorded (organized) are skipped.
-pub fn apply_organize(conn: &Connection, root: &Path, mods: &[ModInput]) -> Report {
+/// Move mods from `source` (the flat mods folder, or the archive's top level when adopting)
+/// into `<archive>/<Category>/` and record the manifest. Mods already recorded (organized)
+/// are skipped.
+pub fn apply_organize(
+    conn: &Connection,
+    layout: &Layout,
+    source: &Path,
+    mods: &[ModInput],
+) -> Report {
+    let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
     let already: HashSet<String> = db::load_organized(conn, &key)
@@ -153,12 +185,12 @@ pub fn apply_organize(conn: &Connection, root: &Path, mods: &[ModInput]) -> Repo
             rep.errors.push(format!("{}: {e}", m.tech_name));
             continue;
         }
-        let from = root.join(&m.file_name);
+        let from = source.join(&m.file_name);
         if !from.exists() {
             rep.skipped += 1;
             continue;
         }
-        let dir = archive_dir(root, &m.category);
+        let dir = archive_dir(&layout.archive, &m.category);
         if let Err(e) = std::fs::create_dir_all(&dir) {
             rep.errors
                 .push(format!("{}: mkdir {}: {e}", m.tech_name, dir.display()));
@@ -200,12 +232,13 @@ pub fn apply_organize(conn: &Connection, root: &Path, mods: &[ModInput]) -> Repo
 
 /// Reconcile the flat-root projection to exactly `active`: link the ones that
 /// should be active, remove links for the ones that shouldn't.
-pub fn set_active(conn: &Connection, root: &Path, active: &HashSet<String>) -> Report {
+pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) -> Report {
+    let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
     for row in db::load_organized(conn, &key) {
         let link = root.join(&row.file_name);
-        let src = archive_path(root, &row.category, &row.file_name);
+        let src = archive_path(&layout.archive, &row.category, &row.file_name);
         let want = active.contains(&row.tech_name);
         let linked = link.symlink_metadata().is_ok();
 
@@ -308,9 +341,10 @@ fn matches_provenance(conn: &Connection, key: &str, link: &Path, file_name: &str
 /// is called once per active zip examined so a long pass can show a bar instead of a freeze.
 pub fn relink_projections(
     conn: &Connection,
-    root: &Path,
+    layout: &Layout,
     mut progress: impl FnMut(usize, usize),
 ) -> RelinkReport {
+    let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut rep = RelinkReport::default();
     // On a cloud-synced folder hardlinks are impossible — every attempt would error 396. Report
@@ -329,7 +363,7 @@ pub fn relink_projections(
     for (i, row) in rows.into_iter().enumerate() {
         progress(i, total);
         let flat = root.join(&row.file_name);
-        let src = archive_path(root, &row.category, &row.file_name);
+        let src = archive_path(&layout.archive, &row.category, &row.file_name);
         let Ok(fmeta) = flat.symlink_metadata() else {
             rep.skipped += 1;
             continue;
@@ -404,7 +438,8 @@ fn relink_over(src: &Path, flat: &Path) -> std::io::Result<()> {
 /// up the old archived copy, promote the flat file into the archive, and (if the mod is
 /// active) re-project it so it's Silo-managed again. Reversible — the old copy is kept under
 /// `backups/`.
-pub fn adopt_foreign(conn: &Connection, root: &Path, file_name: &str) -> Result<(), String> {
+pub fn adopt_foreign(conn: &Connection, layout: &Layout, file_name: &str) -> Result<(), String> {
+    let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     crate::paths::safe_file_name(file_name).map_err(|e| e.to_string())?;
     let row = db::load_organized(conn, &key)
@@ -415,7 +450,7 @@ pub fn adopt_foreign(conn: &Connection, root: &Path, file_name: &str) -> Result<
     if flat.symlink_metadata().is_err() {
         return Err("No file in the mods folder to adopt".into());
     }
-    let archive = archive_path(root, &row.category, file_name);
+    let archive = archive_path(&layout.archive, &row.category, file_name);
     // Back up the old archived copy before replacing it.
     if archive.exists() {
         let bak = backup_path(root, file_name)?;
@@ -434,14 +469,19 @@ pub fn adopt_foreign(conn: &Connection, root: &Path, file_name: &str) -> Result<
 /// Restore Silo's managed copy over a file the user swapped in: back up their file, then
 /// re-project the archived original (if the mod is active). Reversible — their file is kept
 /// under `backups/`.
-pub fn restore_projection(conn: &Connection, root: &Path, file_name: &str) -> Result<(), String> {
+pub fn restore_projection(
+    conn: &Connection,
+    layout: &Layout,
+    file_name: &str,
+) -> Result<(), String> {
+    let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     crate::paths::safe_file_name(file_name).map_err(|e| e.to_string())?;
     let row = db::load_organized(conn, &key)
         .into_iter()
         .find(|r| r.file_name == file_name)
         .ok_or_else(|| "Not a Silo-managed mod".to_string())?;
-    let archive = archive_path(root, &row.category, file_name);
+    let archive = archive_path(&layout.archive, &row.category, file_name);
     if !archive.exists() {
         return Err("No archived copy to restore from".into());
     }
@@ -471,12 +511,13 @@ fn backup_path(root: &Path, file_name: &str) -> Result<PathBuf, String> {
 /// Restore a vanilla flat `mods/`: remove every Silo link, move archived files back
 /// to the root, remove only empty archive directories (never an unrecognized file), and
 /// clear the manifest.
-pub fn flatten(conn: &Connection, root: &Path) -> Report {
+pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
+    let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
     for row in db::load_organized(conn, &key) {
         let link = root.join(&row.file_name);
-        let src = archive_path(root, &row.category, &row.file_name);
+        let src = archive_path(&layout.archive, &row.category, &row.file_name);
 
         if src.exists() {
             let occupied = link.symlink_metadata().is_ok();
@@ -523,7 +564,7 @@ pub fn flatten(conn: &Connection, root: &Path) -> Report {
     // NEVER `remove_dir_all` the archive — that would destroy any file we don't have a
     // manifest row for (e.g. a mod whose manifest write failed on a crash). Remove only
     // provably-empty directories, and surface anything left behind untouched.
-    match cleanup_empty_archive(&root.join(ARCHIVE)) {
+    match cleanup_empty_archive(&layout.archive, layout.archive_is_default()) {
         Ok(leftover) => {
             for p in leftover {
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
@@ -541,8 +582,12 @@ pub fn flatten(conn: &Connection, root: &Path) -> Report {
 /// Remove empty directories under `archive` bottom-up. NEVER deletes a file or a
 /// non-empty directory — any file the manifest didn't restore is left in place and
 /// returned so the caller can tell the user. This is the guard against the flatten
-/// step eating an untracked mod.
-fn cleanup_empty_archive(archive: &Path) -> std::io::Result<Vec<PathBuf>> {
+/// step eating an untracked mod. `archive` itself is removed (when empty) only if
+/// `remove_root` — a user-chosen archive folder is never removed.
+pub(crate) fn cleanup_empty_archive(
+    archive: &Path,
+    remove_root: bool,
+) -> std::io::Result<Vec<PathBuf>> {
     let mut leftover = Vec::new();
     if !archive.exists() {
         return Ok(leftover);
@@ -567,7 +612,7 @@ fn cleanup_empty_archive(archive: &Path) -> std::io::Result<Vec<PathBuf>> {
         }
         Ok(empty)
     }
-    if walk(archive, &mut leftover)? {
+    if walk(archive, &mut leftover)? && remove_root {
         let _ = std::fs::remove_dir(archive);
     }
     Ok(leftover)
@@ -738,9 +783,10 @@ fn mod_version(path: &Path, kind: &str) -> Option<String> {
 /// parked mods leave the flat root empty, so it only identity-checks the handful of entries
 /// actually present against their archived source. Reuses [`is_silo_projection`], so a real
 /// hardlink/symlink/copy projection is never flagged — only a file Silo can't prove it created.
-pub fn detect_foreign_projections(conn: &Connection, root: &Path) -> Vec<ForeignFile> {
+pub fn detect_foreign_projections(conn: &Connection, layout: &Layout) -> Vec<ForeignFile> {
+    let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
-    let archive = root.join(ARCHIVE);
+    let archive = layout.archive.clone();
     if !archive.is_dir() {
         return Vec::new();
     }
@@ -939,7 +985,7 @@ mod tests {
         let orphan = archive.join("Vehicles").join("orphan.zip");
         std::fs::write(&orphan, b"PK\x03\x04").unwrap();
 
-        let leftover = cleanup_empty_archive(&archive).unwrap();
+        let leftover = cleanup_empty_archive(&archive, true).unwrap();
 
         assert!(orphan.exists(), "orphan file must NOT be deleted");
         assert_eq!(leftover.len(), 1);
@@ -981,7 +1027,7 @@ mod tests {
         std::fs::write(&original, b"PK\x03\x04 the user's only copy").unwrap();
         // No archive/Vehicles/FS25_Foo.zip exists.
 
-        let rep = flatten(&conn, &base);
+        let rep = flatten(&conn, &Layout::default_for(&base));
 
         assert!(original.exists(), "the only copy must NOT be deleted");
         assert!(
@@ -1004,7 +1050,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(archive.join("A").join("B")).unwrap();
 
-        let leftover = cleanup_empty_archive(&archive).unwrap();
+        let leftover = cleanup_empty_archive(&archive, true).unwrap();
 
         assert!(leftover.is_empty());
         assert!(!archive.exists(), "a fully-empty archive tree is removed");
@@ -1024,27 +1070,30 @@ mod tests {
         std::fs::write(&src, b"the real archived mod bytes").unwrap();
 
         // Nothing in the flat root → nothing flagged.
-        assert!(detect_foreign_projections(&conn, &root).is_empty());
+        assert!(detect_foreign_projections(&conn, &Layout::default_for(&root)).is_empty());
 
         // A genuine hardlink projection → NOT flagged (it's provably ours).
         let link = root.join("FS25_Foo.zip");
         std::fs::hard_link(&src, &link).unwrap();
         assert!(
-            detect_foreign_projections(&conn, &root).is_empty(),
+            detect_foreign_projections(&conn, &Layout::default_for(&root)).is_empty(),
             "a real hardlink projection must not be flagged"
         );
         std::fs::remove_file(&link).unwrap();
 
         // A DIFFERENT file at that managed name → flagged as foreign.
         std::fs::write(&link, b"the user's own, different build").unwrap();
-        let found = detect_foreign_projections(&conn, &root);
+        let found = detect_foreign_projections(&conn, &Layout::default_for(&root));
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].tech_name, "FS25_Foo");
         assert_eq!(found[0].file_name, "FS25_Foo.zip");
 
         // A loose zip with NO archived counterpart is an ordinary unorganized mod, not foreign.
         std::fs::write(root.join("FS25_Unrelated.zip"), b"loose").unwrap();
-        assert_eq!(detect_foreign_projections(&conn, &root).len(), 1);
+        assert_eq!(
+            detect_foreign_projections(&conn, &Layout::default_for(&root)).len(),
+            1
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1080,7 +1129,7 @@ mod tests {
         // provenance) and the flat file exists.
         let mut want = std::collections::HashSet::new();
         want.insert("FS25_Foo".to_string());
-        let rep = set_active(&conn, &base, &want);
+        let rep = set_active(&conn, &Layout::default_for(&base), &want);
         assert_eq!(rep.changed, 1);
         let flat = base.join("FS25_Foo.zip");
         assert!(flat.exists());
@@ -1091,7 +1140,11 @@ mod tests {
         assert!(matches_provenance(&conn, &key, &flat, "FS25_Foo.zip"));
 
         // Deactivate: provenance matches → removed, provenance forgotten, archive untouched.
-        let rep = set_active(&conn, &base, &std::collections::HashSet::new());
+        let rep = set_active(
+            &conn,
+            &Layout::default_for(&base),
+            &std::collections::HashSet::new(),
+        );
         assert_eq!(rep.changed, 1);
         assert!(!flat.exists(), "our own projection is removed");
         assert!(db::projection_stats(&conn, &key, "FS25_Foo.zip").is_none());
@@ -1102,7 +1155,11 @@ mod tests {
         // deleted — different bytes, so both the fast path and the hash check refuse.
         std::fs::write(&flat, b"the user's OWN irreplaceable build").unwrap();
         db::set_organized_active(&conn, &key, "FS25_Foo", true).unwrap();
-        let rep = set_active(&conn, &base, &std::collections::HashSet::new());
+        let rep = set_active(
+            &conn,
+            &Layout::default_for(&base),
+            &std::collections::HashSet::new(),
+        );
         assert_eq!(rep.skipped, 1, "a swapped-in file is left untouched");
         assert_eq!(
             std::fs::read(&flat).unwrap(),
@@ -1138,7 +1195,7 @@ mod tests {
         .unwrap();
         std::fs::write(base.join("FS25_Foo.zip"), b"NEWER mods-folder build").unwrap();
 
-        adopt_foreign(&conn, &base, "FS25_Foo.zip").unwrap();
+        adopt_foreign(&conn, &Layout::default_for(&base), "FS25_Foo.zip").unwrap();
 
         assert_eq!(
             std::fs::read(cat.join("FS25_Foo.zip")).unwrap(),
@@ -1187,7 +1244,7 @@ mod tests {
         .unwrap();
         std::fs::write(base.join("FS25_Foo.zip"), b"the user's swapped-in build").unwrap();
 
-        restore_projection(&conn, &base, "FS25_Foo.zip").unwrap();
+        restore_projection(&conn, &Layout::default_for(&base), "FS25_Foo.zip").unwrap();
 
         assert_eq!(
             std::fs::read(base.join("FS25_Foo.zip")).unwrap(),
@@ -1241,7 +1298,7 @@ mod tests {
             "precondition: the copy is a distinct file"
         );
 
-        let rep = relink_projections(&conn, &base, |_, _| {});
+        let rep = relink_projections(&conn, &Layout::default_for(&base), |_, _| {});
 
         assert_eq!(rep.upgraded, 1);
         assert_eq!(rep.reclaimed_bytes, bytes.len() as u64);
@@ -1251,7 +1308,7 @@ mod tests {
         assert_eq!(std::fs::read(&flat).unwrap(), bytes);
 
         // Idempotent: a second pass finds it already linked, changes nothing.
-        let rep2 = relink_projections(&conn, &base, |_, _| {});
+        let rep2 = relink_projections(&conn, &Layout::default_for(&base), |_, _| {});
         assert_eq!(rep2.upgraded, 0);
         assert_eq!(rep2.already_linked, 1);
 
@@ -1284,7 +1341,7 @@ mod tests {
         let flat = base.join("FS25_Foo.zip");
         std::fs::write(&flat, b"the user's OWN different build").unwrap();
 
-        let rep = relink_projections(&conn, &base, |_, _| {});
+        let rep = relink_projections(&conn, &Layout::default_for(&base), |_, _| {});
 
         // (This machine's temp dir supports hardlinks, so the cloud short-circuit is off here.)
         assert!(!rep.hardlinks_unsupported);
@@ -1321,15 +1378,15 @@ mod tests {
         };
         db::upsert_organized(&conn, &key_a, &row).unwrap();
         let on: HashSet<String> = ["FS25_Foo".to_string()].into_iter().collect();
-        set_active(&conn, &a, &on);
+        set_active(&conn, &Layout::default_for(&a), &on);
         assert!(a.join("FS25_Foo.zip").exists());
 
         // Folder B: the user's own file at the same name, unknown to Silo.
         std::fs::write(b.join("FS25_Foo.zip"), b"PK\x03\x04 the user's own file").unwrap();
 
         // Deactivating everything in B must not touch B's file, and must not touch A.
-        set_active(&conn, &b, &HashSet::new());
-        flatten(&conn, &b);
+        set_active(&conn, &Layout::default_for(&b), &HashSet::new());
+        flatten(&conn, &Layout::default_for(&b));
         assert!(
             b.join("FS25_Foo.zip").exists(),
             "B's file is not Silo's — never removed"
@@ -1341,6 +1398,92 @@ mod tests {
         assert!(
             db::load_organized(&conn, &key_a)[0].active,
             "A's state is untouched"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn organize_activate_and_flatten_honor_a_custom_archive() {
+        let base = std::env::temp_dir().join(format!("silo_customarch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        let arch = base.join("elsewhere");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(&arch).unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let layout = Layout {
+            mods: mods.clone(),
+            archive: arch.clone(),
+        };
+        std::fs::write(mods.join("FS25_Foo.zip"), b"PK\x03\x04 foo").unwrap();
+        let input = ModInput {
+            tech_name: "FS25_Foo".into(),
+            file_name: "FS25_Foo.zip".into(),
+            kind: "zip".into(),
+            category: "Vehicles".into(),
+            subcategory: None,
+        };
+
+        let rep = apply_organize(&conn, &layout, &mods, std::slice::from_ref(&input));
+        assert_eq!(rep.changed, 1);
+        assert!(
+            arch.join("Vehicles/FS25_Foo.zip").exists(),
+            "filed into the custom archive"
+        );
+        assert!(!mods.join("archive").exists(), "default archive untouched");
+
+        let on: HashSet<String> = ["FS25_Foo".to_string()].into_iter().collect();
+        set_active(&conn, &layout, &on);
+        assert!(
+            mods.join("FS25_Foo.zip").exists(),
+            "projected into the mods folder"
+        );
+
+        flatten(&conn, &layout);
+        assert!(
+            mods.join("FS25_Foo.zip").exists(),
+            "restored to the mods folder"
+        );
+        assert!(
+            arch.exists(),
+            "a user-chosen archive folder is never removed"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn adopting_files_loose_archive_mods_into_categories() {
+        // Distinct temp name: `silo_adopt_{pid}` is already used by the adopt_foreign test,
+        // and tests run in parallel in one process.
+        let base = std::env::temp_dir().join(format!("silo_adoptloose_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        let arch = base.join("hdd");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(&arch).unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let layout = Layout {
+            mods: mods.clone(),
+            archive: arch.clone(),
+        };
+        std::fs::write(arch.join("FS25_Loose.zip"), b"PK\x03\x04 loose").unwrap();
+        let input = ModInput {
+            tech_name: "FS25_Loose".into(),
+            file_name: "FS25_Loose.zip".into(),
+            kind: "zip".into(),
+            category: "Tools".into(),
+            subcategory: None,
+        };
+
+        let plan = plan_organize(&arch, std::slice::from_ref(&input));
+        assert_eq!(plan.len(), 1);
+        let rep = apply_organize(&conn, &layout, &arch, std::slice::from_ref(&input));
+        assert_eq!(rep.changed, 1);
+        assert!(arch.join("Tools/FS25_Loose.zip").exists());
+        assert!(!arch.join("FS25_Loose.zip").exists());
+        assert!(
+            !mods.join("FS25_Loose.zip").exists(),
+            "adopted mods arrive parked"
         );
         let _ = std::fs::remove_dir_all(&base);
     }

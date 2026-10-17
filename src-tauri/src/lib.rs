@@ -905,7 +905,12 @@ async fn apply_organize(
     let root = primary_root(root)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<organize::Report, String> {
         let conn = db::open(&db)?;
-        Ok(organize::apply_organize(&conn, &root, &mods))
+        Ok(organize::apply_organize(
+            &conn,
+            &organize::Layout::default_for(&root),
+            &root,
+            &mods,
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -923,7 +928,7 @@ async fn adopt_foreign_file(
     let root = primary_root(root)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let conn = db::open(&db)?;
-        organize::adopt_foreign(&conn, &root, &file_name)
+        organize::adopt_foreign(&conn, &organize::Layout::default_for(&root), &file_name)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -941,7 +946,7 @@ async fn restore_foreign_file(
     let root = primary_root(root)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let conn = db::open(&db)?;
-        organize::restore_projection(&conn, &root, &file_name)
+        organize::restore_projection(&conn, &organize::Layout::default_for(&root), &file_name)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -958,7 +963,11 @@ async fn set_active(
     tauri::async_runtime::spawn_blocking(move || -> Result<organize::Report, String> {
         let conn = db::open(&db)?;
         let set: HashSet<String> = active.into_iter().collect();
-        Ok(organize::set_active(&conn, &root, &set))
+        Ok(organize::set_active(
+            &conn,
+            &organize::Layout::default_for(&root),
+            &set,
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -987,9 +996,13 @@ async fn relink_projections(
     let emitter = app.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<organize::RelinkReport, String> {
         let conn = db::open(&db)?;
-        Ok(organize::relink_projections(&conn, &root, |done, total| {
-            let _ = emitter.emit("relink-progress", (done, total));
-        }))
+        Ok(organize::relink_projections(
+            &conn,
+            &organize::Layout::default_for(&root),
+            |done, total| {
+                let _ = emitter.emit("relink-progress", (done, total));
+            },
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1001,7 +1014,10 @@ async fn flatten(app: tauri::AppHandle, root: Option<String>) -> Result<organize
     let root = primary_root(root)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<organize::Report, String> {
         let conn = db::open(&db)?;
-        Ok(organize::flatten(&conn, &root))
+        Ok(organize::flatten(
+            &conn,
+            &organize::Layout::default_for(&root),
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2280,7 +2296,10 @@ async fn detect_foreign_files(
     let root = primary_root(root)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<organize::ForeignFile>, String> {
         let conn = db::open(&db)?;
-        Ok(organize::detect_foreign_projections(&conn, &root))
+        Ok(organize::detect_foreign_projections(
+            &conn,
+            &organize::Layout::default_for(&root),
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
