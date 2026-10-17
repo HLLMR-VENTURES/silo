@@ -96,31 +96,20 @@ async fn scan_mods(
         let mut conn = db::open(&db_path(&app)?)?;
         let cache = db::load_cache(&conn);
 
-        // Each mods folder with its archive(s). During an unfinished move both archives are
-        // read, the current direction's destination first so it wins for mods already moved;
-        // otherwise the active folder's chosen archive (or a folder's default).
+        // Each mods folder with its archive(s), and whether the scanned folder's manifest may
+        // be rewritten from what's found (see `scan_archives`).
+        let mut may_reconcile = true;
         let layouts: Vec<(PathBuf, Vec<PathBuf>)> = roots
             .iter()
-            .map(|r| {
-                if let Some(m) = relocate::load_marker(&conn, &modsroot::canonical_key(r)) {
-                    let archives = match m.direction {
-                        relocate::Direction::Forward => vec![m.to, m.from],
-                        relocate::Direction::Back => vec![m.from, m.to],
-                    };
-                    return (r.clone(), archives);
+            .enumerate()
+            .map(|(i, r)| {
+                let (archives, ok) = scan_archives(&conn, r, active.as_ref());
+                if i == 0 {
+                    may_reconcile = ok;
                 }
-                match &active {
-                    Some(a) if modsroot::same_folder(&a.layout.mods, r) => {
-                        (r.clone(), vec![a.layout.archive.clone()])
-                    }
-                    _ => (r.clone(), vec![organize::Layout::default_for(r).archive]),
-                }
+                (r.clone(), archives)
             })
             .collect();
-        // Mid-move the files are in flux between two archives: never rewrite the manifest then.
-        let moving = scan_key
-            .as_deref()
-            .is_some_and(|k| relocate::load_marker(&conn, k).is_some());
 
         let emitter = app.clone();
         let out = scan::scan_layouts(layouts, &cache, move |done, total| {
@@ -167,7 +156,7 @@ async fn scan_mods(
                 })
             })
             .collect();
-        if let Some(key) = scan_key.as_deref().filter(|_| !moving) {
+        if let Some(key) = scan_key.as_deref().filter(|_| may_reconcile) {
             let _ = db::reconcile_organized(&mut conn, key, &organized_rows);
         }
 
@@ -175,6 +164,33 @@ async fn scan_mods(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// The archive(s) a scan of mods folder `root` reads, and whether that scan may rewrite the
+/// folder's `organized` manifest from what it finds. During an unfinished move both archives
+/// are read (the current direction's destination first, so it wins for mods already moved) and
+/// the manifest is left alone — the files are in flux. Otherwise the folder's own archive: the
+/// published one for the active folder (`active`), the stored choice (or the default) for any
+/// other. A custom archive that isn't there (its drive unplugged) reads as empty, so the
+/// manifest is left alone then too — rewriting it would forget the whole library.
+fn scan_archives(
+    conn: &rusqlite::Connection,
+    root: &std::path::Path,
+    active: Option<&modsroot::Active>,
+) -> (Vec<PathBuf>, bool) {
+    if let Some(m) = relocate::load_marker(conn, &modsroot::canonical_key(root)) {
+        let archives = match m.direction {
+            relocate::Direction::Forward => vec![m.to, m.from],
+            relocate::Direction::Back => vec![m.from, m.to],
+        };
+        return (archives, false);
+    }
+    let layout = match active {
+        Some(a) if modsroot::same_folder(&a.layout.mods, root) => a.layout.clone(),
+        _ => resolve_active(conn, root).layout,
+    };
+    let ok = !layout.archive_missing();
+    (vec![layout.archive], ok)
 }
 
 /// Return a mod's icon as a cached PNG `data:` URL (or null if unavailable).
@@ -919,8 +935,9 @@ const STILL_LOADING: &str = "Silo is still loading your library — try again in
 /// layout has been worked out (an unfinished move can't be ruled out yet). Once resolved with
 /// no usable mods folder there's nothing to move, so choosing a folder stays possible.
 fn ensure_no_move() -> Result<(), String> {
-    // A move that's copying right now counts even before the layout republishes its marker.
-    if relocate::is_running() {
+    // A move that's starting, copying or finishing counts even before (or after) the layout
+    // publishes its marker — it holds the library lock across both ends.
+    if move_in_progress() {
         return Err("Finish or cancel the archive move first.".into());
     }
     match modsroot::active() {
@@ -1006,17 +1023,23 @@ fn try_move_lock() -> Result<MoveLock, String> {
     }
 }
 
-/// Refuse organize writes while a custom archive's drive is missing (nothing is deleted; the
-/// banner offers Retry / Choose another), or while no layout is known.
+/// Refuse organize writes and new archive moves while a custom archive's drive is missing
+/// (nothing is deleted; the banner offers Retry / Choose another), or while no layout is known.
 fn ensure_archive_available() -> Result<(), String> {
     match modsroot::active() {
         None if !modsroot::resolved() => Err(STILL_LOADING.into()),
         None => Err("No mods folder selected".into()),
-        Some(a) if !a.layout.archive_is_default() && !a.layout.archive.is_dir() => Err(
-            "Your library archive isn't available — reconnect its drive or choose another.".into(),
-        ),
+        Some(a) if a.layout.archive_missing() => Err(archive_unavailable(&a.layout.archive)),
         Some(_) => Ok(()),
     }
+}
+
+/// Pure: why nothing can be filed into or moved out of a missing archive, and what to do.
+fn archive_unavailable(archive: &std::path::Path) -> String {
+    format!(
+        "Your library archive at {} isn't available. Reconnect its drive, or use Choose another to point Silo at where it is now.",
+        archive.display()
+    )
 }
 
 /// Resolve a frontend-supplied mods folder to a TRUSTED one. Empty → the first detected
@@ -1599,15 +1622,10 @@ fn foreign_mods_problem(n: usize) -> String {
     )
 }
 
-/// Everything about the folder itself that rules it out. Checked before any probe writes a
-/// file there.
-fn target_problems(
-    conn: &rusqlite::Connection,
-    layout: &organize::Layout,
-    new: &std::path::Path,
-    app_data: Option<&std::path::Path>,
-) -> Vec<String> {
-    let f = fences(conn, layout, app_data);
+/// Where a folder can't be the archive at all: `path_problems` (already there, inside the mods
+/// folder, another folder's archive, `Layout::new`'s rules) plus the `Fences` overlaps. Shared
+/// by a move and a re-point. Mostly pure (`same_folder` canonicalizes).
+fn fence_problems(layout: &organize::Layout, new: &std::path::Path, f: &Fences) -> Vec<String> {
     let mut v = relocate::path_problems(
         &layout.archive,
         new,
@@ -1615,7 +1633,20 @@ fn target_problems(
         &f.other_archives,
         modsroot::same_folder,
     );
-    v.extend(overlap_problems(&key_path(new), &f));
+    v.extend(overlap_problems(&key_path(new), f));
+    v
+}
+
+/// Everything about the folder itself that rules it out as a move's destination. Checked
+/// before any probe writes a file there.
+fn target_problems(
+    conn: &rusqlite::Connection,
+    layout: &organize::Layout,
+    new: &std::path::Path,
+    app_data: Option<&std::path::Path>,
+) -> Vec<String> {
+    let f = fences(conn, layout, app_data);
+    let mut v = fence_problems(layout, new, &f);
     // Mods filed in `<new>/<subfolder>/` that Silo doesn't know would mix with the library.
     // (Loose mods at the top level are fine — that's adopt.)
     let foreign = relocate::unknown_mods(new, &[]).len();
@@ -1625,33 +1656,74 @@ fn target_problems(
     v
 }
 
-fn unknown_mods_problem(n: usize) -> String {
+/// The free-space facts a move depends on (see `move_problems`).
+struct Space {
+    /// The old and new archive share a drive.
+    archive_same_drive: bool,
+    /// The whole archive.
+    bytes: u64,
+    /// The largest single mod.
+    largest: u64,
+    /// Free on the new archive's drive (unknown never blocks).
+    free: Option<u64>,
+    /// The largest active zip whose mods-folder entry is a hardlink to its archived copy, when
+    /// the new archive is on another drive than the mods folder (else 0): re-linking it may fall
+    /// back to a copy on the mods folder's drive, which needs that much room there until the
+    /// old copy is deleted.
+    relink_copy: u64,
+    /// Free on the mods folder's drive.
+    mods_free: Option<u64>,
+}
+
+/// Pure inputs to `move_problems`.
+struct MoveFacts {
+    /// Problems with the folder itself (`target_problems`, the write probe).
+    target: Vec<String>,
+    /// Mods in the archive the library doesn't know, phrased (`relocate::unknown_messages`).
+    unknown: Vec<String>,
+    /// Library mods whose archived copy is missing (the move would pause on each).
+    missing: usize,
+    /// Names already at the destination.
+    collisions: Vec<String>,
+    space: Space,
+}
+
+fn missing_mods_problem(n: usize) -> String {
     if n == 1 {
-        "1 mod in your archive isn't in Silo's library yet — rescan, then try again.".into()
+        "1 mod in your library is missing from the archive — rescan first.".into()
     } else {
-        format!("{n} mods in your archive aren't in Silo's library yet — rescan, then try again.")
+        format!("{n} mods in your library are missing from the archive — rescan first.")
     }
 }
 
 /// Pure: everything that blocks a move, in the order the dialog lists them: problems with the
-/// folder itself, mods the library doesn't know (they'd be left behind), names already at the
-/// destination, and — unless the old and new archive share a drive (each mod's old copy goes
-/// before the next is copied) — free space.
-fn move_problems(
-    target: Vec<String>,
-    unknown: usize,
-    collisions: Vec<String>,
-    archive_same_drive: bool,
-    bytes: u64,
-    free: Option<u64>,
-) -> Vec<String> {
-    let mut v = target;
-    if unknown > 0 {
-        v.push(unknown_mods_problem(unknown));
+/// folder itself, mods the library doesn't know (they'd be left behind), library mods missing
+/// from the archive (each would stop the move), names already at the destination, then free
+/// space. On one drive each mod's old copy is deleted before the next is copied — and an active
+/// mod's hardlink is re-linked to the new copy first, so the delete really frees it — so only the
+/// largest mod needs room at a time; across drives the whole archive must fit, plus room on the
+/// mods folder's drive for a re-link that falls back to a copy.
+fn move_problems(f: MoveFacts) -> Vec<String> {
+    let mut v = f.target;
+    v.extend(f.unknown);
+    if f.missing > 0 {
+        v.push(missing_mods_problem(f.missing));
     }
-    v.extend(collisions);
-    if !archive_same_drive {
-        v.extend(relocate::space_problem(bytes, free));
+    v.extend(f.collisions);
+    let s = f.space;
+    let needed = if s.archive_same_drive {
+        s.largest
+    } else {
+        s.bytes
+    };
+    if needed > 0 {
+        v.extend(relocate::space_problem(needed, s.free));
+    }
+    if s.relink_copy > 0 {
+        v.extend(relocate::mods_drive_space_problem(
+            s.relink_copy,
+            s.mods_free,
+        ));
     }
     v
 }
@@ -1681,28 +1753,57 @@ fn check_move(
     target: Vec<String>,
 ) -> MoveCheck {
     let rows = db::load_organized(conn, key);
-    let bytes: u64 = rows
+    let archived =
+        |r: &db::OrganizedRow| organize::archive_path(&layout.archive, &r.category, &r.file_name);
+    let sizes: Vec<u64> = rows
         .iter()
-        .map(|r| {
-            relocate::size_of(&organize::archive_path(
-                &layout.archive,
-                &r.category,
-                &r.file_name,
-            ))
-        })
-        .sum();
+        .map(|r| relocate::size_of(&archived(r)))
+        .collect();
+    let bytes: u64 = sizes.iter().sum();
+    let missing = rows
+        .iter()
+        .filter(|r| archived(r).symlink_metadata().is_err())
+        .count();
     let new_mount = organize::mount_of(new);
+    let mods_mount = organize::mount_of(&layout.mods);
     let free = new_mount.as_ref().map(|(_, f)| *f);
-    let same_drive = known_same_mount(&organize::mount_of(&layout.mods), &new_mount);
+    let same_drive = known_same_mount(&mods_mount, &new_mount);
     let archive_same_drive = known_same_mount(&organize::mount_of(&layout.archive), &new_mount);
-    let problems = move_problems(
+    // Only a hardlink can't follow its copy to another drive (a symlink re-points for free).
+    let relink_copy = if same_drive {
+        0
+    } else {
+        rows.iter()
+            .zip(&sizes)
+            .filter(|(r, _)| {
+                r.active
+                    && r.kind != "dir"
+                    && relocate::same_file(&layout.mods.join(&r.file_name), &archived(r))
+            })
+            .map(|(_, s)| *s)
+            .max()
+            .unwrap_or(0)
+    };
+    let unknown = relocate::unknown_mods(&layout.archive, &rows);
+    let problems = move_problems(MoveFacts {
         target,
-        relocate::unknown_mods(&layout.archive, &rows).len(),
-        relocate::collisions(new, &rows),
-        archive_same_drive,
-        bytes,
-        free,
-    );
+        unknown: relocate::unknown_messages(
+            &unknown,
+            &rows,
+            "then try again.",
+            "rescan, then try again.",
+        ),
+        missing,
+        collisions: relocate::collisions(new, &rows),
+        space: Space {
+            archive_same_drive,
+            bytes,
+            largest: sizes.iter().copied().max().unwrap_or(0),
+            free,
+            relink_copy,
+            mods_free: mods_mount.as_ref().map(|(_, f)| *f),
+        },
+    });
     MoveCheck {
         mod_count: rows.len(),
         bytes,
@@ -1789,6 +1890,10 @@ fn start_move(
     ensure_no_move()?;
     let app_data = app.path().app_data_dir().ok();
     with_move_ctx(app, db, "start", |ctx, layout| {
+        // Nothing to move out of a missing archive — and every mod would look "missing".
+        if layout.archive_missing() {
+            return Err(archive_unavailable(&layout.archive));
+        }
         let target = target_problems(ctx.conn, layout, &new, app_data.as_deref());
         if !target.is_empty() {
             return Err(target.join(" "));
@@ -1855,6 +1960,7 @@ async fn archive_move_preflight(
     let app_data = app.path().app_data_dir().ok();
     tauri::async_runtime::spawn_blocking(move || {
         ensure_no_move()?;
+        ensure_archive_available()?;
         let (layout, key) = active_layout()?;
         let new = modsroot::real_folder(std::path::Path::new(&path))?;
         let conn = db::open(&db)?;
@@ -1968,9 +2074,67 @@ async fn archive_use_default(
         if layout.archive_is_default() {
             return Err("Your library archive is already in its default place.".into());
         }
+        ensure_archive_available()?;
         let mods = modsroot::real_folder(&layout.mods)?;
         let default = organize::Layout::default_for(&mods).archive;
         start_move(&app, &db, default, true)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Pure: why the archive can't be re-pointed right now, if it can't. Re-pointing (changing
+/// where Silo looks, moving nothing) is only for a custom archive that isn't there; an
+/// available one is moved instead, and never while a move is unfinished.
+fn repoint_refusal(layout: &organize::Layout, unfinished_move: bool) -> Option<String> {
+    if unfinished_move {
+        return Some("Finish or cancel the archive move first.".into());
+    }
+    if !layout.archive_missing() {
+        return Some("Your library archive is available — use Change… to move it instead.".into());
+    }
+    None
+}
+
+/// Point Silo at another archive folder (`None` = the default `<mods>/archive`) WITHOUT moving
+/// anything — for a custom archive that has gone missing: the user moved or restored it
+/// elsewhere, or starts fresh with the default (whatever is on the old drive stays there,
+/// untouched). The same path/overlap fences as a move apply, but mods already filed in the
+/// folder are welcome — adopting them is the point. Republishes the layout; the frontend then
+/// rescans so the library reconciles against the new archive.
+#[tauri::command]
+async fn archive_repoint(app: tauri::AppHandle, path: Option<String>) -> Result<(), String> {
+    ensure_no_move()?;
+    let db = db_path(&app)?;
+    let app_data = app.path().app_data_dir().ok();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _write = library_write()?;
+        let (layout, key) = active_layout()?;
+        let conn = db::open(&db)?;
+        let unfinished = relocate::load_marker(&conn, &key).is_some();
+        if let Some(why) = repoint_refusal(&layout, unfinished) {
+            return Err(why);
+        }
+        let new = match &path {
+            Some(p) => modsroot::real_folder(std::path::Path::new(p))?,
+            None => organize::Layout::default_for(&modsroot::real_folder(&layout.mods)?).archive,
+        };
+        let problems = fence_problems(&layout, &new, &fences(&conn, &layout, app_data.as_deref()));
+        if !problems.is_empty() {
+            return Err(problems.join(" "));
+        }
+        // A chosen folder must be usable now; the default is created when first filed into.
+        if path.is_some() {
+            modsroot::validate_folder(&new)?;
+        }
+        relocate::store_archive_setting(&conn, &key, &layout.mods, &new)?;
+        eprintln!(
+            "[Silo] re-pointed the library archive {} -> {} (nothing moved)",
+            layout.archive.display(),
+            new.display()
+        );
+        let _ = compute_mods_root_status(&conn);
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3264,6 +3428,7 @@ pub fn run() {
             archive_move_pause,
             archive_move_cancel,
             archive_use_default,
+            archive_repoint,
             archive_adopt_preview,
             archive_adopt_apply,
             get_loadouts,
@@ -3316,11 +3481,14 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_gh_scope, cancel_falls_back, foreign_mods_problem, known_same_mount, move_outcome,
-        move_problems, overlap_problems, scope_grants, select_adopt, split_adopt,
-        unknown_mods_problem, Fences,
+        build_gh_scope, cancel_falls_back, fence_problems, foreign_mods_problem, known_same_mount,
+        move_outcome, move_problems, overlap_problems, repoint_refusal, scan_archives,
+        scope_grants, select_adopt, split_adopt, Fences, MoveFacts, Space,
     };
-    use crate::{organize::ModInput, relocate::MoveMarker};
+    use crate::{
+        organize::{Layout, ModInput},
+        relocate::MoveMarker,
+    };
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
@@ -3532,36 +3700,227 @@ mod tests {
         assert_eq!(missing, ["..\\evil.zip"]);
     }
 
+    fn space(archive_same_drive: bool, free: Option<u64>) -> Space {
+        Space {
+            archive_same_drive,
+            bytes: 10 << 30,
+            largest: 2 << 30,
+            free,
+            relink_copy: 0,
+            mods_free: None,
+        }
+    }
+
+    fn facts(space: Space) -> MoveFacts {
+        MoveFacts {
+            target: vec![],
+            unknown: vec![],
+            missing: 0,
+            collisions: vec![],
+            space,
+        }
+    }
+
     #[test]
     fn move_problems_lists_everything_in_order() {
-        let p = move_problems(
-            vec!["path".into()],
-            3,
-            vec!["FS25_A: x already exists".into()],
-            false,
-            10 << 30,
-            Some(1 << 30),
-        );
-        assert_eq!(p.len(), 4);
+        let p = move_problems(MoveFacts {
+            target: vec!["path".into()],
+            unknown: vec!["FS25_B.zip is filed twice".into(), "3 mods unknown".into()],
+            missing: 2,
+            collisions: vec!["FS25_A: x already exists".into()],
+            space: space(false, Some(1 << 30)),
+        });
+        assert_eq!(p.len(), 6, "{p:?}");
         assert_eq!(p[0], "path");
-        assert!(p[1].starts_with("3 mods in your archive aren't"));
-        assert_eq!(p[2], "FS25_A: x already exists");
-        assert!(p[3].starts_with("Not enough free space"));
+        assert_eq!(p[1], "FS25_B.zip is filed twice");
+        assert_eq!(p[2], "3 mods unknown");
+        assert!(p[3].starts_with("2 mods in your library are missing from the archive"));
+        assert!(p[3].contains("rescan first"));
+        assert_eq!(p[4], "FS25_A: x already exists");
+        assert!(p[5].starts_with("Not enough free space"));
     }
 
     #[test]
-    fn move_problems_skips_space_on_the_same_drive() {
-        // Same drive: each mod's old copy is deleted before the next is copied, so the whole
-        // archive never needs to fit twice.
-        assert!(move_problems(vec![], 0, vec![], true, 10 << 30, Some(0)).is_empty());
+    fn missing_problem_pluralizes() {
+        let p = move_problems(MoveFacts {
+            missing: 1,
+            ..facts(space(false, None))
+        });
+        assert!(
+            p[0].starts_with("1 mod in your library is missing"),
+            "{p:?}"
+        );
+    }
+
+    #[test]
+    fn move_problems_on_the_same_drive_need_room_for_one_mod_at_a_time() {
+        // Each mod's old copy (and any hardlink to it, re-linked first) is gone before the next
+        // is copied, so the whole archive never needs to fit twice — only the largest mod.
+        assert!(move_problems(facts(space(true, Some(4 << 30)))).is_empty());
+        let p = move_problems(facts(space(true, Some(1 << 30))));
+        assert!(p[0].starts_with("Not enough free space"), "{p:?}");
         // Unknown free space never blocks.
-        assert!(move_problems(vec![], 0, vec![], false, 10 << 30, None).is_empty());
+        assert!(move_problems(facts(space(false, None))).is_empty());
+        assert!(move_problems(facts(space(true, None))).is_empty());
     }
 
     #[test]
-    fn unknown_mods_problem_pluralizes() {
-        assert!(unknown_mods_problem(1).starts_with("1 mod in your archive isn't"));
-        assert!(unknown_mods_problem(2).starts_with("2 mods in your archive aren't"));
+    fn move_problems_count_a_relink_copy_on_the_mods_drive() {
+        let mut s = space(false, Some(100 << 30));
+        s.relink_copy = 3 << 30;
+        s.mods_free = Some(1 << 30);
+        let p = move_problems(facts(s));
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].contains("mods folder's drive"), "{p:?}");
+        let mut ok = space(false, Some(100 << 30));
+        ok.relink_copy = 3 << 30;
+        ok.mods_free = Some(10 << 30);
+        assert!(move_problems(facts(ok)).is_empty());
+    }
+
+    #[test]
+    fn ensure_no_move_refuses_while_a_move_holds_the_lock() {
+        use std::sync::atomic::Ordering::SeqCst;
+        super::MOVE_HOLDS_LOCK.store(true, SeqCst);
+        let r = super::ensure_no_move();
+        super::MOVE_HOLDS_LOCK.store(false, SeqCst);
+        assert_eq!(
+            r,
+            Err("Finish or cancel the archive move first.".to_string())
+        );
+    }
+
+    fn temp_base(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("silo_lib_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("mods")).unwrap();
+        base
+    }
+
+    #[test]
+    fn a_scan_never_forgets_the_library_while_a_custom_archive_is_missing() {
+        let base = temp_base("scanmissing");
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let mods = base.join("mods");
+        let gone = base.join("unplugged");
+        let active = crate::modsroot::Active {
+            layout: Layout {
+                mods: mods.clone(),
+                archive: gone.clone(),
+            },
+            move_to: None,
+        };
+        let (archives, reconcile) = scan_archives(&conn, &mods, Some(&active));
+        assert_eq!(archives, vec![gone.clone()]);
+        assert!(
+            !reconcile,
+            "a missing custom archive must not drop organized rows"
+        );
+        // Plugged back in: reconcile as usual.
+        std::fs::create_dir_all(&gone).unwrap();
+        assert!(scan_archives(&conn, &mods, Some(&active)).1);
+        // The default archive may simply not exist yet — that's an empty library, not a
+        // missing drive.
+        let default = crate::modsroot::Active {
+            layout: Layout::default_for(&mods),
+            move_to: None,
+        };
+        assert!(scan_archives(&conn, &mods, Some(&default)).1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_scan_of_another_folder_reads_its_stored_archive() {
+        let base = temp_base("scanother");
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let mods = base.join("mods");
+        let other = base.join("other-mods");
+        let hdd = base.join("hdd");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::create_dir_all(&hdd).unwrap();
+        let key = crate::modsroot::canonical_key(&other);
+        crate::relocate::store_archive_setting(&conn, &key, &other, &hdd).unwrap();
+        let active = crate::modsroot::Active {
+            layout: Layout::default_for(&mods),
+            move_to: None,
+        };
+        let (archives, reconcile) = scan_archives(&conn, &other, Some(&active));
+        assert_eq!(archives, vec![hdd]);
+        assert!(reconcile);
+        // No stored archive → that folder's default.
+        let third = base.join("third");
+        std::fs::create_dir_all(&third).unwrap();
+        assert_eq!(
+            scan_archives(&conn, &third, Some(&active)).0,
+            vec![third.join("archive")]
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_scan_mid_move_reads_both_archives_and_never_reconciles() {
+        let base = temp_base("scanmove");
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let mods = base.join("mods");
+        let key = crate::modsroot::canonical_key(&mods);
+        let m = MoveMarker::new(mods.join("archive"), base.join("hdd"));
+        crate::relocate::save_marker(&conn, &key, &m).unwrap();
+        let (archives, reconcile) = scan_archives(&conn, &mods, None);
+        assert_eq!(archives, vec![base.join("hdd"), mods.join("archive")]);
+        assert!(!reconcile);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn repoint_is_only_for_a_missing_archive_with_no_move() {
+        let base = temp_base("repointgate");
+        let mods = base.join("mods");
+        let gone = Layout {
+            mods: mods.clone(),
+            archive: base.join("unplugged"),
+        };
+        assert_eq!(repoint_refusal(&gone, false), None);
+        assert!(
+            repoint_refusal(&gone, true).is_some(),
+            "a move is unfinished"
+        );
+        let here = Layout {
+            mods: mods.clone(),
+            archive: base.clone(),
+        };
+        assert!(
+            repoint_refusal(&here, false).is_some(),
+            "an available archive is moved, not re-pointed"
+        );
+        assert!(repoint_refusal(&Layout::default_for(&mods), false).is_some());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn repoint_fences_refuse_the_mods_folder_but_accept_a_filed_archive() {
+        let base = temp_base("repointfence");
+        let mods = base.join("mods");
+        let restored = base.join("restored");
+        std::fs::create_dir_all(restored.join("Tools")).unwrap();
+        std::fs::write(restored.join("Tools/FS25_A.zip"), b"PK").unwrap();
+        let layout = Layout {
+            mods: mods.clone(),
+            archive: base.join("unplugged"),
+        };
+        let f = Fences {
+            mods: super::key_path(&mods),
+            current_archive: super::key_path(&layout.archive),
+            other_mods: vec![],
+            other_archives: vec![],
+            user_dir: None,
+            app_data: None,
+        };
+        // Mods filed in subfolders are the point of a re-point, not a problem.
+        assert!(fence_problems(&layout, &restored, &f).is_empty());
+        assert!(!fence_problems(&layout, &mods.join("sub"), &f).is_empty());
+        assert!(!fence_problems(&layout, &mods, &f).is_empty());
+        assert!(!fence_problems(&layout, &base, &f).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
