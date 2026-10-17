@@ -70,6 +70,12 @@ sysinfo = { version = "0.36", default-features = false, features = ["system", "d
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
+# NTFS junctions project folder mods without Developer Mode (symlink_dir needs it), so a
+# folder mod is linked, not copied (see organize::link_dir_native).
+[target.'cfg(windows)'.dependencies]
+# 1.4.1+: `create` strips the `\\?\` prefix `canonicalize` adds (organize::junction_to relies on it).
+junction = "1.4.1"
+
 [profile.dev]
 # Faster incremental dev builds; the heavy work is I/O-bound anyway.
 incremental = true
