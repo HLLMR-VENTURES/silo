@@ -50,6 +50,7 @@
     bisectSnapshotGet,
     bisectSnapshotClear,
     appVersion,
+    takeStartupNotices,
     detectForeignFiles,
     adoptForeignFile,
     restoreForeignFile,
@@ -2060,6 +2061,12 @@
       // Where the library archive lives, and any unfinished move (paused before a restart).
       // Awaited so the first scan's auto-file guard sees a move left paused before a restart.
       await loadArchive();
+      try {
+        const notes = await takeStartupNotices();
+        if (notes.length) infoMsg = notes.join(" ");
+      } catch {
+        /* non-critical */
+      }
       if (roots.length) runScan();
       // Detect a cloud-synced mods folder (OneDrive / Google Drive / Proton Drive): those reject
       // hardlinks, so Silo projects the active set as copies. Warn once so the extra disk use and

@@ -17,6 +17,7 @@ pub mod moddesc;
 pub mod modsroot;
 pub mod mpsync;
 pub mod net;
+pub mod notices;
 pub mod organize;
 pub mod paths;
 mod picked;
@@ -4147,6 +4148,12 @@ fn app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+/// Notices from startup work, each returned once (see `notices`).
+#[tauri::command]
+async fn take_startup_notices() -> Vec<String> {
+    notices::take()
+}
+
 /// True when this machine can store account tokens in the OS keychain. When false, the UI
 /// warns that a connected token would be kept in the local DB unencrypted.
 #[tauri::command]
@@ -4208,6 +4215,21 @@ pub fn run() {
             tauri::async_runtime::spawn_blocking(move || {
                 match db_path(&handle).and_then(|p| db::open(&p)) {
                     Ok(conn) => {
+                        // A daily copy of the database to fall back on if it's ever damaged.
+                        if let Ok(p) = db_path(&handle) {
+                            match db::snapshot(
+                                &conn,
+                                &db::snapshot_dir(&p),
+                                5,
+                                std::time::Duration::from_secs(20 * 3600),
+                            ) {
+                                Ok(Some(s)) => {
+                                    eprintln!("[Silo] database snapshot saved: {}", s.display())
+                                }
+                                Ok(None) => {}
+                                Err(e) => eprintln!("[Silo] database snapshot failed: {e}"),
+                            }
+                        }
                         let _ = compute_mods_root_status(&conn);
                         eprintln!("[Silo] library layout resolved at startup");
                     }
@@ -4318,6 +4340,7 @@ pub fn run() {
             save_mod_settings,
             save_mod_settings_raw,
             app_version,
+            take_startup_notices,
             secret_storage_secure,
             detect_foreign_files,
             adopt_foreign_file,

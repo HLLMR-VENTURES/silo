@@ -198,6 +198,11 @@ export function appVersion(): Promise<string> {
   return invoke<string>("app_version");
 }
 
+/** One-time notices from startup work (a database restored, an archive found again). */
+export function takeStartupNotices(): Promise<string[]> {
+  return invoke<string[]>("take_startup_notices");
+}
+
 /** True when the OS keychain can hold account tokens; false → they'd fall back to the DB. */
 export function secretStorageSecure(): Promise<boolean> {
   return invoke<boolean>("secret_storage_secure");

@@ -6,7 +6,7 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A cached scan row: the invalidation key (mtime+size) plus the serialized entry.
 pub struct CacheEntry {
@@ -111,6 +111,7 @@ pub fn open(db_path: &Path) -> Result<Connection, String> {
     if let Some(dir) = db_path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    check_once(db_path);
     let mut conn = Connection::open(db_path).map_err(|e| e.to_string())?;
     match schema_version(&conn)? {
         v if v == SCHEMA_VERSION => Ok(conn),
@@ -189,6 +190,201 @@ fn migrate_0_to_1(tx: &Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
     scope_by_root(tx)
+}
+
+// ── damaged-database recovery and snapshots ──
+
+/// Where startup snapshots of the database live (beside it, in the app data folder).
+pub fn snapshot_dir(db_path: &Path) -> PathBuf {
+    db_path.with_file_name("db-snapshots")
+}
+
+/// Database files checked this run (`check_once`).
+static CHECKED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn forget_checked(path: &Path) {
+    CHECKED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|p| p != path);
+}
+
+/// Once per run per file, before first use: if SQLite reports the file damaged, set it aside,
+/// put back the newest good snapshot (or let `open` start a new database), and leave a notice.
+/// A database that is busy, locked or unreadable for any other reason is never touched.
+fn check_once(db_path: &Path) {
+    let mut checked = CHECKED.lock().unwrap_or_else(|e| e.into_inner());
+    if checked.iter().any(|p| p == db_path) {
+        return;
+    }
+    checked.push(db_path.to_path_buf());
+    if !db_path.is_file() || !is_damaged(db_path) {
+        return;
+    }
+    crate::notices::push(match recover(db_path, &snapshot_dir(db_path)) {
+        Ok(notice) => notice,
+        Err(e) => format!(
+            "Silo's library database is damaged and couldn't be set aside ({e}). Close any other \
+             copy of Silo and start it again."
+        ),
+    });
+}
+
+fn is_corruption(e: &rusqlite::Error) -> bool {
+    matches!(
+        e.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseCorrupt) | Some(rusqlite::ErrorCode::NotADatabase)
+    )
+}
+
+fn is_damaged(path: &Path) -> bool {
+    let Ok(c) = Connection::open(path) else {
+        return false;
+    };
+    match c.query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0)) {
+        Ok(verdict) => verdict != "ok",
+        Err(e) => is_corruption(&e),
+    }
+}
+
+fn unix_now() -> std::time::Duration {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+}
+
+/// `silo.db` (and its -wal / -shm) renamed to `silo.db.damaged-<unix secs>`, never over an
+/// earlier damaged file; the main file's new path is returned. The -wal goes first: left
+/// beside a restored database, SQLite would replay it into that database.
+fn set_db_aside(path: &Path) -> std::io::Result<PathBuf> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "silo.db".into());
+    let secs = unix_now().as_secs();
+    let taken = |stem: &str| {
+        ["", "-wal", "-shm"]
+            .iter()
+            .any(|s| path.with_file_name(format!("{stem}{s}")).exists())
+    };
+    let stem = (0u32..)
+        .map(|n| match n {
+            0 => format!("{name}.damaged-{secs}"),
+            n => format!("{name}.damaged-{secs}.{n}"),
+        })
+        .find(|stem| !taken(stem))
+        .unwrap_or_else(|| format!("{name}.damaged-{secs}"));
+    for suffix in ["-wal", "-shm"] {
+        let from = path.with_file_name(format!("{name}{suffix}"));
+        if from.exists() {
+            std::fs::rename(&from, path.with_file_name(format!("{stem}{suffix}")))?;
+        }
+    }
+    let kept = path.with_file_name(&stem);
+    std::fs::rename(path, &kept)?;
+    Ok(kept)
+}
+
+/// The number in a snapshot's name, `silo-<unix_ms>.db`; None for any other file.
+fn snapshot_ms(name: &str) -> Option<u64> {
+    let digits = name.strip_prefix("silo-")?.strip_suffix(".db")?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Snapshot files in `dir`, newest first.
+fn snapshots_newest_first(dir: &Path) -> Vec<(u64, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(u64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let ms = snapshot_ms(&e.file_name().to_string_lossy())?;
+            let path = e.path();
+            path.is_file().then_some((ms, path))
+        })
+        .collect();
+    found.sort_by_key(|(ms, _)| std::cmp::Reverse(*ms));
+    found
+}
+
+/// A snapshot SQLite reads cleanly and this Silo understands.
+fn is_usable_snapshot(path: &Path) -> bool {
+    let Ok(c) = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return false;
+    };
+    let clean = c
+        .query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0))
+        .is_ok_and(|v| v == "ok");
+    clean && schema_version(&c).is_ok_and(|v| v <= SCHEMA_VERSION)
+}
+
+fn newest_good_snapshot(dir: &Path) -> Option<PathBuf> {
+    snapshots_newest_first(dir)
+        .into_iter()
+        .map(|(_, path)| path)
+        .find(|path| is_usable_snapshot(path))
+}
+
+fn recover(db_path: &Path, snapshots: &Path) -> Result<String, String> {
+    let kept = set_db_aside(db_path).map_err(|e| e.to_string())?;
+    match newest_good_snapshot(snapshots) {
+        Some(snap) => {
+            std::fs::copy(&snap, db_path).map_err(|e| e.to_string())?;
+            // A snapshot isn't in WAL mode, and an up-to-date database never migrates again.
+            if let Ok(c) = Connection::open(db_path) {
+                let _ = enable_wal(&c);
+            }
+            Ok(format!(
+                "Silo's library database was damaged, so Silo restored its latest automatic backup \
+                 ({}). Tags, notes or loadouts changed after that backup may be missing. The \
+                 damaged file was kept at {}.",
+                snap.file_name().unwrap_or_default().to_string_lossy(),
+                kept.display()
+            ))
+        }
+        None => Ok(format!(
+            "Silo's library database was damaged and no backup copy could be used, so Silo \
+             started a new one. Your mods are untouched and the next scan finds them again; tags, \
+             notes, ratings and loadouts couldn't be recovered. The damaged file was kept at {}.",
+            kept.display()
+        )),
+    }
+}
+
+/// Copy the database to `dir/silo-<unix_ms>.db` with `VACUUM INTO` (consistent even while Silo
+/// runs) unless the newest snapshot is younger than `min_gap`, then keep only the newest `keep`.
+pub fn snapshot(
+    conn: &Connection,
+    dir: &Path,
+    keep: usize,
+    min_gap: std::time::Duration,
+) -> Result<Option<PathBuf>, String> {
+    let now = unix_now().as_millis() as u64;
+    if let Some((newest, _)) = snapshots_newest_first(dir).first() {
+        if now
+            .checked_sub(*newest)
+            .is_some_and(|age| age < min_gap.as_millis() as u64)
+        {
+            return Ok(None);
+        }
+    }
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let target = (now..)
+        .map(|ms| dir.join(format!("silo-{ms}.db")))
+        .find(|t| !t.exists())
+        .ok_or("no free snapshot name")?;
+    conn.execute("VACUUM INTO ?1", [target.to_string_lossy().into_owned()])
+        .map_err(|e| e.to_string())?;
+    for (_, old) in snapshots_newest_first(dir).into_iter().skip(keep) {
+        let _ = std::fs::remove_file(old);
+    }
+    Ok(Some(target))
 }
 
 /// Every table as of schema version 1. Only `migrate_0_to_1` runs it.
@@ -1022,6 +1218,152 @@ mod tests {
             assert_eq!(load_organized(&conn, "").len(), 1, "no row lost or doubled");
             assert_eq!(projection_stats(&conn, "", "FS25_A.zip"), Some((10, 20)));
         }
+    }
+
+    fn wal_shm(path: &Path) -> [std::path::PathBuf; 2] {
+        let s = path.to_string_lossy();
+        [format!("{s}-wal").into(), format!("{s}-shm").into()]
+    }
+
+    fn damage(path: &Path) {
+        forget_checked(path);
+        for p in wal_shm(path) {
+            let _ = std::fs::remove_file(p);
+        }
+        std::fs::write(
+            path,
+            b"this is not a database, just bytes that used to be one",
+        )
+        .unwrap();
+    }
+
+    fn set_aside(path: &Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("silo.db.damaged-")
+            })
+            .collect()
+    }
+
+    /// This test's own notices (the shared queue also holds other tests').
+    fn notices_for(path: &Path) -> Vec<String> {
+        let dir = path.parent().unwrap().to_string_lossy().into_owned();
+        crate::notices::take_mentioning(&dir)
+    }
+
+    #[test]
+    fn a_damaged_database_is_set_aside_and_the_newest_snapshot_restored() {
+        let path = temp_db("damaged_restore");
+        let dir = snapshot_dir(&path);
+        {
+            let mut c = open(&path).unwrap();
+            save_loadout(&mut c, None, "Before", &["FS25_A".to_string()]).unwrap();
+            assert!(snapshot(&c, &dir, 5, std::time::Duration::ZERO)
+                .unwrap()
+                .is_some());
+        }
+        damage(&path);
+        let conn = open(&path).unwrap();
+        assert_eq!(load_loadouts(&conn)[0].name, "Before");
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal", "the restored copy is back in WAL mode");
+        let notices = notices_for(&path);
+        assert!(
+            notices.iter().any(|n| n.contains("restored")),
+            "{notices:?}"
+        );
+        let kept = set_aside(&path);
+        assert_eq!(kept.len(), 1, "the damaged file is kept, never deleted");
+        assert!(std::fs::read(&kept[0])
+            .unwrap()
+            .starts_with(b"this is not a database"));
+    }
+
+    #[test]
+    fn with_no_snapshot_a_damaged_database_starts_fresh() {
+        let path = temp_db("damaged_fresh");
+        drop(open(&path).unwrap());
+        damage(&path);
+        let conn = open(&path).unwrap();
+        assert!(load_loadouts(&conn).is_empty());
+        let notices = notices_for(&path);
+        assert!(
+            notices.iter().any(|n| n.contains("started a new one")),
+            "{notices:?}"
+        );
+        assert_eq!(set_aside(&path).len(), 1);
+    }
+
+    #[test]
+    fn a_second_recovery_never_replaces_the_first_damaged_file() {
+        let path = temp_db("damaged_twice");
+        drop(open(&path).unwrap());
+        damage(&path);
+        drop(open(&path).unwrap());
+        damage(&path);
+        drop(open(&path).unwrap());
+        assert_eq!(set_aside(&path).len(), 2, "both damaged files are kept");
+    }
+
+    #[test]
+    fn a_healthy_database_is_left_alone() {
+        let path = temp_db("healthy");
+        drop(open(&path).unwrap());
+        forget_checked(&path);
+        drop(open(&path).unwrap());
+        assert!(set_aside(&path).is_empty());
+        assert!(notices_for(&path).is_empty());
+    }
+
+    #[test]
+    fn snapshots_rotate_and_skip_when_recent() {
+        let path = temp_db("snap_rotate");
+        let dir = snapshot_dir(&path);
+        let c = open(&path).unwrap();
+        for _ in 0..7 {
+            snapshot(&c, &dir, 5, std::time::Duration::ZERO).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        }
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            5,
+            "keeps the newest five"
+        );
+        assert!(
+            snapshot(&c, &dir, 5, std::time::Duration::from_secs(3600))
+                .unwrap()
+                .is_none(),
+            "a recent snapshot is enough"
+        );
+    }
+
+    #[test]
+    fn a_damaged_snapshot_is_skipped_for_an_older_good_one() {
+        let path = temp_db("snap_skip_bad");
+        let dir = snapshot_dir(&path);
+        {
+            let mut c = open(&path).unwrap();
+            save_loadout(&mut c, None, "Good", &[]).unwrap();
+            let good = snapshot(&c, &dir, 5, std::time::Duration::ZERO)
+                .unwrap()
+                .unwrap();
+            let newer = good.with_file_name(format!(
+                "silo-{}.db",
+                snapshot_ms(&good.file_name().unwrap().to_string_lossy()).unwrap() + 1000
+            ));
+            std::fs::write(newer, b"not a database").unwrap();
+        }
+        damage(&path);
+        let conn = open(&path).unwrap();
+        assert_eq!(load_loadouts(&conn)[0].name, "Good");
     }
 
     #[test]
