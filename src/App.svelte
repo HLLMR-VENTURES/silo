@@ -643,19 +643,23 @@
       errorMsg = String(e);
       throw e;
     });
+    // A plain string, like Tauri's own command errors, so BisectFlow's String(e) shows it as is.
     if (rep.errors.length) throw rep.errors.slice(0, 3).join("; ");
   }
 
   // When a bisection ends, a snapshot still on disk means the restore didn't finish (or
   // the panel was closed mid-run): offer the restore banner now rather than next launch.
+  // After a clean finish, rescan so the library shows the restored set.
   async function bisectingChanged(active: boolean) {
+    const wasRunning = bisecting;
     bisecting = active;
     if (active) return;
     try {
       bisectRecovery = await bisectSnapshotGet();
     } catch {
-      /* non-critical */
+      return; /* non-critical */
     }
+    if (wasRunning && !bisectRecovery) await runScan(false);
   }
 
   async function toggleActive(techName: string) {
@@ -2036,6 +2040,8 @@
     if (!bisectRecovery) return;
     busy = "Restoring your mod set…";
     try {
+      // Clears even if the report lists errors (applyActive shows them): this banner is the
+      // escape hatch, and keeping the snapshot would block every new bisection for good.
       await applyActive(bisectRecovery);
       await bisectSnapshotClear();
       bisectRecovery = null;
@@ -2293,6 +2299,7 @@
         activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
         onApply={bisectApply}
         onBisecting={(v) => void bisectingChanged(v)}
+        recoveryPending={bisectRecovery !== null}
       />
     </div>
   {/if}

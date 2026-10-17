@@ -15,8 +15,17 @@
     /** Passed through to guided bisection: apply a set, and report start/end. */
     onApply: (techNames: string[]) => Promise<void>;
     onBisecting: (active: boolean) => void;
+    /** An interrupted bisection is waiting to be restored; a new one can't start. */
+    recoveryPending?: boolean;
   }
-  let { onClose, activeMods, activeMaps, onApply, onBisecting }: Props = $props();
+  let {
+    onClose,
+    activeMods,
+    activeMaps,
+    onApply,
+    onBisecting,
+    recoveryPending = false,
+  }: Props = $props();
 
   let mode = $state<"report" | "bisect">("report");
   // Bisect the active non-map mods; maps stay on so the save still loads.
@@ -86,6 +95,7 @@
       alwaysOn={activeMaps}
       {onApply}
       {onBisecting}
+      {recoveryPending}
       onExit={() => (mode = "report")}
     />
   {:else if loading && !report}
