@@ -131,6 +131,11 @@ Tauri v2 (Rust core, all heavy work off the UI thread) + Svelte 5 + TypeScript, 
 cache (path + mtime + size), quick-xml parsing. See [`docs/`](docs/) —
 `ARCHITECTURE.md`, `MVP.md`, and per-feature notes.
 
+## Community
+
+Questions and ideas go to [Discussions](https://github.com/HLLMR/silo/discussions). For quick
+help and release news, join the [Silo Discord](https://discord.gg/NpxcYdGHrW).
+
 ## Contributing
 
 Issues and PRs welcome. `npm run check` (svelte-check) and `cargo test` (in `src-tauri/`)
