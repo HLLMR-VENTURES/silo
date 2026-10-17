@@ -17,10 +17,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Mod icons stay cached across Silo updates.** The icon cache uses stable names, so icons
   aren't decoded again after every update. (#213)
 
+- **Settings edits aren't lost to the game anymore.** Silo won't change gameSettings.xml or a
+  mod's settings while Farming Simulator 25 is running, because the game writes its own copy
+  back when it exits. Close the game first. (#PR)
+
+- **Silo stays responsive while it reads and saves.** Backing up a savegame, opening or saving
+  settings, importing or exporting loadouts and similar actions now run in the background
+  instead of freezing the window. (#PR)
+
 ### Security
 
 - **Stricter file-name checks.** File names with a colon, a trailing dot or space, or a reserved
   Windows device name (such as `CON` or `NUL`) are refused. (#213)
+
+- **Savegame backups only copy real savegames.** Silo now checks the folder against the
+  savegames it found before copying anything. (#PR)
+
+- **The catalog address is fixed in release builds.** Silo always downloads catalog mods
+  through its own catalog; the developer-only setting to change it no longer exists in the
+  release app. (#PR)
 
 ## [0.10.0] - 2026-10-17
 
@@ -73,14 +88,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Silo also asks before quitting, and won't install its own update, while it's still changing
   files. (#202)
 
-- **Settings edits aren't lost to the game anymore.** Silo won't change gameSettings.xml or a
-  mod's settings while Farming Simulator 25 is running, because the game writes its own copy
-  back when it exits. Close the game first. (#PR)
-
-- **Silo stays responsive while it reads and saves.** Backing up a savegame, opening or saving
-  settings, importing or exporting loadouts and similar actions now run in the background
-  instead of freezing the window. (#PR)
-
 ### Security
 
 - **Stricter image-host check.** The image proxy now parses URLs properly before checking the
@@ -90,13 +97,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stricter checks on GitHub requests.** Repository names and gist IDs are validated before
   Silo uses them, GitHub API addresses are built safely, and mod updates download only from
   GitHub. (#202)
-
-- **Savegame backups only copy real savegames.** Silo now checks the folder against the
-  savegames it found before copying anything. (#PR)
-
-- **The catalog address is fixed in release builds.** Silo always downloads catalog mods
-  through its own catalog; the developer-only setting to change it no longer exists in the
-  release app. (#PR)
 
 ## [0.9.0] - 2026-10-17
 
