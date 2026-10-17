@@ -212,7 +212,7 @@ async fn get_mod_icon(
     icon_filename: Option<String>,
 ) -> Option<String> {
     let icon = icon_filename?;
-    let cache_dir = app.path().app_cache_dir().ok()?.join("icons");
+    let cache_dir = app.path().app_cache_dir().ok()?.join("icons-v2");
     tauri::async_runtime::spawn_blocking(move || {
         icons::cached_data_url(&cache_dir, std::path::Path::new(&path), &kind, &icon)
     })
@@ -3870,6 +3870,10 @@ pub fn run() {
                     Err(e) => {
                         eprintln!("[Silo] couldn't resolve the library layout at startup: {e}")
                     }
+                }
+                // Icon thumbnails from the old (unstable) cache naming; `icons-v2` replaced it.
+                if let Ok(c) = handle.path().app_cache_dir() {
+                    let _ = std::fs::remove_dir_all(c.join("icons"));
                 }
             });
             Ok(())

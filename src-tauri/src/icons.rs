@@ -5,7 +5,6 @@
 
 use image::imageops::FilterType;
 use image::ImageFormat;
-use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::path::Path;
 
@@ -44,11 +43,7 @@ pub fn cached_thumbnail(
         .map(|d| d.as_millis())
         .unwrap_or(0);
 
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    mod_path.hash(&mut h);
-    mtime.hash(&mut h);
-    icon_filename.hash(&mut h);
-    let cached = cache_dir.join(format!("{:016x}.png", h.finish()));
+    let cached = cache_dir.join(format!("{}.png", cache_key(mod_path, mtime, icon_filename)));
 
     if let Ok(bytes) = std::fs::read(&cached) {
         return Ok(bytes);
@@ -57,6 +52,21 @@ pub fn cached_thumbnail(
     let _ = std::fs::create_dir_all(cache_dir);
     let _ = std::fs::write(&cached, &png);
     Ok(png)
+}
+
+/// Cache file stem for a mod's icon: the same across runs, builds and Rust versions.
+fn cache_key(mod_path: &Path, mtime_ms: u128, icon_filename: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(mod_path.to_string_lossy().as_bytes());
+    h.update([0u8]);
+    h.update(mtime_ms.to_le_bytes());
+    h.update([0u8]);
+    h.update(icon_filename.as_bytes());
+    h.finalize()[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Extract + decode + thumbnail a mod's icon, returning PNG bytes.
@@ -123,5 +133,22 @@ fn decode(raw: &[u8], name: &str) -> Result<image::DynamicImage, String> {
         Ok(image::DynamicImage::ImageRgba8(rgba))
     } else {
         image::load_from_memory(raw).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_icon_cache_key_is_stable() {
+        let k = cache_key(std::path::Path::new("/mods/FS25_A.zip"), 1234, "icon.dds");
+        // sha256("/mods/FS25_A.zip" 0x00 1234u128-LE 0x00 "icon.dds"), first 16 bytes as hex.
+        assert_eq!(k, "6c7699e483c86ced8f1ae81b22b4740b");
+        assert_eq!(k.len(), 32);
+        assert_ne!(
+            k,
+            cache_key(std::path::Path::new("/mods/FS25_A.zip"), 1235, "icon.dds")
+        );
     }
 }

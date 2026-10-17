@@ -63,6 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   versions before each edit (`.bak`, `.bak.2`, `.bak.3`). Before, every edit replaced the only
   backup. (#PR)
 
+- **Mod icons stay cached across Silo updates.** The icon cache uses stable names, so icons
+  aren't decoded again after every update. (#PR)
+
 ### Security
 
 - **Stricter image-host check.** The image proxy now parses URLs properly before checking the
