@@ -938,24 +938,65 @@ static LIBRARY_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const LIBRARY_BUSY: &str = "Silo is busy updating your library — try again when it finishes.";
 
-/// Take the library write lock (waiting for another write to finish), then re-check that no
-/// archive move started meanwhile. Hold the guard for the whole write.
-fn library_write() -> Result<std::sync::MutexGuard<'static, ()>, String> {
-    let guard = LIBRARY_WRITE.lock().unwrap_or_else(|e| e.into_inner());
-    ensure_no_move()?;
-    Ok(guard)
+const MOVE_RUNNING: &str = "An archive move is already running.";
+
+/// Set while an archive move holds the library write lock — including the checks before
+/// relocate's own guard flips `is_running()` — so writes refuse at once instead of waiting.
+static MOVE_HOLDS_LOCK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A move (or its pre-checks) holds the library lock, or relocate is copying.
+fn move_in_progress() -> bool {
+    MOVE_HOLDS_LOCK.load(std::sync::atomic::Ordering::SeqCst) || relocate::is_running()
 }
 
-/// The library write lock without waiting: a busy library refuses instead.
-fn try_library_write() -> Result<std::sync::MutexGuard<'static, ()>, String> {
-    use std::sync::TryLockError;
-    match LIBRARY_WRITE.try_lock() {
-        Ok(g) => Ok(g),
-        Err(TryLockError::Poisoned(e)) => Ok(e.into_inner()),
-        Err(TryLockError::WouldBlock) if relocate::is_running() => {
-            Err("An archive move is already running.".into())
+/// The library write lock as held by an archive move; clears `MOVE_HOLDS_LOCK` on drop
+/// (before the lock itself is released).
+struct MoveLock {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for MoveLock {
+    fn drop(&mut self) {
+        MOVE_HOLDS_LOCK.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn lock_result(
+    r: std::sync::TryLockResult<std::sync::MutexGuard<'static, ()>>,
+) -> Option<std::sync::MutexGuard<'static, ()>> {
+    match r {
+        Ok(g) => Some(g),
+        Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
+/// Take the library write lock, waiting behind another ordinary write but never behind an
+/// archive move (refused at once, like `ensure_no_move`), then re-check that no move started
+/// meanwhile. Hold the guard for the whole write.
+fn library_write() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    loop {
+        ensure_no_move()?;
+        if move_in_progress() {
+            return Err("Finish or cancel the archive move first.".into());
         }
-        Err(TryLockError::WouldBlock) => Err(LIBRARY_BUSY.into()),
+        if let Some(guard) = lock_result(LIBRARY_WRITE.try_lock()) {
+            ensure_no_move()?;
+            return Ok(guard);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// The library write lock for an archive move, without waiting: a busy library refuses.
+fn try_move_lock() -> Result<MoveLock, String> {
+    match lock_result(LIBRARY_WRITE.try_lock()) {
+        Some(g) => {
+            MOVE_HOLDS_LOCK.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(MoveLock { _guard: g })
+        }
+        None if move_in_progress() => Err(MOVE_RUNNING.into()),
+        None => Err(LIBRARY_BUSY.into()),
     }
 }
 
@@ -1458,6 +1499,8 @@ fn key_path(p: &std::path::Path) -> PathBuf {
 
 /// Folders a new archive must keep clear of, as identity keys (`key_path`).
 struct Fences {
+    /// The active mods folder.
+    mods: PathBuf,
     current_archive: PathBuf,
     /// Every known mods folder except the active one (the active one is `path_problems`').
     other_mods: Vec<PathBuf>,
@@ -1498,6 +1541,7 @@ fn fences(
         other_archives.push(key_path(&archive));
     }
     Fences {
+        mods: mine,
         current_archive: key_path(&layout.archive),
         other_mods,
         other_archives,
@@ -1526,10 +1570,10 @@ fn overlap_problems(new: &std::path::Path, f: &Fences) -> Vec<String> {
     if f.other_archives.iter().any(nests) {
         v.push("That folder overlaps another mods folder's archive — pick one outside it.".into());
     }
-    if f.user_dir
-        .as_ref()
-        .is_some_and(|u| new == u || u.starts_with(new))
-    {
+    // The FS25 user dir, a folder containing it, or anything inside it — except inside a
+    // mods folder (the default `<mods>/archive`; a wrong spot there gets its own message).
+    let in_mods = new.starts_with(&f.mods) || f.other_mods.iter().any(|m| new.starts_with(m));
+    if !in_mods && f.user_dir.as_ref().is_some_and(overlaps) {
         v.push("Pick a folder outside Farming Simulator 25's own folder.".into());
     }
     if f.app_data.as_ref().is_some_and(overlaps) {
@@ -1696,7 +1740,7 @@ fn with_move_ctx(
     ) -> Result<Option<relocate::MoveMarker>, String>,
 ) -> Result<Option<relocate::MoveMarker>, String> {
     let run = || {
-        let _write = try_library_write()?;
+        let _write = try_move_lock()?;
         let (layout, key) = active_layout()?;
         let conn = db::open(db)?;
         let emitter = app.clone();
@@ -1872,18 +1916,33 @@ fn archive_move_pause() {
 async fn archive_move_cancel(
     app: tauri::AppHandle,
 ) -> Result<Option<relocate::MoveMarker>, String> {
-    // The running move holds the library lock; reach it through the request flag instead.
-    if relocate::is_running() {
-        relocate::request_cancel();
-        eprintln!("[Silo] archive move cancel: asked the running move to turn around");
-        return Ok(None);
+    // A move holds the library lock; reach it through the request flag instead.
+    if move_in_progress() {
+        return Ok(request_turn_around());
     }
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        with_move_ctx(&app, &db, "cancel", |ctx, _| relocate::cancel(ctx))
+        match with_move_ctx(&app, &db, "cancel", |ctx, _| relocate::cancel(ctx)) {
+            // A start/resume took the lock in between (its checks may not have flipped
+            // `is_running()` yet): ask it to turn around rather than report "busy".
+            Err(e) if cancel_falls_back(&e) => Ok(request_turn_around()),
+            other => other,
+        }
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Pure: a cancel refused because a move holds the library lock becomes a request to that move.
+/// (An ordinary write holding it stays an error, so the cancel isn't silently dropped.)
+fn cancel_falls_back(err: &str) -> bool {
+    err == MOVE_RUNNING
+}
+
+fn request_turn_around() -> Option<relocate::MoveMarker> {
+    relocate::request_cancel();
+    eprintln!("[Silo] archive move cancel: asked the running move to turn around");
+    None
 }
 
 /// Move the archive back to the default `<mods>/archive` (created once the checks pass).
@@ -2020,6 +2079,7 @@ async fn archive_adopt_apply(
     app: tauri::AppHandle,
     file_names: Vec<String>,
 ) -> Result<organize::Report, String> {
+    ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let _write = library_write()?;
@@ -3245,8 +3305,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_gh_scope, foreign_mods_problem, known_same_mount, move_outcome, move_problems,
-        overlap_problems, scope_grants, select_adopt, split_adopt, unknown_mods_problem, Fences,
+        build_gh_scope, cancel_falls_back, foreign_mods_problem, known_same_mount, move_outcome,
+        move_problems, overlap_problems, scope_grants, select_adopt, split_adopt,
+        unknown_mods_problem, Fences,
     };
     use crate::{organize::ModInput, relocate::MoveMarker};
     use std::collections::HashSet;
@@ -3254,8 +3315,12 @@ mod tests {
 
     fn fences() -> Fences {
         Fences {
+            mods: PathBuf::from("/home/me/fs25/mods"),
             current_archive: PathBuf::from("/hdd/arch"),
-            other_mods: vec![PathBuf::from("/other/mods")],
+            other_mods: vec![
+                PathBuf::from("/other/mods"),
+                PathBuf::from("/home/me/fs25/mods2"),
+            ],
             other_archives: vec![PathBuf::from("/other/mods/archive"), PathBuf::from("/x/a2")],
             user_dir: Some(PathBuf::from("/home/me/fs25")),
             app_data: Some(PathBuf::from("/home/me/.silo")),
@@ -3342,6 +3407,35 @@ mod tests {
             &overlap_problems(Path::new("/home/me/.silo/a"), &f),
             "Silo's own data"
         ));
+    }
+
+    #[test]
+    fn overlap_refuses_inside_the_user_dir_except_inside_a_mods_folder() {
+        let f = fences();
+        for p in ["/home/me/fs25/savegame1", "/home/me/fs25/a/b"] {
+            assert!(
+                has(&overlap_problems(Path::new(p), &f), "Farming Simulator 25"),
+                "{p}"
+            );
+        }
+        // Inside the active mods folder: the default archive is fine (path_problems judges
+        // anything else there), and the user-dir message isn't added.
+        assert!(overlap_problems(Path::new("/home/me/fs25/mods/archive"), &f).is_empty());
+        assert!(!has(
+            &overlap_problems(Path::new("/home/me/fs25/mods/other"), &f),
+            "Farming Simulator 25"
+        ));
+        // Inside another known mods folder: refused for that, not repeated as the user dir.
+        let p = overlap_problems(Path::new("/home/me/fs25/mods2/sub"), &f);
+        assert!(has(&p, "another mods folder Silo knows"));
+        assert!(!has(&p, "Farming Simulator 25"));
+    }
+
+    #[test]
+    fn cancel_falls_back_only_when_a_move_holds_the_lock() {
+        assert!(cancel_falls_back(super::MOVE_RUNNING));
+        assert!(!cancel_falls_back(super::LIBRARY_BUSY));
+        assert!(!cancel_falls_back("There's no archive move to cancel."));
     }
 
     #[test]
