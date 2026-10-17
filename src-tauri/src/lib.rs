@@ -19,6 +19,7 @@ pub mod mpsync;
 pub mod net;
 pub mod organize;
 pub mod paths;
+mod picked;
 pub mod provenance;
 pub mod relocate;
 pub mod savegame;
@@ -1874,8 +1875,23 @@ async fn set_mods_root(app: tauri::AppHandle, path: String) -> Result<ModsRootSt
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        modsroot::validate_folder(std::path::Path::new(&path))?;
         let conn = db::open(&db)?;
+        let p = std::path::Path::new(&path);
+        let known: Vec<PathBuf> =
+            modsroot::parse_known(db::get_app_setting(&conn, modsroot::KNOWN_KEY).as_deref())
+                .into_iter()
+                .map(PathBuf::from)
+                .collect();
+        let default = fsgame::user_dir().map(|d| d.join("mods"));
+        if !mods_root_choice_allowed(
+            p,
+            picked::allows(picked::Purpose::ModsFolder, p),
+            &known,
+            default.as_deref(),
+        ) {
+            return Err(picked::NOT_PICKED.into());
+        }
+        modsroot::validate_folder(p)?;
         let known = modsroot::add_known(
             db::get_app_setting(&conn, modsroot::KNOWN_KEY).as_deref(),
             &path,
@@ -1953,6 +1969,44 @@ async fn folder_looks_empty(path: String) -> Result<bool, String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Show the native folder picker and remember the choice for `purpose` (see `picked`).
+#[tauri::command]
+async fn pick_folder(
+    window: tauri::Window,
+    purpose: picked::Purpose,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    // `blocking_pick_folder` posts the dialog to the main thread and waits for the answer, so
+    // it must never run there; `off_main` runs it on the blocking pool.
+    off_main(move || {
+        let mut builder = window.dialog().file();
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            builder = builder.set_parent(&window);
+        }
+        let Some(fp) = builder.blocking_pick_folder() else {
+            return Ok(None);
+        };
+        let path = fp.into_path().map_err(|e| e.to_string())?;
+        picked::remember(purpose, &path);
+        Ok(Some(path.to_string_lossy().into_owned()))
+    })
+    .await
+}
+
+/// The mods folder may change to a folder picked in Silo's picker, one Silo already knows (the
+/// known list, which only `set_mods_root` adds to), or FS25's default folder.
+fn mods_root_choice_allowed(
+    path: &std::path::Path,
+    picked: bool,
+    known: &[PathBuf],
+    default: Option<&std::path::Path>,
+) -> bool {
+    picked
+        || default.is_some_and(|d| modsroot::same_folder(d, path))
+        || known.iter().any(|k| modsroot::same_folder(k, path))
 }
 
 // ── Library archive location (#166) ──
@@ -2441,6 +2495,9 @@ async fn archive_move_start(
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let new = modsroot::real_folder(std::path::Path::new(&path))?;
+        if !picked::allows(picked::Purpose::Archive, &new) {
+            return Err(picked::NOT_PICKED.into());
+        }
         start_move(&app, &db, new, false)
     })
     .await
@@ -2571,7 +2628,13 @@ async fn archive_repoint(app: tauri::AppHandle, path: Option<String>) -> Result<
             return Err(why);
         }
         let new = match &path {
-            Some(p) => modsroot::real_folder(std::path::Path::new(p))?,
+            Some(p) => {
+                let new = modsroot::real_folder(std::path::Path::new(p))?;
+                if !picked::allows(picked::Purpose::Archive, &new) {
+                    return Err(picked::NOT_PICKED.into());
+                }
+                new
+            }
             None => organize::Layout::default_for(&modsroot::real_folder(&layout.mods)?).archive,
         };
         let problems = fence_problems(&layout, &new, &fences(&conn, &layout, app_data.as_deref()));
@@ -4039,6 +4102,7 @@ pub fn run() {
             point_game_at_mods_root,
             create_mods_folder,
             folder_looks_empty,
+            pick_folder,
             archive_status,
             archive_move_preflight,
             archive_move_start,
@@ -4180,6 +4244,20 @@ mod tests {
 
     fn has(v: &[String], needle: &str) -> bool {
         v.iter().any(|p| p.contains(needle))
+    }
+
+    #[test]
+    fn the_mods_folder_changes_only_to_a_picked_known_or_default_folder() {
+        let a = std::path::Path::new("/x/mods-a");
+        let known = vec![PathBuf::from("/x/mods-known")];
+        let d = std::path::Path::new("/x/default");
+        let default = Some(d);
+        assert!(super::mods_root_choice_allowed(a, true, &known, default));
+        assert!(super::mods_root_choice_allowed(
+            &known[0], false, &known, default
+        ));
+        assert!(super::mods_root_choice_allowed(d, false, &known, default));
+        assert!(!super::mods_root_choice_allowed(a, false, &known, default));
     }
 
     #[test]

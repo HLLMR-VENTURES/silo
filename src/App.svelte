@@ -7,7 +7,7 @@
     pointGameAtModsRoot,
     createModsFolder,
     folderLooksEmpty,
-    pickFolder,
+    pickFolderFor,
     type ModsRootStatus,
     scanMods,
     onScanProgress,
@@ -1516,7 +1516,7 @@
       errorMsg = why;
       return;
     }
-    const path = await pickFolder();
+    const path = await pickFolderFor("modsFolder");
     if (path) await switchModsFolder(path);
   }
 
@@ -1822,7 +1822,7 @@
       errorMsg = why;
       return;
     }
-    const path = await pickFolder();
+    const path = await pickFolderFor("archive");
     if (!path) return;
     if (archiveMissing) {
       await repointArchive(path, "missing");

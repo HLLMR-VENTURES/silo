@@ -187,10 +187,10 @@ export function onMoveProgress(cb: (p: MoveProgress) => void): Promise<UnlistenF
 export function folderLooksEmpty(path: string): Promise<boolean> {
   return invoke<boolean>("folder_looks_empty", { path });
 }
-/** System folder picker. Null if cancelled. */
-export async function pickFolder(): Promise<string | null> {
-  const p = await open({ directory: true, multiple: false });
-  return typeof p === "string" ? p : null;
+/** Ask for a folder with the picker Silo opens itself. Silo only moves the mods folder or the
+ *  library archive to a folder chosen here (or one it already knows). */
+export function pickFolderFor(purpose: "modsFolder" | "archive"): Promise<string | null> {
+  return invoke<string | null>("pick_folder", { purpose });
 }
 
 /** App version (from tauri.conf/Cargo), e.g. "0.2.0" — the single source the UI shows. */

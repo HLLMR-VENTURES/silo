@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through its own catalog; the developer-only setting to change it no longer exists in the
   release app. (#214)
 
+- **Silo decides where it writes.** Changing the mods folder or the library archive now uses a
+  folder picker Silo opens itself, and Silo only switches to a folder chosen there or one it
+  already knows. (#PR)
+
 ## [0.10.0] - 2026-10-17
 
 ### Added
