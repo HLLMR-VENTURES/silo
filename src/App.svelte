@@ -59,6 +59,7 @@
     archiveMovePause,
     archiveMoveCancel,
     archiveUseDefault,
+    archiveRepoint,
     archiveAdoptPreview,
     archiveAdoptApply,
     onMoveProgress,
@@ -1716,10 +1717,53 @@
     sawTurnAround = false;
   }
 
+  /** A custom archive whose folder is missing (drive unplugged): nothing can be moved out of
+   *  it, so Change… / Use default re-point Silo instead. */
+  const archiveMissing = $derived(!!archive?.path && !archive.available && !archive.isDefault);
+
+  /** Point Silo at another archive folder (or the default) without moving anything, then
+   *  rescan so the library reconciles against it. */
+  async function repointArchive(toDefault: boolean) {
+    const old = archive?.path ?? "its old folder";
+    let path: string | null = null;
+    if (!toDefault) {
+      path = await pickFolder();
+      if (!path) return;
+    }
+    const msg = toDefault
+      ? `Your library archive at ${old} isn't available. Start fresh with the default archive inside your mods folder?\n\n` +
+        "Nothing is moved or copied. Mods still on the old drive stay there, untouched — if you restored your archive somewhere, use Choose another and pick that folder instead."
+      : `Your library archive at ${old} isn't available. Use ${path} as your library archive instead?\n\n` +
+        "Nothing is moved or copied — use this if you moved or restored your archive there yourself. Mods still on the old drive stay there, untouched.";
+    const ok = await confirmDialog(msg, {
+      okLabel: toDefault ? "Use default" : "Use this folder",
+      cancelLabel: "Cancel",
+    });
+    if (!ok) return;
+    try {
+      busy = "Pointing Silo at the archive…";
+      try {
+        await archiveRepoint(path);
+      } finally {
+        busy = null;
+      }
+      settingsOpen = false;
+      await refreshArchive();
+      modsStatus = await modsRootStatus().catch(() => modsStatus);
+      await runScan();
+    } catch (e) {
+      errorMsg = String(e);
+    }
+  }
+
   async function changeArchive() {
     const why = await switchBlockReason();
     if (why) {
       errorMsg = why;
+      return;
+    }
+    if (archiveMissing) {
+      await repointArchive(false);
       return;
     }
     const path = await pickFolder();
@@ -1760,6 +1804,10 @@
     const why = await switchBlockReason();
     if (why) {
       errorMsg = why;
+      return;
+    }
+    if (archiveMissing) {
+      await repointArchive(true);
       return;
     }
     if (

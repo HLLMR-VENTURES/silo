@@ -179,6 +179,11 @@
           ? ""
           : " · not available"}{moveUnfinished ? " · move in progress" : ""}
       </div>
+      {#if !archive.available && !archive.isDefault}
+        <div class="set-hint">
+          Reconnect its drive, or use Change… / Use default to point Silo elsewhere — nothing is moved.
+        </div>
+      {/if}
       {#if !archive.isDefault}
         <button class="set-link" disabled={locked} title={lockTitle} onclick={onArchiveDefault}
           >Use default</button

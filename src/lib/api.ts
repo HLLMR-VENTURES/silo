@@ -168,6 +168,10 @@ export const archiveMovePause = () => invoke<void>("archive_move_pause");
  *  home here (pending until it lands). */
 export const archiveMoveCancel = () => invoke<MoveMarker | null>("archive_move_cancel");
 export const archiveUseDefault = () => invoke<MoveMarker | null>("archive_use_default");
+/** Point Silo at another archive folder (null = the default) WITHOUT moving anything. Only
+ *  while the current archive is unavailable and no move is unfinished; rescan afterwards. */
+export const archiveRepoint = (path: string | null) =>
+  invoke<void>("archive_repoint", { path });
 export const archiveAdoptPreview = () => invoke<AdoptPreview>("archive_adopt_preview");
 /** File the picked loose mods (by file name) into the archive's category folders. */
 export const archiveAdoptApply = (fileNames: string[]) =>
