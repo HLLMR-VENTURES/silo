@@ -41,11 +41,12 @@ const GENERIC_NAMES: &[&str] = &[
 /// Replace the home folder with `~` and the user name with `<user>`.
 ///
 /// The home folder goes in every spelling a path can take in a log or an error message: `\` or
-/// `/` separators, `\` doubled (a path printed with `{:?}`, or JSON), any ASCII case, and only
-/// as a whole folder (`/home/bob` never eats `/home/bobby`). The user name goes as a whole word
-/// (ASCII case-insensitive), for names of 3+ characters that aren't generic account names
-/// (`GENERIC_NAMES`); the home folder's own name counts as a user name too, since on Windows it
-/// can differ from the sign-in name.
+/// `/` separators, `\` doubled (a path printed with `{:?}`, or JSON), any case, and only as a
+/// whole folder (`/home/bob` never eats `/home/bobby`). The user name goes as a whole word, in
+/// any case, for names of 3+ characters that aren't generic account names (`GENERIC_NAMES`);
+/// a shorter name only where it fills a whole folder name (`D:\Users\jo\mods`). The home
+/// folder's own name counts as a user name too, since on Windows it can differ from the
+/// sign-in name.
 pub fn redact(text: &str, home: Option<&str>, user: Option<&str>) -> String {
     let mut out = text.to_string();
     let home = home
@@ -55,21 +56,23 @@ pub fn redact(text: &str, home: Option<&str>, user: Option<&str>) -> String {
     if let Some(h) = home {
         let doubled = h.replace('\\', "\\\\");
         for variant in [doubled, h.replace('/', "\\"), h.replace('\\', "/")] {
-            out = replace_ci(&out, &variant, "~", Edges::FolderEnd);
+            out = replace_cased(&out, &variant, "~", Edges::FolderEnd);
         }
         names.extend(h.rsplit(['/', '\\']).next());
     }
     names.extend(user);
     let mut seen: Vec<String> = Vec::new();
     for name in names {
-        let key = name.to_ascii_lowercase();
-        if name.chars().count() < MIN_USER_LEN
-            || seen.contains(&key)
-            || GENERIC_NAMES.contains(&key.as_str())
-        {
+        let key = name.to_lowercase();
+        if name.is_empty() || seen.contains(&key) || GENERIC_NAMES.contains(&key.as_str()) {
             continue;
         }
-        out = replace_ci(&out, name, "<user>", Edges::Word);
+        let edges = if name.chars().count() < MIN_USER_LEN {
+            Edges::Segment
+        } else {
+            Edges::Word
+        };
+        out = replace_cased(&out, name, "<user>", edges);
         seen.push(key);
     }
     out
@@ -82,40 +85,72 @@ enum Edges {
     Word,
     /// The match ends a folder name: the next character doesn't continue it.
     FolderEnd,
+    /// A whole folder name: a path separator on both sides.
+    Segment,
 }
 
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// Replace `needle` in `hay` (ASCII case-insensitive) with `with`, where `edges` allow. Byte
-/// scan: a match of a whole UTF-8 `needle` always starts and ends on character boundaries.
+fn is_separator(c: char) -> bool {
+    c == '/' || c == '\\'
+}
+
+/// [`replace_ci`] for `needle` and for its upper-case form, which catches case mappings that
+/// change length (`ß` -> `SS`) that per-character folding can't.
+fn replace_cased(hay: &str, needle: &str, with: &str, edges: Edges) -> String {
+    let out = replace_ci(hay, needle, with, edges);
+    let upper = needle.to_uppercase();
+    if upper.chars().count() == needle.chars().count() {
+        return out;
+    }
+    replace_ci(&out, &upper, with, edges)
+}
+
+/// The same letter in any case (per character; `to_lowercase` covers non-ASCII letters).
+fn same_letter(a: char, b: char) -> bool {
+    a == b || a.to_lowercase().eq(b.to_lowercase())
+}
+
+/// Replace `needle` in `hay` (case-insensitive, per character) with `with`, where `edges` allow.
 fn replace_ci(hay: &str, needle: &str, with: &str, edges: Edges) -> String {
-    let (h, n) = (hay.as_bytes(), needle.as_bytes());
-    if n.is_empty() || n.len() > h.len() {
+    if needle.is_empty() {
         return hay.to_string();
     }
-    let mut out = String::with_capacity(hay.len());
-    let (mut copied, mut i) = (0, 0);
-    while i + n.len() <= h.len() {
-        if !h[i..i + n.len()].eq_ignore_ascii_case(n) {
-            i += 1;
-            continue;
+    // The end of a match of `needle` starting at byte `i`, if there is one.
+    let match_at = |i: usize| -> Option<usize> {
+        let mut rest = hay[i..].char_indices();
+        let mut end = i;
+        for n in needle.chars() {
+            let (off, h) = rest.next()?;
+            if !same_letter(n, h) {
+                return None;
+            }
+            end = i + off + h.len_utf8();
         }
-        let end = i + n.len();
+        Some(end)
+    };
+    let mut out = String::with_capacity(hay.len());
+    let mut copied = 0;
+    for (i, _) in hay.char_indices() {
+        if i < copied {
+            continue; // inside the previous replacement
+        }
+        let Some(end) = match_at(i) else {
+            continue;
+        };
         let before = hay[..i].chars().next_back();
         let after = hay[end..].chars().next();
         let fits = match edges {
             Edges::Word => !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char),
             Edges::FolderEnd => !after.is_some_and(|c| is_word_char(c) || c == '-'),
+            Edges::Segment => before.is_some_and(is_separator) && after.is_some_and(is_separator),
         };
         if fits {
             out.push_str(&hay[copied..i]);
             out.push_str(with);
             copied = end;
-            i = end;
-        } else {
-            i += 1;
         }
     }
     out.push_str(&hay[copied..]);
@@ -234,6 +269,34 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// Case is folded for any letter, not just ASCII.
+    #[test]
+    fn non_ascii_case_is_folded() {
+        assert_eq!(
+            redact(
+                "C:\\USERS\\JÖRG MÜLLER\\x and c:\\users\\jörg müller\\y by JÖRG MÜLLER",
+                Some("C:\\Users\\Jörg Müller"),
+                Some("Jörg Müller")
+            ),
+            "~\\x and ~\\y by <user>"
+        );
+        // A case mapping that changes length (ß -> SS) is tried too.
+        assert_eq!(redact("/HOME/GROSS/x", Some("/home/groß"), None), "~/x");
+    }
+
+    /// A short name goes when it fills a whole folder name, in any path, but stays as a word.
+    #[test]
+    fn short_names_go_from_whole_path_segments() {
+        assert_eq!(
+            redact(
+                "D:\\Users\\jo\\mods, D:\\\\Users\\\\JO\\\\mods, /mnt/jo/x; jo said /a/jos/b",
+                Some("C:\\Users\\jo"),
+                Some("jo")
+            ),
+            "D:\\Users\\<user>\\mods, D:\\\\Users\\\\<user>\\\\mods, /mnt/<user>/x; jo said /a/jos/b"
+        );
     }
 
     #[test]
