@@ -605,9 +605,9 @@ async fn catalog_detail_by_tech(
     .map_err(|e| e.to_string())?
 }
 
-/// Fetch a catalog mod thumbnail as a `data:` URL (the webview can't set the referer the
-/// Giants CDN now requires). Cached on disk by URL so each image is fetched at most once.
-/// STOPGAP: the polite long-term fix is SiloAPI caching + serving these during its sweeps.
+/// Fetch a catalog mod thumbnail hosted on GitHub as a `data:` URL (the CSP keeps the webview
+/// off arbitrary image hosts). Cached on disk by URL so each image is fetched at most once.
+/// ModHub thumbnails are never fetched from GIANTS' CDN here: they come from SiloAPI's cache.
 #[tauri::command]
 async fn catalog_image(app: tauri::AppHandle, url: String) -> Result<String, String> {
     let cache_dir = app

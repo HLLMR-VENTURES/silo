@@ -3,19 +3,21 @@
 import type { CatalogModDetail } from "./types";
 import { catalogImage } from "./api";
 
-// Source-CDN hosts that gate hotlinking behind a Referer a browser <img> can't set —
-// these must go through the Rust proxy (which adds the referer and disk-caches).
-const REFERER_GATED = /(?:giants-software\.com|farming-simulator\.com|githubusercontent\.com|github\.com)/i;
+// GIANTS' ModHub CDN refuses requests that don't come from its own site. Silo respects
+// that: a thumbnail still pointing there (not yet cached by SiloAPI) shows the placeholder.
+const MODHUB_CDN = /(?:giants-software\.com|farming-simulator\.com)/i;
+// GitHub-hosted images go through the Rust proxy (the CSP keeps the webview off them).
+const GITHUB_HOSTED = /(?:githubusercontent\.com|github\.com)/i;
 
-// Image loading. SiloAPI now caches most catalog images server-side and hands back an
-// `imageUrl` on its own host (referer-free, HTTP-cacheable) — those load DIRECTLY as a
-// plain <img> (CSP allows silo-api). Only the not-yet-cached tail still points at a
-// source CDN; those go through the Rust proxy, which sets the referer and returns a
-// data: URL. Dedupe in-session so paging back doesn't refetch.
+// Image loading. SiloAPI caches catalog images server-side and hands back an `imageUrl` on
+// its own host — those load DIRECTLY as a plain <img> (CSP allows silo-api). GitHub images
+// go through the Rust proxy, which returns a data: URL. Dedupe in-session so paging back
+// doesn't refetch.
 const imageCache = new Map<string, Promise<string>>();
 export function loadCatalogImage(url: string): Promise<string> {
-  // Cached SiloAPI URL (or any non-gated host): the browser can load and cache it itself.
-  if (!REFERER_GATED.test(url)) return Promise.resolve(url);
+  if (MODHUB_CDN.test(url)) return Promise.resolve("");
+  // Cached SiloAPI URL (or any other allowed host): the browser can load and cache it itself.
+  if (!GITHUB_HOSTED.test(url)) return Promise.resolve(url);
   let p = imageCache.get(url);
   if (!p) {
     p = catalogImage(url).catch(() => "");
