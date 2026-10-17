@@ -62,6 +62,9 @@ keyring = { version = "3", features = [
     "crypto-rust",
 ] }
 
+# Process listing, to refuse moving mods while FS25 is running (see gamelaunch::fs25_running).
+sysinfo = { version = "0.36", default-features = false, features = ["system", "disk"] }
+
 # single-instance is desktop-only; the `deep-link` feature forwards a silo:// URL to the
 # already-running instance instead of spawning a second one (Windows/Linux behaviour).
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
