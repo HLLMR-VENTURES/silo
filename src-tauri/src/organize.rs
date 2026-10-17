@@ -1259,8 +1259,7 @@ pub(crate) fn junction_to(src: &Path, link: &Path) -> std::io::Result<()> {
 
 /// A Windows path on a network share: `\\server\share\…`, or the verbatim / device forms
 /// `\\?\UNC\…` and `\\.\UNC\…`. Local verbatim paths (`\\?\C:\…`) are not.
-#[cfg(any(windows, test))]
-fn is_network_path(p: &str) -> bool {
+pub(crate) fn is_network_path(p: &str) -> bool {
     let rest = p.strip_prefix(r"\\?\").or_else(|| p.strip_prefix(r"\\.\"));
     match rest {
         Some(rest) => rest

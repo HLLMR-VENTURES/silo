@@ -837,21 +837,69 @@ pub(crate) fn note_archive(mods: &Path, archive: Option<&Path>) {
 }
 
 /// The archive the notes point to, for a mods folder the database knows no archive for: the
-/// mods folder's note names an archive whose own note names this mods folder back, or whose
-/// folder isn't there right now (an unplugged drive can't confirm; the missing-archive banner
-/// then takes over). Never while the default archive holds mods.
+/// mods folder's note names a local, absolute folder that `Layout` accepts, and that folder's
+/// own note names this mods folder back, or its drive isn't plugged in right now (it can't
+/// confirm; the missing-archive banner then takes over). A folder missing from a drive that
+/// is there was deleted, so it isn't taken up. Never while the default archive holds mods.
+/// The caller still checks the fences (other mods folders, Silo's own folders).
 pub fn rediscover_archive(mods: &Path) -> Option<PathBuf> {
     // The note first: without one (the usual case) the default archive isn't listed at all.
     let archive = read_note(mods)?.archive?;
+    if !archive.is_absolute()
+        || crate::organize::is_network_path(&archive.to_string_lossy())
+        || Layout::new(mods.to_path_buf(), archive.clone()).is_err()
+    {
+        return None;
+    }
     let default = Layout::default_for(mods).archive;
     if filed_mods(&default).map(|v| !v.is_empty()).unwrap_or(true) {
         return None;
     }
     if !archive.exists() {
-        return Some(archive);
+        return drive_absent(&archive).then_some(archive);
     }
     let back = read_note(&archive)?.mods_folder?;
     crate::modsroot::same_folder(&back, mods).then_some(archive)
+}
+
+/// Whether the drive (Windows) or removable-media mount (elsewhere) that `p` lives on is
+/// absent right now: an unplugged drive, rather than a folder that was deleted.
+fn drive_absent(p: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Component;
+        let root: PathBuf = p
+            .components()
+            .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+            .collect();
+        !root.as_os_str().is_empty() && !root.exists()
+    }
+    #[cfg(not(windows))]
+    {
+        // Removable media mounts under these (`/media/<user>/<volume>` as well as
+        // `/media/<volume>`); an unmounted mount point is missing, or an empty folder.
+        const BASES: [(&str, usize); 4] = [
+            ("/Volumes", 1),
+            ("/run/media", 2),
+            ("/media", 2),
+            ("/mnt", 1),
+        ];
+        let Some((base, depth)) = BASES.iter().find(|(b, _)| p.starts_with(b)) else {
+            return false;
+        };
+        let Ok(rest) = p.strip_prefix(base) else {
+            return false;
+        };
+        let mut root = PathBuf::from(base);
+        for c in rest.components().take(*depth) {
+            root.push(c);
+            let empty = std::fs::read_dir(&root).is_ok_and(|mut d| d.next().is_none());
+            if !root.exists() || empty {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// Every mod (zip, or folder with a `modDesc.xml`) filed under `archive/<category>/`, skipping
@@ -2362,12 +2410,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// An archive on a drive (Windows) or removable-media mount (elsewhere) that isn't there.
+    fn on_an_absent_drive() -> PathBuf {
+        #[cfg(windows)]
+        let root = ('D'..='Z')
+            .rev()
+            .map(|d| PathBuf::from(format!("{d}:\\")))
+            .find(|r| !r.exists())
+            .expect("a free drive letter");
+        #[cfg(not(windows))]
+        let root = PathBuf::from(format!("/media/silo-absent-{}", std::process::id()));
+        root.join("SiloArchive")
+    }
+
+    fn point_mods_at(mods: &Path, archive: &str) {
+        std::fs::write(
+            mods.join(ARCHIVE_NOTE),
+            serde_json::json!({ "silo": 1, "archive": archive }).to_string(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn an_unplugged_archive_is_still_found() {
-        let (base, mods, hdd) = note_fixture("unplugged");
+        let (base, mods, _) = note_fixture("unplugged");
+        let gone = on_an_absent_drive();
+        note_archive(&mods, Some(&gone)); // only the mods folder's note can be written
+        assert_eq!(rediscover_archive(&mods).as_deref(), Some(gone.as_path()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_missing_folder_on_a_present_drive_is_not_found() {
+        let (base, mods, hdd) = note_fixture("deleted");
         note_archive(&mods, Some(&hdd));
-        std::fs::remove_dir_all(&hdd).unwrap(); // the drive is gone
-        assert_eq!(rediscover_archive(&mods).as_deref(), Some(hdd.as_path()));
+        std::fs::remove_dir_all(&hdd).unwrap(); // deleted, not unplugged: the drive is there
+        assert_eq!(rediscover_archive(&mods), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_pointer_that_isnt_a_usable_folder_is_ignored() {
+        let (base, mods, _) = note_fixture("unusable");
+        let inside = mods.join("stuff").to_string_lossy().into_owned();
+        for archive in ["", "relative/archive", r"\\server\share\archive", &inside] {
+            point_mods_at(&mods, archive);
+            assert_eq!(rediscover_archive(&mods), None, "{archive:?}");
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 
