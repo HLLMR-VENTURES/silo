@@ -107,7 +107,7 @@ async fn scan_mods(
         // Read after `start`: a change of archive (repoint, move) before this point is seen
         // here, and one after it moves the epoch on, so the reconcile below is refused.
         let active = modsroot::active();
-        let trusted = trusted_roots(active.clone(), modsroot::blocked().as_deref(), false);
+        let trusted = trusted_roots(active.clone(), modsroot::resolved(), false);
         let plan = scan_plan(supplied, &trusted, active.as_ref());
         let mut conn = db::open(&db_path(&app)?)?;
         let emitter = app.clone();
@@ -738,7 +738,7 @@ fn update_target_problem(dest: &std::path::Path, layout: &organize::Layout) -> O
 /// paused) meanwhile comes first: the swap must not replace a file the move already copied.
 fn update_recheck(dest: &std::path::Path) -> Result<organize::Layout, String> {
     ensure_no_move()?;
-    paths::ensure_write_under(&allowed_roots(), dest)?;
+    ensure_library_write(dest)?;
     let layout = primary_layout(None)?;
     if let Some(p) = update_target_problem(dest, &layout) {
         return Err(p);
@@ -770,7 +770,7 @@ async fn download_update(
         // root or its archive, wherever that lives). An absolute path outside them — which
         // `no_traversal` alone would pass — is rejected here.
         paths::no_traversal(&dest)?;
-        paths::ensure_write_under(&allowed_roots(), &dest)?;
+        ensure_library_write(&dest)?;
         // Only a mod zip in the library, never a backup or another file under its folders.
         let layout = primary_layout(None)?;
         if let Some(p) = update_target_problem(&dest, &layout) {
@@ -1447,22 +1447,22 @@ async fn set_override(app: tauri::AppHandle, row: db::CategoryOverride) -> Resul
 /// default. This is the single source of truth for "where may we write"; Rust, not the
 /// webview, is the authority.
 fn allowed_roots() -> Vec<PathBuf> {
-    trusted_roots(modsroot::active(), modsroot::blocked().as_deref(), true)
+    trusted_roots(modsroot::active(), modsroot::resolved(), true)
 }
 
 /// The mods folder(s) only — never an archive. Frontend-supplied roots and default scans
 /// resolve against this.
 fn mods_roots() -> Vec<PathBuf> {
-    trusted_roots(modsroot::active(), modsroot::blocked().as_deref(), false)
+    trusted_roots(modsroot::active(), modsroot::resolved(), false)
 }
 
 /// The active layout's folders (`with_archives`: its archive and a move's other archive too),
-/// or the auto-detected default before anything is resolved. Nothing at all while the
-/// resolved folder is blocked (`blocked`: it shares files with another layout) — never a
-/// fallback to another folder.
+/// or the auto-detected default before anything is `resolved`. Once resolved with no layout
+/// (the folder is unavailable, or blocked because it shares files with another layout):
+/// nothing at all — never a fallback to FS25's default folder.
 fn trusted_roots(
     active: Option<modsroot::Active>,
-    blocked: Option<&str>,
+    resolved: bool,
     with_archives: bool,
 ) -> Vec<PathBuf> {
     match active {
@@ -1472,9 +1472,28 @@ fn trusted_roots(
             v
         }
         Some(a) => vec![a.layout.mods],
-        None if blocked.is_some() => Vec::new(),
+        None if resolved => Vec::new(),
         None => fsgame::default_mods_paths(),
     }
+}
+
+/// `then()`, unless the resolved folder is `blocked`: then its reason, so a refusal says what's
+/// really wrong rather than "no mods folder" or "outside the mods folder".
+fn blocked_first<T>(
+    blocked: Option<String>,
+    then: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    match blocked {
+        Some(why) => Err(why),
+        None => then(),
+    }
+}
+
+/// `paths::ensure_write_under` against the trusted roots, with a blocked folder's reason first.
+fn ensure_library_write(dest: &std::path::Path) -> Result<(), String> {
+    blocked_first(modsroot::blocked(), || {
+        paths::ensure_write_under(&allowed_roots(), dest)
+    })
 }
 
 /// The active layout (mods folder + archive), validated against a frontend-supplied root.
@@ -2197,9 +2216,8 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
         .as_ref()
         .and_then(|b| b.conflict.as_ref())
         .map(|c| c.to_string_lossy().into_owned());
-    // Blocked first, so no command sees "no layout" without its reason.
-    modsroot::set_blocked(blocked);
-    modsroot::set_active(active);
+    // Together, so no command sees "no layout" without its reason.
+    modsroot::publish(active, blocked);
 
     let current_key = r.path.as_ref().map(|p| modsroot::canonical_key(p));
     let mut paths: Vec<PathBuf> =
@@ -2490,14 +2508,14 @@ struct ArchiveStatus {
 
 /// The active layout and its mods-folder key, or why there isn't one yet.
 fn active_layout() -> Result<(organize::Layout, String), String> {
-    match modsroot::active() {
+    blocked_first(modsroot::blocked(), || match modsroot::active() {
         Some(a) => {
             let key = modsroot::canonical_key(&a.layout.mods);
             Ok((a.layout, key))
         }
         None if !modsroot::resolved() => Err(STILL_LOADING.into()),
         None => Err("No mods folder selected".into()),
-    }
+    })
 }
 
 /// A folder's identity key as a path, for component-wise `starts_with` comparisons.
@@ -5342,8 +5360,13 @@ mod tests {
         let why = b.reason;
         // Published as "no writable layout, because…": nothing is a write root, and organize
         // and the other library writes are refused with the reason.
-        assert!(super::trusted_roots(None, Some(&why), true).is_empty());
-        assert!(super::trusted_roots(None, Some(&why), false).is_empty());
+        assert!(super::trusted_roots(None, true, true).is_empty());
+        assert!(super::trusted_roots(None, true, false).is_empty());
+        assert_eq!(
+            super::blocked_first(Some(why.clone()), || Ok::<_, String>(())),
+            Err(why.clone())
+        );
+        assert_eq!(super::blocked_first(None, || Ok::<_, String>(1)), Ok(1));
         assert_eq!(
             super::archive_availability(None, true, Some(&why)),
             Err(why)
@@ -5420,6 +5443,34 @@ mod tests {
         assert_eq!(archives(), vec![o.join("archive")]);
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn once_resolved_no_layout_means_no_write_roots_at_all() {
+        // An unavailable chosen folder (not blocked) never falls back to FS25's default.
+        assert!(super::trusted_roots(None, true, true).is_empty());
+        assert!(super::trusted_roots(None, true, false).is_empty());
+        // Before anything is resolved, the auto-detected default is all there is.
+        assert_eq!(
+            super::trusted_roots(None, false, false),
+            crate::fsgame::default_mods_paths()
+        );
+        let a = crate::modsroot::Active {
+            layout: Layout::default_for(Path::new("/m")),
+            move_to: Some(PathBuf::from("/hdd")),
+        };
+        assert_eq!(
+            super::trusted_roots(Some(a.clone()), true, true),
+            vec![
+                PathBuf::from("/m"),
+                PathBuf::from("/m").join("archive"),
+                PathBuf::from("/hdd")
+            ]
+        );
+        assert_eq!(
+            super::trusted_roots(Some(a), true, false),
+            vec![PathBuf::from("/m")]
+        );
     }
 
     /// A zip mod with a minimal modDesc at `path`.

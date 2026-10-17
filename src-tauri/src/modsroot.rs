@@ -91,17 +91,34 @@ pub struct Active {
     pub move_to: Option<PathBuf>,
 }
 
-static ACTIVE: RwLock<Option<Active>> = RwLock::new(None);
+/// The published layout and, when there is none because the folder is blocked, why. One lock
+/// for both, so no reader ever sees "no layout" without its reason (or a stale reason beside
+/// a new layout).
+struct Published {
+    active: Option<Active>,
+    blocked: Option<Blocked>,
+}
+
+static PUBLISHED: RwLock<Published> = RwLock::new(Published {
+    active: None,
+    blocked: None,
+});
 
 /// Set once the mods folder has been resolved at least once (at startup or by a mods-root
 /// command), so "no active layout" can be told apart from "not worked out yet".
 static RESOLVED: AtomicBool = AtomicBool::new(false);
 
-pub fn set_active(a: Option<Active>) {
-    if let Ok(mut g) = ACTIVE.write() {
-        *g = a;
+/// Publish the resolved layout and its block together (`blocked` is meant for `active: None`).
+pub fn publish(active: Option<Active>, blocked: Option<Blocked>) {
+    if let Ok(mut g) = PUBLISHED.write() {
+        *g = Published { active, blocked };
     }
     RESOLVED.store(true, Ordering::SeqCst);
+}
+
+/// Publish a layout (or none) with no block.
+pub fn set_active(a: Option<Active>) {
+    publish(a, None);
 }
 
 /// Whether `active()` reflects a resolution (it may still be `None`: no usable mods folder).
@@ -109,8 +126,16 @@ pub fn resolved() -> bool {
     RESOLVED.load(Ordering::SeqCst)
 }
 
+/// The published layout and block, read together.
+pub fn published() -> (Option<Active>, Option<Blocked>) {
+    PUBLISHED
+        .read()
+        .map(|g| (g.active.clone(), g.blocked.clone()))
+        .unwrap_or((None, None))
+}
+
 pub fn active() -> Option<Active> {
-    ACTIVE.read().ok().and_then(|g| g.clone())
+    published().0
 }
 
 /// The folder FS25 reads (its override, or the default), as last resolved.
@@ -139,10 +164,6 @@ pub struct Blocked {
     pub conflict: Option<PathBuf>,
 }
 
-/// Why the resolved mods folder has no writable layout (it shares files with another
-/// layout), as last resolved. `None` when nothing blocks it.
-static BLOCKED: RwLock<Option<Blocked>> = RwLock::new(None);
-
 pub fn set_game_reads(p: Option<PathBuf>) {
     if let Ok(mut g) = GAME_READS.write() {
         *g = p;
@@ -153,19 +174,15 @@ pub fn game_reads() -> Option<PathBuf> {
     GAME_READS.read().ok().and_then(|g| g.clone())
 }
 
-pub fn set_blocked(why: Option<Blocked>) {
-    if let Ok(mut g) = BLOCKED.write() {
-        *g = why;
-    }
-}
-
 /// The reason the resolved folder is blocked, if it is.
 pub fn blocked() -> Option<String> {
     blocked_detail().map(|b| b.reason)
 }
 
+/// Why the resolved mods folder has no writable layout (it shares files with another layout),
+/// as last published. `None` when nothing blocks it.
 pub fn blocked_detail() -> Option<Blocked> {
-    BLOCKED.read().ok().and_then(|g| g.clone())
+    published().1
 }
 
 /// The known-folders list stored as a JSON array of path strings.
@@ -664,6 +681,28 @@ mod tests {
         let _ = std::fs::remove_dir(&link);
         let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_layout_and_its_block_are_published_together() {
+        let b = Blocked {
+            reason: "why".into(),
+            cause: BlockCause::Overlap,
+            mods: PathBuf::from("/m"),
+            conflict: None,
+        };
+        let a = Active {
+            layout: crate::organize::Layout::default_for(Path::new("/y")),
+            move_to: None,
+        };
+        publish(None, Some(b.clone()));
+        let (pa, pb) = published();
+        assert!(pa.is_none());
+        assert_eq!(pb, Some(b));
+        // A new layout replaces the block in the same step.
+        publish(Some(a.clone()), None);
+        assert_eq!(published(), (Some(a), None));
+        set_active(None);
     }
 
     #[test]
