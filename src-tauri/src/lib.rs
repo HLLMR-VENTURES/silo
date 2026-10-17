@@ -2008,11 +2008,10 @@ async fn pick_folder(
     // `blocking_pick_folder` posts the dialog to the main thread and waits for the answer, so
     // it must never run there; `off_main` runs it on the blocking pool.
     off_main(move || {
-        let mut builder = window.dialog().file();
+        let builder = window.dialog().file();
+        // Modal to Silo's window where the platform supports it (as the JS dialog does).
         #[cfg(any(windows, target_os = "macos"))]
-        {
-            builder = builder.set_parent(&window);
-        }
+        let builder = builder.set_parent(&window);
         let Some(fp) = builder.blocking_pick_folder() else {
             return Ok(None);
         };
