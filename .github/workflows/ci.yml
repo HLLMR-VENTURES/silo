@@ -11,6 +11,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# CI only reads the repo.
+permissions:
+  contents: read
+
 jobs:
   frontend:
     name: Frontend (svelte-check + build)
@@ -68,6 +72,26 @@ jobs:
     # No system deps needed: Tauri uses the OS WebKit on macOS. fmt is OS-independent, so
     # it stays on the ubuntu job only.
     runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+      - name: Clippy (deny warnings)
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test
+
+  rust-windows:
+    name: Rust (Windows clippy + test)
+    # Windows is the primary platform: hardlinks, junctions, `\\?\` paths, case folding and
+    # file locking all behave differently there, and the `cfg(windows)` tests only run here.
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
