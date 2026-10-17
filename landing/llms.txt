@@ -2,8 +2,8 @@
 
 > Silo is a free, open-source mod manager for Farming Simulator 25 (FS25). It organizes
 > your mods, names the mod that crashed you from the game log, detects conflicts, and
-> unifies ModHub and GitHub into one cross-source catalog — without moving your
-> files or touching your saves.
+> unifies ModHub and GitHub into one cross-source catalog — and everything it changes
+> on disk is reversible.
 
 Silo is a native desktop app for Windows, macOS and Linux. No account, no telemetry, fully
 open source. Its catalog is served by a public read-only API (SiloAPI) that aggregates mod
@@ -14,8 +14,11 @@ metadata, versions, popularity and descriptions across sources.
 - Conflict detection: duplicate active maps (an instant crash), colliding filltypes, vehicle types and scripts
 - Cross-source catalog: one canonical record per mod across ModHub and GitHub, with the real latest version
 - Guided bisection: automates "disable half, relaunch" to isolate a bad mod, then restores your set
-- Loadouts & projection: links only the active set into the game's flat mods folder at launch — never moves files
+- Loadouts & projection: files zips into a reversible local archive and links only the active set into the game's flat mods folder
 - Filltype bridge: generates a companion mod that teaches equipment a stubborn map filltype
+- Any mods folder: follows FS25's mods-folder override, or pick any folder (optionally pointing the game at it, with a backup)
+- Library archive on any drive: move parked mods to another drive with verified, pausable, cancellable moves
+- Integrity check: verifies an installed mod against the build its source published (provenance, not antivirus)
 
 ## Principles
 - Free and open source — every line is on GitHub
