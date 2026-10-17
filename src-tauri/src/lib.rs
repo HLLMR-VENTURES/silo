@@ -9,6 +9,7 @@ pub mod collection;
 pub mod conflicts;
 pub mod db;
 pub mod fsgame;
+mod fslog;
 pub mod gamelaunch;
 pub mod github;
 pub mod icons;
@@ -1125,7 +1126,9 @@ const DOWNLOAD_GONE: &str = "The download disappeared before Silo could add it. 
 /// `dest`; on Windows the rename would then replace it. Hardlink-capable filesystems (the
 /// usual case) have no such window.
 fn place_part(part: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
-    place_part_with(part, dest, |a, b| std::fs::hard_link(a, b))
+    place_part_with(part, dest, |a, b| std::fs::hard_link(a, b))?;
+    fslog::moved("install", part, dest);
+    Ok(())
 }
 
 fn place_part_with(
@@ -3111,6 +3114,7 @@ async fn generate_bridge(spec: bridge::BridgeSpec, root: Option<String>) -> Resu
             return Err(format!("{filename} already exists in your mods folder"));
         }
         bridge::generate(&spec, &dest)?;
+        fslog::changed("generate", &dest);
         Ok(filename)
     })
     .await

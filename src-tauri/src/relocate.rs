@@ -327,6 +327,7 @@ fn place(tmp: &Path, dst: &Path, kind: &str) -> Result<(), String> {
         match std::fs::hard_link(tmp, dst) {
             Ok(()) => {
                 let _ = std::fs::remove_file(tmp);
+                crate::fslog::moved("place", tmp, dst);
                 return Ok(());
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(taken()),
@@ -336,7 +337,9 @@ fn place(tmp: &Path, dst: &Path, kind: &str) -> Result<(), String> {
     if exists(dst) {
         return Err(taken());
     }
-    std::fs::rename(tmp, dst).map_err(|e| format!("place: {e}"))
+    std::fs::rename(tmp, dst).map_err(|e| format!("place: {e}"))?;
+    crate::fslog::moved("place", tmp, dst);
+    Ok(())
 }
 
 /// Copy `src` to a temp sibling of `dst`, verify the temp against `src`, then place it. A
@@ -386,7 +389,9 @@ fn delete_source(src: &Path) -> Result<(), String> {
     let old = suffixed(src, OLD_SUFFIX);
     remove_any(&old).map_err(|e| format!("remove old copy: {e}"))?;
     std::fs::rename(src, &old).map_err(|e| format!("remove old copy: {e}"))?;
-    remove_any(&old).map_err(|e| format!("remove old copy: {e}"))
+    remove_any(&old).map_err(|e| format!("remove old copy: {e}"))?;
+    crate::fslog::changed("delete-moved", src);
+    Ok(())
 }
 
 /// Keep an active mod's mods-folder entry valid as its archived copy moves from `src` to `dst`:

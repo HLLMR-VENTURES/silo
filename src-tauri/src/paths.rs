@@ -154,6 +154,7 @@ pub fn guarded_xml_write(
         let _ = std::fs::copy(&bak, dest);
         return Err(format!("config write failed and was rolled back: {e}"));
     }
+    crate::fslog::changed("write-config", dest);
     Ok(())
 }
 
@@ -202,6 +203,7 @@ fn back_up_config(dest: &Path) -> Result<(), String> {
         }
     }
     std::fs::copy(dest, backup_slot(dest, 1)).map_err(abort)?;
+    crate::fslog::moved("backup-config", dest, &backup_slot(dest, 1));
     Ok(())
 }
 

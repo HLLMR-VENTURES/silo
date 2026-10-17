@@ -162,6 +162,7 @@ fn swap_with(
             ),
         });
     }
+    crate::fslog::moved("update", part, dest);
 
     let mut out = Swapped::default();
     // d. Point the mods folder at the new version, or undo the swap: the game must never be
@@ -204,7 +205,10 @@ fn undo_swap(dest: &Path, part: &Path, old: &Path, name: &str, e: &std::io::Erro
         );
     }
     match std::fs::rename(old, dest) {
-        Ok(()) => format!("{why}, so the update was undone and the current version kept."),
+        Ok(()) => {
+            crate::fslog::moved("restore", old, dest);
+            format!("{why}, so the update was undone and the current version kept.")
+        }
         Err(back) => format!(
             "{why}, and couldn't put the current version back ({back}). It is safe at {}; \
              Silo puts it back on the next scan.",
@@ -217,6 +221,7 @@ fn undo_swap(dest: &Path, part: &Path, old: &Path, name: &str, e: &std::io::Erro
 fn keep_backup(old: &Path, mods_root: &Path, name: &str) -> std::io::Result<PathBuf> {
     let bak = organize::update_backup_path(mods_root, name)?;
     organize::move_path(old, &bak)?;
+    crate::fslog::moved("backup", old, &bak);
     prune_backups(&mods_root.join("backups"), name, KEEP_BACKUPS);
     Ok(bak)
 }
@@ -369,9 +374,12 @@ fn finish_or_roll_back(
         }
         // Stopped before the new version was placed: the old one is the mod again.
         match std::fs::rename(old, dest) {
-            Ok(()) => out.notices.push(format!(
-                "An update of {name} was interrupted, so Silo put the previous version back."
-            )),
+            Ok(()) => {
+                crate::fslog::moved("restore", old, dest);
+                out.notices.push(format!(
+                    "An update of {name} was interrupted, so Silo put the previous version back."
+                ))
+            }
             Err(e) => out.problems.push(format!(
                 "An update of {name} was interrupted and Silo couldn't put the previous version \
                  back: {e}. It is at {}; close any program using it, then try again.",
@@ -498,8 +506,8 @@ pub fn prune_backups(backups: &Path, file_name: &str, keep: usize) {
             .strip_prefix(&tmp_prefix)
             .and_then(|s| s.strip_suffix(&tmp_suffix))
         {
-            if backup_order(stamp).is_some() {
-                let _ = std::fs::remove_file(e.path());
+            if backup_order(stamp).is_some() && std::fs::remove_file(e.path()).is_ok() {
+                crate::fslog::changed("prune", &e.path());
             }
             continue;
         }
@@ -513,7 +521,9 @@ pub fn prune_backups(backups: &Path, file_name: &str, keep: usize) {
     }
     found.sort_by_key(|(order, _)| std::cmp::Reverse(*order));
     for (_, p) in found.into_iter().skip(keep) {
-        let _ = std::fs::remove_file(p);
+        if std::fs::remove_file(&p).is_ok() {
+            crate::fslog::changed("prune", &p);
+        }
     }
 }
 
