@@ -1,10 +1,11 @@
 // Typed wrappers over the Tauri command surface. The frontend never touches a
 // filesystem or zip — it asks the Rust core and listens for progress events.
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as rawInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save, open, confirm as pluginConfirm } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
+import { toAppError } from "./errors";
 import { serial } from "./serial";
 export { serial } from "./serial";
 import type {
@@ -51,6 +52,15 @@ import type {
   CollectionProgress,
   BridgeSpec,
 } from "./types";
+
+/** Every command goes through here so a rejection is always an AppError (see errors.ts). */
+async function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
+  try {
+    return await rawInvoke<T>(cmd, args);
+  } catch (e) {
+    throw toAppError(e);
+  }
+}
 
 /**
  * Ask the user to confirm. ALWAYS `await` this. tauri-plugin-dialog replaces the webview's
@@ -157,7 +167,7 @@ export interface AdoptPreview {
   duplicates: string[];
 }
 
-/** Rejects with a "still loading" message until the layout is resolved at startup. */
+/** Rejects with code `STILL_LOADING` until the layout is resolved at startup. */
 export const archiveStatus = () => invoke<ArchiveStatus>("archive_status");
 export const archiveMovePreflight = (path: string) =>
   invoke<ArchivePreflight>("archive_move_preflight", { path });

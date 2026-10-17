@@ -55,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.silo-archive.json` note and your mods folder points to it, so Silo finds the archive even if
   its database is lost. (#216)
 
+- **Rescanning never fights a change in progress.** A rescan, for example when you switch back
+  to Silo, no longer rewrites Silo's record of your library while another change is running.
+  (#218)
+
 ### Security
 
 - **Stricter file-name checks.** File names with a colon, a trailing dot or space, or a reserved

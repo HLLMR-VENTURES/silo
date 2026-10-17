@@ -76,6 +76,7 @@
     type ArchivePreflight,
     type MoveProgress,
   } from "./lib/api";
+  import { errorCode } from "./lib/errors";
   import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { checkUpdate, installUpdate, type AvailableUpdate } from "./lib/updater";
@@ -705,7 +706,7 @@
       errorMsg = String(e);
       throw e;
     });
-    // A plain string, like Tauri's own command errors, so BisectFlow's String(e) shows it as is.
+    // A plain string, which BisectFlow's String(e) shows as is.
     if (rep.errors.length) throw rep.errors.slice(0, 3).join("; ");
   }
 
@@ -1613,7 +1614,7 @@
   /** Orders archive_status responses so a stale one can't overwrite newer state. */
   let archiveSeq = 0;
 
-  const isStillLoading = (e: unknown) => /still loading/i.test(String(e));
+  const isStillLoading = (e: unknown) => errorCode(e) === "STILL_LOADING";
   const joinProblems = (...ps: (string | null | undefined)[]) =>
     ps.filter(Boolean).join(" ") || null;
   /** Drop a trailing period (and spaces) so joined messages don't end up with "..". */
