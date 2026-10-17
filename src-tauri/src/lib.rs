@@ -648,6 +648,22 @@ fn update_target_problem(dest: &std::path::Path, layout: &organize::Layout) -> O
     }
 }
 
+/// What `download_update` checks again once it holds the library lock, since things may have
+/// changed while it downloaded; returns the layout as it is now. An archive move started (and
+/// paused) meanwhile comes first: the swap must not replace a file the move already copied.
+fn update_recheck(dest: &std::path::Path) -> Result<organize::Layout, String> {
+    ensure_no_move()?;
+    paths::ensure_write_under(&allowed_roots(), dest)?;
+    let layout = primary_layout(None)?;
+    if let Some(p) = update_target_problem(dest, &layout) {
+        return Err(p);
+    }
+    if gamelaunch::fs25_running() {
+        return Err(UPDATE_GAME_RUNNING.into());
+    }
+    Ok(layout)
+}
+
 /// Update an installed mod from a GitHub release asset (`update` module): download beside it
 /// without the library lock, then swap it in under the lock, keeping the previous version in
 /// `backups/`. Refused while FS25 runs (its files may be open).
@@ -680,16 +696,7 @@ async fn download_update(
         let part = update::fetch(&asset_url, &dest)?;
         // A finished download waits out a busy spell instead of being thrown away.
         let _write = library_write_within(PLACE_WAIT)?;
-        // Things may have changed while downloading: check again under the lock, against the
-        // layout as it is now.
-        paths::ensure_write_under(&allowed_roots(), &dest)?;
-        let layout = primary_layout(None)?;
-        if let Some(p) = update_target_problem(&dest, &layout) {
-            return Err(p);
-        }
-        if gamelaunch::fs25_running() {
-            return Err(UPDATE_GAME_RUNNING.into());
-        }
+        let layout = update_recheck(&dest)?;
         let mut policy = organize::LinkPolicy::new(&layout);
         // Finish an earlier, interrupted update first (the user asked: every step is retried),
         // so it doesn't block this one; if it can't be finished, say exactly why.
@@ -4696,6 +4703,18 @@ mod tests {
         assert_eq!(
             r,
             Err("Finish or cancel the archive move first.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_finished_update_download_is_not_placed_while_a_move_is_unfinished() {
+        use std::sync::atomic::Ordering::SeqCst;
+        super::MOVE_HOLDS_LOCK.store(true, SeqCst);
+        let r = super::update_recheck(Path::new("/nowhere/mods/FS25_A.zip"));
+        super::MOVE_HOLDS_LOCK.store(false, SeqCst);
+        assert_eq!(
+            r.err(),
+            Some("Finish or cancel the archive move first.".to_string())
         );
     }
 
