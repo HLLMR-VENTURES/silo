@@ -265,11 +265,34 @@ pub fn real_folder(p: &Path) -> Result<PathBuf, String> {
     )))
 }
 
-/// The identity key for a folder: canonicalized when it exists, then normalized. This is the
-/// value stored in the `root` column and used for every "same folder?" comparison.
+/// The identity key for a folder: canonicalized, then normalized. A folder that doesn't exist
+/// (yet, or any more) is keyed through its nearest existing parent, canonicalized, with the
+/// rest re-appended — so a link or junction on the way still yields the real path's key. This
+/// is the value stored in the `root` column and used for every "same folder?" comparison.
 pub fn canonical_key(p: &Path) -> String {
-    let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    normalize_key(&c.to_string_lossy(), cfg!(windows))
+    normalize_key(&resolve_existing(p).to_string_lossy(), cfg!(windows))
+}
+
+/// `p` canonicalized as far as it exists: the nearest existing ancestor's real path plus the
+/// missing names below it. Unchanged when no ancestor resolves, or the missing part holds a
+/// `..` (it can't be re-appended faithfully).
+fn resolve_existing(p: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return c;
+    }
+    let mut missing = Vec::new();
+    let mut cur = p;
+    while let (Some(parent), Some(name)) = (cur.parent(), cur.file_name()) {
+        missing.push(name);
+        cur = parent;
+        if let Ok(mut c) = std::fs::canonicalize(cur) {
+            for n in missing.iter().rev() {
+                c.push(n);
+            }
+            return c;
+        }
+    }
+    p.to_path_buf()
 }
 
 /// True when two paths name the same folder.
@@ -579,6 +602,40 @@ mod tests {
             vec!["/a", "/b"]
         );
         assert!(parse_known(Some("not json")).is_empty());
+    }
+
+    #[test]
+    fn a_missing_folder_is_keyed_through_its_nearest_existing_parent() {
+        let base = std::env::temp_dir().join(format!("silo_key_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        // Spelled with `.` segments: the existing part is resolved, the rest re-appended.
+        assert_eq!(
+            canonical_key(&real.join(".").join("gone/deeper")),
+            canonical_key(&real.join("gone/deeper"))
+        );
+        let resolved = std::fs::canonicalize(&real)
+            .unwrap()
+            .join("gone")
+            .join("deeper");
+        assert_eq!(
+            canonical_key(&real.join("gone").join("deeper")),
+            normalize_key(&resolved.to_string_lossy(), cfg!(windows))
+        );
+        // Reached through a link (a junction on Windows): the same key as the real path.
+        let link = base.join("link");
+        #[cfg(windows)]
+        crate::organize::junction_to(&real, &link).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(
+            canonical_key(&link.join("gone/deeper")),
+            canonical_key(&real.join("gone/deeper"))
+        );
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
