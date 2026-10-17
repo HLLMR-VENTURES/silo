@@ -626,19 +626,26 @@ fn ensure_override_kept(
 const UPDATE_NOT_A_LIBRARY_MOD: &str = "Silo only updates mods in your library.";
 
 /// `download_update` may replace only a mod zip directly in the mods folder or filed in an
-/// archive category folder; never a backup or any other file under those folders.
+/// archive category folder; never a backup or any other file under those folders. The folder
+/// is resolved once to where it really is, so a category that is a link (or junction) into
+/// another folder, e.g. `mods/backups`, is judged by where it leads.
 fn update_target_problem(dest: &std::path::Path, layout: &organize::Layout) -> Option<String> {
+    let refused = || Some(UPDATE_NOT_A_LIBRARY_MOD.to_string());
     let is_zip = dest
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
-    let Some(parent) = dest.parent() else {
-        return Some(UPDATE_NOT_A_LIBRARY_MOD.to_string());
+    let Some(parent) = dest.parent().and_then(|p| std::fs::canonicalize(p).ok()) else {
+        return refused();
     };
-    let in_mods = modsroot::same_folder(parent, &layout.mods);
+    let in_mods = modsroot::same_folder(&parent, &layout.mods);
     let in_category = parent
         .parent()
         .is_some_and(|a| modsroot::same_folder(a, &layout.archive));
-    (!(is_zip && (in_mods || in_category))).then(|| UPDATE_NOT_A_LIBRARY_MOD.to_string())
+    if is_zip && (in_mods || in_category) {
+        None
+    } else {
+        refused()
+    }
 }
 
 /// Update an installed mod from a GitHub release asset (`update` module): download beside it
@@ -4946,6 +4953,28 @@ mod tests {
         for p in &bad {
             assert!(super::update_target_problem(p, &layout).is_some(), "{p:?}");
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_update_can_not_reach_a_backup_through_a_linked_category() {
+        let base = temp_base("update_target_link");
+        let mods = base.join("mods");
+        let layout = Layout::default_for(&mods);
+        let backups = mods.join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        std::fs::create_dir_all(&layout.archive).unwrap();
+        std::fs::write(backups.join("FS25_A.zip"), b"zip").unwrap();
+        // A "category" that is a junction (Windows) or symlink (unix) into `mods/backups`.
+        let linked = layout.archive.join("Linked");
+        crate::organize::link_dir_native(&backups, &linked).unwrap();
+        let dest = linked.join("FS25_A.zip");
+        assert!(dest.is_file());
+        assert!(
+            super::update_target_problem(&dest, &layout).is_some(),
+            "the category leads into backups"
+        );
+        let _ = std::fs::remove_dir(&linked);
         let _ = std::fs::remove_dir_all(&base);
     }
 
