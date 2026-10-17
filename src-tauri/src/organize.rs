@@ -450,9 +450,14 @@ pub fn relink_projections(
     layout: &Layout,
     progress: impl FnMut(usize, usize),
 ) -> RelinkReport {
-    // Same volume → hardlinks, unless the folder is cloud-synced (every attempt would error
-    // 396 — copies stay). Archive on another drive → symlinks, when the OS allows them.
-    let mode = if same_volume(&layout.mods, &layout.archive) {
+    relink_with(conn, layout, relink_mode(layout), progress)
+}
+
+/// How a relink pass may link here. Same volume → hardlinks, unless the folder is cloud-synced
+/// (every attempt would error 396 — copies stay). Archive on another drive → symlinks, when the
+/// OS allows them.
+fn relink_mode(layout: &Layout) -> RelinkMode {
+    if same_volume(&layout.mods, &layout.archive) {
         if supports_hardlinks(&layout.mods) {
             RelinkMode::Hardlink
         } else {
@@ -462,8 +467,7 @@ pub fn relink_projections(
         RelinkMode::Symlink
     } else {
         RelinkMode::CrossDriveNoSymlinks
-    };
-    relink_with(conn, layout, mode, progress)
+    }
 }
 
 /// How [`relink_projections`] may link — decided once up front, injectable for tests.
@@ -1047,7 +1051,7 @@ impl<'a> LinkPolicy<'a> {
         }
     }
 
-    /// The archive is on another volume than the mods folder (unknown ⇒ same, see
+    /// The archive is on another volume than the mods folder (unknown ⇒ another, see
     /// `same_volume`). Asked at most once.
     fn cross_volume(&mut self) -> bool {
         let layout = self.layout;
@@ -1080,8 +1084,9 @@ impl<'a> LinkPolicy<'a> {
     }
 }
 
-/// Symlinks from the mods folder into the archive can be created and the game will follow them.
-fn symlinks_usable(layout: &Layout) -> bool {
+/// Symlinks from the mods folder into the archive can be created and the game will follow them
+/// (what `LinkPolicy` allows across drives, and what the move preflight reports).
+pub(crate) fn symlinks_usable(layout: &Layout) -> bool {
     !in_mac_app_container(&layout.mods) && supports_symlinks(layout)
 }
 
@@ -1218,14 +1223,20 @@ pub(crate) fn mount_of(p: &Path) -> Option<(PathBuf, u64)> {
     mount_in(&sysinfo::Disks::new_with_refreshed_list(), p)
 }
 
+/// Pure: both mounts (`mount_of`) are known and the same. An unknown mount — a network share,
+/// anything the disk list doesn't show — is never the same drive. Every same-drive decision
+/// goes through this (`same_volume` for links, the move preflight for space and hardlinks), so
+/// they always agree.
+pub(crate) fn known_same_mount(a: &Option<(PathBuf, u64)>, b: &Option<(PathBuf, u64)>) -> bool {
+    matches!((a, b), (Some((ma, _)), Some((mb, _))) if ma == mb)
+}
+
 /// Whether `a` and `b` live on the same volume (one disk enumeration for both). Unknown →
-/// assume same (a hardlink attempt then falls back safely to a copy).
+/// another volume (`known_same_mount`): no hardlink is planned there, so Optimize doesn't
+/// fail once per mod, and a move keeps an active mod's hardlink instead of copying it.
 pub(crate) fn same_volume(a: &Path, b: &Path) -> bool {
     let disks = sysinfo::Disks::new_with_refreshed_list();
-    match (mount_in(&disks, a), mount_in(&disks, b)) {
-        (Some((ma, _)), Some((mb, _))) => ma == mb,
-        _ => true,
-    }
+    known_same_mount(&mount_in(&disks, a), &mount_in(&disks, b))
 }
 
 /// Dir projection: `symlink` (a symlink or junction, see [`link_dir_native`]), or a marked copy
@@ -2853,6 +2864,40 @@ mod tests {
             &crate::modsroot::normalize_key(&mount.to_string_lossy(), cfg!(windows))
         ));
         assert!(same_volume(&base, &base.join("sub")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn known_same_mount_needs_both_mounts_known_and_equal() {
+        let c = Some((PathBuf::from("C:\\"), 1));
+        let d = Some((PathBuf::from("D:\\"), 1));
+        assert!(known_same_mount(&c, &c.clone()));
+        assert!(!known_same_mount(&c, &d));
+        assert!(!known_same_mount(&c, &None));
+        assert!(!known_same_mount(&None, &None));
+    }
+
+    /// A folder on a mount Silo can't identify (a network share, a path that won't resolve)
+    /// counts as another drive everywhere: no hardlink attempt per mod in Optimize, and a
+    /// move keeps a hardlink rather than falling back to a copy on the mods drive.
+    #[test]
+    fn an_unknown_mount_is_another_drive() {
+        let base = std::env::temp_dir().join(format!("silo_unknown_mount_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        // Never created, so its mount can't be found.
+        let unknown = base.join("not-mounted");
+        assert!(mount_of(&unknown).is_none());
+        assert!(!same_volume(&mods, &unknown));
+        let layout = Layout {
+            mods: mods.clone(),
+            archive: unknown,
+        };
+        assert_eq!(relink_mode(&layout), RelinkMode::CrossDriveNoSymlinks);
+        let mut policy = LinkPolicy::new(&layout);
+        assert!(policy.can_only_copy());
+        assert!(!policy.allow_symlink());
         let _ = std::fs::remove_dir_all(&base);
     }
 

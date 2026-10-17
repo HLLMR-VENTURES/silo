@@ -106,6 +106,10 @@ Folder (unzipped) mods keep the symlink-else-copy logic, but inside a **Mac App 
 they are always copied: the sandboxed game can't follow a link out of its container (matched on
 `/library/containers/` in the mods path, case-insensitively).
 
+A drive Silo can't identify (a network share, a mount the disk list doesn't show) counts as a
+**different volume** everywhere (`organize::known_same_mount`): in `LinkPolicy`, in Optimize links,
+and in the move preflight's `sameDrive` / space check, so all three agree.
+
 When the archive is on another drive and links aren't available, **Optimize links** reports it
 (`RelinkReport.cross_drive_copies`) instead of doing anything. Whether FS25 actually loads symlinked
 zips on each OS is a release gate — see `SMOKE_TEST.md` §1c.

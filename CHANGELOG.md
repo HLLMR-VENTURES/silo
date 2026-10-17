@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would be one. Before, two layouts could share files and organizing one moved the other's mods.
   (#PR)
 
+- **Optimize links handles an archive on a network share.** A drive Silo can't identify now
+  counts as another drive everywhere, so Optimize links no longer tries a hardlink for each mod and
+  fails, and the move dialog says the same as what the move does. (#PR)
+
 ### Security
 
 - **Stricter file-name checks.** File names with a colon, a trailing dot or space, or a reserved

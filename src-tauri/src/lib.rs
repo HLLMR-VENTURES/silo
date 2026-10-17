@@ -2550,12 +2550,6 @@ fn move_problems(f: MoveFacts) -> Vec<String> {
     v
 }
 
-/// Pure: both mounts known and equal. An unknown mount is NOT the same drive (so the space
-/// check still runs) — unlike `organize::same_volume`, which assumes same for link fallback.
-fn known_same_mount(a: &Option<(PathBuf, u64)>, b: &Option<(PathBuf, u64)>) -> bool {
-    matches!((a, b), (Some((ma, _)), Some((mb, _))) if ma == mb)
-}
-
 /// The facts a move to `new` depends on (the dialog's preflight, and the start command's
 /// server-side re-check — the webview isn't trusted to have run the preflight).
 struct MoveCheck {
@@ -2588,8 +2582,11 @@ fn check_move(
         .count();
     let new_mount = organize::mount_of(new);
     let free = new_mount.as_ref().map(|(_, f)| *f);
-    let same_drive = known_same_mount(&organize::mount_of(&layout.mods), &new_mount);
-    let archive_same_drive = known_same_mount(&organize::mount_of(&layout.archive), &new_mount);
+    // An unknown mount is another drive here (the space check still runs) and in
+    // `organize::same_volume` (links), so the preflight says what the move will do.
+    let same_drive = organize::known_same_mount(&organize::mount_of(&layout.mods), &new_mount);
+    let archive_same_drive =
+        organize::known_same_mount(&organize::mount_of(&layout.archive), &new_mount);
     let unknown = relocate::unknown_mods(&layout.archive, &rows);
     let problems = move_problems(MoveFacts {
         target,
@@ -2796,8 +2793,10 @@ async fn archive_move_preflight(
             && fence_problems(&layout, &new, &fences(&conn, &layout, app_data.as_deref()))
                 .is_empty();
         let check = check_move(&conn, &layout, &key, &new, target);
+        // What `LinkPolicy` will allow there (the probe, and never out of a Mac App Store
+        // sandbox).
         let symlinks_available = probed
-            && organize::supports_symlinks(&organize::Layout {
+            && organize::symlinks_usable(&organize::Layout {
                 mods: layout.mods.clone(),
                 archive: new.clone(),
             });
@@ -4717,9 +4716,9 @@ fn hold_quit() -> bool {
 mod tests {
     use super::{
         archive_holds_mods, build_gh_scope, cancel_falls_back, fence_problems,
-        foreign_mods_problem, known_same_mount, move_outcome, move_outcome_level, move_problems,
-        overlap_problems, repoint_refusal, scan_archives, scope_grants, select_adopt, split_adopt,
-        Fences, MoveFacts, Space,
+        foreign_mods_problem, move_outcome, move_outcome_level, move_problems, overlap_problems,
+        repoint_refusal, scan_archives, scope_grants, select_adopt, split_adopt, Fences, MoveFacts,
+        Space,
     };
     use crate::{
         organize::{Layout, ModInput},
@@ -4971,16 +4970,6 @@ mod tests {
         assert!(foreign_mods_problem(1).contains("move it to"));
         assert!(foreign_mods_problem(4).contains("already has 4 mods in subfolders"));
         assert!(foreign_mods_problem(4).contains("move them to"));
-    }
-
-    #[test]
-    fn unknown_mount_is_not_the_same_drive() {
-        let c = Some((PathBuf::from("C:\\"), 1));
-        let d = Some((PathBuf::from("D:\\"), 1));
-        assert!(known_same_mount(&c, &c.clone()));
-        assert!(!known_same_mount(&c, &d));
-        assert!(!known_same_mount(&c, &None));
-        assert!(!known_same_mount(&None, &None));
     }
 
     /// Finishing, or pausing because the user asked, is routine; a pause for a reason (the game
