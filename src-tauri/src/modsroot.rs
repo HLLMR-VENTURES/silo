@@ -162,6 +162,9 @@ pub struct Blocked {
     pub mods: PathBuf,
     /// The folder it runs into, when known.
     pub conflict: Option<PathBuf>,
+    /// The folder's own unfinished archive move, if any: still shown, and it can still be
+    /// resumed or cancelled (nothing else is written while blocked).
+    pub moving: Option<Box<Active>>,
 }
 
 pub fn set_game_reads(p: Option<PathBuf>) {
@@ -690,6 +693,7 @@ mod tests {
             cause: BlockCause::Overlap,
             mods: PathBuf::from("/m"),
             conflict: None,
+            moving: None,
         };
         let a = Active {
             layout: crate::organize::Layout::default_for(Path::new("/y")),

@@ -1516,10 +1516,24 @@ fn ensure_no_move() -> Result<(), String> {
     if move_in_progress() {
         return Err("Finish or cancel the archive move first.".into());
     }
-    match modsroot::active() {
-        Some(a) if a.move_to.is_some() => Err("Finish or cancel the archive move first.".into()),
+    let (active, blocked) = modsroot::published();
+    no_move_refusal(active.as_ref(), blocked.as_ref(), modsroot::resolved())
+}
+
+/// Pure: `ensure_no_move` over the published state. A blocked folder's own unfinished move
+/// counts too.
+fn no_move_refusal(
+    active: Option<&modsroot::Active>,
+    blocked: Option<&modsroot::Blocked>,
+    resolved: bool,
+) -> Result<(), String> {
+    let unfinished = active
+        .or_else(|| blocked.and_then(|b| b.moving.as_deref()))
+        .is_some_and(|a| a.move_to.is_some());
+    match active {
+        _ if unfinished => Err("Finish or cancel the archive move first.".into()),
         Some(_) => Ok(()),
-        None if !modsroot::resolved() => Err(STILL_LOADING.into()),
+        None if !resolved => Err(STILL_LOADING.into()),
         None => Ok(()),
     }
 }
@@ -2041,6 +2055,7 @@ fn resolve_layout(
         cause,
         mods: mods.to_path_buf(),
         conflict,
+        moving: unfinished_move(conn, mods).map(Box::new),
     };
     let problem = match mods_folder_check(conn, mods, &known(true)) {
         Ok(None) => return Ok(resolve_active(conn, mods)),
@@ -2073,6 +2088,37 @@ fn resolve_layout(
         modsroot::BlockCause::Overlap,
         Some(problem.conflict),
     ))
+}
+
+/// The layout of `mods`' unfinished archive move, if it has one: the archive it started from
+/// (`Layout`'s rules, else the default) and the one it's going to. No side effects (unlike
+/// `resolve_active`, nothing is rediscovered or stored).
+fn unfinished_move(
+    conn: &rusqlite::Connection,
+    mods: &std::path::Path,
+) -> Option<modsroot::Active> {
+    let m = relocate::load_marker(conn, &modsroot::canonical_key(mods))?;
+    let layout = organize::Layout::new(mods.to_path_buf(), m.from)
+        .unwrap_or_else(|_| organize::Layout::default_for(mods));
+    Some(modsroot::Active {
+        layout,
+        move_to: Some(m.to),
+    })
+}
+
+/// The layout a move's resume or cancel runs in: the published one, or — while the folder is
+/// blocked — that folder's own unfinished move, so it can still be finished or brought home.
+fn resumable_layout(
+    active: Option<modsroot::Active>,
+    blocked: Option<modsroot::Blocked>,
+    resolved: bool,
+) -> Result<organize::Layout, String> {
+    match (active, blocked) {
+        (Some(a), _) => Ok(a.layout),
+        (None, Some(b)) => b.moving.map(|m| m.layout).ok_or(b.reason),
+        (None, None) if !resolved => Err(STILL_LOADING.into()),
+        (None, None) => Err("No mods folder selected".into()),
+    }
 }
 
 /// The folder "Point FS25 here" writes into FS25's setting: the managed folder, or — while
@@ -2963,7 +3009,16 @@ fn with_move_ctx(
 ) -> Result<Option<relocate::MoveMarker>, String> {
     let run = || {
         let _write = try_move_lock()?;
-        let (layout, key) = active_layout()?;
+        // A resume or cancel also reaches a blocked folder's own unfinished move.
+        let (layout, key) = match what {
+            "resume" | "cancel" => {
+                let (active, blocked) = modsroot::published();
+                let l = resumable_layout(active, blocked, modsroot::resolved())?;
+                let key = modsroot::canonical_key(&l.mods);
+                (l, key)
+            }
+            _ => active_layout()?,
+        };
         let conn = db::open(db)?;
         let emitter = app.clone();
         let mut progress = move |p: &relocate::Progress| {
@@ -3042,7 +3097,10 @@ async fn archive_status(app: tauri::AppHandle) -> Result<ArchiveStatus, error::A
                 STILL_LOADING,
             ));
         }
-        let Some(a) = modsroot::active() else {
+        // A blocked folder's own unfinished move is still shown (it can be resumed or
+        // cancelled).
+        let (active, blocked) = modsroot::published();
+        let Some(a) = active.or_else(|| blocked.and_then(|b| b.moving).map(|m| *m)) else {
             return Ok(ArchiveStatus {
                 path: None,
                 is_default: true,
@@ -5441,6 +5499,48 @@ mod tests {
         };
         crate::db::upsert_organized(&conn, &crate::modsroot::canonical_key(&o), &row).unwrap();
         assert_eq!(archives(), vec![o.join("archive")]);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_blocked_folders_own_move_can_still_be_resumed_or_cancelled() {
+        let base = temp_base("blockedmove");
+        let mods = base.join("mods");
+        let hdd = base.join("hdd");
+        std::fs::create_dir_all(&hdd).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        assert_eq!(super::unfinished_move(&conn, &mods), None);
+        let m = MoveMarker::new(mods.join("archive"), hdd.clone());
+        crate::relocate::save_marker(&conn, &crate::modsroot::canonical_key(&mods), &m).unwrap();
+        let moving = super::unfinished_move(&conn, &mods).unwrap();
+        assert_eq!(moving.layout, Layout::default_for(&mods));
+        assert_eq!(moving.move_to, Some(hdd));
+        let blocked = |moving| crate::modsroot::Blocked {
+            reason: "blocked".into(),
+            cause: crate::modsroot::BlockCause::Overlap,
+            mods: mods.clone(),
+            conflict: None,
+            moving,
+        };
+        // Resume / cancel run in the blocked folder's move; without one, the reason.
+        assert_eq!(
+            super::resumable_layout(None, Some(blocked(Some(Box::new(moving.clone())))), true),
+            Ok(Layout::default_for(&mods))
+        );
+        assert_eq!(
+            super::resumable_layout(None, Some(blocked(None)), true),
+            Err("blocked".to_string())
+        );
+        // Everything else waits for that move, as for any unfinished move.
+        assert_eq!(
+            super::no_move_refusal(None, Some(&blocked(Some(Box::new(moving)))), true),
+            Err("Finish or cancel the archive move first.".to_string())
+        );
+        assert_eq!(
+            super::no_move_refusal(None, Some(&blocked(None)), true),
+            Ok(())
+        );
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
     }
