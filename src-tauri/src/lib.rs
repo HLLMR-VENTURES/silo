@@ -103,6 +103,8 @@ async fn scan_mods(
         // A mod update Silo was in the middle of when it stopped is finished or rolled back
         // first, so the scan sees the library as it should be.
         let recovered = recover_interrupted_updates();
+        // Taken after this scan's own recovery, so only writes from here on count against it.
+        let start = quiet_epoch(&LIBRARY_WRITE, &LIBRARY_EPOCH);
         // Warm cache: parsed entries persist between launches, keyed by
         // path+mtime+size, so unchanged mods skip archive parsing entirely.
         let mut conn = db::open(&db_path(&app)?)?;
@@ -168,8 +170,22 @@ async fn scan_mods(
                 })
             })
             .collect();
+        // Only on a quiet library: a scan's snapshot of the archive may predate, or overlap, an
+        // organize, activate, install or move, and rewriting the manifest from it would undo it.
         if let Some(key) = scan_key.as_deref().filter(|_| may_reconcile) {
-            let _ = db::reconcile_organized(&mut conn, key, &organized_rows);
+            let quiet = reconcile_if_quiet(
+                &LIBRARY_WRITE,
+                &LIBRARY_EPOCH,
+                start,
+                &mut conn,
+                key,
+                &organized_rows,
+            );
+            if !quiet {
+                eprintln!(
+                    "[Silo] scan: library changed while scanning; manifest left for the next scan"
+                );
+            }
         }
 
         let mut result = out.result;
@@ -764,7 +780,10 @@ fn recover_interrupted_updates() -> update::Recovery {
     if active.move_to.is_some() {
         return update::Recovery::default();
     }
-    let Some(_write) = lock_result(LIBRARY_WRITE.try_lock()) else {
+    // Counts as a write: it can change files, so a scan already under way (another window
+    // focus) mustn't rewrite the manifest from what it saw before. The scan calling this takes
+    // its own starting epoch afterwards.
+    let Some(_write) = take_for_write(&LIBRARY_WRITE, &LIBRARY_EPOCH) else {
         return update::Recovery::default();
     };
     let r = settle_layout(&active.layout);
@@ -1548,7 +1567,7 @@ fn wait_for_library(
     let start = std::time::Instant::now();
     loop {
         ready()?;
-        if let Some(guard) = lock_result(LIBRARY_WRITE.try_lock()) {
+        if let Some(guard) = take_for_write(&LIBRARY_WRITE, &LIBRARY_EPOCH) {
             ready()?;
             return Ok(guard);
         }
@@ -1559,10 +1578,63 @@ fn wait_for_library(
     }
 }
 
+/// Bumped every time a writer takes the library lock, so a scan can tell whether the library
+/// changed while it ran.
+static LIBRARY_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Take `lock` for a write without waiting, and count it in `epoch` (bumped while the lock is
+/// held, so a scan reading `epoch` under the same lock always sees it).
+fn take_for_write(
+    lock: &'static std::sync::Mutex<()>,
+    epoch: &std::sync::atomic::AtomicU64,
+) -> Option<std::sync::MutexGuard<'static, ()>> {
+    let guard = lock_result(lock.try_lock())?;
+    epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Some(guard)
+}
+
+/// The epoch, if no writer holds `lock` right now.
+fn quiet_epoch(
+    lock: &'static std::sync::Mutex<()>,
+    epoch: &std::sync::atomic::AtomicU64,
+) -> Option<u64> {
+    let _g = lock_result(lock.try_lock())?;
+    Some(epoch.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// A scan may rewrite the organize manifest only if the library was quiet when it began, is
+/// quiet now, and no write took the lock in between.
+fn scan_may_reconcile(start: Option<u64>, now: Option<u64>) -> bool {
+    matches!((start, now), (Some(a), Some(b)) if a == b)
+}
+
+/// Rewrite folder `key`'s organize manifest from what a scan found on disk, unless the library
+/// changed since the scan began (`start`, from `quiet_epoch`). `lock` is held while
+/// reconciling, so no write starts on top of it. Returns false when the manifest was left
+/// alone because the library wasn't quiet (a database error is ignored, as before).
+fn reconcile_if_quiet(
+    lock: &'static std::sync::Mutex<()>,
+    epoch: &std::sync::atomic::AtomicU64,
+    start: Option<u64>,
+    conn: &mut rusqlite::Connection,
+    key: &str,
+    rows: &[db::OrganizedRow],
+) -> bool {
+    let now = lock_result(lock.try_lock());
+    let seen = now
+        .as_ref()
+        .map(|_| epoch.load(std::sync::atomic::Ordering::SeqCst));
+    if !scan_may_reconcile(start, seen) {
+        return false;
+    }
+    let _ = db::reconcile_organized(conn, key, rows);
+    true
+}
+
 /// The library write lock for an archive move, without waiting: a busy library refuses.
 fn try_move_lock() -> Result<MoveLock, String> {
     ensure_not_self_updating()?;
-    match lock_result(LIBRARY_WRITE.try_lock()) {
+    match take_for_write(&LIBRARY_WRITE, &LIBRARY_EPOCH) {
         Some(g) => {
             // A self-update may have started between the check above and taking the lock.
             if self_updating() {
@@ -4925,6 +4997,127 @@ mod tests {
             r.err(),
             Some("Finish or cancel the archive move first.".to_string())
         );
+    }
+
+    #[test]
+    fn a_scan_reconciles_only_when_no_write_overlapped_it() {
+        assert!(super::scan_may_reconcile(Some(3), Some(3)));
+        assert!(
+            !super::scan_may_reconcile(Some(3), Some(4)),
+            "a write ran during the scan"
+        );
+        assert!(
+            !super::scan_may_reconcile(None, Some(3)),
+            "a write was running when it began"
+        );
+        assert!(
+            !super::scan_may_reconcile(Some(3), None),
+            "a write is running now"
+        );
+    }
+
+    #[test]
+    fn quiet_epoch_is_none_while_a_writer_holds_the_lock() {
+        static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static E: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(7);
+        assert_eq!(super::quiet_epoch(&L, &E), Some(7));
+        let _held = L.lock().unwrap();
+        let seen = std::thread::spawn(|| super::quiet_epoch(&L, &E))
+            .join()
+            .unwrap();
+        assert_eq!(seen, None);
+    }
+
+    #[test]
+    fn a_write_during_a_scan_keeps_that_scan_from_overwriting_it() {
+        use crate::db;
+        static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static E: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let base = temp_base("scan_race");
+        let mut conn = db::open(&base.join("silo.db")).unwrap();
+        let row = |tech: &str| db::OrganizedRow {
+            tech_name: tech.into(),
+            file_name: format!("{tech}.zip"),
+            kind: "zip".into(),
+            category: "Vehicles".into(),
+            subcategory: None,
+            active: false,
+        };
+        let names = |conn: &rusqlite::Connection| {
+            let mut v: Vec<String> = db::load_organized(conn, "r")
+                .into_iter()
+                .map(|r| r.tech_name)
+                .collect();
+            v.sort();
+            v
+        };
+
+        // The scan starts on a quiet library and finds only FS25_A on disk...
+        let start = super::quiet_epoch(&L, &E);
+        let seen_on_disk = vec![row("FS25_A")];
+        // ...while an organize files FS25_B (taking the lock the way every write does).
+        {
+            let _w = super::take_for_write(&L, &E).unwrap();
+            db::upsert_organized(&conn, "r", &row("FS25_B")).unwrap();
+        }
+        assert!(!super::reconcile_if_quiet(
+            &L,
+            &E,
+            start,
+            &mut conn,
+            "r",
+            &seen_on_disk
+        ));
+        assert_eq!(names(&conn), ["FS25_B"], "the organize's record is kept");
+
+        // A scan that began after the write may bring the record in line with disk.
+        let start = super::quiet_epoch(&L, &E);
+        let seen_on_disk = vec![row("FS25_A"), row("FS25_B")];
+        assert!(super::reconcile_if_quiet(
+            &L,
+            &E,
+            start,
+            &mut conn,
+            "r",
+            &seen_on_disk
+        ));
+        assert_eq!(names(&conn), ["FS25_A", "FS25_B"]);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_scan_never_reconciles_while_a_write_holds_the_lock() {
+        static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static E: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let base = temp_base("scan_held");
+        let mut conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let start = super::quiet_epoch(&L, &E);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let writer = std::thread::spawn(move || {
+            let _w = super::take_for_write(&L, &E).unwrap();
+            held_tx.send(()).unwrap();
+            let _ = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+        });
+        held_rx.recv().unwrap();
+        let did = super::reconcile_if_quiet(&L, &E, start, &mut conn, "r", &[]);
+        done_tx.send(()).unwrap();
+        writer.join().unwrap();
+        assert!(!did);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn every_library_write_moves_the_epoch_on() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let before = super::LIBRARY_EPOCH.load(SeqCst);
+        // Checks stubbed out, as in the deadline test below: they read global state.
+        let guard = super::wait_for_library(std::time::Duration::from_secs(20), || Ok(()))
+            .expect("the library lock");
+        assert!(super::LIBRARY_EPOCH.load(SeqCst) > before);
+        drop(guard);
     }
 
     #[test]
