@@ -3,7 +3,7 @@
 //! only from here (or one Silo already knows), so a compromised webview can't quietly point
 //! them somewhere else.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -18,14 +18,17 @@ pub(crate) const KEEP: usize = 4;
 
 pub const NOT_PICKED: &str = "Choose that folder with the Change… button, then try again.";
 
+/// Each pick is kept as the folder's identity key (`modsroot::canonical_key`) taken when it was
+/// picked, so a picked path later swapped for a link (or junction) to somewhere else no longer
+/// matches.
 #[derive(Default)]
-pub struct Picks(Vec<(Purpose, PathBuf)>);
+pub struct Picks(Vec<(Purpose, String)>);
 
 impl Picks {
     pub fn remember(&mut self, purpose: Purpose, path: &Path) {
-        self.0
-            .retain(|(p, f)| !(*p == purpose && crate::modsroot::same_folder(f, path)));
-        self.0.push((purpose, path.to_path_buf()));
+        let key = crate::modsroot::canonical_key(path);
+        self.0.retain(|(p, k)| !(*p == purpose && *k == key));
+        self.0.push((purpose, key));
         let mut seen = 0;
         let mut i = self.0.len();
         while i > 0 {
@@ -40,9 +43,14 @@ impl Picks {
     }
 
     pub fn allows(&self, purpose: Purpose, path: &Path) -> bool {
-        self.0
-            .iter()
-            .any(|(p, f)| *p == purpose && crate::modsroot::same_folder(f, path))
+        let key = crate::modsroot::canonical_key(path);
+        self.0.iter().any(|(p, k)| *p == purpose && *k == key)
+    }
+
+    /// Drop every pick for `purpose`: called once a command has used one, so it can't be
+    /// replayed later.
+    pub fn forget(&mut self, purpose: Purpose) {
+        self.0.retain(|(p, _)| *p != purpose);
     }
 }
 
@@ -60,6 +68,15 @@ pub fn allows(purpose: Purpose, path: &Path) -> bool {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .allows(purpose, path)
+}
+
+/// See [`Picks::forget`]. Call only after the command that used the pick succeeded, so a
+/// refused or cancelled attempt (e.g. "use it as it is" after a move is refused) can retry.
+pub fn forget(purpose: Purpose) {
+    PICKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .forget(purpose);
 }
 
 #[cfg(test)]
@@ -99,6 +116,43 @@ mod tests {
         }
         assert!(!p.allows(Purpose::ModsFolder, &d[0]), "oldest pick dropped");
         assert!(d[1..].iter().all(|x| p.allows(Purpose::ModsFolder, x)));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_pick_names_the_folder_it_was_not_a_link_put_there_later() {
+        let (base, d) = dirs("swap", 2);
+        let mut p = Picks::default();
+        p.remember(Purpose::Archive, &d[0]);
+        // The picked folder is swapped for a link (a junction on Windows) to another folder.
+        std::fs::remove_dir(&d[0]).unwrap();
+        crate::organize::link_dir_native(&d[1], &d[0]).unwrap();
+        assert!(
+            !p.allows(Purpose::Archive, &d[0]),
+            "the path now leads elsewhere"
+        );
+        assert!(
+            !p.allows(Purpose::Archive, &d[1]),
+            "the link's target was never picked"
+        );
+        let _ = std::fs::remove_dir(&d[0]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_used_pick_can_not_be_replayed() {
+        let (base, d) = dirs("used", 3);
+        let mut p = Picks::default();
+        p.remember(Purpose::Archive, &d[0]);
+        p.remember(Purpose::Archive, &d[1]);
+        p.remember(Purpose::ModsFolder, &d[2]);
+        p.forget(Purpose::Archive);
+        assert!(!p.allows(Purpose::Archive, &d[0]));
+        assert!(!p.allows(Purpose::Archive, &d[1]));
+        assert!(
+            p.allows(Purpose::ModsFolder, &d[2]),
+            "other purposes keep their picks"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

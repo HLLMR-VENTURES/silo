@@ -1960,6 +1960,8 @@ async fn set_mods_root(app: tauri::AppHandle, path: String) -> Result<ModsRootSt
         );
         db::set_app_setting(&conn, modsroot::KNOWN_KEY, Some(&known))?;
         db::set_app_setting(&conn, modsroot::CHOICE_KEY, Some(&path))?;
+        // Used: a later call can't replay it (the folder is in the known list now anyway).
+        picked::forget(picked::Purpose::ModsFolder);
         Ok(compute_mods_root_status(&conn))
     })
     .await
@@ -2599,7 +2601,10 @@ async fn archive_move_start(
         if !picked::allows(picked::Purpose::Archive, &new) {
             return Err(picked::NOT_PICKED.into());
         }
-        start_move(&app, &db, new, false)
+        let moved = start_move(&app, &db, new, false)?;
+        // Used: a later call can't replay it. (A refused start keeps it for "use as it is".)
+        picked::forget(picked::Purpose::Archive);
+        Ok(moved)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2747,6 +2752,9 @@ async fn archive_repoint(app: tauri::AppHandle, path: Option<String>) -> Result<
             modsroot::validate_folder(&new)?;
         }
         relocate::store_archive_setting(&conn, &key, &layout.mods, &new)?;
+        if path.is_some() {
+            picked::forget(picked::Purpose::Archive);
+        }
         eprintln!(
             "[Silo] re-pointed the library archive {} -> {} (nothing moved)",
             layout.archive.display(),
