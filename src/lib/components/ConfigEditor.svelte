@@ -116,7 +116,7 @@
       <button class="ms-save" onclick={save} disabled={!dirty}>Save changes</button>
       {#if saved}<span class="ms-saved">saved ✓</span>{/if}
     </div>
-    {#if footnote}<div class="ms-foot">{footnote} Silo keeps the original and your last three versions as <code>.bak</code> files.</div>{/if}
+    {#if footnote}<div class="ms-foot">{footnote} Silo keeps the original and the three versions before your latest edit as <code>.bak</code> files.</div>{/if}
   {/if}
 </div>
 

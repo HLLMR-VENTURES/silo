@@ -154,7 +154,7 @@
     </div>
   {/each}
 
-  <div class="ms-foot">Silo keeps the original and your last three versions as <code>.bak</code> files.</div>
+  <div class="ms-foot">Silo keeps the original and the three versions before your latest edit as <code>.bak</code> files.</div>
 </div>
 
 <style>
