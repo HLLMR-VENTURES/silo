@@ -2,22 +2,131 @@
 //! and user name removed, ready to paste into a public bug report.
 
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// The bundle: a `header` line, the `report`, and (when given) the recent `log`, with the home
-/// folder and user name removed from all of it.
+/// What the bundle carries from the log.
+#[derive(Default)]
+pub struct LogParts {
+    /// The latest warning and error lines (`recent_warnings`).
+    pub warnings: String,
+    /// The end of the log (`recent_log`).
+    pub recent: String,
+}
+
+/// The bundle: a `header` line, the `report`, and (when given) the recent warnings and log,
+/// with the home folder and user name removed from all of it.
 pub fn bundle(
     header: &str,
     report: &str,
-    log: Option<&str>,
+    log: Option<&LogParts>,
     home: Option<&str>,
     user: Option<&str>,
 ) -> String {
     let mut out = format!("{header}\n\n{report}");
     if let Some(log) = log {
-        out.push_str(&format!("\n\n## Recent log\n\n```\n{log}\n```\n"));
+        let fenced = |s: &str| {
+            if s.is_empty() {
+                "None.".to_string()
+            } else {
+                format!("```\n{s}\n```")
+            }
+        };
+        out.push_str(&format!(
+            "\n\n## Recent warnings\n\n{}\n\n## Recent log\n\n{}\n",
+            fenced(&log.warnings),
+            fenced(&log.recent)
+        ));
     }
     redact(&out, home, user)
+}
+
+/// The log file name without its extension (`app_log_dir()/silo.log`; rotated copies are
+/// `silo_<date>_<time>.log`).
+pub const LOG_NAME: &str = "silo";
+
+/// The log files in `dir`, newest first: the live `silo.log`, then the newest rotated
+/// `silo_<date>_<time>.log` (their names sort by date). Only files that exist.
+pub fn log_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let live = dir.join(format!("{LOG_NAME}.log"));
+    if live.is_file() {
+        out.push(live);
+    }
+    let prefix = format!("{LOG_NAME}_");
+    let newest_rotated = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&prefix) && n.ends_with(".log"))
+        .max();
+    out.extend(newest_rotated.map(|n| dir.join(n)));
+    out
+}
+
+/// The last `max_lines` lines across `files` (newest first, as `log_files` gives them), reading
+/// at most `max_bytes` in all: the live log first, topped up from the rotated one when it's
+/// short (just after a rotation). Oldest line first.
+pub fn recent_log(files: &[PathBuf], max_lines: usize, max_bytes: u64) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let (mut lines_left, mut bytes_left) = (max_lines, max_bytes);
+    for f in files {
+        if lines_left == 0 || bytes_left == 0 {
+            break;
+        }
+        let t = tail(f, lines_left, bytes_left);
+        let len = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+        bytes_left = bytes_left.saturating_sub(len.min(bytes_left));
+        if !t.is_empty() {
+            lines_left = lines_left.saturating_sub(t.lines().count());
+            parts.push(t);
+        }
+    }
+    parts.reverse();
+    parts.join("\n")
+}
+
+/// Read at most this much of one log file when looking for warnings (a log file is at most
+/// 2 MB; this only guards against a file that grew some other way).
+const WARN_SCAN_BYTES: u64 = 4 * 1024 * 1024;
+
+/// A log line at WARN or ERROR level (`[date][time][target][LEVEL] message`).
+fn is_warning(line: &str) -> bool {
+    line.split_once("] ")
+        .is_some_and(|(head, _)| head.ends_with("[WARN") || head.ends_with("[ERROR"))
+}
+
+/// The last `max_lines` warning and error lines from the whole of each of `files` (newest
+/// first), topped up from the rotated log when the live one has fewer; at most `max_bytes`,
+/// dropping the oldest lines first. Oldest line first.
+pub fn recent_warnings(files: &[PathBuf], max_lines: usize, max_bytes: u64) -> String {
+    let mut found: Vec<String> = Vec::new(); // newest first
+    for f in files {
+        if found.len() >= max_lines {
+            break;
+        }
+        let text = tail(f, usize::MAX, WARN_SCAN_BYTES);
+        let mut here: Vec<String> = text
+            .lines()
+            .filter(|l| is_warning(l))
+            .map(str::to_string)
+            .collect();
+        here.reverse();
+        found.extend(here.into_iter().take(max_lines - found.len()));
+    }
+    let mut kept: Vec<String> = Vec::new(); // newest first, within the byte limit
+    let mut used = 0u64;
+    for line in found {
+        let cost = line.len() as u64 + u64::from(!kept.is_empty());
+        if used + cost > max_bytes {
+            break;
+        }
+        used += cost;
+        kept.push(line);
+    }
+    kept.reverse();
+    kept.join("\n")
 }
 
 /// User names shorter than this only go from paths (the home folder), so a short name like
@@ -316,12 +425,19 @@ mod tests {
     fn the_bundle_redacts_the_report_and_the_log() {
         let report = "- Mods folder: C:\\Users\\hllmr\\Documents\\mods\n\
                       - Corrupt: FS25_A — couldn't open C:\\Users\\hllmr\\mods\\FS25_A.zip: denied";
-        let log = "[INFO][silo::fs] link \"C:\\Users\\hllmr\\arc\\A.zip\" -> \"C:\\Users\\hllmr\\mods\\A.zip\"\n\
-                   [WARN][silo_lib] copy failed: Os { path: \"C:\\\\Users\\\\hllmr\\\\x\" } for hllmr";
+        let warn =
+            "[WARN][silo_lib] copy failed: Os { path: \"C:\\\\Users\\\\hllmr\\\\x\" } for hllmr";
+        let recent = format!(
+            "[INFO][silo::fs] link \"C:\\Users\\hllmr\\arc\\A.zip\" -> \"C:\\Users\\hllmr\\mods\\A.zip\"\n{warn}"
+        );
+        let parts = LogParts {
+            warnings: warn.into(),
+            recent,
+        };
         let with_log = bundle(
             "Silo 1.0.0 on windows",
             report,
-            Some(log),
+            Some(&parts),
             Some("C:\\Users\\hllmr"),
             Some("hllmr"),
         );
@@ -330,10 +446,103 @@ mod tests {
             "{with_log}"
         );
         assert!(with_log.starts_with("Silo 1.0.0 on windows\n\n- Mods folder: ~\\Documents\\mods"));
-        assert!(with_log.contains("## Recent log"));
+        let w = with_log
+            .find("## Recent warnings")
+            .expect("warnings section");
+        let r = with_log.find("## Recent log").expect("log section");
+        assert!(w < r, "warnings come first");
         assert!(with_log.contains("link \"~\\arc\\A.zip\" -> \"~\\mods\\A.zip\""));
+        let none = LogParts::default();
+        let quiet = bundle("h", "r", Some(&none), None, None);
+        assert!(quiet.contains("## Recent warnings\n\nNone."), "{quiet}");
         let without = bundle("h", report, None, Some("C:\\Users\\hllmr"), Some("hllmr"));
         assert!(!without.contains("Recent log") && !without.contains("hllmr"));
+    }
+
+    fn log_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("silo_logs_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn lines(prefix: &str, range: std::ops::Range<usize>) -> String {
+        range.map(|i| format!("{prefix} {i}\n")).collect()
+    }
+
+    /// The live log, then the newest rotated one; anything else in the folder is ignored.
+    #[test]
+    fn log_files_are_the_live_one_then_the_newest_rotated_one() {
+        let dir = log_dir("files");
+        for f in [
+            "silo_2026-10-01_10-00-00.log",
+            "silo_2026-10-16_09-00-00.log",
+            "silo_2026-10-16_09-00-00.log.bak",
+            "silo.log",
+            "other.log",
+        ] {
+            std::fs::write(dir.join(f), "x\n").unwrap();
+        }
+        let names: Vec<String> = log_files(&dir)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["silo.log", "silo_2026-10-16_09-00-00.log"]);
+        assert!(log_files(&dir.join("missing")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Just after a rotation the live log is short: the recent log is topped up from the
+    /// rotated one, oldest first, within the line and byte limits.
+    #[test]
+    fn the_recent_log_is_topped_up_after_a_rotation() {
+        let dir = log_dir("topup");
+        let live = dir.join("silo.log");
+        let old = dir.join("silo_2026-10-16_09-00-00.log");
+        std::fs::write(&live, lines("new", 0..2)).unwrap();
+        std::fs::write(&old, lines("old", 0..10)).unwrap();
+        let files = [live.clone(), old.clone()];
+        assert_eq!(
+            recent_log(&files, 5, 64 * 1024),
+            "old 7\nold 8\nold 9\nnew 0\nnew 1"
+        );
+        // A full live log needs nothing older.
+        assert_eq!(recent_log(&files, 2, 64 * 1024), "new 0\nnew 1");
+        // The byte limit covers both files: 12 bytes is "new 0\nnew 1\n" only.
+        assert_eq!(recent_log(&files, 5, 12), "new 0\nnew 1");
+        assert_eq!(recent_log(&[], 5, 1024), "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Warnings and errors from the whole live log (not just its tail), topped up from the
+    /// rotated one, newest last, within the line and byte limits.
+    #[test]
+    fn recent_warnings_come_from_the_whole_log() {
+        let dir = log_dir("warn");
+        let live = dir.join("silo.log");
+        let old = dir.join("silo_2026-10-16_09-00-00.log");
+        let mut body = String::from("[d][t][silo_lib][WARN] early warning\n");
+        body.push_str(&lines("[d][t][silo_lib][INFO] busy", 0..2000));
+        body.push_str("[d][t][silo_lib][ERROR] late error\n");
+        body.push_str("[d][t][silo_lib][INFO] mentions [WARN] in passing\n");
+        std::fs::write(&live, body).unwrap();
+        std::fs::write(
+            &old,
+            "[d][t][silo_lib][WARN] old one\n[d][t][silo_lib][WARN] old two\n",
+        )
+        .unwrap();
+        let files = [live.clone(), old.clone()];
+        assert_eq!(
+            recent_warnings(&files, 3, 16 * 1024),
+            "[d][t][silo_lib][WARN] old two\n[d][t][silo_lib][WARN] early warning\n[d][t][silo_lib][ERROR] late error"
+        );
+        assert_eq!(recent_warnings(&files, 50, 16 * 1024).lines().count(), 4);
+        // Over the byte limit, the oldest lines go first.
+        assert_eq!(
+            recent_warnings(&files, 50, 40),
+            "[d][t][silo_lib][ERROR] late error"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

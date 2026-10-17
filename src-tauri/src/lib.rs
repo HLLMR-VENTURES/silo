@@ -3092,14 +3092,19 @@ async fn diagnostics_bundle(
     report: String,
     include_log: bool,
 ) -> Result<String, String> {
-    let log = app.path().app_log_dir().ok().map(|d| d.join("silo.log"));
+    let log_dir = app.path().app_log_dir().ok();
     let version = app.package_info().version.to_string();
     off_main(move || {
         let header = format!("Silo {version} on {}", std::env::consts::OS);
-        let recent = include_log.then(|| {
-            log.as_deref()
-                .map(|p| diagnostics::tail(p, 300, 64 * 1024))
-                .unwrap_or_default()
+        let parts = include_log.then(|| {
+            let files = log_dir
+                .as_deref()
+                .map(diagnostics::log_files)
+                .unwrap_or_default();
+            diagnostics::LogParts {
+                warnings: diagnostics::recent_warnings(&files, 50, 16 * 1024),
+                recent: diagnostics::recent_log(&files, 300, 64 * 1024),
+            }
         });
         let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
         let user = std::env::var("USERNAME")
@@ -3108,7 +3113,7 @@ async fn diagnostics_bundle(
         Ok(diagnostics::bundle(
             &header,
             &report,
-            recent.as_deref(),
+            parts.as_ref(),
             home.as_deref(),
             user.as_deref(),
         ))
@@ -4279,7 +4284,7 @@ fn log_plugin<R: tauri::Runtime>(to_file: bool) -> tauri::plugin::TauriPlugin<R>
     let mut targets = vec![Target::new(TargetKind::Stderr)];
     if to_file {
         targets.push(Target::new(TargetKind::LogDir {
-            file_name: Some("silo".into()),
+            file_name: Some(diagnostics::LOG_NAME.into()),
         }));
     }
     tauri_plugin_log::Builder::new()
