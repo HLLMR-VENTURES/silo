@@ -188,21 +188,7 @@ fn back_up_config(dest: &Path) -> Result<(), String> {
         } else {
             dest.to_path_buf()
         };
-        let mut out = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&original)
-            .map_err(abort)?;
-        let copied = std::fs::File::open(&source)
-            .and_then(|mut src| std::io::copy(&mut src, &mut out))
-            .and_then(|_| out.sync_all());
-        if let Err(e) = copied {
-            // A partial copy would be kept forever as the "original": remove the file we just
-            // created so the next edit tries again.
-            drop(out);
-            let _ = std::fs::remove_file(&original);
-            return Err(abort(e));
-        }
+        keep_original(&source, &original).map_err(abort)?;
     }
     let oldest = backup_slot(dest, CONFIG_BACKUPS);
     if oldest.exists() {
@@ -215,6 +201,46 @@ fn back_up_config(dest: &Path) -> Result<(), String> {
         }
     }
     std::fs::copy(dest, backup_slot(dest, 1)).map_err(abort)?;
+    Ok(())
+}
+
+/// Copy `source` to `original` so that `original` only ever appears complete, even if Silo
+/// stops mid-copy: copy into `<original>.tmp`, flush it, then hard-link it into place (a link
+/// never replaces an existing file) and drop the temp. On a filesystem without hard links, fall
+/// back to a create-new copy. A partial temp from an earlier crash is removed first.
+fn keep_original(source: &Path, original: &Path) -> std::io::Result<()> {
+    use std::io::ErrorKind;
+    let tmp = with_suffix(original, ".tmp");
+    match std::fs::remove_file(&tmp) {
+        Err(e) if e.kind() != ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    copy_new(source, &tmp)?;
+    let placed = match std::fs::hard_link(&tmp, original) {
+        Ok(()) => Ok(()),
+        // Another edit kept the original first; it is never replaced.
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(_) => copy_new(source, original),
+    };
+    let _ = std::fs::remove_file(&tmp);
+    placed
+}
+
+/// Copy `source` to a new file `to` (never replacing one) and flush it. A partial copy is
+/// removed again on failure.
+fn copy_new(source: &Path, to: &Path) -> std::io::Result<()> {
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
+    let copied = std::fs::File::open(source)
+        .and_then(|mut src| std::io::copy(&mut src, &mut out))
+        .and_then(|_| out.sync_all());
+    if let Err(e) = copied {
+        drop(out);
+        let _ = std::fs::remove_file(to);
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -419,6 +445,26 @@ mod tests {
         assert_eq!(read("gameSettings.xml.silo-original.bak"), "<v0/>");
         assert_eq!(read("gameSettings.xml.bak"), "<v1/>");
         assert_eq!(read("gameSettings.xml.bak.2"), "<v0/>");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_stale_partial_original_is_replaced_and_cleaned_up() {
+        // A crash mid-copy leaves only the temp file; the original must never be the partial.
+        let root = std::env::temp_dir().join(format!("silo_cfg_stale_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let dest = root.join("gameSettings.xml");
+        std::fs::write(&dest, "<v0 full='yes'/>").unwrap();
+        std::fs::write(root.join("gameSettings.xml.silo-original.bak.tmp"), "<v0").unwrap();
+        guarded_xml_write(std::slice::from_ref(&root), &dest, "<v1/>").unwrap();
+        let read = |n: &str| std::fs::read_to_string(root.join(n)).unwrap();
+        assert_eq!(
+            read("gameSettings.xml.silo-original.bak"),
+            "<v0 full='yes'/>"
+        );
+        assert!(!root.join("gameSettings.xml.silo-original.bak.tmp").exists());
+        assert_eq!(read("gameSettings.xml"), "<v1/>");
         let _ = std::fs::remove_dir_all(&root);
     }
 
