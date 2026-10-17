@@ -36,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waiting forever, and mods download before Silo locks your library, so other changes aren't
   blocked while a download runs. (#202)
 
+- **Guided bisection puts back exactly what you had.** Finishing a bisection now restores the
+  set saved when it started, even if Silo rescanned while you were testing in the game, and any
+  problems are shown instead of ignored. (#202)
+
 ### Security
 
 - **Stricter image-host check.** The image proxy now parses URLs properly before checking the

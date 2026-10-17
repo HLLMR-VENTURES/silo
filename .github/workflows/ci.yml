@@ -26,6 +26,7 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - run: npm test
       # `npm run build` runs svelte-check AND vite build — catches type errors and a
       # broken production bundle in one step.
       - run: npm run build
