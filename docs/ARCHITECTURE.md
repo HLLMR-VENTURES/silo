@@ -43,11 +43,23 @@ Keep `scan`, `moddesc`, `library`, `profile`, `projection`, `conflict`, and
 `commands/` wrappers. They should be testable against a fixture folder without a
 running app.
 
-> **Shipped module set (2026-07)** has grown well beyond the original sketch above —
-> the same pure-logic-behind-thin-command pattern held. Current authoritative list is
-> in `CLAUDE.md` ("Stack & structure"): adds `siloapi`, `logscan`, `bisect`, `bindings`,
-> `mpsync`, `bridge`, plus `organize`/`savegame`/`xmlconfig`/`gamelaunch`/`github`.
-> 42+ Rust unit tests. Feature-level release gate: `docs/SMOKE_TEST.md`.
+> **The shipped module set** has grown well beyond the original sketch above — the same
+> pure-logic-behind-thin-command pattern held (230+ Rust unit tests). The sketch's
+> `library`/`profile`/`projection` became `organize` + `db`, and the command wrappers live
+> in `lib.rs`. Feature-level release gate: `docs/SMOKE_TEST.md`.
+
+### Shipped modules (`src-tauri/src/`)
+
+| Area | Modules |
+|------|---------|
+| Scan & parse | `scan` (walk + parse + cache), `moddesc` (modDesc.xml model), `category` (two-level categorization), `store` (storeItem category), `icons` (DDS/PNG thumbnails) |
+| Game & folders | `fsgame` (per-OS user-dir discovery: Steam libraries, Proton prefix, Mac App Store), `modsroot` (which mods folder is live: FS25's `modsDirectoryOverride`, the user's choice, per-folder state — #162), `gamelaunch` (launch, `fs25_running`) |
+| Library on disk | `organize` (archive layout, projection — hardlink/symlink/junction/copy — and Restore vanilla), `relocate` (moving the library archive to another folder/drive as a resumable, verified job — #166, landed in #185) |
+| Analysis | `conflicts`, `logscan` (crash triage), `bisect` (guided bisection), `bindings` (input map) |
+| Saves & config | `savegame` (saves + bound mod lists), `xmlconfig` (game.xml / careerSavegame.xml fields), `settings_form` (mod settings XML → form ↔ XML), `xmltext` |
+| Network & sources | `siloapi` (catalog client), `github`, `collection` (shareable mod-set lists), `net` (outbound-URL guard) |
+| Sharing & generators | `mpsync` (multiplayer manifest), `bridge` (filltype companion mod), `provenance` (integrity hashing) |
+| Persistence & safety | `db` (SQLite), `paths` (write confinement + `.bak` writes), `secrets` (OS keychain) |
 
 ## Key crates (proposed — confirm at scaffold time)
 
@@ -120,11 +132,30 @@ At launch, project the active profile into the primary game `mods/` folder:
 Cross-volume note: hardlinks fail across drives and symlinks-to-another-drive may
 be blocked — copy-mode is the universal fallback and must be first-class.
 
+**As shipped:** the archive lives at `<archive>/<Category>/<file>`, by default
+`<mods folder>/archive`. Zips project as **hardlinks** (same volume), folder mods as
+junctions/symlinks, and anything that can't be linked (e.g. a cloud-synced folder) as a
+marked **copy**. Every projection is recorded so cleanup only touches Silo-owned entries.
+
+### Mods folder and library archive location
+
+- **Which mods folder** (`modsroot`, #162): FS25's `gameSettings.xml`
+  `<modsDirectoryOverride>` is followed; the user can choose another folder and optionally
+  write the override back (with a `.bak`). Organize state is keyed per folder, and
+  `allowed_roots()` follows the active folder so every write command does too.
+- **Where the archive lives** (`relocate`, #166 — landed in #185, unreleased as of v0.8.0):
+  per mods folder, the archive can be moved to any drive while the mods folder stays put.
+  The move is a resumable job with a DB marker — copy to a temp name, verify, place without
+  replacing an existing file, then remove the original — with Pause / Resume / Cancel
+  (cancel moves back what was moved), refused and auto-paused while FS25 runs. Across
+  drives, active zips project **hardlink → symlink → copy** (`organize::LinkPolicy`). Details
+  and per-OS caveats: `CROSS-PLATFORM.md` ("Library archive").
+
 ## Settings form generator
 
 The flagship tinkerer feature: turn a mod's hand-edited settings XML into a clean,
-editable form, and write changes back safely. Lives in the `settings/` Rust module
-plus a generic Svelte form renderer.
+editable form, and write changes back safely. Lives in the `settings_form` Rust module
+(sketched below as `settings/`) plus a generic Svelte form renderer.
 
 **Where a mod's settings live** (probe in order, all present-or-absent):
 - `Documents/My Games/FarmingSimulator2025/modSettings/<modName>/…xml` — the common

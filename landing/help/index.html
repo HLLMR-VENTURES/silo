@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Help & documentation — Silo</title>
 <script src="/nav.js"></script>
-<meta name="description" content="How to use Silo, the free open-source Farming Simulator 25 mod manager: organizing your library, loadouts, conflict and crash diagnosis, mod integrity verification, savegame tools, multiplayer sync, and more." />
+<meta name="description" content="How to use Silo, the free open-source Farming Simulator 25 mod manager: organizing your library, choosing your mods folder and archive drive, loadouts, conflict and crash diagnosis, mod integrity verification, savegame tools, multiplayer sync, and more." />
 <meta property="og:title" content="Help & documentation — Silo" />
 <meta property="og:description" content="Full user documentation for Silo, the FS25 mod manager: library, loadouts, diagnosis, provenance, and every tool." />
 <meta property="og:type" content="website" />
@@ -122,6 +122,8 @@
       <nav id="toc" aria-label="Help topics">
 <div class="nav-group"><p class="nav-h">Getting started</p><ul><li><a href="#getting-started" data-slug="getting-started">Getting started</a></li></ul></div>
 <div class="nav-group"><p class="nav-h">Your library</p><ul><li><a href="#library" data-slug="library">The library: active vs. parked</a></li>
+<li><a href="#mods-folder" data-slug="mods-folder">Choosing your mods folder</a></li>
+<li><a href="#library-archive" data-slug="library-archive">Moving your library archive to another drive</a></li>
 <li><a href="#curation" data-slug="curation">Curating your library: favorites, tags &amp; flags</a></li>
 <li><a href="#loadouts" data-slug="loadouts">Loadouts</a></li>
 <li><a href="#collections" data-slug="collections">Collections</a></li>
@@ -159,9 +161,9 @@
 
 <h3>What happens on first run</h3>
 
-<p>When Silo opens it lands on the <strong>Library</strong> view and looks for your FS25 mods folder automatically — on Windows that's <code>Documents\My Games\FarmingSimulator2025\mods</code>. If it finds one, it starts scanning right away; a progress bar shows how many mods it has read. A cold scan of a large library takes seconds, and later scans are near-instant.</p>
+<p>When Silo opens it lands on the <strong>Library</strong> view and looks for your FS25 mods folder automatically — on Windows that's <code>Documents\My Games\FarmingSimulator2025\mods</code>, unless FS25 has been set to use another folder, in which case Silo follows the game's setting. If it finds one, it starts scanning right away; a progress bar shows how many mods it has read. A cold scan of a large library takes seconds, and later scans are near-instant.</p>
 
-<p>When the scan finishes you'll see your whole library, with counts for mods, maps, and scripts. You can confirm which folder Silo found under <strong>Settings</strong> (the gear icon), in the <strong>Mods folder</strong> section. If nothing was found, the list reads <em>"No mods found yet. Point Silo at your mods folder and rescan"</em> — check that the folder exists, then use the <strong>Rescan</strong> button.</p>
+<p>When the scan finishes you'll see your whole library, with counts for mods, maps, and scripts. You can confirm which folder Silo found under <strong>Settings</strong> (the gear icon), in the <strong>Mods folder</strong> section, and pick a different one with <strong>Change…</strong> (see <a href="#mods-folder">Choosing your mods folder</a>). If nothing was found, the list reads <em>"No mods found yet. Point Silo at your mods folder and rescan"</em> — check that the folder exists, then use the <strong>Rescan</strong> button.</p>
 
 <h3>Your files stay safe</h3>
 
@@ -169,7 +171,7 @@
 
 <blockquote class="note"><strong>If your <code>Documents</code> folder is synced by a cloud service</strong> — OneDrive, Google Drive, or Proton Drive — that service presents files as on-demand placeholders and won't allow hardlinks. Silo detects this on first run and shows a one-time notice: it will project your active mods as <strong>file copies</strong> instead of links. Everything still works and nothing is lost, but the active set uses extra disk and bulk activate/deactivate is slower. Excluding <code>…\My Games\FarmingSimulator2025</code> from your cloud sync lets Silo use hardlinks again — see <a href="#settings-accounts">Library layout &amp; maintenance</a>.</blockquote>
 
-<blockquote class="note"><strong>macOS and Linux are experimental.</strong> Silo is built and tested Windows-first. It can run on macOS and Linux (via Proton), but game-file discovery on those platforms isn't fully verified yet — expect rough edges.</blockquote>
+<blockquote class="note"><strong>macOS and Linux are experimental.</strong> Silo is built and tested Windows-first. It runs natively on macOS and Linux: on Linux it finds FS25's folder inside the Steam Proton prefix (native or Flatpak Steam), and on macOS it handles Steam, GIANTS and Mac App Store installs. This hasn't been tested on many real machines yet, so expect rough edges — and reports are very welcome.</blockquote>
 
 </section>
 
@@ -181,14 +183,89 @@
 <p>The checkbox in the toolbar activates or parks everything <em>in the current view</em> at once — most useful with a filter applied. Sweeping your <strong>whole unfiltered library</strong> asks for confirmation first, since that's a lot of files to move (and on a cloud-synced folder each one is copied or removed individually). Parking never deletes anything — it just leaves the mod out of the game's folder. Parking a <strong>loose, unorganized</strong> mod (one you dropped straight into <code>mods/</code>) files it into your library as it parks it, so it leaves the live folder but stays available; activating it again re-projects it.</p>
 
 <h3>Organize</h3>
-<p>Reach for <strong>Organize</strong> when your <code>mods/</code> folder is a flat pile and you want it sorted. It moves each loose <code>.zip</code> into <code>mods/archive/&lt;Category&gt;/</code> — subfolders the game deliberately ignores, since it only reads the flat root. Your active mods stay loaded; nothing is duplicated. You'll find the button in the top bar (<em>Organize N</em>, showing how many loose mods it found) and under <strong>Settings → Library layout</strong>.</p>
+<p>Reach for <strong>Organize</strong> when your <code>mods/</code> folder is a flat pile and you want it sorted. It moves each loose <code>.zip</code> into <code>mods/archive/&lt;Category&gt;/</code> — subfolders the game deliberately ignores, since it only reads the flat root. (If you've <a href="#library-archive">moved your library archive</a>, they go into the category folders there instead.) Your active mods stay loaded; nothing is duplicated. You'll find the button in the top bar (<em>Organize N</em>, showing how many loose mods it found) and under <strong>Settings → Library layout</strong>.</p>
 <p>Before it touches a file, Organize shows a read-only <strong>dry run</strong>: a preview grouped by destination category (for example "12 into Vehicles, 3 into Maps"), each file with its exact <code>archive/&lt;Category&gt;/…</code> target. Nothing has moved yet — you confirm with the <em>Organize N mods</em> button or <strong>Cancel</strong>. Power users can tick <em>Don't preview next time</em>, or turn on <strong>Auto-file new mods</strong> in Settings to file new downloads automatically.</p>
 
 <h3>Projection at launch</h3>
-<p>Silo keeps the flat <code>mods/</code> folder holding exactly your active set by <strong>projecting</strong> the archived originals back into it — <code>.zip</code> mods as same-volume <strong>hardlinks</strong>, unpacked mod folders as directory symlinks/junctions. Hardlinks use no extra disk and need no admin rights or Developer Mode. When you hit <strong>▶ Launch</strong>, the game reads that folder and loads precisely the mods you marked active.</p>
+<p>Silo keeps the flat <code>mods/</code> folder holding exactly your active set by <strong>projecting</strong> the archived originals back into it — <code>.zip</code> mods as same-volume <strong>hardlinks</strong>, unpacked mod folders as directory symlinks/junctions. Hardlinks use no extra disk and need no admin rights or Developer Mode. (If your library archive is on another drive, Silo uses symlinks or copies instead — see <a href="#library-archive">Active mods across drives</a>.) When you hit <strong>▶ Launch</strong>, the game reads that folder and loads precisely the mods you marked active.</p>
 <p>Where links aren't permitted — most commonly a <strong>cloud-synced</strong> <code>Documents</code> folder (OneDrive, Google Drive, Proton Drive), which blocks hardlinks — Silo falls back to <strong>copies</strong>. It works exactly the same, but each active mod's bytes are duplicated into the live folder, so activating a large set is slower and uses more disk. Silo records what it projected so it can still tell its own copy from a build you swapped in, and it warns you once when it detects a cloud folder. To get instant, no-duplication hardlink projection back, exclude the FS25 folder from your cloud sync.</p>
 
 <blockquote class="note"><strong>It's reversible, and it never destroys your originals.</strong> Moves are instant same-volume renames (or a safe copy-then-swap across volumes) — the original is never lost mid-operation. <strong>Restore vanilla layout</strong> (Settings, shown once anything is organized) undoes everything: it drops Silo's projections, moves the archived files back into a plain flat <code>mods/</code>, and removes only empty archive folders. It never deletes a file it doesn't recognize, never removes the only copy of a mod, and won't touch a file you swapped in yourself — you're always one step from stock.</blockquote>
+</section>
+
+<section id="mods-folder"><h2 id="mods-folder-h">Choosing your mods folder</h2>
+<p>By default FS25 reads <code>Documents/My Games/FarmingSimulator2025/mods/</code>, but the game can be told to use another folder (its <em>mods directory override</em> in <code>gameSettings.xml</code>). Silo follows that setting automatically: if FS25 is set to another folder, Silo uses it too and tells you once — <em>"Silo now uses the mods folder FS25 is set to: …"</em>. You can also pick any folder yourself, for example one on a bigger drive.</p>
+
+<h3>Where to find it</h3>
+<p>Open <strong>Settings</strong> (the gear) → <strong>Mods folder</strong>. It shows the folder Silo is using and where that choice came from: <em>FS25 default</em>, <em>Following FS25's setting</em>, or <em>Chosen in Silo</em> (with <em>not available</em> added if the folder can't be reached). <strong>Open ↗</strong> reveals it in your file manager.</p>
+
+<h3>Picking another folder</h3>
+<ol>
+<li>Click <strong>Change…</strong> next to <em>Mods folder</em> and choose a folder. If it holds no mods yet, Silo asks first — <strong>Use this folder</strong> or <strong>Cancel</strong>.</li>
+<li>Silo switches to it and rescans. If FS25 still reads a different folder, Silo asks <em>"Point Farming Simulator at this folder too?"</em>:
+<ul>
+<li><strong>Update FS25's setting</strong> — Silo writes the new folder into FS25's <code>gameSettings.xml</code>, keeping a backup of the original as <code>gameSettings.xml.bak</code>. Close FS25 first: the game rewrites that file when it exits.</li>
+<li><strong>Only in Silo</strong> — leave the game alone. Use this when you just want to look at or tidy another folder.</li>
+</ul></li>
+</ol>
+<p>Changing folders waits for a running scan or task to finish, and isn't allowed during a guided bisection (finish or cancel it first — it belongs to the folder it started in).</p>
+
+<h3>When Silo and FS25 disagree</h3>
+<p>If Silo and the game end up reading different folders, a banner says <em>"FS25 is reading a different mods folder — mods you activate here won't load in-game."</em> Pick one:</p>
+<ul>
+<li><strong>Point FS25 here</strong> — update the game's setting to Silo's folder (with the same <code>.bak</code> backup).</li>
+<li><strong>Switch Silo to the game's folder</strong> — go back to whatever FS25 reads.</li>
+</ul>
+<p>When you've chosen a folder in Silo, Settings also offers <strong>Use the game's folder</strong> to undo that choice.</p>
+
+<h3>Several folders, each with its own library</h3>
+<p>Silo remembers how each folder is organized separately. Switching to another folder and back restores that folder's library exactly as you left it. Folders you've used before are listed under <em>Other folders Silo knows</em> in Settings, with their mod counts — click one to switch.</p>
+
+<h3>If the folder goes missing</h3>
+<p>If a folder you chose can't be found (an unplugged drive, a renamed folder), Silo scans nothing and shows <em>"Your mods folder isn't available"</em> with <strong>Retry</strong>, <strong>Choose another</strong>, and <strong>Use the game's folder</strong>. If FS25 simply hasn't created its <code>mods</code> folder yet, you'll see <strong>Create it</strong> or <strong>Choose a folder</strong> instead.</p>
+
+<blockquote class="note">On <strong>Linux</strong>, FS25 runs through Steam Proton and stores its setting as a Windows-style path; Silo translates it to the real folder through the Proton prefix. If Silo can't map the path to a folder on your computer, Settings says so — choose the folder with <strong>Change…</strong>.</blockquote>
+</section>
+
+<section id="library-archive"><h2 id="library-archive-h">Moving your library archive to another drive</h2>
+<p>Your <strong>library archive</strong> is where Silo keeps parked mods, sorted into category folders. It starts inside your mods folder (<code>mods/archive/</code>), on the same drive. If that drive is filling up, you can move the archive to any other folder or drive — a big HDD, for example — while the mods folder stays where FS25 reads it. Only your active mods need to be in the game's folder; the rest of the library can live elsewhere.</p>
+
+<blockquote class="note"><strong>New after v0.8.0.</strong> If you don't see <em>Library archive</em> in Settings, update Silo.</blockquote>
+
+<h3>Moving it</h3>
+<ol>
+<li>Close Farming Simulator 25.</li>
+<li>Open <strong>Settings</strong> → <strong>Library archive</strong>. It shows the current folder, labelled <em>Inside your mods folder (default)</em> or <em>Custom location</em>.</li>
+<li>Click <strong>Change…</strong> and choose the new folder. Silo checks it, then asks you to confirm with the number of mods, their total size and (on another drive) the free space there.</li>
+<li>Click <strong>Move library</strong>. A banner shows progress — how many mods have moved and how much data. When it finishes, Settings reads <em>Custom location</em> and your library looks exactly as before.</li>
+</ol>
+<p>Silo refuses a folder that can't work and says why: it's already your archive, it's inside your mods folder, another mods folder already uses it, or the drive doesn't have room (Silo keeps 1 GB spare). Each mods folder has its own archive setting.</p>
+
+<h3>Pause to play, then resume</h3>
+<p>A big library can take a while to move. While it runs, <strong>Launch</strong> is blocked. Click <strong>Pause</strong> on the banner and you can play right away — your active mods still load, including ones already moved. When you're done, close the game and click <strong>Resume</strong>. Silo won't move mods while the game is using them, so it refuses to start or resume while FS25 is open, and if you start the game yourself mid-move, the move pauses itself within a few seconds.</p>
+<p>While a move is unfinished (running or paused), Silo doesn't change your library: Organize, activating and parking, Optimize links, switching mods folders and the archive controls are switched off (<em>"Finish or cancel the archive move first"</em>), and auto-filing waits.</p>
+
+<h3>Cancelling</h3>
+<p>Click <strong>Cancel move</strong> and confirm. Mods already moved go back to where they were, and the setting stays unchanged. If some mods can't be moved, the move pauses and lists them with the reason — <strong>Retry</strong> tries them again, or <strong>Cancel move</strong> puts everything back.</p>
+
+<h3>A folder that already has mods in it</h3>
+<p>If the folder you choose already holds loose <code>.zip</code> mods, Silo says so before the move and offers to file them in afterwards: a preview titled <em>File N mods into your library</em> shows where each one goes, and they arrive parked. Mods that are already in your library are listed and left untouched. Silo refuses a folder whose subfolders hold mods it doesn't manage, since those would mix with your library — choose another folder, or move those mods to the folder's top level so Silo can file them in.</p>
+
+<h3>Active mods across drives</h3>
+<p>On the same drive, active mods are hardlinked into the mods folder, as usual. When the archive is on another drive, hardlinks aren't possible, so Silo uses a symlink where it can (Linux, macOS, and Windows with <strong>Developer Mode</strong> turned on) and a copy otherwise. Copies work just the same but use extra disk for your active set. On Windows without Developer Mode, the move's confirmation suggests turning it on, and <strong>Optimize links</strong> explains that active mods stay as copies. On a Mac App Store install, active mods are always copied: the sandboxed game can't follow a link outside its own folder.</p>
+
+<h3>If the archive's drive is unplugged</h3>
+<p>Silo doesn't forget your library. A banner says <em>"Your library archive isn't available"</em>; parked mods are hidden until it's back, and active mods linked from it won't load in-game. Nothing is deleted. Your choices:</p>
+<ul>
+<li><strong>Retry</strong> — after you reconnect the drive. Every parked mod comes back, in its category.</li>
+<li><strong>Choose another</strong> — if you moved or restored the archive folder yourself, point Silo at it. Nothing is moved or copied; Silo just uses that folder (<strong>Use this folder</strong>).</li>
+<li><strong>Use default</strong> (in Settings) — start fresh with the default archive inside your mods folder. Nothing is moved, and mods on the old drive stay there untouched.</li>
+</ul>
+
+<h3>Moving it back</h3>
+<p>Settings → Library archive → <strong>Use default</strong> moves your library back into your mods folder, the same careful way. <strong>Restore vanilla layout</strong> also still works: it brings every mod back from the archive, wherever it is, into a plain flat <code>mods/</code> folder (the archive's drive has to be connected).</p>
+
+<blockquote class="note"><strong>Built so a mod is never lost mid-move.</strong> Silo copies each mod, verifies the copy, places it without ever replacing a file that's already there, and only then removes the original. Moved mods keep their dates. If Silo or your computer stops mid-move, the move is still there to resume or cancel next time.</blockquote>
 </section>
 
 <section id="curation"><h2 id="curation-h">Curating your library: favorites, tags & flags</h2>
@@ -595,7 +672,7 @@
 <p>Under <strong>Appearance</strong>, pick <strong>system</strong>, <strong>light</strong>, or <strong>dark</strong>. <em>System</em> follows your OS theme; the other two force that look. Your choice is saved and reapplied on the next launch.</p>
 
 <h3>Folders</h3>
-<p><strong>Mods folder</strong> and <strong>Game</strong> show the paths Silo detected, each with an <strong>Open ↗</strong> link to reveal it in your file manager. If the game install isn't found, the Launch button is hidden. When your user directory is known, <strong>Graphics &amp; performance</strong> offers <strong>Edit game.xml ↗</strong> to tune presets (Performance / Balanced / Quality) without starting the game.</p>
+<p><strong>Mods folder</strong>, <strong>Library archive</strong> and <strong>Game</strong> show the paths Silo is using, each with an <strong>Open ↗</strong> link to reveal it in your file manager. <strong>Mods folder → Change…</strong> picks another mods folder (see <a href="#mods-folder">Choosing your mods folder</a>), and <strong>Library archive → Change…</strong> moves your parked mods to another folder or drive (see <a href="#library-archive">Moving your library archive</a>). If the game install isn't found, the Launch button is hidden. When your user directory is known, <strong>Graphics &amp; performance</strong> offers <strong>Edit game.xml ↗</strong> to tune presets (Performance / Balanced / Quality) without starting the game.</p>
 
 <h3>Diagnostics — Export report</h3>
 <p><strong>Export report ↗</strong> writes a shareable Markdown file (<code>silo-report.md</code>) summarizing your environment, library counts by category, active set, detected conflicts, and health issues. Reach for it when asking for help or comparing setups. It only reads your library and saves a text file — it changes nothing.</p>
@@ -606,15 +683,15 @@
 <h3>Library layout &amp; maintenance</h3>
 <p>Under <strong>Library layout</strong>:</p>
 <ul>
-<li><strong>Organize</strong> sorts your <code>.zip</code> mods into <code>mods/archive/&lt;Category&gt;/</code> subfolders (which the game ignores) and projects the active set back via hardlinks — no duplication, fully reversible.</li>
+<li><strong>Organize</strong> sorts your <code>.zip</code> mods into <code>mods/archive/&lt;Category&gt;/</code> subfolders (which the game ignores), or into your library archive if you moved it, and projects the active set back via hardlinks — no duplication, fully reversible.</li>
 <li><strong>↻ Rebuild categories</strong> re-scans every mod from scratch. Use it after a Silo update improves categorization so existing mods pick up the better categories.</li>
-<li><strong>⛓ Optimize links</strong> appears when mods are organized on a normal (non-cloud) drive. It collapses any active mod that ended up projected as a full copy back into a hardlink — reclaiming the duplicated disk and making activate/deactivate instant. It only touches files byte-identical to the archived copy, never a build you swapped in. On a cloud-synced folder this is replaced by a short note explaining that copies are used because the drive can't do hardlinks.</li>
+<li><strong>⛓ Optimize links</strong> appears when mods are organized on a normal (non-cloud) drive. It collapses any active mod that ended up projected as a full copy back into a hardlink — reclaiming the duplicated disk and making activate/deactivate instant. It only touches files byte-identical to the archived copy, never a build you swapped in. On a cloud-synced folder this is replaced by a short note explaining that copies are used because the drive can't do hardlinks. If your library archive is on another drive and Windows can't link across drives (no Developer Mode), it says so and changes nothing.</li>
 <li><strong>Restore vanilla layout</strong> appears only when mods are organized. It moves every mod back out of <code>archive/</code> and removes all links, returning you to a plain flat <code>mods/</code> folder. You'll confirm first.</li>
 </ul>
 <blockquote class="note">Restore vanilla does <strong>not</strong> delete any mods — it only undoes Silo's organization. If some files can't be moved, Silo reports the errors rather than leaving things half-done.</blockquote>
 
 <h3>Connecting GitHub</h3>
-<p>Under <strong>GitHub account</strong>, press <strong>Connect GitHub</strong>. A browser opens to <strong>github.com/login/device</strong>; enter the code Silo shows and authorize. Connecting gives faster update checks (5,000 requests/hour) and access to private repos, and it enables in-app GitHub installs from the Browse tab. By default the connection is read-only; use <strong>Enable actions</strong> to grant the <code>public_repo</code> scope so <em>Star</em> and <em>Watch</em> land on your account. You can <strong>Disconnect</strong> anytime, or use a Personal Access Token instead via the token option.</p>
+<p>Under <strong>GitHub account</strong>, press <strong>Connect GitHub</strong>. A browser opens to <strong>github.com/login/device</strong>; enter the code Silo shows and authorize. Connecting gives faster update checks (5,000 requests/hour), access to private repos, and lets you publish <a href="#collections">collections</a>; in-app GitHub installs from the Browse tab work without it. By default the connection is read-only; use <strong>Enable actions</strong> to grant the <code>public_repo</code> scope so <em>Star</em> and <em>Watch</em> land on your account. You can <strong>Disconnect</strong> anytime, or use a Personal Access Token instead via the token option.</p>
 
 
 <p>The panel footer shows your installed Silo version.</p>
@@ -636,20 +713,20 @@
 <li><strong>Packed <code>.zip</code> mods project as hardlinks</strong> — same volume, no admin, no Developer Mode, and no second copy on disk.</li>
 <li><strong>Only unpacked folder-mods</strong> use a directory junction/symlink, and if that isn't available Silo falls back to a plain copy.</li>
 </ul>
-<p>Since most mods are zips, most people never hit an elevation prompt.</p>
+<p>Since most mods are zips, most people never hit an elevation prompt. The one exception is a <a href="#library-archive">library archive on another drive</a>: hardlinks can't cross drives, so Silo would need file symlinks, which on Windows require Developer Mode. Without it, active mods are copied instead — that works, it just uses more disk.</p>
 
 <h3>Is my library safe? Can I undo this?</h3>
 <p>Yes. Projection is fully reversible. Open <strong>Settings</strong> and use <strong>Restore vanilla layout</strong> to move every mod back into a plain flat <code>mods/</code> folder and clear Silo's bookkeeping.</p>
 <blockquote class="note">Silo never deletes a file it doesn't recognize and never removes the only copy of a mod. If you swap your own build into the mods folder, Silo detects that it isn't the file it projected and leaves it untouched. Config edits are backed up to a <code>.bak</code> first.</blockquote>
 
 <h3>Where does Silo store its data?</h3>
-<p>Your mods stay in your game's mods folder — Silo only rearranges them. Silo's own database (<code>silo.db</code>: the library index and cache) lives in the app's per-user data directory. Any account tokens go into your OS credential store (Windows Credential Manager, macOS Keychain, Linux Secret Service), not in plain text.</p>
+<p>Your mods stay in your game's mods folder — Silo only rearranges them — or in your library archive, if you moved it to another folder or drive. Silo's own database (<code>silo.db</code>: the library index and cache) lives in the app's per-user data directory. Any account tokens go into your OS credential store (Windows Credential Manager, macOS Keychain, Linux Secret Service), not in plain text.</p>
 
 <h3>Why does a mod show "Unverified"?</h3>
 <p>The <strong>Integrity</strong> check in a mod's detail drawer compares your file against the trusted build SiloAPI hashed from its source. <strong>Unverified</strong> means there's no trusted build to compare against yet — usually because that mod isn't in the catalog. It is not a warning about the mod. Folder mods can't be verified at all (there's no archive to hash). This is a provenance check, not a virus scan.</p>
 
 <h3>Connecting a GitHub account</h3>
-<p>Connecting GitHub is optional and lives in <strong>Settings → GitHub account → Connect GitHub</strong>: a browser opens to <code>github.com/login/device</code>; type in the code shown. This raises update-check limits to 5,000/hr, enables in-app installs and Star/Watch on mod pages, and lets you publish <a href="#collections">collections</a>. The token stays on your machine, and a <strong>Disconnect</strong> button removes it at any time.</p>
+<p>Connecting GitHub is optional and lives in <strong>Settings → GitHub account → Connect GitHub</strong>: a browser opens to <code>github.com/login/device</code>; type in the code shown. This raises update-check limits to 5,000/hr, enables Star/Watch on mod pages, and lets you publish <a href="#collections">collections</a>. The token stays on your machine, and a <strong>Disconnect</strong> button removes it at any time.</p>
 </section>
     </main>
   </div>

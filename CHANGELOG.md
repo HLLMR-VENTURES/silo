@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back — or, if you moved or restored the archive yourself, **Choose another** points Silo at it
   without moving anything. (#166)
 
+### Fixed
+
+- **Linux & macOS: folder mods linked with a symlink can be deactivated again.** Silo removed the
+  link with a call Unix refuses for symlinks, so parking, restoring the vanilla layout, or moving
+  such a mod failed. Symlinks are now unlinked properly; Windows was not affected. (#185)
+
 ### Security
 
 - **Updated the zip library (2.4 → 9.0)** for RUSTSEC-2026-0367, -0368 and -0369, which concern

@@ -67,9 +67,10 @@ Rust core modules (`src-tauri/src/`): `scan` `moddesc` `category` `icons` `db` `
 `fsgame` `modsroot` (mods-folder resolution) `organize` `relocate` (archive move job) `savegame` `conflicts` `settings_form`
 `xmlconfig` `gamelaunch` `github` `siloapi` (catalog client) · `logscan` (crash triage) ·
 `bisect` (guided bisection) · `bindings` (input map) · `mpsync` (MP manifest) · `bridge`
-(filltype companion generator) · `provenance` (integrity/manifest hashing) · `paths` `secrets`
-`xmltext` (safety/util). Each is pure logic behind thin `#[tauri::command]` wrappers with
-unit tests (226 Rust tests). Frontend panels in `src/lib/components/`.
+(filltype companion generator) · `provenance` (integrity/manifest hashing) · `collection`
+(shareable mod sets) · `net` (outbound-URL SSRF guard) · `paths` `secrets` `xmltext` (safety/util). Each is
+pure logic behind thin `#[tauri::command]` wrappers with unit tests (230+ Rust tests; some are
+`#[cfg(unix)]` and only run on Linux/macOS CI). Frontend panels in `src/lib/components/`.
 
 - **Tauri v2**: Rust core in `src-tauri/`, web frontend in `src/`.
 - **Frontend: Svelte 5 (runes) + Vite + TypeScript**, hand-authored CSS design

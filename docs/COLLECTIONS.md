@@ -1,7 +1,7 @@
 # Shareable collections — design (post-v0.2.0)
 
-**Status: parked design. Do NOT build before v0.2.0 ships.** Captured now so it's ready to
-pick up, and so infra can scope the Phase 3 indexing in parallel.
+**Status: Phase 1 shipped** (share / preview / import a mod set via a secret gist — epic #61,
+PRs #63–#69). The rest of this document is the original design, kept for the later phases.
 
 Goal: let a user share a mod set — a loadout / active set, optionally bound to a savegame —
 as a **GitHub artifact under their own account**, and let anyone import it into Silo in a
