@@ -197,6 +197,7 @@ pub fn backup(user_dir: &Path, folder: &str) -> Result<String, String> {
         .join("SiloBackups")
         .join(format!("{folder}_{secs}"));
     copy_dir(&src, &dst).map_err(|e| e.to_string())?;
+    crate::fslog::moved("backup-save", &src, &dst);
     Ok(dst.to_string_lossy().into_owned())
 }
 

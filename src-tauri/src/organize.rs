@@ -591,7 +591,10 @@ fn relink_over(src: &Path, flat: &Path, hard: bool) -> std::io::Result<()> {
         symlink_file(src, &tmp)?;
     }
     match std::fs::rename(&tmp, flat) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            crate::fslog::moved("link", src, flat);
+            Ok(())
+        }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             Err(e)
@@ -625,7 +628,9 @@ pub(crate) fn replace_zip_link(
     make_link(dst, &tmp, "zip", policy)?;
     std::fs::rename(&tmp, link).inspect_err(|_| {
         let _ = remove_path(&tmp);
-    })
+    })?;
+    crate::fslog::moved("move", &tmp, link);
+    Ok(())
 }
 
 /// A zip's mods-folder entry `link` was just (re)made by Silo: refresh its projection record so
@@ -663,7 +668,7 @@ pub fn adopt_foreign(conn: &Connection, layout: &Layout, file_name: &str) -> Res
     // Back up the old archived copy before replacing it.
     if archive.exists() {
         let bak = backup_path(root, file_name)?;
-        move_path(&archive, &bak).map_err(|e| format!("backup: {e}"))?;
+        move_path_as(&archive, &bak, "backup").map_err(|e| format!("backup: {e}"))?;
     } else if let Some(parent) = archive.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -699,7 +704,7 @@ pub fn restore_projection(
     // Back up the user's file, then free the slot.
     if flat.symlink_metadata().is_ok() {
         let bak = backup_path(root, file_name)?;
-        move_path(&flat, &bak).map_err(|e| format!("backup: {e}"))?;
+        move_path_as(&flat, &bak, "backup").map_err(|e| format!("backup: {e}"))?;
     }
     if row.active {
         make_link(&archive, &flat, &row.kind, &mut LinkPolicy::new(layout))
@@ -929,8 +934,10 @@ fn remove_path(p: &Path) -> std::io::Result<()> {
     match std::fs::symlink_metadata(p) {
         Ok(m) if m.is_dir() => std::fs::remove_dir_all(p),
         Ok(_) => std::fs::remove_file(p),
-        Err(_) => Ok(()),
-    }
+        Err(_) => return Ok(()),
+    }?;
+    crate::fslog::changed("remove", p);
+    Ok(())
 }
 
 /// Move a file/dir, preferring an instant same-volume rename. On any rename failure
@@ -939,10 +946,17 @@ fn remove_path(p: &Path) -> std::io::Result<()> {
 /// partial copy never leaves a half-written file at `to`, and `from` is never lost until
 /// the destination is complete.
 pub(crate) fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
+    move_path_as(from, to, "move")
+}
+
+/// [`move_path`], logged as `action` (`backup` for an update's previous version), so each move
+/// is one log line that says what it was for.
+pub(crate) fn move_path_as(from: &Path, to: &Path, action: &str) -> std::io::Result<()> {
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
     if std::fs::rename(from, to).is_ok() {
+        crate::fslog::moved(action, from, to);
         return Ok(());
     }
 
@@ -965,7 +979,9 @@ pub(crate) fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
         std::fs::remove_dir_all(from)
     } else {
         std::fs::remove_file(from)
-    }
+    }?;
+    crate::fslog::moved(action, from, to);
+    Ok(())
 }
 
 /// Project `src` into the flat root at `link`. Files → hardlink (no privilege, same volume, no
@@ -1104,7 +1120,10 @@ fn link_zip(
 ) -> std::io::Result<()> {
     use std::io::ErrorKind::{AlreadyExists, NotFound};
     match hard(src, link) {
-        Ok(()) => return Ok(()),
+        Ok(()) => {
+            crate::fslog::moved("link", src, link);
+            return Ok(());
+        }
         Err(e) if matches!(e.kind(), AlreadyExists | NotFound) => return Err(e),
         Err(_) => {}
     }
@@ -1116,7 +1135,10 @@ fn link_zip(
     }
     if allow_symlink() {
         match soft(src, link) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                crate::fslog::moved("link", src, link);
+                return Ok(());
+            }
             Err(e) if e.kind() == AlreadyExists => return Err(e),
             Err(_) => {}
         }
@@ -1138,6 +1160,7 @@ fn copy_new(src: &Path, dst: &Path) -> std::io::Result<()> {
         let _ = std::fs::remove_file(dst);
         return Err(e);
     }
+    crate::fslog::moved("copy", src, dst);
     Ok(())
 }
 
@@ -1216,6 +1239,10 @@ fn link_dir_or_copy(
 ) -> std::io::Result<()> {
     match symlink(src, link) {
         Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => copy_dir_projection(src, link),
+        Ok(()) => {
+            crate::fslog::moved("link", src, link);
+            Ok(())
+        }
         other => other,
     }
 }
@@ -1333,7 +1360,9 @@ fn copy_dir_projection(src: &Path, dst: &Path) -> std::io::Result<()> {
         files: listing_of(dst)?,
     };
     let json = serde_json::to_vec(&listing).map_err(std::io::Error::other)?;
-    std::fs::write(dst.join(SILO_MARKER), json)
+    std::fs::write(dst.join(SILO_MARKER), json)?;
+    crate::fslog::moved("copy", src, dst);
+    Ok(())
 }
 
 /// The v2 listing in `dir`'s marker; `None` for a legacy (`silo\n`) or unreadable marker.
@@ -1401,6 +1430,7 @@ fn retire_folder_copy_with(
 ) -> std::io::Result<Option<PathBuf>> {
     if copy_unchanged(link, src).unwrap_or(false) {
         std::fs::remove_dir_all(link)?;
+        crate::fslog::changed("unlink", link);
         return Ok(None);
     }
     let name = link
@@ -1417,6 +1447,7 @@ fn retire_folder_copy_with(
         }
         return Err(std::io::Error::other(backup_move_error(&name, &e)));
     }
+    crate::fslog::moved("keep-edited-copy", link, &dest);
     let _ = std::fs::remove_file(dest.join(SILO_MARKER));
     Ok(Some(dest))
 }
@@ -1602,6 +1633,7 @@ pub(crate) fn remove_dangling_link(link: &Path) -> std::io::Result<bool> {
     // A dangling dir link can't report itself as a dir on Windows: `remove_file` refuses it,
     // and `remove_dir` then removes the link itself (never a folder's contents).
     std::fs::remove_file(link).or_else(|_| std::fs::remove_dir(link))?;
+    crate::fslog::changed("unlink", link);
     Ok(true)
 }
 
@@ -1612,7 +1644,7 @@ pub(crate) fn remove_dangling_link(link: &Path) -> std::io::Result<bool> {
 pub(crate) fn remove_link(link: &Path) -> std::io::Result<()> {
     let meta = link.symlink_metadata()?;
     let ft = meta.file_type();
-    if ft.is_symlink() {
+    let removed = if ft.is_symlink() {
         // A dir symlink/junction must be removed with remove_dir on Windows. On Unix every
         // symlink — even one to a folder — is unlinked as a file: rmdir on it fails (ENOTDIR).
         if cfg!(windows) && link.metadata().map(|m| m.is_dir()).unwrap_or(false) {
@@ -1638,7 +1670,10 @@ pub(crate) fn remove_link(link: &Path) -> std::io::Result<()> {
         std::fs::remove_dir_all(link)
     } else {
         std::fs::remove_file(link)
-    }
+    };
+    removed?;
+    crate::fslog::changed("unlink", link);
+    Ok(())
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {

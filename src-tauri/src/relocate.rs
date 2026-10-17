@@ -327,6 +327,7 @@ fn place(tmp: &Path, dst: &Path, kind: &str) -> Result<(), String> {
         match std::fs::hard_link(tmp, dst) {
             Ok(()) => {
                 let _ = std::fs::remove_file(tmp);
+                crate::fslog::moved("place", tmp, dst);
                 return Ok(());
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(taken()),
@@ -336,7 +337,9 @@ fn place(tmp: &Path, dst: &Path, kind: &str) -> Result<(), String> {
     if exists(dst) {
         return Err(taken());
     }
-    std::fs::rename(tmp, dst).map_err(|e| format!("place: {e}"))
+    std::fs::rename(tmp, dst).map_err(|e| format!("place: {e}"))?;
+    crate::fslog::moved("place", tmp, dst);
+    Ok(())
 }
 
 /// Copy `src` to a temp sibling of `dst`, verify the temp against `src`, then place it. A
@@ -386,7 +389,9 @@ fn delete_source(src: &Path) -> Result<(), String> {
     let old = suffixed(src, OLD_SUFFIX);
     remove_any(&old).map_err(|e| format!("remove old copy: {e}"))?;
     std::fs::rename(src, &old).map_err(|e| format!("remove old copy: {e}"))?;
-    remove_any(&old).map_err(|e| format!("remove old copy: {e}"))
+    remove_any(&old).map_err(|e| format!("remove old copy: {e}"))?;
+    crate::fslog::changed("delete-moved", src);
+    Ok(())
 }
 
 /// Keep an active mod's mods-folder entry valid as its archived copy moves from `src` to `dst`:
@@ -435,8 +440,13 @@ fn repoint(
     if row.kind == "dir" {
         // A dangling dir link can't report itself as a dir on Windows, so `remove_link` may pick
         // `remove_file`; `remove_dir` then removes the link itself (it is a link, never a folder).
+        // `remove_link` logs its own success; only the fallback needs a line here.
         organize::remove_link(&link)
-            .or_else(|_| std::fs::remove_dir(&link))
+            .or_else(|_| {
+                std::fs::remove_dir(&link)?;
+                crate::fslog::changed("unlink", &link);
+                Ok::<(), std::io::Error>(())
+            })
             .map_err(|e| format!("relink: {e}"))?;
         if let Err(e) = organize::make_link(dst, &link, &row.kind, policy) {
             if src.exists() {
@@ -683,8 +693,11 @@ fn settle_updates(mods: &Path, marker: &MoveMarker, direction: Direction) -> Opt
             &mut LinkPolicy::new(&layout),
             crate::update::Attempt::UserAsked,
         );
-        for n in r.notices.iter().chain(&r.problems) {
-            eprintln!("[silo] {n}");
+        for n in &r.notices {
+            log::info!("{n}");
+        }
+        for p in &r.problems {
+            log::warn!("{p}");
         }
         all.problems.extend(r.problems);
         all.leftovers.extend(r.leftovers);
@@ -806,22 +819,18 @@ pub(crate) fn note_archive(mods: &Path, archive: Option<&Path>) {
     let write = |dir: &Path, note: &ArchiveNote| {
         let path = dir.join(ARCHIVE_NOTE);
         if path.exists() && read_note(dir).is_none() {
-            eprintln!(
-                "[Silo] left {} alone: it isn't a note Silo wrote",
-                path.display()
-            );
+            log::warn!("left {} alone: it isn't a note Silo wrote", path.display());
             return;
         }
         let tmp = dir.join(format!("{ARCHIVE_NOTE}.tmp"));
         let json = serde_json::to_string_pretty(note).unwrap_or_default();
         let written = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path));
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&tmp);
-            eprintln!(
-                "[Silo] couldn't write {} in {}: {e}",
-                ARCHIVE_NOTE,
-                dir.display()
-            );
+        match written {
+            Ok(()) => crate::fslog::changed("write-note", &path),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                log::warn!("couldn't write {} in {}: {e}", ARCHIVE_NOTE, dir.display());
+            }
         }
     };
     match archive {
@@ -844,8 +853,9 @@ pub(crate) fn note_archive(mods: &Path, archive: Option<&Path>) {
             );
         }
         None => {
-            if read_note(mods).is_some() {
-                let _ = std::fs::remove_file(mods.join(ARCHIVE_NOTE));
+            let note = mods.join(ARCHIVE_NOTE);
+            if read_note(mods).is_some() && std::fs::remove_file(&note).is_ok() {
+                crate::fslog::changed("remove-note", &note);
             }
         }
     }

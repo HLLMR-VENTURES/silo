@@ -46,6 +46,8 @@
     setSelfUpdating,
     onCloseBlocked,
     saveTextFile,
+    diagnosticsBundle,
+    copyText,
     userDirPath,
     bisectSnapshotGet,
     bisectSnapshotClear,
@@ -100,6 +102,7 @@
   } from "./lib/types";
   import { checkYourselfList, type CheckYourselfRow } from "./lib/sources";
   import { appendInfo } from "./lib/info";
+  import { copyOrSave } from "./lib/clipboard";
 
   const CATEGORIES = [
     "Maps",
@@ -541,9 +544,21 @@
 
   async function exportReport() {
     try {
-      await saveTextFile("silo-report.md", buildReport());
+      await saveTextFile("silo-report.md", await diagnosticsBundle(buildReport(), false));
     } catch (e) {
       errorMsg = String(e);
+    }
+  }
+
+  async function copyDiagnostics() {
+    try {
+      const text = await diagnosticsBundle(buildReport(), true);
+      const out = await copyOrSave(text, "silo-diagnostics.md", copyText, saveTextFile);
+      if (out === "copied") infoMsg = "Diagnostics copied. Paste them into your bug report.";
+      else if (out === "saved")
+        infoMsg = "Silo couldn't use the clipboard, so it saved the diagnostics to a file instead.";
+    } catch (e) {
+      errorMsg = `Couldn't copy diagnostics: ${e}`;
     }
   }
 
@@ -2278,6 +2293,7 @@
       onSetTheme={setTheme}
       onOpenGameGraphics={openGameGraphics}
       onExportReport={exportReport}
+      onCopyDiagnostics={copyDiagnostics}
       onSetAutoFile={setAutoFile}
       onOrganize={() => {
         settingsOpen = false;

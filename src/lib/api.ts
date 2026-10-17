@@ -776,6 +776,18 @@ export async function saveTextFile(
   return true;
 }
 
+/** The diagnostics report plus (optionally) Silo's recent log, with the home folder and user
+ *  name removed. */
+export function diagnosticsBundle(report: string, includeLog: boolean): Promise<string> {
+  return invoke<string>("diagnostics_bundle", { report, includeLog });
+}
+
+/** Put `text` on the clipboard. Done in Rust: WebKit (macOS, Linux) refuses
+ *  navigator.clipboard after an awaited call, and older WebKitGTK has none. */
+export function copyText(text: string): Promise<void> {
+  return invoke("copy_text", { text });
+}
+
 // ── Mod settings form ──
 export function userDirPath(): Promise<string | null> {
   return invoke<string | null>("user_dir_path");

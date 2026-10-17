@@ -15,6 +15,7 @@
     collectionDelete,
     collectionUpdate,
     confirmDialog,
+    copyText,
   } from "../api";
   import type { CollectionSummary } from "../api";
   import type {
@@ -97,7 +98,7 @@
 
   async function copyShareLink(c: CollectionSummary) {
     try {
-      await navigator.clipboard.writeText(c.pageUrl);
+      await copyText(c.pageUrl);
       copiedRef = c.reference;
       setTimeout(() => {
         if (copiedRef === c.reference) copiedRef = null;
@@ -168,7 +169,7 @@
   async function copyLink() {
     if (!shareResult) return;
     try {
-      await navigator.clipboard.writeText(shareResult.url);
+      await copyText(shareResult.url);
       copied = true;
     } catch {
       copied = false;

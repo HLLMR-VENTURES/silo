@@ -181,8 +181,8 @@ fn keep_copy_before_migrating(conn: &Connection) {
         .map_err(|e| e.to_string())
         .and_then(|()| write_copy(conn, &target, &|v| v == from));
     match kept {
-        Ok(()) => eprintln!("[Silo] kept a copy before upgrading: {}", target.display()),
-        Err(e) => eprintln!("[Silo] couldn't keep a copy before upgrading: {e}"),
+        Ok(()) => log::info!("kept a copy before upgrading: {}", target.display()),
+        Err(e) => log::warn!("couldn't keep a copy before upgrading: {e}"),
     }
 }
 

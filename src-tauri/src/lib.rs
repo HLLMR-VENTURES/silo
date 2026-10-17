@@ -8,7 +8,9 @@ pub mod category;
 pub mod collection;
 pub mod conflicts;
 pub mod db;
+mod diagnostics;
 pub mod fsgame;
+mod fslog;
 pub mod gamelaunch;
 pub mod github;
 pub mod icons;
@@ -723,14 +725,11 @@ async fn download_update(
         }
         let label = file_label(&dest);
         match &done.backup {
-            Some(b) => eprintln!(
-                "[silo] updated {label}; previous version kept at {}",
-                b.display()
-            ),
-            None => eprintln!("[silo] updated {label}; previous version not moved to backups"),
+            Some(b) => log::info!("updated {label}; previous version kept at {}", b.display()),
+            None => log::info!("updated {label}; previous version not moved to backups"),
         }
         for p in &done.problems {
-            eprintln!("[silo] {p}");
+            log::warn!("{p}");
         }
         Ok(UpdateOutcome {
             backup: done.backup.map(|b| b.to_string_lossy().into_owned()),
@@ -742,8 +741,11 @@ async fn download_update(
 }
 
 fn log_recovery(r: &update::Recovery) {
-    for n in r.notices.iter().chain(&r.problems) {
-        eprintln!("[silo] {n}");
+    for n in &r.notices {
+        log::info!("{n}");
+    }
+    for p in &r.problems {
+        log::warn!("{p}");
     }
 }
 
@@ -1095,7 +1097,11 @@ fn remove_unclaimed_part(path: &std::path::Path) -> bool {
     if held.contains(&same_file_key(path)) {
         return false;
     }
-    std::fs::remove_file(path).is_ok()
+    let removed = std::fs::remove_file(path).is_ok();
+    if removed {
+        fslog::changed("remove", path);
+    }
+    removed
 }
 
 /// Anything at `p`, including a broken link (which `Path::exists` would call absent).
@@ -1125,7 +1131,9 @@ const DOWNLOAD_GONE: &str = "The download disappeared before Silo could add it. 
 /// `dest`; on Windows the rename would then replace it. Hardlink-capable filesystems (the
 /// usual case) have no such window.
 fn place_part(part: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
-    place_part_with(part, dest, |a, b| std::fs::hard_link(a, b))
+    place_part_with(part, dest, |a, b| std::fs::hard_link(a, b))?;
+    fslog::moved("install", part, dest);
+    Ok(())
 }
 
 fn place_part_with(
@@ -1840,8 +1848,8 @@ fn resolve_active(conn: &rusqlite::Connection, mods: &std::path::Path) -> modsro
     };
     let layout = match stored {
         Some(archive) => organize::Layout::new(mods.to_path_buf(), archive).unwrap_or_else(|e| {
-            eprintln!(
-                "[Silo] ignoring the library archive stored for {}: {e}",
+            log::warn!(
+                "ignoring the library archive stored for {}: {e}",
                 mods.display()
             );
             organize::Layout::default_for(mods)
@@ -1870,8 +1878,8 @@ fn rediscovered_archive_fits(
         .filter(|p| !p.as_os_str().is_empty());
     let problems = fence_problems(&layout, found, &fences(conn, &layout, app_data));
     if !problems.is_empty() {
-        eprintln!(
-            "[Silo] not using the archive {} named in {}: {}",
+        log::warn!(
+            "not using the archive {} named in {}: {}",
             found.display(),
             relocate::ARCHIVE_NOTE,
             problems.join(" ")
@@ -2457,10 +2465,10 @@ fn check_move(
     }
 }
 
-/// Pure: the `[Silo]` log line for a start / resume / cancel outcome.
+/// Pure: the log line for a start / resume / cancel outcome.
 fn move_outcome(what: &str, out: &Result<Option<relocate::MoveMarker>, String>) -> String {
     match out {
-        Ok(None) => format!("[Silo] archive move {what}: finished"),
+        Ok(None) => format!("archive move {what}: finished"),
         Ok(Some(m)) => {
             let reason = match (&m.pause_reason, m.errors.is_empty()) {
                 (Some(r), _) => r.as_str(),
@@ -2468,11 +2476,21 @@ fn move_outcome(what: &str, out: &Result<Option<relocate::MoveMarker>, String>) 
                 (None, true) => "on request",
             };
             format!(
-                "[Silo] archive move {what}: paused ({reason}; {} error(s))",
+                "archive move {what}: paused ({reason}; {} error(s))",
                 m.errors.len()
             )
         }
-        Err(e) => format!("[Silo] archive move {what}: refused — {e}"),
+        Err(e) => format!("archive move {what}: refused — {e}"),
+    }
+}
+
+/// Pure: how loud the outcome's log line is. Finished, or paused because the user asked, is
+/// info; a pause for a reason (the game started) or on errors, or a refusal, is a warning.
+fn move_outcome_level(out: &Result<Option<relocate::MoveMarker>, String>) -> log::Level {
+    match out {
+        Ok(None) => log::Level::Info,
+        Ok(Some(m)) if m.pause_reason.is_none() && m.errors.is_empty() => log::Level::Info,
+        _ => log::Level::Warn,
     }
 }
 
@@ -2516,7 +2534,7 @@ fn with_move_ctx(
     // refusal.
     let handed_off = what == "cancel" && matches!(&out, Err(e) if cancel_falls_back(e));
     if !handed_off {
-        eprintln!("{}", move_outcome(what, &out));
+        log::log!(move_outcome_level(&out), "{}", move_outcome(what, &out));
     }
     out
 }
@@ -2551,8 +2569,8 @@ fn start_move(
         if !check.problems.is_empty() {
             return Err(check.problems.join("\n"));
         }
-        eprintln!(
-            "[Silo] moving the library archive {} -> {}",
+        log::info!(
+            "moving the library archive {} -> {}",
             layout.archive.display(),
             new.display()
         );
@@ -2714,7 +2732,7 @@ fn cancel_falls_back(err: &str) -> bool {
 
 fn request_turn_around() -> Option<relocate::MoveMarker> {
     relocate::request_cancel();
-    eprintln!("[Silo] archive move cancel: asked the running move to turn around");
+    log::info!("archive move cancel: asked the running move to turn around");
     None
 }
 
@@ -2809,8 +2827,8 @@ async fn archive_repoint(app: tauri::AppHandle, path: Option<String>) -> Result<
         if path.is_some() {
             picked::forget(picked::Purpose::Archive);
         }
-        eprintln!(
-            "[Silo] re-pointed the library archive {} -> {} (nothing moved)",
+        log::info!(
+            "re-pointed the library archive {} -> {} (nothing moved)",
             layout.archive.display(),
             new.display()
         );
@@ -2951,8 +2969,8 @@ async fn archive_adopt_apply(
                 "{n}: no longer a loose mod Silo can file in — left untouched"
             ));
         }
-        eprintln!(
-            "[Silo] adopted {} loose mod(s) into the library archive ({} skipped, {} errors)",
+        log::info!(
+            "adopted {} loose mod(s) into the library archive ({} skipped, {} errors)",
             report.changed,
             report.skipped,
             report.errors.len()
@@ -3077,6 +3095,53 @@ async fn save_text(path: String, content: String) -> Result<(), String> {
     .await
 }
 
+/// The diagnostics report (built by the frontend) plus, if asked, the recent log, with the
+/// home folder and user name removed from both.
+#[tauri::command]
+async fn diagnostics_bundle(
+    app: tauri::AppHandle,
+    report: String,
+    include_log: bool,
+) -> Result<String, String> {
+    let log_dir = app.path().app_log_dir().ok();
+    let log_error = app.try_state::<LogFileError>().and_then(|s| s.0.clone());
+    let version = app.package_info().version.to_string();
+    off_main(move || {
+        let header = format!("Silo {version} on {}", std::env::consts::OS);
+        let parts = include_log.then(|| {
+            let files = log_dir
+                .as_deref()
+                .map(diagnostics::log_files)
+                .unwrap_or_default();
+            diagnostics::LogParts {
+                warnings: diagnostics::recent_warnings(&files, 50, 16 * 1024),
+                recent: diagnostics::recent_log(&files, 300, 64 * 1024),
+                unavailable: log_error,
+            }
+        });
+        let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
+        let user = std::env::var("USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .ok();
+        Ok(diagnostics::bundle(
+            &header,
+            &report,
+            parts.as_ref(),
+            home.as_deref(),
+            user.as_deref(),
+        ))
+    })
+    .await
+}
+
+/// Put `text` on the system clipboard. From Rust because WebKit (macOS, Linux) refuses the
+/// webview's clipboard after an awaited call; the webview itself has no clipboard permission.
+#[tauri::command]
+async fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    off_main(move || app.clipboard().write_text(text).map_err(|e| e.to_string())).await
+}
+
 /// Clear the scan cache so the next scan re-parses & re-categorizes every mod.
 #[tauri::command]
 async fn clear_scan_cache(app: tauri::AppHandle) -> Result<(), String> {
@@ -3108,6 +3173,7 @@ async fn generate_bridge(spec: bridge::BridgeSpec, root: Option<String>) -> Resu
             return Err(format!("{filename} already exists in your mods folder"));
         }
         bridge::generate(&spec, &dest)?;
+        fslog::changed("generate", &dest);
         Ok(filename)
     })
     .await
@@ -4221,6 +4287,37 @@ async fn detect_foreign_files(
     .map_err(|e| e.to_string())?
 }
 
+/// The log: `app_log_dir()/silo.log` when `to_file` (Windows `%LOCALAPPDATA%\com.hllmr.silo\logs`,
+/// macOS `~/Library/Logs/com.hllmr.silo`, Linux `~/.local/share/com.hllmr.silo/logs`), and
+/// stderr. Release builds have no console, so the file is the only record of what Silo did. It
+/// holds full paths; "Copy diagnostics" removes the home folder and user name (`diagnostics`).
+/// Never log secrets (tokens, gist contents) through it.
+/// Why the log file couldn't be opened this session (`None` when it was), for diagnostics.
+struct LogFileError(Option<String>);
+
+fn log_plugin<R: tauri::Runtime>(to_file: bool) -> tauri::plugin::TauriPlugin<R> {
+    use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
+    let mut targets = vec![Target::new(TargetKind::Stderr)];
+    if to_file {
+        targets.push(Target::new(TargetKind::LogDir {
+            file_name: Some(diagnostics::LOG_NAME.into()),
+        }));
+    }
+    tauri_plugin_log::Builder::new()
+        .clear_targets()
+        .targets(targets)
+        .level(log::LevelFilter::Info)
+        .level_for("tao", log::LevelFilter::Warn)
+        .level_for("wry", log::LevelFilter::Warn)
+        .level_for("ureq", log::LevelFilter::Warn)
+        .level_for("rustls", log::LevelFilter::Warn)
+        .max_file_size(2_000_000)
+        // KeepSome(n) keeps n rotated files besides the live one: five files in all.
+        .rotation_strategy(RotationStrategy::KeepSome(4))
+        .timezone_strategy(TimezoneStrategy::UseLocal)
+        .build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -4246,7 +4343,23 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Used by `copy_text` only; no clipboard permission is granted to the webview.
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
+            // Started here, not on the builder: a plugin that fails on the builder stops the app,
+            // and a log folder Silo can't write (or an old log another program holds open) must
+            // never keep Silo from starting. Then it logs to stderr only.
+            let log_error = app.handle().plugin(log_plugin(true)).err().map(|e| {
+                let _ = app.handle().plugin(log_plugin(false));
+                log::warn!("couldn't open the log file: {e}");
+                e.to_string()
+            });
+            app.manage(LogFileError(log_error));
+            log::info!(
+                "Silo {} starting on {}",
+                app.package_info().version,
+                std::env::consts::OS
+            );
             // Resolve and publish the active layout (mods folder, archive, any unfinished move)
             // before the UI asks, so the write guards never act on an unknown layout. Off the
             // main thread: it reads gameSettings.xml and the DB.
@@ -4263,17 +4376,17 @@ pub fn run() {
                                 std::time::Duration::from_secs(20 * 3600),
                             ) {
                                 Ok(Some(s)) => {
-                                    eprintln!("[Silo] database snapshot saved: {}", s.display())
+                                    log::info!("database snapshot saved: {}", s.display())
                                 }
                                 Ok(None) => {}
-                                Err(e) => eprintln!("[Silo] database snapshot failed: {e}"),
+                                Err(e) => log::warn!("database snapshot failed: {e}"),
                             }
                         }
                         let _ = compute_mods_root_status(&conn);
-                        eprintln!("[Silo] library layout resolved at startup");
+                        log::info!("library layout resolved at startup");
                     }
                     Err(e) => {
-                        eprintln!("[Silo] couldn't resolve the library layout at startup: {e}")
+                        log::warn!("couldn't resolve the library layout at startup: {e}")
                     }
                 }
                 // Icon thumbnails from the old (unstable) cache naming; `icons-v2` replaced it.
@@ -4354,6 +4467,8 @@ pub fn run() {
             detect_game,
             launch_game,
             save_text,
+            diagnostics_bundle,
+            copy_text,
             user_dir_path,
             clear_scan_cache,
             scan_log,
@@ -4447,9 +4562,9 @@ fn hold_quit() -> bool {
 mod tests {
     use super::{
         archive_holds_mods, build_gh_scope, cancel_falls_back, fence_problems,
-        foreign_mods_problem, known_same_mount, move_outcome, move_problems, overlap_problems,
-        repoint_refusal, scan_archives, scope_grants, select_adopt, split_adopt, Fences, MoveFacts,
-        Space,
+        foreign_mods_problem, known_same_mount, move_outcome, move_outcome_level, move_problems,
+        overlap_problems, repoint_refusal, scan_archives, scope_grants, select_adopt, split_adopt,
+        Fences, MoveFacts, Space,
     };
     use crate::{
         organize::{Layout, ModInput},
@@ -4618,12 +4733,28 @@ mod tests {
         assert!(!known_same_mount(&None, &None));
     }
 
+    /// Finishing, or pausing because the user asked, is routine; a pause for a reason (the game
+    /// started), a pause on errors, or a refusal is worth a warning.
+    #[test]
+    fn move_outcome_level_warns_only_when_something_went_wrong() {
+        let m = MoveMarker::new("/a".into(), "/b".into());
+        assert_eq!(move_outcome_level(&Ok(None)), log::Level::Info);
+        assert_eq!(move_outcome_level(&Ok(Some(m.clone()))), log::Level::Info);
+        let mut e = m.clone();
+        e.errors.push("x".into());
+        assert_eq!(move_outcome_level(&Ok(Some(e))), log::Level::Warn);
+        let mut g = m;
+        g.pause_reason = Some("Farming Simulator 25 started".into());
+        assert_eq!(move_outcome_level(&Ok(Some(g))), log::Level::Warn);
+        assert_eq!(move_outcome_level(&Err("nope".into())), log::Level::Warn);
+    }
+
     #[test]
     fn move_outcome_names_finished_paused_and_refused() {
         let m = MoveMarker::new("/a".into(), "/b".into());
         assert_eq!(
             move_outcome("start", &Ok(None)),
-            "[Silo] archive move start: finished"
+            "archive move start: finished"
         );
         assert!(move_outcome("resume", &Ok(Some(m.clone())))
             .contains("paused (on request; 0 error(s))"));
@@ -4637,7 +4768,7 @@ mod tests {
         assert!(move_outcome("start", &Ok(Some(g))).contains("(Farming Simulator 25 started; 0"));
         assert_eq!(
             move_outcome("cancel", &Err("nope".into())),
-            "[Silo] archive move cancel: refused — nope"
+            "archive move cancel: refused — nope"
         );
     }
 
