@@ -1361,16 +1361,33 @@ fn retire_folder_copy_with(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "folder".into());
+    let backups = mods_root.join("backups");
+    let created = backups.symlink_metadata().is_err();
     let dest = backup_dir_path(mods_root, &name)?;
-    if rename(link, &dest).is_err() {
-        // Don't leave an empty backups/ behind (remove_dir refuses a non-empty one).
-        let _ = std::fs::remove_dir(mods_root.join("backups"));
-        return Err(std::io::Error::other(format!(
-            "Couldn't move {name} to backups because a file in it is in use. Close any program using it (the game, an editor) and try again."
-        )));
+    if let Err(e) = rename(link, &dest) {
+        // Don't leave behind an empty backups/ this call made (remove_dir refuses a non-empty one).
+        if created {
+            let _ = std::fs::remove_dir(&backups);
+        }
+        return Err(std::io::Error::other(backup_move_error(&name, &e)));
     }
     let _ = std::fs::remove_file(dest.join(SILO_MARKER));
     Ok(Some(dest))
+}
+
+/// What the user is told when moving a changed copy to backups failed. Access denied or a
+/// Windows sharing/lock violation (os error 32 / 33) almost always means a program has a file
+/// in it open; anything else is reported as is.
+fn backup_move_error(name: &str, e: &std::io::Error) -> String {
+    let in_use = e.kind() == std::io::ErrorKind::PermissionDenied
+        || (cfg!(windows) && matches!(e.raw_os_error(), Some(32) | Some(33)));
+    if in_use {
+        format!(
+            "Couldn't move {name} to backups because a file in it is in use. Close any program using it (the game, an editor) and try again."
+        )
+    } else {
+        format!("Couldn't move {name} to backups ({e}), so Silo left it in place.")
+    }
 }
 
 /// Free a mods-folder slot holding Silo's projection of `src`. A marked folder copy goes
@@ -3326,20 +3343,48 @@ mod tests {
         copy_dir_projection(&src, &flat).unwrap();
         std::fs::write(flat.join("edit.lua"), b"mine").unwrap();
         let marker = std::fs::read(flat.join(SILO_MARKER)).unwrap();
+        let in_use_msg = "Couldn't move FS25_Dir to backups because a file in it is in use. Close any program using it (the game, an editor) and try again.";
 
-        let in_use = |_: &Path, _: &Path| -> std::io::Result<()> {
+        let mut cases: Vec<(std::io::Error, String)> = vec![
+            (
+                std::io::ErrorKind::PermissionDenied.into(),
+                in_use_msg.to_string(),
+            ),
+            (
+                std::io::Error::other("the disk is full"),
+                "Couldn't move FS25_Dir to backups (the disk is full), so Silo left it in place."
+                    .to_string(),
+            ),
+        ];
+        if cfg!(windows) {
+            // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION
+            cases.push((
+                std::io::Error::from_raw_os_error(32),
+                in_use_msg.to_string(),
+            ));
+            cases.push((
+                std::io::Error::from_raw_os_error(33),
+                in_use_msg.to_string(),
+            ));
+        }
+        for (fail, want) in cases {
+            let err =
+                retire_folder_copy_with(&flat, &src, &base, move |_: &Path, _: &Path| Err(fail))
+                    .unwrap_err();
+            assert_eq!(err.to_string(), want);
+            assert_eq!(std::fs::read(flat.join("edit.lua")).unwrap(), b"mine");
+            assert_eq!(std::fs::read(flat.join(SILO_MARKER)).unwrap(), marker);
+            assert!(flat.join("modDesc.xml").is_file());
+            assert!(!base.join("backups").exists(), "no empty backups folder");
+        }
+
+        // A backups/ folder that was already there is never removed.
+        std::fs::create_dir_all(base.join("backups")).unwrap();
+        let fail = |_: &Path, _: &Path| -> std::io::Result<()> {
             Err(std::io::ErrorKind::PermissionDenied.into())
         };
-        let err = retire_folder_copy_with(&flat, &src, &base, in_use).unwrap_err();
-
-        assert_eq!(
-            err.to_string(),
-            "Couldn't move FS25_Dir to backups because a file in it is in use. Close any program using it (the game, an editor) and try again."
-        );
-        assert_eq!(std::fs::read(flat.join("edit.lua")).unwrap(), b"mine");
-        assert_eq!(std::fs::read(flat.join(SILO_MARKER)).unwrap(), marker);
-        assert!(flat.join("modDesc.xml").is_file());
-        assert!(!base.join("backups").exists(), "no empty backups folder");
+        assert!(retire_folder_copy_with(&flat, &src, &base, fail).is_err());
+        assert!(base.join("backups").is_dir(), "the existing backups/ stays");
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **New look for the website and README.** "More farming. Less fixing." Copy now describes
   crash triage as ranking the likely culprit, and drops claims we couldn't back up.
 
+### Fixed
+
+- **Folder mods: your edits are safe.** On Windows, folder mods are now linked as NTFS
+  junctions instead of copied, so edits you make in the mods folder land in your library. Where
+  Silo still has to copy a folder (some drives and cloud folders), parking or restoring the
+  vanilla layout only deletes the copy if it's unchanged; otherwise it's moved to `backups/`
+  and Silo tells you where. (#202)
+
 ### Security
 
 - **Stricter image-host check.** The image proxy now parses URLs properly before checking the
