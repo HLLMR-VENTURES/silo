@@ -561,29 +561,36 @@ pub fn download_to<F: Fn(u64, Option<u64>)>(
     Ok(())
 }
 
-/// The only hosts we'll proxy an image from. Also an SSRF guard — a hostile catalog
-/// `imageUrl` can't make us fetch an arbitrary internal URL.
+/// The only hosts we'll proxy an image from: GitHub's content CDN. Also an SSRF guard — a
+/// hostile catalog `imageUrl` can't make us fetch an arbitrary internal URL. The host is
+/// parsed with the WHATWG URL parser, so tricks like `https://169.254.169.254\.x.com/`
+/// resolve to their real host and are refused. GIANTS' ModHub CDN is deliberately absent:
+/// it refuses requests that don't come from its own site, and Silo doesn't work around
+/// that — ModHub thumbnails come from SiloAPI's cache or fall back to a placeholder.
 pub(crate) fn is_catalog_image_host(url: &str) -> bool {
-    let host = url
-        .split_once("://")
-        .and_then(|(_, rest)| rest.split(['/', '?', '#']).next())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let host = host.split(':').next().unwrap_or("");
-    host.ends_with(".giants-software.com") || host.ends_with(".githubusercontent.com")
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    match parsed.host_str() {
+        Some(host) => host
+            .to_ascii_lowercase()
+            .ends_with(".githubusercontent.com"),
+        None => false,
+    }
 }
 
 /// Fetch a catalog mod image in Rust and return it as a `data:` URL the webview can render
-/// directly. Needed because Giants' ModHub CDN now 403s any request without a
-/// giants/farming-simulator `Referer` — a header a browser `<img>` can't forge. Sending
-/// that referer is harmless for the other CDNs. Host-allowlisted and size-capped.
+/// directly (the CSP keeps the webview from loading arbitrary image hosts). Sends Silo's
+/// own User-Agent and no Referer. Host-allowlisted and size-capped.
 pub fn fetch_image(url: &str) -> Result<String, String> {
     if !is_catalog_image_host(url) {
         return Err("not an allowed image host".to_string());
     }
     let resp = ureq::get(url)
-        .set("User-Agent", "Mozilla/5.0 (Silo)")
-        .set("Referer", "https://www.farming-simulator.com/")
+        .set("User-Agent", UA)
         .call()
         .map_err(|e| e.to_string())?;
     let mime = resp
@@ -619,6 +626,31 @@ mod tests {
         );
         assert_eq!(filename_from_url("https://example.com/notazip"), None);
         assert_eq!(filename_from_url("https://example.com/.zip"), None);
+    }
+
+    #[test]
+    fn image_proxy_only_allows_github_content() {
+        assert!(is_catalog_image_host(
+            "https://raw.githubusercontent.com/o/r/main/icon.png"
+        ));
+        assert!(is_catalog_image_host(
+            "https://user-images.githubusercontent.com/1/2.png"
+        ));
+        // GIANTS' CDN refuses off-site requests; Silo no longer proxies it.
+        assert!(!is_catalog_image_host(
+            "https://cdn40.giants-software.com/modHub/storage/00303729/iconBig.jpg"
+        ));
+        // Plain http, look-alike hosts and the backslash trick are refused.
+        assert!(!is_catalog_image_host(
+            "http://raw.githubusercontent.com/o/r/main/icon.png"
+        ));
+        assert!(!is_catalog_image_host(
+            "https://githubusercontent.com.evil.example/x.png"
+        ));
+        assert!(!is_catalog_image_host(
+            "https://169.254.169.254\\.githubusercontent.com/latest/meta-data"
+        ));
+        assert!(!is_catalog_image_host("not a url"));
     }
 
     #[test]

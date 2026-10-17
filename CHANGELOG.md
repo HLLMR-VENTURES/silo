@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Silo no longer works around ModHub's image protection.** GIANTS' ModHub CDN only serves
+  images to its own website. Silo used to send a farming-simulator.com `Referer` header to get
+  thumbnails anyway; it now sends its own User-Agent and no Referer, and only proxies images
+  hosted on GitHub. ModHub thumbnails come from Silo's catalog cache as before; the occasional
+  brand-new mod that isn't cached yet shows a placeholder until the next catalog refresh.
+
+### Security
+
+- **Stricter image-host check.** The image proxy now parses URLs properly before checking the
+  host, so look-alike or malformed URLs (for example one using a backslash to disguise its real
+  host) are refused.
+
 ## [0.9.0] - 2026-10-17
 
 ### Added
