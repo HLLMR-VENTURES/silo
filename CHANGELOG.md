@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Folder mods: your edits are safe.** On Windows, folder mods are now linked as NTFS
+  junctions instead of copied, so edits you make in the mods folder land in your library. Where
+  Silo still has to copy a folder (some drives and cloud folders), parking or restoring the
+  vanilla layout only deletes the copy if it's unchanged; otherwise it's moved to `backups/`
+  and Silo tells you where. (#202)
+
 - **A stalled download can't freeze Silo anymore.** Network requests now time out instead of
   waiting forever, and mods download before Silo locks your library, so other changes aren't
   blocked while a download runs. (#202)

@@ -80,6 +80,8 @@ export interface OrganizeReport {
   changed: number;
   skipped: number;
   errors: string[];
+  /** Not errors, but worth telling the user (e.g. where an edited folder copy was kept). */
+  notices: string[];
 }
 
 /** Provenance verdict of comparing an installed mod to its canonical build. */

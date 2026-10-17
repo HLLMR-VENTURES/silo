@@ -122,6 +122,8 @@ pub struct Report {
     pub changed: usize,
     pub skipped: usize,
     pub errors: Vec<String>,
+    /// Not errors, but worth telling the user (e.g. where an edited folder copy was kept).
+    pub notices: Vec<String>,
 }
 
 /// Result of the link-repair pass — how many copy-projections were deduped into links
@@ -380,8 +382,12 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
                 ));
                 rep.skipped += 1;
             } else {
-                match remove_link(&link) {
-                    Ok(()) => {
+                match clear_projection(&link, &src, root) {
+                    Ok(kept) => {
+                        if let Some(kept) = kept {
+                            rep.notices
+                                .push(kept_copy_notice(&row.file_name, &kept, false));
+                        }
                         db::forget_projection(conn, &key, &row.file_name);
                         if let Err(e) = db::set_organized_active(conn, &key, &row.tech_name, false)
                         {
@@ -389,7 +395,7 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
                         }
                         rep.changed += 1;
                     }
-                    Err(e) => rep.errors.push(format!("{}: unlink: {e}", row.tech_name)),
+                    Err(e) => rep.errors.push(format!("{}: {e}", row.tech_name)),
                 }
             }
         } else {
@@ -677,6 +683,46 @@ fn backup_path(root: &Path, file_name: &str) -> Result<PathBuf, String> {
     Ok(dir.join(format!("{file_name}.{secs}.bak")))
 }
 
+/// A free `<root>/backups/<name>.<unix_secs>` folder path for a folder copy we're keeping
+/// (`-2`, `-3`, … appended if that name is taken, so an earlier backup is never replaced).
+fn backup_dir_path(root: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    backup_dir_path_at(root, name, secs)
+}
+
+/// [`backup_dir_path`] for a given timestamp (creates `<root>/backups/`, not the folder).
+fn backup_dir_path_at(root: &Path, name: &str, secs: u64) -> std::io::Result<PathBuf> {
+    let dir = root.join("backups");
+    std::fs::create_dir_all(&dir)?;
+    let mut candidate = dir.join(format!("{name}.{secs}"));
+    let mut n = 2;
+    while candidate.symlink_metadata().is_ok() {
+        candidate = dir.join(format!("{name}.{secs}-{n}"));
+        n += 1;
+    }
+    Ok(candidate)
+}
+
+/// What the user is told when a changed folder copy was moved aside instead of deleted.
+/// `restored`: the archived original is back in the mods folder (flatten); otherwise the mod
+/// was parked and its slot is simply empty.
+fn kept_copy_notice(name: &str, kept: &Path, restored: bool) -> String {
+    if restored {
+        format!(
+            "{name} had changed since Silo copied it, so it was moved to {} instead of being deleted. Your mods folder now has Silo's original.",
+            kept.display()
+        )
+    } else {
+        format!(
+            "{name} had changed since Silo copied it, so it was kept in {} instead of being deleted.",
+            kept.display()
+        )
+    }
+}
+
 /// Restore a vanilla flat `mods/`: remove every Silo link, move archived files back
 /// to the root, remove only empty archive directories (never an unrecognized file), and
 /// clear the manifest.
@@ -711,13 +757,22 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             }
             // Normal restore: drop our projection to free the slot, then move the archived
             // original back into the root.
+            let mut kept = None;
             if occupied {
-                if let Err(e) = remove_link(&link) {
-                    rep.errors.push(format!("{}: unlink: {e}", row.tech_name));
-                    continue;
+                match clear_projection(&link, &src, root) {
+                    Ok(k) => kept = k,
+                    Err(e) => {
+                        rep.errors.push(format!("{}: {e}", row.tech_name));
+                        continue;
+                    }
                 }
             }
-            if let Err(e) = move_path(&src, &link) {
+            let restored = move_path(&src, &link);
+            if let Some(kept) = &kept {
+                rep.notices
+                    .push(kept_copy_notice(&row.file_name, kept, restored.is_ok()));
+            }
+            if let Err(e) = restored {
                 rep.errors.push(format!("{}: restore: {e}", row.tech_name));
                 continue;
             }
@@ -869,7 +924,8 @@ fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Project `src` into the flat root at `link`. Files → hardlink (no privilege, same volume, no
 /// disk duplication); if that fails, a symlink only when the archive is on **another drive**
 /// and symlinks work there (`policy`, decided lazily); otherwise a copy. A same-volume folder
-/// that rejects hardlinks (cloud-synced) keeps copies. Dirs → OS symlink, falling back to copy;
+/// that rejects hardlinks (cloud-synced) keeps copies. Dirs → OS symlink (on Windows, an NTFS
+/// junction when symlinks need Developer Mode), falling back to copy;
 /// inside a Mac App Store container always a marked copy (the sandboxed game can't follow a
 /// link out). Never overwrites an existing entry at `link`, and never links to a missing `src`
 /// (a dangling link would look active but load nothing, and cleanup couldn't prove it ours).
@@ -888,11 +944,7 @@ pub(crate) fn make_link(
             }
             return copy_dir_projection(src, link);
         }
-        #[cfg(unix)]
-        let symlink = |s: &Path, l: &Path| std::os::unix::fs::symlink(s, l);
-        #[cfg(windows)]
-        let symlink = |s: &Path, l: &Path| std::os::windows::fs::symlink_dir(s, l);
-        link_dir_or_copy(src, link, symlink)
+        link_dir_or_copy(src, link, link_dir_native)
     } else {
         link_zip(
             src,
@@ -1106,9 +1158,10 @@ pub(crate) fn same_volume(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Dir projection: `symlink`, or a marked copy when the filesystem refuses links (exFAT/FAT
-/// drives, no symlink privilege). Never falls back when `link` already exists — copying into
-/// a folder that's already there would merge into it and stamp it as ours.
+/// Dir projection: `symlink` (a symlink or junction, see [`link_dir_native`]), or a marked copy
+/// when the filesystem refuses links (exFAT/FAT drives, a network archive). Never falls back
+/// when `link` already exists — copying into a folder that's already there would merge into it
+/// and stamp it as ours.
 fn link_dir_or_copy(
     src: &Path,
     link: &Path,
@@ -1120,11 +1173,232 @@ fn link_dir_or_copy(
     }
 }
 
+/// Create a directory link at `link` pointing at `src`. Windows tries a symlink first
+/// (Developer Mode), then an NTFS junction, which needs no privilege. Unix uses a symlink.
+/// Errors bubble up so the caller can fall back to a marked copy.
+#[cfg(windows)]
+pub(crate) fn link_dir_native(src: &Path, link: &Path) -> std::io::Result<()> {
+    match std::os::windows::fs::symlink_dir(src, link) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+        Err(_) => junction_to(src, link),
+    }
+}
+
+/// An NTFS junction at `link` to `src`. Never replaces anything already at `link`. A junction
+/// can only point at a local volume, so a network target (a UNC path, or a mapped drive, which
+/// canonicalizes to one) is refused with `Unsupported` and the caller falls back to a copy. If
+/// the junction can't be made for another reason (not NTFS), the empty folder the crate created
+/// for it is removed again (`remove_dir` only ever removes an empty folder or a link).
+#[cfg(windows)]
+pub(crate) fn junction_to(src: &Path, link: &Path) -> std::io::Result<()> {
+    if link.symlink_metadata().is_ok() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
+    // Junction targets must be absolute; the crate strips the `\\?\` verbatim prefix itself.
+    let target = std::fs::canonicalize(src)?;
+    if is_network_path(&target.to_string_lossy()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "a junction can't point at a network folder",
+        ));
+    }
+    junction::create(&target, link).inspect_err(|e| {
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            let _ = std::fs::remove_dir(link);
+        }
+    })
+}
+
+/// A Windows path on a network share: `\\server\share\…`, or the verbatim / device forms
+/// `\\?\UNC\…` and `\\.\UNC\…`. Local verbatim paths (`\\?\C:\…`) are not.
+#[cfg(any(windows, test))]
+fn is_network_path(p: &str) -> bool {
+    let rest = p.strip_prefix(r"\\?\").or_else(|| p.strip_prefix(r"\\.\"));
+    match rest {
+        Some(rest) => rest
+            .get(..4)
+            .is_some_and(|s| s.eq_ignore_ascii_case(r"UNC\")),
+        None => p.starts_with(r"\\"),
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn link_dir_native(src: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(src, link)
+}
+
+/// The ownership marker of a folder copy (v2): every file Silo wrote, so a later park or
+/// flatten can tell an untouched copy (safe to delete) from one the user edited.
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+struct CopyListing {
+    v: u32,
+    files: Vec<ListedFile>,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+struct ListedFile {
+    /// Relative to the copy, '/'-separated.
+    path: String,
+    size: u64,
+    mtime_ms: u64,
+}
+
+/// Every regular file under `dir` except the marker, sorted by path. Links are not followed.
+fn listing_of(dir: &Path) -> std::io::Result<Vec<ListedFile>> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(dir).follow_links(false) {
+        let entry = entry.map_err(std::io::Error::other)?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(dir)
+            .map_err(std::io::Error::other)?;
+        if rel == Path::new(SILO_MARKER) {
+            continue;
+        }
+        // Ask the file itself: Windows' directory-enumeration data that walkdir caches can be
+        // stale for a file that's still open (its size/mtime aren't flushed to the entry yet).
+        let meta = std::fs::metadata(entry.path())?;
+        let mtime_ms = meta
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        out.push(ListedFile {
+            path: rel.to_string_lossy().replace('\\', "/"),
+            size: meta.len(),
+            mtime_ms,
+        });
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
 /// Copy a directory as a projection and drop the ownership marker, so a later flatten /
-/// deactivate can prove Silo created it (a copied dir has no link identity to compare).
+/// deactivate can prove Silo created it (a copied dir has no link identity to compare). The
+/// marker lists the copy's own files as written, so later edits can be detected.
 fn copy_dir_projection(src: &Path, dst: &Path) -> std::io::Result<()> {
     copy_dir_all(src, dst)?;
-    std::fs::write(dst.join(SILO_MARKER), b"silo\n")
+    let listing = CopyListing {
+        v: 2,
+        files: listing_of(dst)?,
+    };
+    let json = serde_json::to_vec(&listing).map_err(std::io::Error::other)?;
+    std::fs::write(dst.join(SILO_MARKER), json)
+}
+
+/// The v2 listing in `dir`'s marker; `None` for a legacy (`silo\n`) or unreadable marker.
+fn marker_listing(dir: &Path) -> std::io::Result<Option<Vec<ListedFile>>> {
+    let raw = std::fs::read(dir.join(SILO_MARKER))?;
+    Ok(match serde_json::from_slice::<CopyListing>(&raw) {
+        Ok(l) if l.v == 2 => Some(l.files),
+        _ => None,
+    })
+}
+
+/// True only when the marked folder copy at `dir` is provably what Silo wrote. With a v2
+/// listing: the same files with the same sizes and modification times (any added, removed,
+/// resized or re-timed file counts as changed). Limit: an edit that keeps a file's size and
+/// lands within the same timestamp tick as the copy (same millisecond, or FAT's 2 s) can't be
+/// seen; in practice an edit comes much later. A legacy marker has no listing, so the copy is
+/// compared with the archived `src` by relative path, size and SHA-256.
+pub(crate) fn copy_unchanged(dir: &Path, src: &Path) -> std::io::Result<bool> {
+    match marker_listing(dir)? {
+        Some(files) => Ok(listing_of(dir)? == files),
+        None => same_tree_contents(dir, src),
+    }
+}
+
+/// Same relative paths, sizes and SHA-256 contents (the marker is ignored).
+fn same_tree_contents(copy: &Path, src: &Path) -> std::io::Result<bool> {
+    let a = listing_of(copy)?;
+    let b = listing_of(src)?;
+    if a.len() != b.len()
+        || a.iter()
+            .zip(&b)
+            .any(|(x, y)| x.path != y.path || x.size != y.size)
+    {
+        return Ok(false);
+    }
+    let sha = |p: PathBuf| crate::provenance::sha256_file(&p).map_err(std::io::Error::other);
+    for f in &a {
+        if sha(copy.join(&f.path))? != sha(src.join(&f.path))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Remove a marked folder copy only if unchanged; otherwise move it to
+/// `<mods_root>/backups/<name>.<secs>/` and return that path so the caller can tell the user.
+/// The kept copy loses Silo's marker: it is the user's folder now.
+pub(crate) fn retire_folder_copy(
+    link: &Path,
+    src: &Path,
+    mods_root: &Path,
+) -> std::io::Result<Option<PathBuf>> {
+    retire_folder_copy_with(link, src, mods_root, |a, b| std::fs::rename(a, b))
+}
+
+/// [`retire_folder_copy`] with the move injected. `backups/` sits beside the copy in the mods
+/// folder, so the move is always a same-volume rename: never a copy-then-delete, which could
+/// half-copy a folder with a file in use and then fail to delete it. If the rename fails, the
+/// copy is left exactly as it was (marker included) and the error says why.
+fn retire_folder_copy_with(
+    link: &Path,
+    src: &Path,
+    mods_root: &Path,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<Option<PathBuf>> {
+    if copy_unchanged(link, src).unwrap_or(false) {
+        std::fs::remove_dir_all(link)?;
+        return Ok(None);
+    }
+    let name = link
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "folder".into());
+    let backups = mods_root.join("backups");
+    let created = backups.symlink_metadata().is_err();
+    let dest = backup_dir_path(mods_root, &name)?;
+    if let Err(e) = rename(link, &dest) {
+        // Don't leave behind an empty backups/ this call made (remove_dir refuses a non-empty one).
+        if created {
+            let _ = std::fs::remove_dir(&backups);
+        }
+        return Err(std::io::Error::other(backup_move_error(&name, &e)));
+    }
+    let _ = std::fs::remove_file(dest.join(SILO_MARKER));
+    Ok(Some(dest))
+}
+
+/// What the user is told when moving a changed copy to backups failed. Access denied or a
+/// Windows sharing/lock violation (os error 32 / 33) almost always means a program has a file
+/// in it open; anything else is reported as is.
+fn backup_move_error(name: &str, e: &std::io::Error) -> String {
+    let in_use = e.kind() == std::io::ErrorKind::PermissionDenied
+        || (cfg!(windows) && matches!(e.raw_os_error(), Some(32) | Some(33)));
+    if in_use {
+        format!(
+            "Couldn't move {name} to backups because a file in it is in use. Close any program using it (the game, an editor) and try again."
+        )
+    } else {
+        format!("Couldn't move {name} to backups ({e}), so Silo left it in place.")
+    }
+}
+
+/// Free a mods-folder slot holding Silo's projection of `src`. A marked folder copy goes
+/// through [`retire_folder_copy`] (an edited one is kept in backups, its path returned);
+/// anything else through [`remove_link`].
+fn clear_projection(link: &Path, src: &Path, mods_root: &Path) -> std::io::Result<Option<PathBuf>> {
+    let meta = link.symlink_metadata()?;
+    if meta.is_dir() && !meta.file_type().is_symlink() && link.join(SILO_MARKER).is_file() {
+        return retire_folder_copy(link, src, mods_root);
+    }
+    remove_link(link).map(|()| None)
 }
 
 /// True only if `link` in the flat root is provably the projection Silo created for archived
@@ -1286,7 +1560,9 @@ pub(crate) fn remove_dangling_link(link: &Path) -> std::io::Result<bool> {
 }
 
 /// Remove a projected entry (hardlink, symlink, junction, or copy) without
-/// touching the archived original.
+/// touching the archived original. A real folder is removed only when it is Silo's v2-marked
+/// copy and still untouched; any other folder (the user's own, an edited or legacy copy) is
+/// refused. Park and flatten go through [`clear_projection`], which keeps edited copies.
 pub(crate) fn remove_link(link: &Path) -> std::io::Result<()> {
     let meta = link.symlink_metadata()?;
     let ft = meta.file_type();
@@ -1299,6 +1575,20 @@ pub(crate) fn remove_link(link: &Path) -> std::io::Result<()> {
             std::fs::remove_file(link)
         }
     } else if ft.is_dir() {
+        let untouched = link.join(SILO_MARKER).is_file()
+            && match marker_listing(link)? {
+                Some(files) => listing_of(link)? == files,
+                None => false,
+            };
+        if !untouched {
+            let name = link
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| link.display().to_string());
+            return Err(std::io::Error::other(format!(
+                "{name} isn't a copy Silo made, or it has changed since, so Silo left it alone."
+            )));
+        }
         std::fs::remove_dir_all(link)
     } else {
         std::fs::remove_file(link)
@@ -2605,6 +2895,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_mod_is_projected_as_a_link_not_a_copy_on_windows() {
+        // Junctions need no privilege on NTFS, so this must never fall back to a copy.
+        let base = std::env::temp_dir().join(format!("silo_junction_proj_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        let archive_mod = mods.join(ARCHIVE).join("Misc").join("FS25_Dir");
+        std::fs::create_dir_all(&archive_mod).unwrap();
+        std::fs::write(archive_mod.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        let link = mods.join("FS25_Dir");
+        let layout = Layout::default_for(&mods);
+
+        make_link(&archive_mod, &link, "dir", &mut LinkPolicy::new(&layout)).unwrap();
+
+        let ft = link.symlink_metadata().unwrap().file_type();
+        assert!(
+            ft.is_symlink(),
+            "expected a junction or symlink, got a real folder"
+        );
+        assert!(
+            !link.join(SILO_MARKER).exists(),
+            "must not be a marked copy"
+        );
+        assert!(is_silo_projection(&link, &archive_mod, "dir"));
+        // An edit made through the link lands in the archived mod.
+        std::fs::write(link.join("edit.txt"), b"hello").unwrap();
+        assert!(archive_mod.join("edit.txt").is_file());
+        // Removing the link never touches the archived mod.
+        remove_link(&link).unwrap();
+        assert!(link.symlink_metadata().is_err());
+        assert!(archive_mod.join("modDesc.xml").is_file());
+        assert!(archive_mod.join("edit.txt").is_file());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The junction branch on its own: this machine may have Developer Mode (so `symlink_dir`
+    /// wins in `make_link`), but users and the CI runner usually don't.
+    #[cfg(windows)]
+    #[test]
+    fn junction_to_links_a_folder_without_privilege() {
+        let base = std::env::temp_dir().join(format!("silo_junction_to_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let target = base.join(ARCHIVE).join("Misc").join("FS25_Dir");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        let link = base.join("FS25_Dir");
+
+        junction_to(&target, &link).unwrap();
+
+        assert!(junction::exists(&link).unwrap(), "a real NTFS junction");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(is_silo_projection(&link, &target, "dir"));
+        assert_eq!(
+            std::fs::read(link.join("modDesc.xml")).unwrap(),
+            b"<modDesc/>"
+        );
+        remove_link(&link).unwrap();
+        assert!(link.symlink_metadata().is_err());
+        assert!(
+            target.join("modDesc.xml").is_file(),
+            "the target is untouched"
+        );
+
+        // Never replaces or merges into something already at the link path.
+        let theirs = base.join("FS25_Theirs");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("mine.txt"), b"keep").unwrap();
+        let err = junction_to(&target, &theirs).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(theirs.join("mine.txt")).unwrap(), b"keep");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn remove_dangling_link_never_touches_a_file_or_a_working_link() {
         let (base, _conn, src, flat) = symlink_fixture("notdangle", true);
@@ -2773,6 +3137,406 @@ mod tests {
             b"PK\x03\x04 the archived build"
         );
         assert!(!base.join("backups").exists(), "nothing backed up");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn temp_dir_for(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("silo_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    #[test]
+    fn an_untouched_folder_copy_is_recognised_as_unchanged() {
+        let base = temp_dir_for("copy_unchanged");
+        let src = base.join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::write(src.join("sub").join("a.lua"), b"print(1)").unwrap();
+        let copy = base.join("copy");
+        copy_dir_projection(&src, &copy).unwrap();
+        assert!(copy_unchanged(&copy, &src).unwrap());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_edited_added_or_removed_file_makes_the_copy_changed() {
+        for edit in ["modify", "add", "remove"] {
+            let base = temp_dir_for(&format!("copy_changed_{edit}"));
+            let src = base.join("src");
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+            std::fs::write(src.join("a.lua"), b"print(1)").unwrap();
+            let copy = base.join("copy");
+            copy_dir_projection(&src, &copy).unwrap();
+            match edit {
+                "modify" => {
+                    // Same size: only the mtime tells. Push it well past the listed one so the
+                    // test can't land in the same millisecond (or FAT's 2 s granularity).
+                    std::fs::write(copy.join("a.lua"), b"print(2)").unwrap();
+                    std::fs::File::options()
+                        .write(true)
+                        .open(copy.join("a.lua"))
+                        .unwrap()
+                        .set_modified(
+                            std::time::SystemTime::now() + std::time::Duration::from_secs(10),
+                        )
+                        .unwrap();
+                }
+                "add" => std::fs::write(copy.join("new.lua"), b"x").unwrap(),
+                _ => std::fs::remove_file(copy.join("a.lua")).unwrap(),
+            }
+            assert!(
+                !copy_unchanged(&copy, &src).unwrap(),
+                "{edit} must count as changed"
+            );
+            let _ = std::fs::remove_dir_all(&base);
+        }
+    }
+
+    #[test]
+    fn a_legacy_marker_is_compared_against_the_archived_source() {
+        let base = temp_dir_for("copy_legacy");
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        let copy = base.join("copy");
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::write(copy.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::write(copy.join(SILO_MARKER), b"silo\n").unwrap(); // pre-v2 marker
+        assert!(copy_unchanged(&copy, &src).unwrap());
+        std::fs::write(copy.join("modDesc.xml"), b"<modDesX/>").unwrap(); // same size, new bytes
+        assert!(!copy_unchanged(&copy, &src).unwrap());
+        std::fs::write(copy.join("extra.lua"), b"x").unwrap();
+        assert!(!copy_unchanged(&copy, &src).unwrap());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn remove_link_never_deletes_a_real_folder_it_cannot_prove_untouched() {
+        let base = temp_dir_for("rmlink_dir");
+        // A user's own folder (no marker): refused, contents kept.
+        let theirs = base.join("FS25_Theirs");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        assert!(remove_link(&theirs).is_err());
+        assert!(theirs.join("modDesc.xml").is_file());
+        // A legacy-marked copy: no listing to prove it, refused.
+        std::fs::write(theirs.join(SILO_MARKER), b"silo\n").unwrap();
+        assert!(remove_link(&theirs).is_err());
+        assert!(theirs.join("modDesc.xml").is_file());
+        // Silo's v2 copy: removed while untouched, refused once edited.
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        let copy = base.join("FS25_Copy");
+        copy_dir_projection(&src, &copy).unwrap();
+        std::fs::write(copy.join("edit.lua"), b"x").unwrap();
+        assert!(remove_link(&copy).is_err());
+        assert!(copy.join("edit.lua").is_file());
+        std::fs::remove_file(copy.join("edit.lua")).unwrap();
+        remove_link(&copy).unwrap();
+        assert!(copy.symlink_metadata().is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A default-layout mods folder at `base` with an active organized folder mod `FS25_Dir`
+    /// (archived in `Misc`) whose mods-folder entry is a marked COPY. Returns (src, flat).
+    fn folder_copy_fixture(base: &Path, conn: &Connection) -> (PathBuf, PathBuf) {
+        let key = crate::modsroot::canonical_key(base);
+        let src = base.join(ARCHIVE).join("Misc").join("FS25_Dir");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::write(src.join("a.lua"), b"print(1)").unwrap();
+        db::upsert_organized(
+            conn,
+            &key,
+            &OrganizedRow {
+                tech_name: "FS25_Dir".into(),
+                file_name: "FS25_Dir".into(),
+                kind: "dir".into(),
+                category: "Misc".into(),
+                subcategory: None,
+                active: true,
+            },
+        )
+        .unwrap();
+        let flat = base.join("FS25_Dir");
+        copy_dir_projection(&src, &flat).unwrap();
+        (src, flat)
+    }
+
+    /// The single folder under `<mods>/backups/`, if exactly one exists.
+    fn only_backup(base: &Path) -> PathBuf {
+        let found: Vec<PathBuf> = std::fs::read_dir(base.join("backups"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(found.len(), 1, "one backup: {found:?}");
+        found.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn parking_an_untouched_folder_copy_just_removes_it() {
+        let base = temp_dir_for("park_copy_clean");
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let (src, flat) = folder_copy_fixture(&base, &conn);
+        let rep = set_active(&conn, &Layout::default_for(&base), &HashSet::new());
+        assert_eq!(rep.changed, 1, "errors: {:?}", rep.errors);
+        assert!(rep.notices.is_empty(), "{:?}", rep.notices);
+        assert!(flat.symlink_metadata().is_err());
+        assert!(!base.join("backups").exists());
+        assert!(src.join("a.lua").is_file());
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn parking_a_changed_folder_copy_moves_it_to_backups() {
+        let base = temp_dir_for("park_copy_edit");
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
+        let (src, flat) = folder_copy_fixture(&base, &conn);
+        std::fs::write(flat.join("a.lua"), b"print('my fix')").unwrap();
+
+        let rep = set_active(&conn, &Layout::default_for(&base), &HashSet::new());
+
+        assert_eq!(rep.changed, 1, "errors: {:?}", rep.errors);
+        assert!(
+            flat.symlink_metadata().is_err(),
+            "the mods-folder slot is free"
+        );
+        assert!(!db::load_organized(&conn, &key)[0].active);
+        assert_eq!(std::fs::read(src.join("a.lua")).unwrap(), b"print(1)");
+        let kept = only_backup(&base);
+        let name = kept.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("FS25_Dir."), "{name}");
+        assert_eq!(
+            std::fs::read(kept.join("a.lua")).unwrap(),
+            b"print('my fix')"
+        );
+        assert!(
+            !kept.join(SILO_MARKER).exists(),
+            "the kept copy is the user's now"
+        );
+        assert_eq!(rep.notices.len(), 1);
+        assert!(
+            rep.notices[0]
+                .starts_with("FS25_Dir had changed since Silo copied it, so it was kept in ")
+                && rep.notices[0].contains(&name),
+            "{:?}",
+            rep.notices
+        );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_failed_rename_to_backups_leaves_the_copy_exactly_as_it_was() {
+        let base = temp_dir_for("retire_inuse");
+        let src = base.join(ARCHIVE).join("Misc").join("FS25_Dir");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        let flat = base.join("FS25_Dir");
+        copy_dir_projection(&src, &flat).unwrap();
+        std::fs::write(flat.join("edit.lua"), b"mine").unwrap();
+        let marker = std::fs::read(flat.join(SILO_MARKER)).unwrap();
+        let in_use_msg = "Couldn't move FS25_Dir to backups because a file in it is in use. Close any program using it (the game, an editor) and try again.";
+
+        let mut cases: Vec<(std::io::Error, String)> = vec![
+            (
+                std::io::ErrorKind::PermissionDenied.into(),
+                in_use_msg.to_string(),
+            ),
+            (
+                std::io::Error::other("the disk is full"),
+                "Couldn't move FS25_Dir to backups (the disk is full), so Silo left it in place."
+                    .to_string(),
+            ),
+        ];
+        if cfg!(windows) {
+            // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION
+            cases.push((
+                std::io::Error::from_raw_os_error(32),
+                in_use_msg.to_string(),
+            ));
+            cases.push((
+                std::io::Error::from_raw_os_error(33),
+                in_use_msg.to_string(),
+            ));
+        }
+        for (fail, want) in cases {
+            let err =
+                retire_folder_copy_with(&flat, &src, &base, move |_: &Path, _: &Path| Err(fail))
+                    .unwrap_err();
+            assert_eq!(err.to_string(), want);
+            assert_eq!(std::fs::read(flat.join("edit.lua")).unwrap(), b"mine");
+            assert_eq!(std::fs::read(flat.join(SILO_MARKER)).unwrap(), marker);
+            assert!(flat.join("modDesc.xml").is_file());
+            assert!(!base.join("backups").exists(), "no empty backups folder");
+        }
+
+        // A backups/ folder that was already there is never removed.
+        std::fs::create_dir_all(base.join("backups")).unwrap();
+        let fail = |_: &Path, _: &Path| -> std::io::Result<()> {
+            Err(std::io::ErrorKind::PermissionDenied.into())
+        };
+        assert!(retire_folder_copy_with(&flat, &src, &base, fail).is_err());
+        assert!(base.join("backups").is_dir(), "the existing backups/ stays");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn backup_folder_names_never_collide() {
+        let base = temp_dir_for("backup_names");
+        let first = backup_dir_path_at(&base, "FS25_Dir", 100).unwrap();
+        assert_eq!(first, base.join("backups").join("FS25_Dir.100"));
+        std::fs::create_dir_all(&first).unwrap();
+        let second = backup_dir_path_at(&base, "FS25_Dir", 100).unwrap();
+        assert_eq!(second, base.join("backups").join("FS25_Dir.100-2"));
+        std::fs::create_dir_all(&second).unwrap();
+        assert_eq!(
+            backup_dir_path_at(&base, "FS25_Dir", 100).unwrap(),
+            base.join("backups").join("FS25_Dir.100-3")
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn parking_a_legacy_marked_copy_compares_it_with_the_archive() {
+        for edited in [false, true] {
+            let base = temp_dir_for(&format!("park_legacy_{edited}"));
+            let conn = db::open(&base.join("silo.db")).unwrap();
+            let (src, flat) = folder_copy_fixture(&base, &conn);
+            // Rewrite the projection as a pre-v2 copy: plain copy plus the old marker.
+            std::fs::remove_dir_all(&flat).unwrap();
+            copy_dir_all(&src, &flat).unwrap();
+            std::fs::write(flat.join(SILO_MARKER), b"silo\n").unwrap();
+            if edited {
+                std::fs::write(flat.join("a.lua"), b"print(9)").unwrap(); // same size
+            }
+
+            let rep = set_active(&conn, &Layout::default_for(&base), &HashSet::new());
+
+            assert_eq!(rep.changed, 1, "errors: {:?}", rep.errors);
+            assert!(flat.symlink_metadata().is_err());
+            assert_eq!(std::fs::read(src.join("a.lua")).unwrap(), b"print(1)");
+            if edited {
+                let kept = only_backup(&base);
+                assert_eq!(std::fs::read(kept.join("a.lua")).unwrap(), b"print(9)");
+                assert_eq!(rep.notices.len(), 1);
+            } else {
+                assert!(!base.join("backups").exists());
+                assert!(rep.notices.is_empty());
+            }
+            drop(conn);
+            let _ = std::fs::remove_dir_all(&base);
+        }
+    }
+
+    #[test]
+    fn a_copy_whose_marker_was_deleted_is_left_alone() {
+        let base = temp_dir_for("copy_no_marker");
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
+        let (src, flat) = folder_copy_fixture(&base, &conn);
+        std::fs::remove_file(flat.join(SILO_MARKER)).unwrap();
+        std::fs::write(flat.join("a.lua"), b"print('mine')").unwrap();
+        let layout = Layout::default_for(&base);
+
+        let rep = set_active(&conn, &layout, &HashSet::new());
+        assert_eq!(rep.changed, 0);
+        assert_eq!(rep.errors.len(), 1, "{:?}", rep.errors);
+        assert_eq!(std::fs::read(flat.join("a.lua")).unwrap(), b"print('mine')");
+
+        let rep = flatten(&conn, &layout);
+        assert_eq!(rep.changed, 0);
+        assert_eq!(std::fs::read(flat.join("a.lua")).unwrap(), b"print('mine')");
+        assert!(src.join("a.lua").is_file(), "the archived copy stays put");
+        assert_eq!(db::load_organized(&conn, &key).len(), 1, "still organized");
+        assert!(!base.join("backups").exists());
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn network_paths_are_recognised() {
+        assert!(is_network_path(r"\\server\share\mods"));
+        assert!(is_network_path(r"\\?\UNC\server\share\mods"));
+        assert!(is_network_path(r"\\?\unc\server\share"));
+        assert!(is_network_path(r"\\.\UNC\server\share"));
+        assert!(!is_network_path(r"\\?\C:\Users\me\mods"));
+        assert!(!is_network_path(r"\\.\C:\Users\me\mods"));
+        assert!(!is_network_path(r"C:\Users\me\mods"));
+        assert!(!is_network_path("/home/me/mods"));
+        assert!(!is_network_path(r"\\?\UN"));
+    }
+
+    /// A working junction at an organized folder mod's name that points somewhere other than
+    /// the archive is the user's: park and flatten leave it, and its target, alone.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_to_a_folder_outside_the_archive_is_never_removed() {
+        let base = temp_dir_for("junction_foreign");
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
+        let (src, flat) = folder_copy_fixture(&base, &conn);
+        std::fs::remove_dir_all(&flat).unwrap();
+        let theirs = base.join("elsewhere").join("FS25_Dir");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("modDesc.xml"), b"<theirs/>").unwrap();
+        junction_to(&theirs, &flat).unwrap();
+        assert!(!is_silo_projection(&flat, &src, "dir"));
+        let layout = Layout::default_for(&base);
+
+        let rep = set_active(&conn, &layout, &HashSet::new());
+        assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+        assert!(junction::exists(&flat).unwrap(), "the junction stays");
+
+        let rep = flatten(&conn, &layout);
+        assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+        assert!(junction::exists(&flat).unwrap(), "the junction stays");
+        assert_eq!(
+            std::fs::read(theirs.join("modDesc.xml")).unwrap(),
+            b"<theirs/>"
+        );
+        assert!(src.join("a.lua").is_file(), "the archived copy stays put");
+        assert_eq!(db::load_organized(&conn, &key).len(), 1);
+        drop(conn);
+        let _ = std::fs::remove_dir(&flat);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn flattening_a_changed_folder_copy_keeps_the_edits_in_backups() {
+        let base = temp_dir_for("flat_copy_edit");
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let (src, flat) = folder_copy_fixture(&base, &conn);
+        std::fs::write(flat.join("new.lua"), b"added by me").unwrap();
+
+        let rep = flatten(&conn, &Layout::default_for(&base));
+
+        assert_eq!(rep.changed, 1, "errors: {:?}", rep.errors);
+        // The archived original is back in the mods folder as a plain folder.
+        let meta = flat.symlink_metadata().unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink());
+        assert_eq!(std::fs::read(flat.join("a.lua")).unwrap(), b"print(1)");
+        assert!(!flat.join("new.lua").exists());
+        assert!(!src.exists(), "moved back out of the archive");
+        // The edited copy is kept.
+        let kept = only_backup(&base);
+        assert_eq!(std::fs::read(kept.join("new.lua")).unwrap(), b"added by me");
+        assert_eq!(rep.notices.len(), 1, "{:?}", rep.notices);
+        assert!(
+            rep.notices[0]
+                .starts_with("FS25_Dir had changed since Silo copied it, so it was moved to ")
+                && rep.notices[0].ends_with("Your mods folder now has Silo's original."),
+            "{:?}",
+            rep.notices
+        );
+        drop(conn);
         let _ = std::fs::remove_dir_all(&base);
     }
 
