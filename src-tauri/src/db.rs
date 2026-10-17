@@ -129,6 +129,7 @@ pub fn open(db_path: &Path) -> Result<Connection, String> {
 /// then finds nothing to do. A step and its version stamp commit together, so a failed step
 /// leaves the database as it was.
 fn migrate(conn: &mut Connection) -> Result<(), String> {
+    keep_copy_before_migrating(conn);
     // WAL is a property of the file and can't be switched inside a transaction.
     enable_wal(conn)?;
     loop {
@@ -152,6 +153,36 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         tx.commit()
             .map_err(|e| format!("database migration failed: {e}"))?;
+    }
+}
+
+/// Before the first migration step touches an existing library, keep a verified copy of it as
+/// it was: `db-snapshots/silo-before-v<version>.db`. It is never restored automatically or
+/// rotated out; it's there if a migration ever goes wrong. One per version (an earlier attempt's
+/// copy is kept). Best effort: `VACUUM INTO` can't run inside the migration's transaction, and
+/// a copy that fails (no space, or another connection migrated first) doesn't block the upgrade,
+/// which is itself all-or-nothing.
+fn keep_copy_before_migrating(conn: &Connection) {
+    let Ok(from) = schema_version(conn) else {
+        return;
+    };
+    let Some(db_path) = conn.path().filter(|p| !p.is_empty()).map(PathBuf::from) else {
+        return;
+    };
+    if from >= SCHEMA_VERSION || !has_tables(conn).unwrap_or(false) {
+        return; // up to date, or a brand-new database: nothing to keep
+    }
+    let dir = snapshot_dir(&db_path);
+    let target = dir.join(format!("silo-before-v{from}.db"));
+    if target.exists() {
+        return;
+    }
+    let kept = std::fs::create_dir_all(&dir)
+        .map_err(|e| e.to_string())
+        .and_then(|()| write_copy(conn, &target, &|v| v == from));
+    match kept {
+        Ok(()) => eprintln!("[Silo] kept a copy before upgrading: {}", target.display()),
+        Err(e) => eprintln!("[Silo] couldn't keep a copy before upgrading: {e}"),
     }
 }
 
@@ -1427,6 +1458,47 @@ mod tests {
             before,
             "the file is not modified"
         );
+    }
+
+    #[test]
+    fn a_copy_is_kept_before_a_database_is_migrated() {
+        let path = temp_db("premigrate");
+        {
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE organized (tech_name TEXT PRIMARY KEY, file_name TEXT NOT NULL,
+                     kind TEXT NOT NULL, category TEXT NOT NULL, subcategory TEXT,
+                     active INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE projection (file_name TEXT PRIMARY KEY, size INTEGER NOT NULL,
+                     mtime_ms INTEGER NOT NULL);
+                 INSERT INTO organized VALUES ('FS25_A','FS25_A.zip','zip','Vehicles',NULL,1);",
+            )
+            .unwrap();
+        }
+        drop(open(&path).unwrap());
+        let copy = snapshot_dir(&path).join("silo-before-v0.db");
+        {
+            let c = Connection::open(&copy).unwrap();
+            assert_eq!(schema_version(&c).unwrap(), 0);
+            assert!(
+                !has_column(&c, "organized", "root"),
+                "taken before the migration"
+            );
+            let n: i64 = c
+                .query_row("SELECT COUNT(*) FROM organized", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 1);
+        }
+        // Kept for the user: never restored automatically, never rotated out.
+        assert!(!is_usable_snapshot(&copy));
+        assert!(snapshot_ms("silo-before-v0.db").is_none());
+    }
+
+    #[test]
+    fn a_new_database_needs_no_pre_migration_copy() {
+        let path = temp_db("premigrate_fresh");
+        drop(open(&path).unwrap());
+        assert!(!snapshot_dir(&path).exists());
     }
 
     #[test]
