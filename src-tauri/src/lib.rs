@@ -2400,18 +2400,19 @@ fn mods_folder_problem(
     archives: &[PathBuf],
 ) -> Option<String> {
     if archives.iter().any(|a| overlaps(mods, a)) {
-        return Some(
-            "That folder overlaps another mods folder's archive — pick one outside it.".into(),
-        );
+        return Some(OVERLAPS_AN_ARCHIVE.into());
     }
     if archives.iter().any(|a| overlaps(own_archive, a)) {
         return Some(
-            "That folder's archive would be another mods folder's archive — pick another folder."
+            "That folder's archive would be another mods folder's archive. Pick another folder."
                 .into(),
         );
     }
     None
 }
+
+const OVERLAPS_AN_ARCHIVE: &str =
+    "That folder overlaps another mods folder's archive. Pick a folder outside it.";
 
 /// Pure: where a new archive (`new`, an identity key) runs into a folder it must keep clear
 /// of. Equality with the current archive / another archive is `path_problems`' to report.
@@ -2428,10 +2429,12 @@ fn overlap_problems(new: &std::path::Path, f: &Fences) -> Vec<String> {
         );
     }
     if f.other_mods.iter().any(overlaps) {
-        v.push("That folder overlaps another mods folder Silo knows — pick one outside it.".into());
+        v.push(
+            "That folder overlaps another mods folder Silo knows. Pick a folder outside it.".into(),
+        );
     }
     if f.other_archives.iter().any(nests) {
-        v.push("That folder overlaps another mods folder's archive — pick one outside it.".into());
+        v.push(OVERLAPS_AN_ARCHIVE.into());
     }
     // The FS25 user dir, a folder containing it, or anything inside it — except inside a
     // mods folder (the default `<mods>/archive`; a wrong spot there gets its own message).
@@ -4892,12 +4895,27 @@ mod tests {
         for p in ["/hdd/lib", "/hdd/lib/Tools", "/hdd"] {
             let own = PathBuf::from(p).join("archive");
             let why = super::mods_folder_problem(Path::new(p), &own, &archives);
-            assert!(
-                why.as_deref()
-                    .is_some_and(|w| w.contains("another mods folder's archive")),
-                "{p}: {why:?}"
+            assert_eq!(
+                why.as_deref(),
+                Some(
+                    "That folder overlaps another mods folder's archive. Pick a folder outside it."
+                ),
+                "{p}"
             );
         }
+    }
+
+    #[test]
+    fn overlap_messages_are_plain_sentences() {
+        let f = fences();
+        assert!(overlap_problems(Path::new("/other/mods/sub"), &f).contains(
+            &"That folder overlaps another mods folder Silo knows. Pick a folder outside it."
+                .to_string()
+        ));
+        assert!(overlap_problems(Path::new("/x/a2/deeper"), &f).contains(
+            &"That folder overlaps another mods folder's archive. Pick a folder outside it."
+                .to_string()
+        ));
     }
 
     #[test]
@@ -4908,11 +4926,15 @@ mod tests {
             super::mods_folder_problem(Path::new("/x"), Path::new("/x/archive"), &archives)
                 .is_some()
         );
-        // ...or its own chosen archive sits inside another folder's.
+        // ...or its own chosen archive sits inside another folder's (the folder itself is
+        // clear, so this is the own-archive check speaking).
         let archives = vec![PathBuf::from("/hdd/lib")];
         let why =
             super::mods_folder_problem(Path::new("/ssd/mods"), Path::new("/hdd/lib/a"), &archives);
-        assert!(why.is_some_and(|w| w.contains("archive")));
+        assert_eq!(
+            why.as_deref(),
+            Some("That folder's archive would be another mods folder's archive. Pick another folder.")
+        );
     }
 
     #[test]
