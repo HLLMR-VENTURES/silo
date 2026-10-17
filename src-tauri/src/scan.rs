@@ -382,7 +382,10 @@ fn detect_settings_zip(path: &Path) -> (bool, SettingsSource) {
     };
     // Cheap first pass over just the name list (no decompression): Tier A wins outright,
     // and we note the Lua members for the bounded Tier-B grep.
-    let names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
+    let names: Vec<String> = archive
+        .file_names()
+        .filter_map(|s| s.ok().map(|n| n.into_owned()))
+        .collect();
     let mut lua: Vec<String> = Vec::new();
     for name in &names {
         let lower = name.to_ascii_lowercase();

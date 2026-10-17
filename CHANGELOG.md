@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Updated the zip library (2.4 → 9.0)** for RUSTSEC-2026-0367, -0368 and -0369, which concern
+  extracting archives with hostile symlinks or permission bits. Silo only *reads* mod archives and
+  never extracts them, so it wasn't affected in practice; scanning, conflict detection and integrity
+  hashes are unchanged (verified against the full test suite and a real 737-mod library). The
+  auto-updater still bundles an older zip with no fixed release yet; that path is unreachable
+  because updates are signature-checked before anything is unpacked, and it's tracked to remove. (#182)
+
 ## [0.8.0] - 2026-10-16
 
 ### Added

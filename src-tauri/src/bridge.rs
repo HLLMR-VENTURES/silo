@@ -248,7 +248,7 @@ mod tests {
         let f = std::fs::File::open(&dest).unwrap();
         let mut ar = zip::ZipArchive::new(f).unwrap();
         let names: Vec<String> = (0..ar.len())
-            .map(|i| ar.by_index(i).unwrap().name().to_string())
+            .map(|i| ar.by_index(i).unwrap().name().unwrap().into_owned())
             .collect();
         assert!(names.contains(&"modDesc.xml".to_string()));
         assert!(names.contains(&"fillTypes.xml".to_string()));
