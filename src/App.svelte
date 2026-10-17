@@ -706,7 +706,7 @@
       errorMsg = String(e);
       throw e;
     });
-    // A plain string, like Tauri's own command errors, so BisectFlow's String(e) shows it as is.
+    // A plain string, which BisectFlow's String(e) shows as is.
     if (rep.errors.length) throw rep.errors.slice(0, 3).join("; ");
   }
 
