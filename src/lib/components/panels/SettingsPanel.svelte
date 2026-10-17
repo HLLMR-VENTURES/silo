@@ -43,6 +43,7 @@
     onSwitchModsFolder,
     archive,
     moveUnfinished,
+    archiveLoadFailed,
     onChangeArchive,
     onArchiveDefault,
   }: {
@@ -73,12 +74,16 @@
     archive: ArchiveStatus | null;
     /** An archive move is running or paused — library writes are refused until it's done. */
     moveUnfinished: boolean;
+    /** The startup status read gave up (App retries when Settings opens). */
+    archiveLoadFailed: boolean;
     onChangeArchive: () => void;
     onArchiveDefault: () => void;
   } = $props();
 
   // Folder- and library-changing controls are off while busy, scanning, or mid-move.
   const locked = $derived(!!busy || scanning || moveUnfinished);
+  /** Why a `locked` control is off, when it's the move. */
+  const lockTitle = $derived(moveUnfinished ? "Finish or cancel the archive move first" : undefined);
 
   const others = $derived((modsStatus?.known ?? []).filter((k) => !k.current));
   function sourceLabel(s: ModsRootStatus["source"]): string {
@@ -114,7 +119,7 @@
           Open ↗
         </button>
       {/if}
-      <button class="set-link" disabled={locked} onclick={onChangeModsFolder}>
+      <button class="set-link" disabled={locked} title={lockTitle} onclick={onChangeModsFolder}>
         Change…
       </button>
     </div>
@@ -124,7 +129,7 @@
         {sourceLabel(modsStatus.source)}{modsStatus.available ? "" : " · not available"}
       </div>
       {#if modsStatus.source === "user"}
-        <button class="set-link" disabled={locked} onclick={onUseGameFolder}>
+        <button class="set-link" disabled={locked} title={lockTitle} onclick={onUseGameFolder}>
           Use the game's folder
         </button>
       {/if}
@@ -146,6 +151,7 @@
         <button
           class="set-link known"
           disabled={locked}
+          title={lockTitle}
           onclick={() => onSwitchModsFolder(k.path)}
         >
           {k.path} · {k.modCount} mods
@@ -162,7 +168,7 @@
           Open ↗
         </button>
       {/if}
-      <button class="set-link" disabled={locked || !archive?.path} onclick={onChangeArchive}>
+      <button class="set-link" disabled={locked || !archive?.path} title={lockTitle} onclick={onChangeArchive}>
         Change…
       </button>
     </div>
@@ -174,10 +180,18 @@
           : " · not available"}{moveUnfinished ? " · move in progress" : ""}
       </div>
       {#if !archive.isDefault}
-        <button class="set-link" disabled={locked} onclick={onArchiveDefault}>Use default</button>
+        <button class="set-link" disabled={locked} title={lockTitle} onclick={onArchiveDefault}
+          >Use default</button
+        >
       {/if}
     {:else}
-      <div class="set-path muted">{archive ? "No mods folder selected." : "Loading…"}</div>
+      <div class="set-path muted">
+        {archive
+          ? "No mods folder selected."
+          : archiveLoadFailed
+            ? "Couldn't read the library archive — reopen Settings to retry."
+            : "Loading…"}
+      </div>
     {/if}
   </div>
 
@@ -263,7 +277,7 @@
       duplication, fully reversible. {#if organizedCount > 0}{organizedCount} mod(s) currently organized.{/if}
     </div>
     <div class="set-btnrow">
-      <button class="set-btn" onclick={onOrganize} disabled={locked}>
+      <button class="set-btn" onclick={onOrganize} disabled={locked} title={lockTitle}>
         Organize {unorganizedCount > 0 ? unorganizedCount : "library"}
       </button>
       <button class="set-btn" onclick={onRebuild} disabled={!!busy || scanning}>
@@ -287,6 +301,7 @@
         style="margin-top:10px;width:100%"
         onclick={onOptimizeLinks}
         disabled={locked}
+        title={lockTitle}
       >
         ⛓ Optimize links (reclaim space)
       </button>
@@ -302,6 +317,7 @@
         style="margin-top:10px"
         onclick={onRestoreVanilla}
         disabled={locked}
+        title={lockTitle}
       >
         Restore vanilla layout
       </button>

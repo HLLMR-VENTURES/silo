@@ -43,7 +43,12 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="modal-backdrop" onclick={onCancel}></div>
-<div class="modal" role="dialog" aria-modal="true" aria-label="Organize preview">
+<div
+  class="modal"
+  role="dialog"
+  aria-modal="true"
+  aria-label={adopt ? "File mods into your library" : "Organize preview"}
+>
   <div class="modal-head">
     <h3>{adopt ? "File in" : "Organize"} {noun(plan.length)}</h3>
     <button class="drawer-x" title="Close" onclick={onCancel}>✕</button>
@@ -108,7 +113,7 @@
         disabled={loading || applying || plan.length === 0}
       >
         {#if adopt}
-          {applying ? "Filing…" : `File in ${noun(plan.length)}`}
+          {applying ? "Filing…" : `File ${noun(plan.length)} into your library`}
         {:else}
           {applying ? "Organizing…" : `Organize ${noun(plan.length)}`}
         {/if}

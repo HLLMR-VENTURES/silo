@@ -63,6 +63,7 @@
     archiveAdoptApply,
     onMoveProgress,
     type ArchiveStatus,
+    type ArchivePreflight,
     type MoveProgress,
   } from "./lib/api";
   import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
@@ -1503,33 +1504,59 @@
   // A move can run for hours: its invoke stays pending the whole time, so the UI is driven by
   // `archive_status` (polled while running) and `archive-move-progress` events, not the return.
   let archive = $state<ArchiveStatus | null>(null);
+  /** The startup read gave up — Settings says so and retries once when opened. */
+  let archiveLoadFailed = $state(false);
   let moveProgress = $state<MoveProgress | null>(null);
   /** Move invokes (start / resume / cancel / use default) this window is still waiting on. */
   let movesInFlight = $state(0);
+  /** Pause was clicked; the move pauses at the next mod boundary. */
+  let pauseRequested = $state(false);
+  /** Cancel was confirmed; shows "moving back" before the backend reports the turn-around. */
+  let cancelInFlight = $state(false);
+  /** A neutral, dismissible notice (not an error). */
+  let infoMsg = $state<string | null>(null);
   /** A move is copying right now — Pause applies, Launch is blocked. */
   const moveRunning = $derived(!!archive?.running || movesInFlight > 0);
   /** A move is running or paused — library writes are refused until it finishes. */
   const moveUnfinished = $derived(moveRunning || !!archive?.moving);
   const moveCancelling = $derived(
-    archive?.moving?.direction === "back" || (moveRunning && !!moveProgress?.cancelling),
+    archive?.moving?.direction === "back" ||
+      cancelInFlight ||
+      (moveRunning && !!moveProgress?.cancelling),
   );
   // Lost-cancel detection: Cancel was clicked on a running move, but it may finish first.
   let cancelRequested = false;
-  /** The archive path when Cancel was clicked (during a move that's where it started). */
+  /** Where the move started when Cancel was clicked (the archive path during a move). */
   let cancelHome: string | null = null;
+  let cancelHomeDefault = false;
+  /** The cancel invoke's own error, held until we know whether the cancel was lost. */
+  let cancelProblem: string | null = null;
   let sawTurnAround = false;
   let lastProgressCancelling = false;
   let settlingMove = false;
+  /** A settle was asked for while one ran: the running one loops once more with this. */
+  let resettle: { problem: string | null } | null = null;
+  /** Orders archive_status responses so a stale one can't overwrite newer state. */
+  let archiveSeq = 0;
 
   const isStillLoading = (e: unknown) => /still loading/i.test(String(e));
+  const joinProblems = (...ps: (string | null | undefined)[]) =>
+    ps.filter(Boolean).join(" ") || null;
+  /** "a, b, c +N more" */
+  const capList = (xs: string[], n = 3, sep = ", ") =>
+    xs.slice(0, n).join(sep) + (xs.length > n ? ` +${xs.length - n} more` : "");
 
   /** Re-read the archive status; keeps the last one on error ("still loading" is expected
-   *  until the layout resolves at startup). */
+   *  until the layout resolves at startup). False when it failed or a newer read superseded it. */
   async function refreshArchive(): Promise<boolean> {
+    const seq = ++archiveSeq;
     try {
       const st = await archiveStatus();
+      if (seq !== archiveSeq) return false;
       archive = st;
+      archiveLoadFailed = false;
       if (st.moving?.direction === "back") sawTurnAround = true;
+      if (st.moving && !st.running) pauseRequested = false;
       return true;
     } catch (e) {
       if (!isStillLoading(e)) console.warn("[Silo] archive_status:", e);
@@ -1540,15 +1567,30 @@
   /** Startup: retry while the backend is still resolving the layout. */
   async function loadArchive() {
     for (let i = 0; i < 60; i++) {
+      const seq = ++archiveSeq;
       try {
-        archive = await archiveStatus();
+        const st = await archiveStatus();
+        if (seq === archiveSeq) archive = st;
+        archiveLoadFailed = false;
         return;
       } catch (e) {
-        if (!isStillLoading(e)) return;
+        if (!isStillLoading(e)) {
+          console.warn("[Silo] archive_status at startup:", e);
+          break;
+        }
         await new Promise((r) => setTimeout(r, 500));
       }
     }
+    if (!archive) {
+      console.warn("[Silo] gave up reading the library archive status");
+      archiveLoadFailed = true;
+    }
   }
+
+  // The startup read gave up: try once more whenever Settings opens.
+  $effect(() => {
+    if (settingsOpen && archiveLoadFailed) void refreshArchive();
+  });
 
   // While a move runs, poll so Pause → paused and the turn-around show even if an event is missed.
   $effect(() => {
@@ -1565,55 +1607,99 @@
   }
 
   /** After a move stops (finished, paused, or back home): refresh everything that depends on
-   *  where the library lives, explain a lost cancel, and offer to file in loose mods. */
+   *  where the library lives, explain a lost cancel, and offer to file in loose mods. A settle
+   *  asked for while one runs is folded into it (one more pass), never dropped. */
   async function settleMove(problem: string | null) {
-    if (settlingMove) return;
+    if (settlingMove) {
+      if (problem) errorMsg = problem;
+      resettle = { problem: joinProblems(resettle?.problem, problem) };
+      return;
+    }
     settlingMove = true;
     try {
-      moveProgress = null;
-      await refreshArchive();
-      modsStatus = await modsRootStatus().catch(() => modsStatus);
-      let lost: string | null = null;
-      if (cancelRequested && !archive?.moving && !archive?.running) {
-        const landedElsewhere = !cancelHome || archive?.path !== cancelHome;
-        if (!lastProgressCancelling && !sawTurnAround && landedElsewhere)
-          lost =
-            `The move finished before it could be cancelled — your library is now in ${archive?.path ?? "its new folder"}. ` +
-            "Use 'Use default' or Change… to move it back.";
-        cancelRequested = false;
-        cancelHome = null;
-        sawTurnAround = false;
+      let next = problem;
+      for (;;) {
+        await settleOnce(next);
+        if (!resettle) break;
+        next = resettle.problem;
+        resettle = null;
       }
-      await runScan();
-      // runScan clears errorMsg — show what the move said afterwards.
-      if (problem || lost) errorMsg = [problem, lost].filter(Boolean).join(" ");
-      if (!archive?.moving && !archive?.running && !problem) await offerAdopt();
     } finally {
       settlingMove = false;
     }
   }
 
+  async function settleOnce(problem: string | null) {
+    moveProgress = null;
+    pauseRequested = false;
+    cancelInFlight = false;
+    await refreshArchive();
+    modsStatus = await modsRootStatus().catch(() => modsStatus);
+    let lost: string | null = null;
+    if (cancelRequested && !archive?.moving && !archive?.running) {
+      const landedElsewhere = !cancelHome || archive?.path !== cancelHome;
+      if (!lastProgressCancelling && !sawTurnAround && landedElsewhere) {
+        // Lost: the cancel's own "nothing to cancel" error is noise — drop it.
+        lost = lostCancelMessage();
+      } else {
+        problem = joinProblems(problem, cancelProblem);
+      }
+      cancelRequested = false;
+      cancelHome = null;
+      cancelProblem = null;
+      sawTurnAround = false;
+    }
+    await runScan();
+    // runScan clears errorMsg — show what the move said afterwards.
+    if (problem || lost) errorMsg = joinProblems(problem, lost);
+    if (!archive?.moving && !archive?.running && !problem) await offerAdopt();
+  }
+
+  function lostCancelMessage(): string {
+    return (
+      `The move finished before it could be cancelled — your library is now in ${archive?.path ?? "its new folder"}. ` +
+      (cancelHomeDefault
+        ? "Use 'Use default' in Settings to move it back."
+        : "Use Change… in Settings to move it again.")
+    );
+  }
+
   /** Run a move-ish invoke (pending until the move finishes or pauses), then settle. */
-  async function driveMove(call: () => Promise<unknown>) {
+  async function driveMove(call: () => Promise<unknown>, isCancel = false) {
     movesInFlight++;
     let problem: string | null = null;
     try {
       await call();
     } catch (e) {
-      problem = String(e);
+      // A cancel of a running move can race its finish; hold that error until the settle
+      // knows whether the cancel was lost.
+      if (isCancel && cancelRequested) cancelProblem = String(e);
+      else problem = String(e);
     } finally {
       movesInFlight--;
     }
-    if (movesInFlight === 0) await settleMove(problem);
-    else if (problem) errorMsg = problem;
+    if (movesInFlight > 0) {
+      if (problem) errorMsg = problem;
+      return;
+    }
+    await refreshArchive();
+    if (archive?.running) {
+      // Not this window's move to settle (e.g. after a webview reload) — pollArchive will.
+      if (problem) errorMsg = problem;
+      return;
+    }
+    await settleMove(problem);
   }
 
   /** Fresh move: forget the previous one's progress and cancel bookkeeping. */
   function startTracking() {
     moveProgress = null;
     lastProgressCancelling = false;
+    pauseRequested = false;
+    cancelInFlight = false;
     cancelRequested = false;
     cancelHome = null;
+    cancelProblem = null;
     sawTurnAround = false;
   }
 
@@ -1626,7 +1712,13 @@
     const path = await pickFolder();
     if (!path) return;
     try {
-      const pf = await archiveMovePreflight(path);
+      busy = "Checking the folder…";
+      let pf: ArchivePreflight;
+      try {
+        pf = await archiveMovePreflight(path);
+      } finally {
+        busy = null;
+      }
       if (pf.problems.length) {
         errorMsg = pf.problems.join(" ");
         return;
@@ -1670,9 +1762,11 @@
   }
 
   async function pauseMove() {
+    pauseRequested = true;
     try {
       await archiveMovePause();
     } catch (e) {
+      pauseRequested = false;
       errorMsg = String(e);
     }
     void refreshArchive();
@@ -1684,6 +1778,9 @@
   }
 
   async function cancelMove() {
+    // Captured before the dialog: the move may finish while it's open.
+    const home = archive?.path ?? null;
+    const homeDefault = !!archive?.isDefault;
     if (
       !(await confirmDialog("Cancel the move? Mods already moved go back to where they were.", {
         okLabel: "Cancel move",
@@ -1691,14 +1788,24 @@
       }))
     )
       return;
+    if (!moveUnfinished) {
+      // It finished while the dialog was open — nothing left to cancel.
+      if (archive?.path && archive.path !== home) {
+        cancelHomeDefault = homeDefault;
+        errorMsg = lostCancelMessage();
+      }
+      return;
+    }
     // Only a running move can finish before it sees the cancel; a paused one is run home here.
     if (moveRunning) {
       cancelRequested = true;
-      cancelHome = archive?.path ?? null;
+      cancelHome = home;
+      cancelHomeDefault = homeDefault;
     }
+    cancelInFlight = true;
     // A running move is asked to turn around (resolves at once; the original invoke settles
     // when it lands); a paused one stays pending until it's back home.
-    await driveMove(() => archiveMoveCancel());
+    await driveMove(() => archiveMoveCancel(), true);
     void refreshArchive();
   }
 
@@ -1707,10 +1814,10 @@
     const pv = await archiveAdoptPreview().catch(() => null);
     if (!pv) return;
     const dupNote = pv.duplicates.length
-      ? `${pv.duplicates.length} mod(s) in that folder are already in your library and were left untouched: ${pv.duplicates.join(", ")}.`
+      ? `${pv.duplicates.length} mod(s) in that folder are already in your library and were left untouched: ${capList(pv.duplicates)}.`
       : null;
     if (pv.inputs.length === 0) {
-      if (dupNote) errorMsg = dupNote;
+      if (dupNote) infoMsg = dupNote;
       return;
     }
     organizePreview = {
@@ -1759,7 +1866,8 @@
     }
     // Auto-file any mods still loose in the flat root (e.g. freshly downloaded),
     // keeping them active so filing is transparent to the game.
-    if (auto && autoFileNew) {
+    // Never auto-file mid-move: library writes are refused until the move finishes.
+    if (auto && autoFileNew && !moveUnfinished) {
       if (mods.some(isFileable)) {
         await autoFile();
       }
@@ -1859,7 +1967,14 @@
       // scan cache (path+mtime+size) makes an unchanged rescan cheap anyway.
       try {
         focusUnlisten = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
-          if (focused && !scanning && !busy && roots.length && Date.now() - lastScanAt > 4000) {
+          if (
+            focused &&
+            !scanning &&
+            !busy &&
+            !moveRunning &&
+            roots.length &&
+            Date.now() - lastScanAt > 4000
+          ) {
             void runScan(true);
           }
         });
@@ -2016,6 +2131,7 @@
       onSwitchModsFolder={switchModsFolder}
       {archive}
       {moveUnfinished}
+      {archiveLoadFailed}
       onChangeArchive={changeArchive}
       onArchiveDefault={archiveDefault}
     />
@@ -2208,6 +2324,14 @@
     <div class="error">{errorMsg}</div>
   {/if}
 
+  {#if infoMsg}
+    <div class="cloud-notice">
+      <span class="cn-ico">ⓘ</span>
+      <div class="cn-text">{infoMsg}</div>
+      <button class="cn-x" onclick={() => (infoMsg = null)} title="Dismiss">✕</button>
+    </div>
+  {/if}
+
   {#if cloudNoticeOpen}
     <div class="cloud-notice">
       <span class="cn-ico">☁</span>
@@ -2268,15 +2392,17 @@
           {#if moveProgress && moveProgress.total > 0}
             <span class="tnum">
               {moveProgress.done}/{moveProgress.total} mods · {fmtSize(moveProgress.bytesDone)} of
-              {fmtSize(moveProgress.bytesTotal)}
-            </span>
+              {fmtSize(moveProgress.bytesTotal)}</span
+            >.
           {:else}
-            starting…
+            starting.
           {/if}
           Launch is blocked until it pauses or finishes.
         {:else if archive?.moving?.errors.length}
-          <b>{archive.moving.errors.length} mod(s) couldn't be moved.</b>
-          {archive.moving.errors.join("; ")}
+          <b>{archive.moving.errors.length} mod(s) couldn't be moved:</b>
+          {capList(archive.moving.errors, 3, "; ")}.
+          {archive.moving.pauseReason ? `${archive.moving.pauseReason}. ` : ""}The move is paused —
+          Retry tries them again, or Cancel moves everything back.
         {:else if archive?.moving}
           <b>{moveCancelling ? "Moving your library back is paused." : "Archive move paused."}</b>
           {archive.moving.pauseReason ? `${archive.moving.pauseReason}. ` : ""}You can play — resume
@@ -2284,7 +2410,9 @@
         {/if}
       </div>
       {#if moveRunning}
-        <button class="cn-act" onclick={pauseMove}>Pause</button>
+        <button class="cn-act" onclick={pauseMove} disabled={pauseRequested}>
+          {pauseRequested ? "Pausing…" : "Pause"}
+        </button>
       {:else if archive?.moving}
         <button class="cn-act" onclick={resumeMove}>
           {archive.moving.errors.length ? "Retry" : "Resume"}
