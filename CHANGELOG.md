@@ -47,8 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mods folder or library archive, never any other file there. (#PR)
 
 - **Collections install exactly what the preview showed.** Silo matches every mod the same way
-  in the preview and the install, and won't install if the collection changed after you
-  previewed it. (#PR)
+  in the preview and the install, and won't install if the collection, or what the catalog
+  found for it, changed after you previewed it. (#PR)
 
 ## [0.10.0] - 2026-10-17
 

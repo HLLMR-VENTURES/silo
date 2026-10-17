@@ -3359,8 +3359,8 @@ fn read_collection_json(
     read_collection_raw(url_or_id, token).map(|(c, _)| c)
 }
 
-/// `read_collection_json`, plus the fingerprint of the exact file text (see
-/// `collection::fingerprint`), so apply can refuse a collection that changed after its preview.
+/// `read_collection_json`, plus the file's exact text (for `collection::fingerprint`, so apply
+/// can refuse a collection that changed after its preview).
 fn read_collection_raw(
     url_or_id: &str,
     token: Option<&str>,
@@ -3375,7 +3375,22 @@ fn read_collection_raw(
             github::read_repo_file(owner, repo, collection::FILE_NAME, token)
         }
     }?;
-    Ok((collection::parse(&json)?, collection::fingerprint(&json)))
+    Ok((collection::parse(&json)?, json))
+}
+
+/// Resolve every mod of a collection by techName with one catalog lookup, and fingerprint the
+/// file together with that result. Preview and apply both go through here, so apply installs
+/// exactly what the preview showed or refuses (`COLLECTION_CHANGED`).
+fn resolve_collection(
+    base: &str,
+    coll: &collection::Collection,
+    json: &str,
+) -> (Vec<collection::Target>, String) {
+    let names: Vec<String> = coll.mods.iter().map(|m| m.tech_name.clone()).collect();
+    let hits = siloapi::lookup(base, &names).unwrap_or_default();
+    let targets = collection::resolve_targets(&coll.mods, &catalog_matches(&hits));
+    let fingerprint = collection::fingerprint(json, &targets);
+    (targets, fingerprint)
 }
 
 /// The catalog lookup keyed by techName, for `collection::resolve_targets`.
@@ -3539,7 +3554,8 @@ struct ImportPlan {
     already_present: Vec<PlanRow>,
     version_drift: Vec<PlanRow>,
     unresolved: Vec<PlanRow>,
-    /// Hash of the collection file as previewed; `collection_apply` refuses if it changed.
+    /// Hash of the collection file and its catalog matches as previewed (`resolve_collection`);
+    /// `collection_apply` refuses if either changed.
     fingerprint: String,
 }
 
@@ -3557,7 +3573,7 @@ async fn collection_import_preview(
     tauri::async_runtime::spawn_blocking(move || -> Result<ImportPlan, String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token");
-        let (coll, fingerprint) = read_collection_raw(&url_or_id, token.as_deref())?;
+        let (coll, json) = read_collection_raw(&url_or_id, token.as_deref())?;
 
         let installed_by: std::collections::HashMap<&str, Option<&str>> = installed
             .iter()
@@ -3566,9 +3582,7 @@ async fn collection_import_preview(
 
         // One lookup resolves catalog presence + best installable source for every mod, by
         // techName, exactly as apply resolves them.
-        let names: Vec<String> = coll.mods.iter().map(|m| m.tech_name.clone()).collect();
-        let hits = siloapi::lookup(&base, &names).unwrap_or_default();
-        let targets = collection::resolve_targets(&coll.mods, &catalog_matches(&hits));
+        let (targets, fingerprint) = resolve_collection(&base, &coll, &json);
 
         let mut plan = ImportPlan {
             name: coll.name.clone(),
@@ -3682,7 +3696,11 @@ async fn collection_apply(
     tauri::async_runtime::spawn_blocking(move || -> Result<ApplyReport, String> {
         let mut conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token");
-        let (coll, fp) = read_collection_raw(&url_or_id, token.as_deref())?;
+        let (coll, json) = read_collection_raw(&url_or_id, token.as_deref())?;
+        // Resolve every mod by techName, exactly as the preview did. A collection's own
+        // `catalog_id` and source hint never decide what downloads. The fingerprint covers the
+        // file and this resolution, so a changed gist or catalog answer is refused.
+        let (targets, fp) = resolve_collection(&base, &coll, &json);
         const COLLECTION_CHANGED: &str =
             "This collection changed since you previewed it. Preview it again before installing.";
         if fp != fingerprint {
@@ -3691,12 +3709,6 @@ async fn collection_apply(
 
         let have: std::collections::HashSet<&str> =
             installed.iter().map(|m| m.tech_name.as_str()).collect();
-
-        // Resolve every mod by techName, exactly as the preview did. A collection's own
-        // `catalog_id` and source hint never decide what downloads.
-        let names: Vec<String> = coll.mods.iter().map(|m| m.tech_name.clone()).collect();
-        let hits = siloapi::lookup(&base, &names).unwrap_or_default();
-        let targets = collection::resolve_targets(&coll.mods, &catalog_matches(&hits));
 
         let total = coll.mods.len();
         let mut rows: Vec<ApplyRow> = Vec::with_capacity(total);

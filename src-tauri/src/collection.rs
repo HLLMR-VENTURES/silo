@@ -147,13 +147,31 @@ pub fn resolve_targets(
         .collect()
 }
 
-/// SHA-256 (hex) of the collection file's exact text: apply refuses if it changed after preview.
-pub fn fingerprint(json: &str) -> String {
+/// SHA-256 (hex) of the collection file's exact text plus what the catalog resolved for each
+/// mod (in the file's order): apply refuses if either changed after the preview.
+pub fn fingerprint(json: &str, targets: &[Target]) -> String {
     use sha2::{Digest, Sha256};
-    Sha256::digest(json.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    // Every field is length-prefixed (and an absent one marked), so no two different inputs
+    // can run together into the same bytes.
+    fn field(h: &mut Sha256, s: Option<&str>) {
+        match s {
+            None => h.update([0u8]),
+            Some(s) => {
+                h.update([1u8]);
+                h.update((s.len() as u64).to_le_bytes());
+                h.update(s.as_bytes());
+            }
+        }
+    }
+    let mut h = Sha256::new();
+    field(&mut h, Some(json));
+    h.update((targets.len() as u64).to_le_bytes());
+    for t in targets {
+        field(&mut h, Some(&t.tech_name));
+        field(&mut h, t.catalog_id.as_deref());
+        field(&mut h, t.download_source.as_deref());
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A GitHub gist id is an opaque hex string (see `github::valid_gist_id`, the one rule).
@@ -407,9 +425,40 @@ mod tests {
 
     #[test]
     fn the_fingerprint_follows_the_exact_text() {
-        assert_eq!(fingerprint("{\"a\":1}"), fingerprint("{\"a\":1}"));
-        assert_ne!(fingerprint("{\"a\":1}"), fingerprint("{\"a\":2}"));
-        assert_eq!(fingerprint("x").len(), 64);
+        assert_eq!(fingerprint("{\"a\":1}", &[]), fingerprint("{\"a\":1}", &[]));
+        assert_ne!(fingerprint("{\"a\":1}", &[]), fingerprint("{\"a\":2}", &[]));
+        assert_eq!(fingerprint("x", &[]).len(), 64);
+    }
+
+    #[test]
+    fn the_fingerprint_follows_what_the_catalog_resolved() {
+        let mods = vec![cm("FS25_A", None, None), cm("FS25_B", None, None)];
+        let resolve = |a: CatalogMatch| {
+            let hits = std::collections::HashMap::from([
+                ("FS25_A".to_string(), a),
+                ("FS25_B".to_string(), hit("cat-B", None)),
+            ]);
+            resolve_targets(&mods, &hits)
+        };
+        let base = resolve(hit("cat-A", Some("github")));
+        let json = "{\"a\":1}";
+        assert_eq!(fingerprint(json, &base), fingerprint(json, &base.clone()));
+        assert_ne!(
+            fingerprint(json, &base),
+            fingerprint(json, &resolve(hit("cat-OTHER", Some("github")))),
+            "another catalog entry"
+        );
+        assert_ne!(
+            fingerprint(json, &base),
+            fingerprint(json, &resolve(hit("cat-A", None))),
+            "no longer directly downloadable"
+        );
+        assert_ne!(
+            fingerprint(json, &base),
+            fingerprint(json, &resolve_targets(&mods, &Default::default())),
+            "not in the catalog any more"
+        );
+        assert_ne!(fingerprint(json, &base), fingerprint(json, &[]));
     }
 
     fn sample() -> Collection {
