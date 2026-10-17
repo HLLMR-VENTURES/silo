@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   settings, importing or exporting loadouts and similar actions now run in the background
   instead of freezing the window. (#214)
 
-- **The open-folder links in Settings work.** They silently did nothing before. (#PR)
+- **The open-folder links in Settings work.** They silently did nothing before. (#215)
 
 ### Security
 
@@ -41,14 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Silo decides where it writes.** Changing the mods folder or the library archive now uses a
   folder picker Silo opens itself, and Silo only switches to a folder chosen there or one it
-  already knows. Editing game settings can't change FS25's mods folder either. (#PR)
+  already knows. Editing game settings can't change FS25's mods folder either. (#215)
 
 - **Updates only replace mods in your library.** An update can only swap a mod's zip in your
-  mods folder or library archive, never any other file there. (#PR)
+  mods folder or library archive, never any other file there. (#215)
 
 - **Collections install exactly what the preview showed.** Silo matches every mod the same way
   in the preview and the install, and won't install if the collection, or what the catalog
-  found for it, changed after you previewed it. (#PR)
+  found for it, changed after you previewed it. (#215)
 
 ## [0.10.0] - 2026-10-17
 
