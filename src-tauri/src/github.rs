@@ -28,14 +28,12 @@ pub struct UpdateInfo {
     pub release: ReleaseInfo,
 }
 
-const UA: &str = "Silo-FS25-Mod-Manager";
-
 /// Fetch the latest release for `owner/repo`. A token (when present) raises the
 /// rate limit to 5000/hr and allows private repos.
 pub fn latest_release(owner: &str, repo: &str, token: Option<&str>) -> Result<ReleaseInfo, String> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
-    let mut req = ureq::get(&url)
-        .set("User-Agent", UA)
+    let mut req = crate::net::api()
+        .get(&url)
         .set("Accept", "application/vnd.github+json");
     if let Some(t) = token {
         req = req.set("Authorization", &format!("Bearer {t}"));
@@ -140,9 +138,9 @@ pub struct PollResult {
 /// to let the user star/watch through Silo we also need `public_repo` (GitHub's
 /// docs: "Also required for starring public repositories").
 pub fn device_start(client_id: &str, scope: &str) -> Result<DeviceCode, String> {
-    let resp = ureq::post("https://github.com/login/device/code")
+    let resp = crate::net::api()
+        .post("https://github.com/login/device/code")
         .set("Accept", "application/json")
-        .set("User-Agent", UA)
         .send_form(&[("client_id", client_id), ("scope", scope)])
         .map_err(|e| e.to_string())?;
     let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
@@ -169,9 +167,9 @@ pub fn device_start(client_id: &str, scope: &str) -> Result<DeviceCode, String> 
 
 /// Step 2 (polled): exchange the device code for a token once the user approves.
 pub fn device_poll(client_id: &str, device_code: &str) -> Result<PollResult, String> {
-    let resp = ureq::post("https://github.com/login/oauth/access_token")
+    let resp = crate::net::api()
+        .post("https://github.com/login/oauth/access_token")
         .set("Accept", "application/json")
-        .set("User-Agent", UA)
         .send_form(&[
             ("client_id", client_id),
             ("device_code", device_code),
@@ -238,7 +236,7 @@ pub fn is_github_host(url: &str) -> bool {
 /// truncated and re-filled — so an active hardlink projection reflects the update
 /// automatically. The `.part` temp file is always cleaned up.
 pub fn download_zip(url: &str, token: Option<&str>, dest: &std::path::Path) -> Result<(), String> {
-    let mut req = ureq::get(url).set("User-Agent", UA);
+    let mut req = crate::net::download().get(url);
     // Attach the token ONLY to GitHub hosts. Public release assets don't need it anyway;
     // this guarantees the credential never travels to a non-GitHub URL.
     if let Some(t) = token.filter(|_| is_github_host(url)) {
@@ -411,9 +409,9 @@ pub fn whoami(token: &str) -> Result<String, String> {
 /// fine-grained PAT uses a different permission model and reports an empty header — the
 /// caller decides how to treat "unknown" scopes.
 pub fn whoami_scoped(token: &str) -> Result<(String, String), String> {
-    let resp = ureq::get("https://api.github.com/user")
+    let resp = crate::net::api()
+        .get("https://api.github.com/user")
         .set("Accept", "application/vnd.github+json")
-        .set("User-Agent", UA)
         .set("Authorization", &format!("Bearer {token}"))
         .call()
         .map_err(gh_err)?;
@@ -446,9 +444,9 @@ pub struct RepoStats {
 }
 
 fn gh_get(url: &str, token: Option<&str>) -> Result<serde_json::Value, String> {
-    let mut req = ureq::get(url)
-        .set("Accept", "application/vnd.github+json")
-        .set("User-Agent", UA);
+    let mut req = crate::net::api()
+        .get(url)
+        .set("Accept", "application/vnd.github+json");
     if let Some(t) = token {
         req = req.set("Authorization", &format!("Bearer {t}"));
     }
@@ -510,9 +508,9 @@ pub fn repo_stats(owner: &str, repo: &str, token: Option<&str>) -> Result<RepoSt
 /// A GET that treats 204 as true and 404 as false — the shape GitHub uses for
 /// "is this thing in the user's set?" checks.
 fn present_check(url: &str, token: &str) -> Result<bool, String> {
-    match ureq::get(url)
+    match crate::net::api()
+        .get(url)
         .set("Accept", "application/vnd.github+json")
-        .set("User-Agent", UA)
         .set("Authorization", &format!("Bearer {token}"))
         .call()
     {
@@ -543,12 +541,11 @@ pub fn watch_state(owner: &str, repo: &str, token: &str) -> Result<bool, String>
 pub fn set_star(owner: &str, repo: &str, token: &str, on: bool) -> Result<bool, String> {
     let url = format!("https://api.github.com/user/starred/{owner}/{repo}");
     let req = if on {
-        ureq::put(&url)
+        crate::net::api().put(&url)
     } else {
-        ureq::delete(&url)
+        crate::net::api().delete(&url)
     }
     .set("Accept", "application/vnd.github+json")
-    .set("User-Agent", UA)
     .set("Content-Length", "0")
     .set("Authorization", &format!("Bearer {token}"));
     req.call().map_err(gh_err)?;
@@ -559,16 +556,16 @@ pub fn set_star(owner: &str, repo: &str, token: &str, on: bool) -> Result<bool, 
 pub fn set_watch(owner: &str, repo: &str, token: &str, on: bool) -> Result<bool, String> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/subscription");
     if on {
-        ureq::put(&url)
+        crate::net::api()
+            .put(&url)
             .set("Accept", "application/vnd.github+json")
-            .set("User-Agent", UA)
             .set("Authorization", &format!("Bearer {token}"))
             .send_json(ureq::json!({ "subscribed": true, "ignored": false }))
             .map_err(gh_err)?;
     } else {
-        ureq::delete(&url)
+        crate::net::api()
+            .delete(&url)
             .set("Accept", "application/vnd.github+json")
-            .set("User-Agent", UA)
             .set("Content-Length", "0")
             .set("Authorization", &format!("Bearer {token}"))
             .call()
@@ -604,9 +601,9 @@ pub fn create_secret_gist(
         "public": false,
         "files": { filename: { "content": content } },
     });
-    let v = ureq::post("https://api.github.com/gists")
+    let v = crate::net::api()
+        .post("https://api.github.com/gists")
         .set("Accept", "application/vnd.github+json")
-        .set("User-Agent", UA)
         .set("Authorization", &format!("Bearer {token}"))
         .send_json(body)
         .map_err(gh_err)?
@@ -628,9 +625,9 @@ pub fn update_gist_file(
     filename: &str,
     content: &str,
 ) -> Result<(), String> {
-    ureq::request("PATCH", &format!("https://api.github.com/gists/{id}"))
+    crate::net::api()
+        .request("PATCH", &format!("https://api.github.com/gists/{id}"))
         .set("Accept", "application/vnd.github+json")
-        .set("User-Agent", UA)
         .set("Authorization", &format!("Bearer {token}"))
         .send_json(ureq::json!({ "files": { filename: { "content": content } } }))
         .map_err(gh_err)?;
@@ -672,9 +669,9 @@ pub fn list_user_gists(token: &str) -> Result<Vec<GistListItem>, String> {
 
 /// DELETE /gists/{id} — unpublish a gist we own. Needs `gist`.
 pub fn delete_gist(token: &str, id: &str) -> Result<(), String> {
-    ureq::delete(&format!("https://api.github.com/gists/{id}"))
+    crate::net::api()
+        .delete(&format!("https://api.github.com/gists/{id}"))
         .set("Accept", "application/vnd.github+json")
-        .set("User-Agent", UA)
         .set("Authorization", &format!("Bearer {token}"))
         .call()
         .map_err(gh_err)?;
@@ -745,7 +742,7 @@ fn fetch_gist_raw(url: &str, token: Option<&str>) -> Result<String, String> {
     if !is_github_host(url) {
         return Err("Refusing to fetch gist content from a non-GitHub host".into());
     }
-    let mut req = ureq::get(url).set("User-Agent", UA);
+    let mut req = crate::net::api().get(url);
     if let Some(t) = token {
         req = req.set("Authorization", &format!("Bearer {t}"));
     }
@@ -767,9 +764,9 @@ pub fn read_repo_file(
     token: Option<&str>,
 ) -> Result<String, String> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/contents/{path}");
-    let mut req = ureq::get(&url)
-        .set("Accept", "application/vnd.github.raw")
-        .set("User-Agent", UA);
+    let mut req = crate::net::api()
+        .get(&url)
+        .set("Accept", "application/vnd.github.raw");
     if let Some(t) = token {
         req = req.set("Authorization", &format!("Bearer {t}"));
     }
@@ -797,9 +794,9 @@ pub fn create_public_repo(token: &str, name: &str, description: &str) -> Result<
         "private": false,
         "auto_init": false,
     });
-    let v = ureq::post("https://api.github.com/user/repos")
+    let v = crate::net::api()
+        .post("https://api.github.com/user/repos")
         .set("Accept", "application/vnd.github+json")
-        .set("User-Agent", UA)
         .set("Authorization", &format!("Bearer {token}"))
         .send_json(body)
         .map_err(|e| match e {
@@ -846,14 +843,14 @@ pub fn put_repo_file(
     if let Some(sha) = repo_file_sha(token, owner, repo, path) {
         body["sha"] = serde_json::Value::String(sha);
     }
-    ureq::put(&format!(
-        "https://api.github.com/repos/{owner}/{repo}/contents/{path}"
-    ))
-    .set("Accept", "application/vnd.github+json")
-    .set("User-Agent", UA)
-    .set("Authorization", &format!("Bearer {token}"))
-    .send_json(body)
-    .map_err(gh_err)?;
+    crate::net::api()
+        .put(&format!(
+            "https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+        ))
+        .set("Accept", "application/vnd.github+json")
+        .set("Authorization", &format!("Bearer {token}"))
+        .send_json(body)
+        .map_err(gh_err)?;
     Ok(())
 }
 

@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vanilla layout only deletes the copy if it's unchanged; otherwise it's moved to `backups/`
   and Silo tells you where. (#202)
 
+- **A stalled download can't freeze Silo anymore.** Network requests now time out instead of
+  waiting forever, and mods download before Silo locks your library, so other changes aren't
+  blocked while a download runs. (#202)
+
 ### Security
 
 - **Stricter image-host check.** The image proxy now parses URLs properly before checking the
