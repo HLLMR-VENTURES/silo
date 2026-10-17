@@ -141,7 +141,7 @@ fn candidate_from(path: PathBuf, name: &str, ft: std::fs::FileType) -> Option<Ca
 /// True for the scratch entries Silo leaves mid-operation (an archive move's in-flight copy or
 /// the old copy it is deleting, relink, or organize's `.{name}.silo-tmp`). They can hold a full
 /// copy of a mod and must never be scanned as one.
-fn is_silo_temp(name: &str) -> bool {
+pub(crate) fn is_silo_temp(name: &str) -> bool {
     let l = name.to_lowercase();
     l.ends_with(".silo-move-tmp")
         || l.ends_with(".silo-move-old")

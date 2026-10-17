@@ -173,6 +173,15 @@ fn exists(p: &Path) -> bool {
     p.symlink_metadata().is_ok()
 }
 
+/// Both paths are the same file on disk (a hardlink pair, or one path twice). Never errors:
+/// anything unreadable is "not the same".
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
+    matches!(
+        (same_file::Handle::from_path(a), same_file::Handle::from_path(b)),
+        (Ok(x), Ok(y)) if x == y
+    )
+}
+
 /// `p` with `suffix` appended to its file name.
 fn suffixed(p: &Path, suffix: &str) -> PathBuf {
     let name = p
@@ -208,10 +217,13 @@ fn link_inside(p: &Path) -> String {
     )
 }
 
-/// Copy a file in chunks, giving up (and deleting the partial) when `abort()` turns true.
+/// Copy a file in chunks, giving up (and deleting the partial) when `abort()` turns true. The
+/// copy keeps the original's modified time, so a moved mod keeps its date (and the scan cache,
+/// keyed by path+mtime+size, isn't fooled into thinking it changed).
 fn copy_file_abortable(src: &Path, dst: &Path, abort: &dyn Fn() -> bool) -> Result<(), StepErr> {
     let io = |e: std::io::Error| StepErr::Failed(format!("copy: {e}"));
     let mut r = std::fs::File::open(src).map_err(io)?;
+    let modified = r.metadata().and_then(|m| m.modified()).ok();
     let mut w = std::fs::File::create(dst).map_err(io)?;
     let mut buf = vec![0u8; 1 << 20];
     loop {
@@ -225,6 +237,10 @@ fn copy_file_abortable(src: &Path, dst: &Path, abort: &dyn Fn() -> bool) -> Resu
             break;
         }
         w.write_all(&buf[..n]).map_err(io)?;
+    }
+    // Best effort: a filesystem that can't set times still gets a correct copy.
+    if let Some(t) = modified {
+        let _ = w.set_modified(t);
     }
     w.sync_all().map_err(io)
 }
@@ -375,12 +391,14 @@ fn delete_source(src: &Path) -> Result<(), String> {
 
 /// Keep an active mod's mods-folder entry valid as its archived copy moves from `src` to `dst`:
 /// a missing entry gets a fresh link to `dst`; a symlink into `src` is re-pointed (zips by an
-/// atomic replace; folder links are removed and re-made, restoring the old link if that fails).
-/// Hardlinked/copied zips and marker-copied folders are standalone and need nothing; a link to
-/// anything else is not ours to change.
+/// atomic replace; folder links are removed and re-made, restoring the old link if that fails);
+/// a zip hardlinked to `src` is atomically replaced by a link to `dst` — otherwise it would keep
+/// the old copy's bytes alive after that copy is deleted, and the move would free nothing.
+/// Copied zips, marker-copied folders and the user's own files are standalone and left alone;
+/// a link to anything else is not ours to change.
 fn repoint(
+    env: &Env,
     row: &OrganizedRow,
-    mods: &Path,
     src: &Path,
     dst: &Path,
     policy: &mut LinkPolicy,
@@ -388,12 +406,17 @@ fn repoint(
     if !row.active {
         return Ok(());
     }
-    let link = mods.join(&row.file_name);
+    let link = env.mods.join(&row.file_name);
     let Ok(meta) = link.symlink_metadata() else {
-        return organize::make_link(dst, &link, &row.kind, policy)
-            .map_err(|e| format!("relink: {e}"));
+        organize::make_link(dst, &link, &row.kind, policy).map_err(|e| format!("relink: {e}"))?;
+        env.note_projection(row, &link);
+        return Ok(());
     };
     if !meta.file_type().is_symlink() {
+        // Only a hardlink of the very file being moved — provably Silo's projection.
+        if row.kind != "dir" && meta.is_file() && same_file(&link, src) {
+            return replace_zip_link(env, row, &link, dst, policy);
+        }
         return Ok(());
     }
     let target = std::fs::read_link(&link).map_err(|e| format!("relink: {e}"))?;
@@ -419,13 +442,29 @@ fn repoint(
         }
         return Ok(());
     }
-    let tmp = suffixed(&link, RELINK_SUFFIX);
+    replace_zip_link(env, row, &link, dst, policy)
+}
+
+/// Atomically swap a zip's mods-folder entry `link` for a new link to `dst` (hardlink →
+/// symlink → copy, per `policy`): make the link at a `RELINK_SUFFIX` temp sibling, then rename
+/// it over `link`. At every point `link` is either the old working entry or the new one; a crash
+/// leaves at most the temp, which the next attempt replaces (and `scan` skips).
+fn replace_zip_link(
+    env: &Env,
+    row: &OrganizedRow,
+    link: &Path,
+    dst: &Path,
+    policy: &mut LinkPolicy,
+) -> Result<(), String> {
+    let tmp = suffixed(link, RELINK_SUFFIX);
     let _ = remove_any(&tmp);
     organize::make_link(dst, &tmp, &row.kind, policy).map_err(|e| format!("relink: {e}"))?;
-    std::fs::rename(&tmp, &link).map_err(|e| {
+    std::fs::rename(&tmp, link).map_err(|e| {
         let _ = remove_any(&tmp);
         format!("relink: {e}")
-    })
+    })?;
+    env.note_projection(row, link);
+    Ok(())
 }
 
 /// What a step needs from the run: the DB (to save the marker) and the mods folder.
@@ -451,6 +490,19 @@ impl Env<'_> {
     fn unrecord(&self, m: &mut MoveMarker, tech: &str) -> Result<(), StepErr> {
         m.moved.retain(|t| t != tech);
         self.save(m)
+    }
+
+    /// A zip's mods-folder entry was just (re)made by Silo: refresh its projection record so
+    /// later deactivates prove it's Silo's without hashing. A symlink is identified
+    /// structurally and keeps none.
+    fn note_projection(&self, row: &OrganizedRow, link: &Path) {
+        if row.kind == "dir" {
+            return;
+        }
+        db::forget_projection(self.conn, self.mods_key, &row.file_name);
+        if let Some((size, mtime)) = organize::file_stats(link) {
+            db::record_projection(self.conn, self.mods_key, &row.file_name, size, mtime);
+        }
     }
 }
 
@@ -505,7 +557,7 @@ fn forward_one(
                     dst.display()
                 )));
             }
-            repoint(row, env.mods, &src, &dst, policy).map_err(StepErr::Failed)?;
+            repoint(env, row, &src, &dst, policy).map_err(StepErr::Failed)?;
             return Ok(Step::AlreadyDone);
         }
         (true, true) => {
@@ -529,7 +581,7 @@ fn forward_one(
     if abort() {
         return Err(StepErr::Interrupted);
     }
-    repoint(row, env.mods, &src, &dst, policy).map_err(StepErr::Failed)?;
+    repoint(env, row, &src, &dst, policy).map_err(StepErr::Failed)?;
     if abort() {
         return Err(StepErr::Interrupted);
     }
@@ -558,7 +610,7 @@ fn back_one(
             ))
         }
         (false, true) => {
-            repoint(row, env.mods, &src, &home, policy).map_err(StepErr::Failed)?;
+            repoint(env, row, &src, &home, policy).map_err(StepErr::Failed)?;
             env.unrecord(marker, &row.tech_name)?;
             return Ok(Step::AlreadyDone);
         }
@@ -572,7 +624,7 @@ fn back_one(
     if abort() {
         return Err(StepErr::Interrupted);
     }
-    repoint(row, env.mods, &src, &home, policy).map_err(StepErr::Failed)?;
+    repoint(env, row, &src, &home, policy).map_err(StepErr::Failed)?;
     if abort() {
         return Err(StepErr::Interrupted);
     }
@@ -581,8 +633,11 @@ fn back_one(
     Ok(Step::Moved)
 }
 
-/// Delete stale temp copies and half-deleted old copies left by a crash, under each category
-/// folder of `archive`. Only Silo's own suffixes are touched.
+/// Delete stale scratch entries left by a crash under each category folder of `archive`: a
+/// move's temp and half-deleted old copies, and an interrupted cross-drive organize's
+/// `.{name}.silo-tmp` (its original is only removed after the temp is renamed into place, so a
+/// leftover temp is never the only copy). Only Silo's own names (`scan::is_silo_temp`) are
+/// touched; the move holds the library lock, so no organize is writing one right now.
 fn clean_temps(archive: &Path) {
     if let Ok(cats) = std::fs::read_dir(archive) {
         for c in cats.flatten() {
@@ -591,8 +646,7 @@ fn clean_temps(archive: &Path) {
             }
             if let Ok(es) = std::fs::read_dir(c.path()) {
                 for e in es.flatten() {
-                    let n = e.file_name().to_string_lossy().into_owned();
-                    if n.ends_with(TMP_SUFFIX) || n.ends_with(OLD_SUFFIX) {
+                    if crate::scan::is_silo_temp(&e.file_name().to_string_lossy()) {
                         let _ = remove_any(&e.path());
                     }
                 }
@@ -601,9 +655,73 @@ fn clean_temps(archive: &Path) {
     }
 }
 
+/// Of `unknown` (from `unknown_mods`), the file names that are a second copy of a library mod
+/// filed under another category (same file name, or named after its techName). They get their
+/// own message: rescanning can't fix a mod that's filed twice.
+pub fn filed_twice(unknown: &[PathBuf], rows: &[OrganizedRow]) -> Vec<String> {
+    unknown
+        .iter()
+        .filter_map(|p| {
+            let name = p.file_name()?.to_string_lossy().into_owned();
+            let l = name.to_lowercase();
+            let stem = l.strip_suffix(".zip").unwrap_or(&l);
+            rows.iter()
+                .any(|r| r.file_name.to_lowercase() == l || r.tech_name.to_lowercase() == stem)
+                .then_some(name)
+        })
+        .collect()
+}
+
+/// "N mod(s) in your archive aren't in Silo's library yet — `then`".
+pub fn unknown_count_message(n: usize, then: &str) -> String {
+    if n == 1 {
+        format!("1 mod in your archive isn't in Silo's library yet — {then}")
+    } else {
+        format!("{n} mods in your archive aren't in Silo's library yet — {then}")
+    }
+}
+
+/// One message per mod filed twice, then one for the rest of `unknown` (if any). `then_twice`
+/// and `then_unknown` say what to do next in the caller's situation.
+pub fn unknown_messages(
+    unknown: &[PathBuf],
+    rows: &[OrganizedRow],
+    then_twice: &str,
+    then_unknown: &str,
+) -> Vec<String> {
+    let twice = filed_twice(unknown, rows);
+    let mut v: Vec<String> = twice
+        .iter()
+        .map(|n| format!("{n} is filed twice in your archive — remove one copy, {then_twice}"))
+        .collect();
+    let rest = unknown.len() - twice.len();
+    if rest > 0 {
+        v.push(unknown_count_message(rest, then_unknown));
+    }
+    v
+}
+
+/// Record `archive` as the mods folder's archive: the setting is cleared when it's the default
+/// `<mods>/archive` (compared canonically), so the default keeps following the mods folder.
+pub fn store_archive_setting(
+    conn: &Connection,
+    mods_key: &str,
+    mods: &Path,
+    archive: &Path,
+) -> Result<(), String> {
+    let default = Layout::default_for(mods).archive;
+    let value = if crate::modsroot::same_folder(archive, &default) {
+        None
+    } else {
+        Some(archive.to_string_lossy().into_owned())
+    };
+    db::set_app_setting(conn, &archive_setting_key(mods_key), value.as_deref())
+}
+
 /// Mods (zips, or folders with a `modDesc.xml`) under `archive/<category>/` that have no
 /// organized row — a move would leave them behind. Preflight calls this before any marker is
-/// written; a forward run re-checks it at every start. Silo's own temp/old entries are ignored.
+/// written; a forward run re-checks it at every start. Silo's own scratch entries
+/// (`scan::is_silo_temp`) are ignored.
 pub fn unknown_mods(archive: &Path, rows: &[OrganizedRow]) -> Vec<PathBuf> {
     let windows = cfg!(windows);
     let key = |p: &Path| crate::modsroot::normalize_key(&p.to_string_lossy(), windows);
@@ -625,7 +743,7 @@ pub fn unknown_mods(archive: &Path, rows: &[OrganizedRow]) -> Vec<PathBuf> {
         for e in es.flatten() {
             let p = e.path();
             let n = e.file_name().to_string_lossy().to_lowercase();
-            if n.ends_with(TMP_SUFFIX) || n.ends_with(OLD_SUFFIX) {
+            if crate::scan::is_silo_temp(&n) {
                 continue;
             }
             let is_mod = n.ends_with(".zip") || p.join("modDesc.xml").is_file();
@@ -811,9 +929,11 @@ fn run_locked(
         let rows = db::load_organized(env.conn, env.mods_key);
         let unknown = unknown_mods(&marker.from, &rows);
         if !unknown.is_empty() {
-            marker.errors.push(format!(
-                "{} mods in your archive aren't in Silo's library yet — cancel the move, rescan, then start again",
-                unknown.len()
+            marker.errors.extend(unknown_messages(
+                &unknown,
+                &rows,
+                "then resume",
+                "cancel the move, rescan, then start again",
             ));
             return pause(&env, marker);
         }
@@ -942,13 +1062,7 @@ fn run_locked(
             .unchecked_transaction()
             .map_err(|e| e.to_string())?;
         if !back {
-            let default = Layout::default_for(env.mods).archive;
-            let value = if crate::modsroot::same_folder(&marker.to, &default) {
-                None
-            } else {
-                Some(marker.to.to_string_lossy().into_owned())
-            };
-            db::set_app_setting(&tx, &archive_setting_key(env.mods_key), value.as_deref())?;
+            store_archive_setting(&tx, env.mods_key, env.mods, &marker.to)?;
         }
         clear_marker(&tx, env.mods_key)?;
         tx.commit().map_err(|e| e.to_string())?;
@@ -1011,17 +1125,33 @@ pub fn path_problems(
     v
 }
 
-/// Space problem, if the target drive can't hold the archive plus a 1 GB margin.
-pub fn space_problem(bytes: u64, free: Option<u64>) -> Option<String> {
+/// "needs X GB, Y GB free", if `free` can't hold `bytes` plus a 1 GB margin (unknown never
+/// blocks).
+fn short_of(bytes: u64, free: Option<u64>) -> Option<String> {
     const MARGIN: u64 = 1 << 30;
     match free {
         Some(f) if f < bytes + MARGIN => Some(format!(
-            "Not enough free space: needs {:.1} GB, {:.1} GB free.",
+            "needs {:.1} GB, {:.1} GB free",
             (bytes + MARGIN) as f64 / 1e9,
             f as f64 / 1e9
         )),
         _ => None,
     }
+}
+
+/// Space problem, if the target drive can't hold `bytes` plus a 1 GB margin.
+pub fn space_problem(bytes: u64, free: Option<u64>) -> Option<String> {
+    short_of(bytes, free).map(|s| format!("Not enough free space: {s}."))
+}
+
+/// Space problem on the mods folder's drive, for an active mod whose link may have to become a
+/// copy there while its old copy still exists.
+pub fn mods_drive_space_problem(bytes: u64, free: Option<u64>) -> Option<String> {
+    short_of(bytes, free).map(|s| {
+        format!(
+            "Not enough free space on your mods folder's drive to keep active mods linked: {s}."
+        )
+    })
 }
 
 /// Loose mods (zips / mod folders) at the top level of an archive folder — candidates to adopt.
@@ -1533,7 +1663,11 @@ mod tests {
         let out = run_with(&f, Op::Start, &|| false).unwrap().unwrap();
         assert!(out.paused);
         assert_eq!(out.errors.len(), 1);
-        assert!(out.errors[0].contains("1 mods"), "{:?}", out.errors);
+        assert!(
+            out.errors[0].starts_with("1 mod in your archive isn't"),
+            "{:?}",
+            out.errors
+        );
         assert_eq!(
             unknown_mods(&f.old, &db::load_organized(&f.conn, &f.key)),
             vec![zip_at(&f.old, "FS25_Stray")],
@@ -1675,14 +1809,206 @@ mod tests {
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
+    /// An active zip projected as a hardlink to its archived copy (the same-drive default).
+    fn add_hardlinked(f: &Fx, tech: &str) -> PathBuf {
+        add_zip(f, tech, true);
+        let flat = f.mods.join(format!("{tech}.zip"));
+        std::fs::hard_link(zip_at(&f.old, tech), &flat).unwrap();
+        flat
+    }
+
     #[test]
-    fn an_active_hardlinked_zip_stays_readable_after_its_old_copy_is_removed() {
+    fn an_active_hardlinked_zip_is_relinked_to_its_new_copy() {
         let f = fx("hardlink");
-        add_zip(&f, "FS25_A", true);
-        let flat = f.mods.join("FS25_A.zip");
-        std::fs::hard_link(zip_at(&f.old, "FS25_A"), &flat).unwrap();
+        let flat = add_hardlinked(&f, "FS25_A");
         assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
         assert_eq!(std::fs::read(&flat).unwrap(), b"PK\x03\x04 FS25_A");
+        // Same volume: the entry now shares the NEW copy's identity, so deleting the old copy
+        // really freed its bytes (nothing else holds them).
+        assert!(same_file(&flat, &zip_at(&f.new, "FS25_A")));
+        assert!(!flat.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(!f.mods.join("FS25_A.zip.silo-relink-tmp").exists());
+        // Its projection record describes the new entry (fast, hash-free deactivate).
+        assert_eq!(
+            db::projection_stats(&f.conn, &f.key, "FS25_A.zip"),
+            organize::file_stats(&flat)
+        );
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn cancel_relinks_an_active_hardlinked_zip_back_home() {
+        let f = fx("hardlinkback");
+        let flat = add_hardlinked(&f, "FS25_A");
+        add_zip(&f, "FS25_B", false);
+        let req = AtomicU8::new(0);
+        let mut prog = |p: &Progress| {
+            if !p.cancelling && p.current == "FS25_B" {
+                req.store(CANCEL, Ordering::SeqCst);
+            }
+        };
+        assert!(run_full(&f, Op::Start, &|| false, &req, &mut prog)
+            .unwrap()
+            .is_none());
+        assert!(!zip_at(&f.new, "FS25_A").exists());
+        assert!(same_file(&flat, &zip_at(&f.old, "FS25_A")));
+        assert_eq!(std::fs::read(&flat).unwrap(), b"PK\x03\x04 FS25_A");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_crash_before_the_relink_is_finished_on_resume() {
+        let f = fx("relinkcrash");
+        let flat = add_hardlinked(&f, "FS25_A");
+        let mut m = marker(&f);
+        // Placed and recorded, then the crash: the entry still hardlinks the old copy.
+        copy_verify_place(
+            &zip_at(&f.old, "FS25_A"),
+            &zip_at(&f.new, "FS25_A"),
+            "zip",
+            &|| false,
+        )
+        .unwrap();
+        env(&f).record(&mut m, "FS25_A").unwrap();
+        // …and a half-made relink temp from the attempt that never got renamed.
+        let tmp = f.mods.join("FS25_A.zip.silo-relink-tmp");
+        std::fs::write(&tmp, b"partial").unwrap();
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        assert!(
+            same_file(&flat, &zip_at(&f.old, "FS25_A")),
+            "old link works"
+        );
+        assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
+        assert!(same_file(&flat, &zip_at(&f.new, "FS25_A")));
+        assert_eq!(std::fs::read(&flat).unwrap(), b"PK\x03\x04 FS25_A");
+        assert!(!tmp.exists());
+        assert!(!zip_at(&f.old, "FS25_A").exists());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_crash_after_the_relink_only_removes_the_old_copy() {
+        let f = fx("relinkdone");
+        let flat = add_hardlinked(&f, "FS25_A");
+        let mut m = marker(&f);
+        copy_verify_place(
+            &zip_at(&f.old, "FS25_A"),
+            &zip_at(&f.new, "FS25_A"),
+            "zip",
+            &|| false,
+        )
+        .unwrap();
+        env(&f).record(&mut m, "FS25_A").unwrap();
+        // Relinked, then the crash before the old copy went.
+        std::fs::remove_file(&flat).unwrap();
+        std::fs::hard_link(zip_at(&f.new, "FS25_A"), &flat).unwrap();
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
+        assert!(same_file(&flat, &zip_at(&f.new, "FS25_A")));
+        assert!(!zip_at(&f.old, "FS25_A").exists());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn the_users_own_file_in_the_mods_folder_is_never_relinked() {
+        let f = fx("userflat");
+        add_zip(&f, "FS25_A", true);
+        let flat = f.mods.join("FS25_A.zip");
+        std::fs::write(&flat, b"the user's own build").unwrap();
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
+        assert_eq!(std::fs::read(&flat).unwrap(), b"the user's own build");
+        assert!(!same_file(&flat, &zip_at(&f.new, "FS25_A")));
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn copies_keep_their_modified_time() {
+        let f = fx("mtime");
+        let when = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+        let set = |p: &Path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(when)
+                .unwrap()
+        };
+        add_zip(&f, "FS25_A", false);
+        set(&zip_at(&f.old, "FS25_A"));
+        let dir = f.old.join("Tools/FS25_D");
+        std::fs::create_dir_all(dir.join("xml")).unwrap();
+        std::fs::write(dir.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::write(dir.join("xml/a.xml"), b"<a/>").unwrap();
+        set(&dir.join("modDesc.xml"));
+        set(&dir.join("xml/a.xml"));
+        db::upsert_organized(&f.conn, &f.key, &row("FS25_D", "FS25_D", "dir", false)).unwrap();
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
+        let mtime = |p: PathBuf| std::fs::metadata(p).unwrap().modified().unwrap();
+        assert_eq!(mtime(zip_at(&f.new, "FS25_A")), when);
+        assert_eq!(mtime(f.new.join("Tools/FS25_D/modDesc.xml")), when);
+        assert_eq!(mtime(f.new.join("Tools/FS25_D/xml/a.xml")), when);
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn organize_temps_are_not_unknown_mods_and_a_move_cleans_them() {
+        let f = fx("orgtemp");
+        let r = add_zip(&f, "FS25_A", false);
+        // A cross-volume organize's leftovers: a zip temp and a folder temp with a modDesc.
+        let zip_tmp = f.old.join("Tools/.FS25_B.zip.silo-tmp");
+        std::fs::write(&zip_tmp, b"PK").unwrap();
+        let dir_tmp = f.old.join("Tools/.FS25_C.silo-tmp");
+        std::fs::create_dir_all(&dir_tmp).unwrap();
+        std::fs::write(dir_tmp.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        assert!(unknown_mods(&f.old, std::slice::from_ref(&r)).is_empty());
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
+        assert!(!zip_tmp.exists() && !dir_tmp.exists());
+        assert!(zip_at(&f.new, "FS25_A").exists());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_mod_filed_twice_is_named_and_not_called_unknown() {
+        let f = fx("twice2");
+        let r = add_zip(&f, "FS25_A", false);
+        std::fs::create_dir_all(f.old.join("Maps")).unwrap();
+        std::fs::write(f.old.join("Maps/FS25_A.zip"), b"PK\x03\x04 FS25_A").unwrap();
+        std::fs::write(zip_at(&f.old, "FS25_Stray"), b"PK").unwrap();
+        let rows = vec![r];
+        let unknown = unknown_mods(&f.old, &rows);
+        assert_eq!(unknown.len(), 2);
+        assert_eq!(filed_twice(&unknown, &rows), vec!["FS25_A.zip".to_string()]);
+        let out = run_with(&f, Op::Start, &|| false).unwrap().unwrap();
+        assert!(out.paused);
+        assert!(
+            out.errors
+                .iter()
+                .any(|e| e.contains("FS25_A.zip is filed twice") && e.contains("remove one copy")),
+            "{:?}",
+            out.errors
+        );
+        assert!(
+            out.errors
+                .iter()
+                .any(|e| e.starts_with("1 mod in your archive")),
+            "{:?}",
+            out.errors
+        );
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn store_archive_setting_clears_it_for_the_default() {
+        let f = fx("store");
+        store_archive_setting(&f.conn, &f.key, &f.mods, &f.new).unwrap();
+        assert_eq!(
+            setting(&f).as_deref(),
+            Some(f.new.to_string_lossy().as_ref())
+        );
+        store_archive_setting(&f.conn, &f.key, &f.mods, &f.mods.join("archive")).unwrap();
+        assert!(setting(&f).is_none());
         let _ = std::fs::remove_dir_all(&f.base);
     }
 

@@ -80,6 +80,12 @@ impl Layout {
         crate::modsroot::canonical_key(&self.archive)
             == crate::modsroot::canonical_key(&self.mods.join(ARCHIVE))
     }
+
+    /// A custom archive whose folder isn't there (its drive unplugged, or moved away). The
+    /// default archive is never "missing" — it simply may not exist yet.
+    pub fn archive_missing(&self) -> bool {
+        !self.archive_is_default() && !self.archive.is_dir()
+    }
 }
 
 /// Dropped inside a copy-fallback **directory** projection so we can later prove Silo
@@ -375,7 +381,7 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
 
 /// A plain file's `(size, mtime_ms)`, or `None` for a symlink/junction (identified structurally,
 /// not by provenance) or an unreadable path.
-fn file_stats(path: &Path) -> Option<(u64, i64)> {
+pub(crate) fn file_stats(path: &Path) -> Option<(u64, i64)> {
     let m = std::fs::symlink_metadata(path).ok()?;
     if m.file_type().is_symlink() {
         return None;
