@@ -79,17 +79,27 @@ pub fn resolve(
     }
 }
 
-/// The single trusted write root, published by the mods-root commands. `lib::allowed_roots`
-/// reads it, so every organize/install command follows the folder the user picked.
-static ACTIVE: RwLock<Option<PathBuf>> = RwLock::new(None);
+/// The trusted write targets, published by the mods-root/archive commands: the active layout
+/// and, while an archive move is unfinished, its other archive. `lib::allowed_roots` reads it,
+/// so every organize/install command follows the folder (and archive) the user picked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Active {
+    pub layout: crate::organize::Layout,
+    /// The other archive of an unfinished move (its destination; or its origin when cancelling).
+    pub move_to: Option<PathBuf>,
+    /// A move is copying right now (not paused) — Launch is blocked.
+    pub move_running: bool,
+}
 
-pub fn set_active(p: Option<PathBuf>) {
+static ACTIVE: RwLock<Option<Active>> = RwLock::new(None);
+
+pub fn set_active(a: Option<Active>) {
     if let Ok(mut g) = ACTIVE.write() {
-        *g = p;
+        *g = a;
     }
 }
 
-pub fn active() -> Option<PathBuf> {
+pub fn active() -> Option<Active> {
     ACTIVE.read().ok().and_then(|g| g.clone())
 }
 
@@ -481,11 +491,16 @@ mod tests {
     }
 
     #[test]
-    fn active_root_round_trips() {
-        set_active(Some(PathBuf::from("/x")));
-        assert_eq!(active(), Some(PathBuf::from("/x")));
+    fn active_layout_round_trips() {
+        let l = crate::organize::Layout::default_for(Path::new("/x"));
+        set_active(Some(Active {
+            layout: l.clone(),
+            move_to: None,
+            move_running: false,
+        }));
+        assert_eq!(active().map(|a| a.layout), Some(l));
         set_active(None);
-        assert_eq!(active(), None);
+        assert!(active().is_none());
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub mod net;
 pub mod organize;
 pub mod paths;
 pub mod provenance;
+pub mod relocate;
 pub mod savegame;
 pub mod scan;
 pub mod secrets;
@@ -83,10 +84,24 @@ async fn scan_mods(
 ) -> Result<scan::ScanResult, String> {
     let roots: Vec<PathBuf> = match roots {
         Some(v) if !v.is_empty() => v.into_iter().map(PathBuf::from).collect(),
-        _ => allowed_roots(),
+        _ => mods_roots(),
     };
     // The organize manifest is per folder; scope the reconcile to the folder being scanned.
     let scan_key = roots.first().map(|r| modsroot::canonical_key(r));
+    // Each mods folder with its archive(s): the active folder's chosen archive, and during a
+    // move both archives — the destination first, so it wins for mods already moved.
+    let active = modsroot::active();
+    let layouts: Vec<(PathBuf, Vec<PathBuf>)> = roots
+        .iter()
+        .map(|r| match &active {
+            Some(a) if modsroot::same_folder(&a.layout.mods, r) => {
+                let mut archives: Vec<PathBuf> = a.move_to.iter().cloned().collect();
+                archives.push(a.layout.archive.clone());
+                (r.clone(), archives)
+            }
+            _ => (r.clone(), vec![organize::Layout::default_for(r).archive]),
+        })
+        .collect();
 
     tauri::async_runtime::spawn_blocking(move || {
         // Warm cache: parsed entries persist between launches, keyed by
@@ -95,7 +110,7 @@ async fn scan_mods(
         let cache = db::load_cache(&conn);
 
         let emitter = app.clone();
-        let out = scan::scan_cached(roots, &cache, move |done, total| {
+        let out = scan::scan_layouts(layouts, &cache, move |done, total| {
             let _ = emitter.emit("scan:progress", Progress { done, total });
         });
 
@@ -440,12 +455,13 @@ async fn download_update(
     path: String,
     asset_url: String,
 ) -> Result<(), String> {
+    ensure_no_move()?;
     // No DB/token needed: a public release asset is downloaded unauthenticated.
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let dest = std::path::Path::new(&path);
         // Defence against a compromised webview naming an arbitrary write target: the path
         // must contain no `..` AND its parent must resolve inside a real mods root (the flat
-        // root or its `archive/`). An absolute path outside the mods folder — which
+        // root or its archive, wherever that lives). An absolute path outside them — which
         // `no_traversal` alone would pass — is rejected here.
         paths::no_traversal(dest)?;
         paths::ensure_write_under(&allowed_roots(), dest)?;
@@ -622,6 +638,7 @@ async fn install_remote_mod(
     source: Option<String>,
     root: Option<String>,
 ) -> Result<String, String> {
+    ensure_no_move()?;
     let base = siloapi_base(&app)?;
     let root = primary_root(root)?;
     let emitter = app.clone();
@@ -847,23 +864,65 @@ fn set_override(app: tauri::AppHandle, row: db::CategoryOverride) -> Result<(), 
 
 // ── Organize / projection engine (writes to the game folder) ──
 
-/// The mod roots Silo is allowed to write to: the folder the mods-root commands resolved
-/// (user choice > FS25 override > default, see `modsroot`), or — before they have run — the
-/// auto-detected default. This is the single source of truth for "where may we write";
-/// Rust, not the webview, is the authority.
+/// The folders Silo is allowed to write to: the active layout the mods-root commands resolved
+/// (user choice > FS25 override > default, see `modsroot`) — its mods folder, its archive and,
+/// during an archive move, the other archive — or, before they have run, the auto-detected
+/// default. This is the single source of truth for "where may we write"; Rust, not the
+/// webview, is the authority.
 fn allowed_roots() -> Vec<PathBuf> {
     match modsroot::active() {
-        Some(p) => vec![p],
+        Some(a) => {
+            let mut v = vec![a.layout.mods, a.layout.archive];
+            v.extend(a.move_to);
+            v
+        }
         None => fsgame::default_mods_paths(),
     }
 }
 
-/// Resolve a frontend-supplied root to a TRUSTED one. Empty → the first detected root.
-/// Otherwise the path must canonicalize to one of the allowed roots, or it's rejected —
-/// so a compromised webview can't redirect an install/organize into an arbitrary directory.
-/// Returns the matched allowed root (the trusted path), never the raw frontend string.
+/// The mods folder(s) only — never an archive. Frontend-supplied roots and default scans
+/// resolve against this.
+fn mods_roots() -> Vec<PathBuf> {
+    match modsroot::active() {
+        Some(a) => vec![a.layout.mods],
+        None => fsgame::default_mods_paths(),
+    }
+}
+
+/// The active layout (mods folder + archive), validated against a frontend-supplied root.
+fn primary_layout(root: Option<String>) -> Result<organize::Layout, String> {
+    let mods = primary_root(root)?;
+    Ok(match modsroot::active() {
+        Some(a) if modsroot::same_folder(&a.layout.mods, &mods) => a.layout,
+        _ => organize::Layout::default_for(&mods),
+    })
+}
+
+/// Refuse writes to the library while an archive move is unfinished.
+fn ensure_no_move() -> Result<(), String> {
+    match modsroot::active() {
+        Some(a) if a.move_to.is_some() => Err("Finish or cancel the archive move first.".into()),
+        _ => Ok(()),
+    }
+}
+
+/// Refuse organize writes while a custom archive's drive is missing (nothing is deleted; the
+/// banner offers Retry / Choose another).
+fn ensure_archive_available() -> Result<(), String> {
+    match modsroot::active() {
+        Some(a) if !a.layout.archive_is_default() && !a.layout.archive.is_dir() => Err(
+            "Your library archive isn't available — reconnect its drive or choose another.".into(),
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Resolve a frontend-supplied mods folder to a TRUSTED one. Empty → the first detected
+/// folder. Otherwise the path must canonicalize to one of the allowed mods folders (never an
+/// archive), or it's rejected — so a compromised webview can't redirect an install/organize
+/// into an arbitrary directory. Returns the matched trusted path, never the raw frontend string.
 fn primary_root(root: Option<String>) -> Result<PathBuf, String> {
-    let allowed = allowed_roots();
+    let allowed = mods_roots();
     match root {
         Some(r) if !r.is_empty() => {
             let want = PathBuf::from(&r)
@@ -901,14 +960,16 @@ async fn apply_organize(
     root: Option<String>,
     mods: Vec<organize::ModInput>,
 ) -> Result<organize::Report, String> {
+    ensure_no_move()?;
+    ensure_archive_available()?;
     let db = db_path(&app)?;
-    let root = primary_root(root)?;
+    let layout = primary_layout(root)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<organize::Report, String> {
         let conn = db::open(&db)?;
         Ok(organize::apply_organize(
             &conn,
-            &organize::Layout::default_for(&root),
-            &root,
+            &layout,
+            &layout.mods,
             &mods,
         ))
     })
@@ -924,11 +985,13 @@ async fn adopt_foreign_file(
     root: Option<String>,
     file_name: String,
 ) -> Result<(), String> {
+    ensure_no_move()?;
+    ensure_archive_available()?;
     let db = db_path(&app)?;
-    let root = primary_root(root)?;
+    let layout = primary_layout(root)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let conn = db::open(&db)?;
-        organize::adopt_foreign(&conn, &organize::Layout::default_for(&root), &file_name)
+        organize::adopt_foreign(&conn, &layout, &file_name)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -942,11 +1005,13 @@ async fn restore_foreign_file(
     root: Option<String>,
     file_name: String,
 ) -> Result<(), String> {
+    ensure_no_move()?;
+    ensure_archive_available()?;
     let db = db_path(&app)?;
-    let root = primary_root(root)?;
+    let layout = primary_layout(root)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let conn = db::open(&db)?;
-        organize::restore_projection(&conn, &organize::Layout::default_for(&root), &file_name)
+        organize::restore_projection(&conn, &layout, &file_name)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -958,16 +1023,14 @@ async fn set_active(
     root: Option<String>,
     active: Vec<String>,
 ) -> Result<organize::Report, String> {
+    ensure_no_move()?;
+    ensure_archive_available()?;
     let db = db_path(&app)?;
-    let root = primary_root(root)?;
+    let layout = primary_layout(root)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<organize::Report, String> {
         let conn = db::open(&db)?;
         let set: HashSet<String> = active.into_iter().collect();
-        Ok(organize::set_active(
-            &conn,
-            &organize::Layout::default_for(&root),
-            &set,
-        ))
+        Ok(organize::set_active(&conn, &layout, &set))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -991,14 +1054,16 @@ async fn relink_projections(
     app: tauri::AppHandle,
     root: Option<String>,
 ) -> Result<organize::RelinkReport, String> {
+    ensure_no_move()?;
+    ensure_archive_available()?;
     let db = db_path(&app)?;
-    let root = primary_root(root)?;
+    let layout = primary_layout(root)?;
     let emitter = app.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<organize::RelinkReport, String> {
         let conn = db::open(&db)?;
         Ok(organize::relink_projections(
             &conn,
-            &organize::Layout::default_for(&root),
+            &layout,
             |done, total| {
                 let _ = emitter.emit("relink-progress", (done, total));
             },
@@ -1010,14 +1075,13 @@ async fn relink_projections(
 
 #[tauri::command]
 async fn flatten(app: tauri::AppHandle, root: Option<String>) -> Result<organize::Report, String> {
+    ensure_no_move()?;
+    ensure_archive_available()?;
     let db = db_path(&app)?;
-    let root = primary_root(root)?;
+    let layout = primary_layout(root)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<organize::Report, String> {
         let conn = db::open(&db)?;
-        Ok(organize::flatten(
-            &conn,
-            &organize::Layout::default_for(&root),
-        ))
+        Ok(organize::flatten(&conn, &layout))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1026,7 +1090,7 @@ async fn flatten(app: tauri::AppHandle, root: Option<String>) -> Result<organize
 #[tauri::command]
 fn get_organized(app: tauri::AppHandle) -> Result<Vec<db::OrganizedRow>, String> {
     let conn = db::open(&db_path(&app)?)?;
-    let key = allowed_roots()
+    let key = mods_roots()
         .first()
         .map(|r| modsroot::canonical_key(r))
         .unwrap_or_default();
@@ -1081,7 +1145,35 @@ fn loose_zip_count(dir: &std::path::Path) -> i64 {
         .unwrap_or(0)
 }
 
-/// Resolve the live mods folder, publish it as the trusted write root, and describe it.
+/// The trusted layout for mods folder `mods`: during an unfinished move its archive is where
+/// the move started (the other one is `move_to`); otherwise the stored custom archive, or the
+/// default. A stored archive that fails `Layout::new`'s checks is ignored (default used).
+fn resolve_active(conn: &rusqlite::Connection, mods: &std::path::Path) -> modsroot::Active {
+    let key = modsroot::canonical_key(mods);
+    let marker = relocate::load_marker(conn, &key);
+    let stored = match &marker {
+        Some(m) => Some(m.from.clone()),
+        None => db::get_app_setting(conn, &relocate::archive_setting_key(&key)).map(PathBuf::from),
+    };
+    let layout = match stored {
+        Some(archive) => organize::Layout::new(mods.to_path_buf(), archive).unwrap_or_else(|e| {
+            eprintln!(
+                "[Silo] ignoring the library archive stored for {}: {e}",
+                mods.display()
+            );
+            organize::Layout::default_for(mods)
+        }),
+        None => organize::Layout::default_for(mods),
+    };
+    modsroot::Active {
+        layout,
+        move_to: marker.map(|m| m.to),
+        move_running: false,
+    }
+}
+
+/// Resolve the live mods folder, publish it (and its archive) as the trusted write roots, and
+/// describe it.
 fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
     let loc = fsgame::locate();
     let default = loc.as_ref().map(|l| l.user_dir.join("mods"));
@@ -1118,7 +1210,11 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
     let mods_folder_missing = !available
         && r.source == modsroot::Source::Default
         && loc.as_ref().map(|l| l.user_dir.is_dir()).unwrap_or(false);
-    modsroot::set_active(if available { r.path.clone() } else { None });
+    modsroot::set_active(if available {
+        r.path.as_deref().map(|p| resolve_active(conn, p))
+    } else {
+        None
+    });
 
     let current_key = r.path.as_ref().map(|p| modsroot::canonical_key(p));
     let mut paths: Vec<PathBuf> =
@@ -1183,6 +1279,7 @@ async fn mods_root_status(app: tauri::AppHandle) -> Result<ModsRootStatus, Strin
 /// Use `path` as the mods folder (remembered, added to the known list). Never moves files.
 #[tauri::command]
 async fn set_mods_root(app: tauri::AppHandle, path: String) -> Result<ModsRootStatus, String> {
+    ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         modsroot::validate_folder(std::path::Path::new(&path))?;
@@ -1202,6 +1299,7 @@ async fn set_mods_root(app: tauri::AppHandle, path: String) -> Result<ModsRootSt
 /// Forget the user's choice and follow the folder FS25 reads.
 #[tauri::command]
 async fn clear_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus, String> {
+    ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db::open(&db)?;
@@ -1215,9 +1313,12 @@ async fn clear_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus, String
 /// Point FS25 at the folder Silo currently manages.
 #[tauri::command]
 async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus, String> {
+    ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let folder = modsroot::active().ok_or_else(|| "No mods folder selected".to_string())?;
+        let folder = modsroot::active()
+            .map(|a| a.layout.mods)
+            .ok_or_else(|| "No mods folder selected".to_string())?;
         point_game_at(&folder)?;
         let conn = db::open(&db)?;
         Ok(compute_mods_root_status(&conn))
@@ -1340,6 +1441,9 @@ async fn detect_game() -> Result<Option<gamelaunch::GameInfo>, String> {
 
 #[tauri::command]
 async fn launch_game() -> Result<(), String> {
+    if modsroot::active().map(|a| a.move_running).unwrap_or(false) {
+        return Err("Silo is moving your library archive — pause the move to play.".into());
+    }
     tauri::async_runtime::spawn_blocking(gamelaunch::launch)
         .await
         .map_err(|e| e.to_string())?
@@ -1371,6 +1475,7 @@ fn user_dir_path() -> Option<String> {
 /// Returns the created zip filename; the frontend rescans to pick it up.
 #[tauri::command]
 async fn generate_bridge(spec: bridge::BridgeSpec, root: Option<String>) -> Result<String, String> {
+    ensure_no_move()?;
     let root = primary_root(root)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let filename = format!("{}.zip", spec.tech_name);
@@ -1947,6 +2052,7 @@ async fn collection_apply(
     installed: Vec<LocalMod>,
     root: Option<String>,
 ) -> Result<ApplyReport, String> {
+    ensure_no_move()?;
     let base = siloapi_base(&app)?;
     let db = db_path(&app)?;
     let root = primary_root(root)?;
@@ -2293,13 +2399,10 @@ async fn detect_foreign_files(
     root: Option<String>,
 ) -> Result<Vec<organize::ForeignFile>, String> {
     let db = db_path(&app)?;
-    let root = primary_root(root)?;
+    let layout = primary_layout(root)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<organize::ForeignFile>, String> {
         let conn = db::open(&db)?;
-        Ok(organize::detect_foreign_projections(
-            &conn,
-            &organize::Layout::default_for(&root),
-        ))
+        Ok(organize::detect_foreign_projections(&conn, &layout))
     })
     .await
     .map_err(|e| e.to_string())?
