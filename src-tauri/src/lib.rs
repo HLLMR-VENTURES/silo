@@ -588,6 +588,41 @@ fn config_write_refusal(game_running: bool) -> Result<(), String> {
     }
 }
 
+/// FS25's `modsDirectoryOverride` decides the active mods folder when the user hasn't chosen
+/// one in Silo, so only `point_game_at` (Settings) may change it, never a config edit.
+const OVERRIDE_IS_SILOS: &str = "Change the mods folder in Settings.";
+
+/// Pure: refuse an edit of gameSettings.xml that changes the mods-folder override (its folder
+/// or whether it's on, or adds or removes it). Every other edit is allowed.
+fn override_edit_refusal(old: &str, new: &str) -> Result<(), String> {
+    if modsroot::read_override(old) == modsroot::read_override(new) {
+        Ok(())
+    } else {
+        Err(OVERRIDE_IS_SILOS.into())
+    }
+}
+
+/// When a config write targets FS25's gameSettings.xml, refuse it if it would change the
+/// mods-folder override. `old` is the current text when the caller already read it; an
+/// unreadable file counts as one without the override.
+fn ensure_override_kept(
+    user: &std::path::Path,
+    target: &std::path::Path,
+    old: Option<&str>,
+    new: &str,
+) -> Result<(), String> {
+    if !modsroot::same_folder(target, &user.join("gameSettings.xml")) {
+        return Ok(());
+    }
+    match old {
+        Some(old) => override_edit_refusal(old, new),
+        None => {
+            let old = paths::guarded_xml_read(&[user.to_path_buf()], target).unwrap_or_default();
+            override_edit_refusal(&old, new)
+        }
+    }
+}
+
 const UPDATE_NOT_A_LIBRARY_MOD: &str = "Silo only updates mods in your library.";
 
 /// `download_update` may replace only a mod zip directly in the mods folder or filed in an
@@ -3994,6 +4029,7 @@ async fn set_config(path: String, edits: Vec<xmlconfig::Edit>) -> Result<(), Str
         let p = std::path::Path::new(&path);
         let xml = paths::guarded_xml_read(&roots, p)?;
         let out = xmlconfig::set_values(&xml, &edits)?;
+        ensure_override_kept(&roots[0], p, Some(&xml), &out)?;
         paths::guarded_xml_write(&roots, p, &out)
     })
     .await
@@ -4032,6 +4068,7 @@ async fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Res
         let p = std::path::Path::new(&path);
         let raw = paths::guarded_xml_read(&roots, p)?;
         let updated = settings_form::apply_edits(&raw, &edits)?;
+        ensure_override_kept(&roots[0], p, Some(&raw), &updated)?;
         paths::guarded_xml_write(&roots, p, &updated)
     })
     .await
@@ -4042,7 +4079,9 @@ async fn save_mod_settings_raw(path: String, content: String) -> Result<(), Stri
     off_main(move || {
         config_write_refusal(gamelaunch::fs25_running())?;
         let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
-        paths::guarded_xml_write(&[user], std::path::Path::new(&path), &content)
+        let p = std::path::Path::new(&path);
+        ensure_override_kept(&user, p, None, &content)?;
+        paths::guarded_xml_write(&[user], p, &content)
     })
     .await
 }
@@ -4791,6 +4830,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("mods")).unwrap();
         base
+    }
+
+    fn game_settings(active: &str, dir: &str, port: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\" ?>\n<gameSettings \
+             revision=\"15\">\n    <modsDirectoryOverride active=\"{active}\" \
+             directory=\"{dir}\"/>\n    <defaultMultiplayerPort>{port}</defaultMultiplayerPort>\n\
+             </gameSettings>\n"
+        )
+    }
+
+    #[test]
+    fn a_config_edit_can_not_move_the_mods_folder() {
+        let old = game_settings("false", "C:/Temp", "10823");
+        assert_eq!(
+            super::override_edit_refusal(&old, &game_settings("false", "D:/Elsewhere", "10823")),
+            Err(super::OVERRIDE_IS_SILOS.to_string()),
+            "changed directory"
+        );
+        assert_eq!(
+            super::override_edit_refusal(&old, &game_settings("true", "C:/Temp", "10823")),
+            Err(super::OVERRIDE_IS_SILOS.to_string()),
+            "changed active"
+        );
+        assert_eq!(
+            super::override_edit_refusal(&old, &game_settings("false", "C:/Temp", "10900")),
+            Ok(()),
+            "an unrelated edit"
+        );
+        let plain =
+            "<gameSettings><defaultMultiplayerPort>1</defaultMultiplayerPort></gameSettings>";
+        let plain2 =
+            "<gameSettings><defaultMultiplayerPort>2</defaultMultiplayerPort></gameSettings>";
+        assert_eq!(
+            super::override_edit_refusal(plain, plain2),
+            Ok(()),
+            "no override element"
+        );
+        assert_eq!(
+            super::override_edit_refusal(plain, &old),
+            Err(super::OVERRIDE_IS_SILOS.to_string()),
+            "adding the element"
+        );
+    }
+
+    #[test]
+    fn only_game_settings_writes_are_checked_for_the_override() {
+        let base = temp_base("override_kept");
+        let gs = base.join("gameSettings.xml");
+        std::fs::write(&gs, game_settings("false", "C:/Temp", "1")).unwrap();
+        let moved = game_settings("true", "D:/Elsewhere", "1");
+        assert_eq!(
+            super::ensure_override_kept(&base, &gs, None, &moved),
+            Err(super::OVERRIDE_IS_SILOS.to_string()),
+            "the file is read when the caller hasn't"
+        );
+        let other = base.join("modSettings").join("FS25_X.xml");
+        assert_eq!(
+            super::ensure_override_kept(&base, &other, None, &moved),
+            Ok(())
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

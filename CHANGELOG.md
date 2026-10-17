@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Silo decides where it writes.** Changing the mods folder or the library archive now uses a
   folder picker Silo opens itself, and Silo only switches to a folder chosen there or one it
-  already knows. (#PR)
+  already knows. Editing game settings can't change FS25's mods folder either. (#PR)
 
 - **Updates only replace mods in your library.** An update can only swap a mod's zip in your
   mods folder or library archive, never any other file there. (#PR)
