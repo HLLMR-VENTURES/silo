@@ -252,12 +252,15 @@
 
   async function doApply() {
     if (!importUrl.trim() || applyBusy) return;
+    // Only apply what was previewed: apply refuses if the collection changed since.
+    if (!plan) return;
+    const fingerprint = plan.fingerprint;
     applyBusy = true;
     importErr = null;
     applyProgress = null;
     unlisten = await onCollectionProgress((p) => (applyProgress = p));
     try {
-      applyReport = await collectionApply(importUrl.trim(), installed);
+      applyReport = await collectionApply(importUrl.trim(), installed, fingerprint);
       onImported?.();
     } catch (e) {
       importErr = String(e);

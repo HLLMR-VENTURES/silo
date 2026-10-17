@@ -19,6 +19,7 @@ pub mod mpsync;
 pub mod net;
 pub mod organize;
 pub mod paths;
+mod picked;
 pub mod provenance;
 pub mod relocate;
 pub mod savegame;
@@ -587,6 +588,82 @@ fn config_write_refusal(game_running: bool) -> Result<(), String> {
     }
 }
 
+/// FS25's `modsDirectoryOverride` decides the active mods folder when the user hasn't chosen
+/// one in Silo, so only `point_game_at` (Settings) may change it, never a config edit.
+const OVERRIDE_IS_SILOS: &str = "Change the mods folder in Settings.";
+
+/// Pure: refuse an edit of gameSettings.xml that changes the mods-folder override (its folder
+/// or whether it's on, or adds or removes it). Every other edit is allowed.
+fn override_edit_refusal(old: &str, new: &str) -> Result<(), String> {
+    if modsroot::read_override(old) == modsroot::read_override(new) {
+        Ok(())
+    } else {
+        Err(OVERRIDE_IS_SILOS.into())
+    }
+}
+
+/// When a config write targets FS25's gameSettings.xml, refuse it if it would change the
+/// mods-folder override. `old` is the current text when the caller already read it; an
+/// unreadable file counts as one without the override.
+fn ensure_override_kept(
+    user: &std::path::Path,
+    target: &std::path::Path,
+    old: Option<&str>,
+    new: &str,
+) -> Result<(), String> {
+    if !modsroot::same_folder(target, &user.join("gameSettings.xml")) {
+        return Ok(());
+    }
+    match old {
+        Some(old) => override_edit_refusal(old, new),
+        None => {
+            let old = paths::guarded_xml_read(&[user.to_path_buf()], target).unwrap_or_default();
+            override_edit_refusal(&old, new)
+        }
+    }
+}
+
+const UPDATE_NOT_A_LIBRARY_MOD: &str = "Silo only updates mods in your library.";
+
+/// `download_update` may replace only a mod zip directly in the mods folder or filed in an
+/// archive category folder; never a backup or any other file under those folders. The folder
+/// is resolved once to where it really is, so a category that is a link (or junction) into
+/// another folder, e.g. `mods/backups`, is judged by where it leads.
+fn update_target_problem(dest: &std::path::Path, layout: &organize::Layout) -> Option<String> {
+    let refused = || Some(UPDATE_NOT_A_LIBRARY_MOD.to_string());
+    let is_zip = dest
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+    let Some(parent) = dest.parent().and_then(|p| std::fs::canonicalize(p).ok()) else {
+        return refused();
+    };
+    let in_mods = modsroot::same_folder(&parent, &layout.mods);
+    let in_category = parent
+        .parent()
+        .is_some_and(|a| modsroot::same_folder(a, &layout.archive));
+    if is_zip && (in_mods || in_category) {
+        None
+    } else {
+        refused()
+    }
+}
+
+/// What `download_update` checks again once it holds the library lock, since things may have
+/// changed while it downloaded; returns the layout as it is now. An archive move started (and
+/// paused) meanwhile comes first: the swap must not replace a file the move already copied.
+fn update_recheck(dest: &std::path::Path) -> Result<organize::Layout, String> {
+    ensure_no_move()?;
+    paths::ensure_write_under(&allowed_roots(), dest)?;
+    let layout = primary_layout(None)?;
+    if let Some(p) = update_target_problem(dest, &layout) {
+        return Err(p);
+    }
+    if gamelaunch::fs25_running() {
+        return Err(UPDATE_GAME_RUNNING.into());
+    }
+    Ok(layout)
+}
+
 /// Update an installed mod from a GitHub release asset (`update` module): download beside it
 /// without the library lock, then swap it in under the lock, keeping the previous version in
 /// `backups/`. Refused while FS25 runs (its files may be open).
@@ -609,17 +686,17 @@ async fn download_update(
         // `no_traversal` alone would pass — is rejected here.
         paths::no_traversal(&dest)?;
         paths::ensure_write_under(&allowed_roots(), &dest)?;
+        // Only a mod zip in the library, never a backup or another file under its folders.
+        let layout = primary_layout(None)?;
+        if let Some(p) = update_target_problem(&dest, &layout) {
+            return Err(p);
+        }
         // Public release assets don't need auth, and a download must never carry the user's
         // GitHub credential — keep the token for explicit API actions only.
         let part = update::fetch(&asset_url, &dest)?;
         // A finished download waits out a busy spell instead of being thrown away.
         let _write = library_write_within(PLACE_WAIT)?;
-        // Things may have changed while downloading: check again under the lock.
-        paths::ensure_write_under(&allowed_roots(), &dest)?;
-        if gamelaunch::fs25_running() {
-            return Err(UPDATE_GAME_RUNNING.into());
-        }
-        let layout = primary_layout(None)?;
+        let layout = update_recheck(&dest)?;
         let mut policy = organize::LinkPolicy::new(&layout);
         // Finish an earlier, interrupted update first (the user asked: every step is retried),
         // so it doesn't block this one; if it can't be finished, say exactly why.
@@ -1874,14 +1951,31 @@ async fn set_mods_root(app: tauri::AppHandle, path: String) -> Result<ModsRootSt
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        modsroot::validate_folder(std::path::Path::new(&path))?;
         let conn = db::open(&db)?;
+        let p = std::path::Path::new(&path);
+        let known: Vec<PathBuf> =
+            modsroot::parse_known(db::get_app_setting(&conn, modsroot::KNOWN_KEY).as_deref())
+                .into_iter()
+                .map(PathBuf::from)
+                .collect();
+        let default = fsgame::user_dir().map(|d| d.join("mods"));
+        if !mods_root_choice_allowed(
+            p,
+            picked::allows(picked::Purpose::ModsFolder, p),
+            &known,
+            default.as_deref(),
+        ) {
+            return Err(picked::NOT_PICKED.into());
+        }
+        modsroot::validate_folder(p)?;
         let known = modsroot::add_known(
             db::get_app_setting(&conn, modsroot::KNOWN_KEY).as_deref(),
             &path,
         );
         db::set_app_setting(&conn, modsroot::KNOWN_KEY, Some(&known))?;
         db::set_app_setting(&conn, modsroot::CHOICE_KEY, Some(&path))?;
+        // Used: a later call can't replay it (the folder is in the known list now anyway).
+        picked::forget(picked::Purpose::ModsFolder);
         Ok(compute_mods_root_status(&conn))
     })
     .await
@@ -1953,6 +2047,83 @@ async fn folder_looks_empty(path: String) -> Result<bool, String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Show the native folder picker and remember the choice for `purpose` (see `picked`).
+#[tauri::command]
+async fn pick_folder(
+    window: tauri::Window,
+    purpose: picked::Purpose,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    // `blocking_pick_folder` posts the dialog to the main thread and waits for the answer, so
+    // it must never run there; `off_main` runs it on the blocking pool.
+    off_main(move || {
+        let builder = window.dialog().file();
+        // Modal to Silo's window where the platform supports it (as the JS dialog does).
+        #[cfg(any(windows, target_os = "macos"))]
+        let builder = builder.set_parent(&window);
+        let Some(fp) = builder.blocking_pick_folder() else {
+            return Ok(None);
+        };
+        let path = fp.into_path().map_err(|e| e.to_string())?;
+        picked::remember(purpose, &path);
+        Ok(Some(path.to_string_lossy().into_owned()))
+    })
+    .await
+}
+
+/// The mods folder may change to a folder picked in Silo's picker, one Silo already knows (the
+/// known list, which only `set_mods_root` adds to), or FS25's default folder.
+fn mods_root_choice_allowed(
+    path: &std::path::Path,
+    picked: bool,
+    known: &[PathBuf],
+    default: Option<&std::path::Path>,
+) -> bool {
+    picked
+        || default.is_some_and(|d| modsroot::same_folder(d, path))
+        || known.iter().any(|k| modsroot::same_folder(k, path))
+}
+
+const FOLDER_MISSING: &str = "That folder isn't there right now.";
+
+/// The folders Settings can open, named by the webview, resolved by Rust.
+#[derive(serde::Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+enum KnownFolder {
+    ModsFolder,
+    Archive,
+    GameInstall,
+}
+
+fn existing_dir(p: Option<PathBuf>) -> Result<PathBuf, String> {
+    p.filter(|p| p.is_dir())
+        .ok_or_else(|| FOLDER_MISSING.to_string())
+}
+
+fn known_folder_path(which: KnownFolder) -> Result<PathBuf, String> {
+    let active = modsroot::active();
+    existing_dir(match which {
+        KnownFolder::ModsFolder => active.map(|a| a.layout.mods),
+        KnownFolder::Archive => active.map(|a| a.layout.archive),
+        KnownFolder::GameInstall => gamelaunch::detect().map(|g| PathBuf::from(g.install_dir)),
+    })
+}
+
+/// Open one of Silo's folders in the file manager. Rust picks the path; the webview only names
+/// which folder, so it can't open (or run) anything else.
+#[tauri::command]
+async fn open_known_folder(app: tauri::AppHandle, which: KnownFolder) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    // Resolving the game folder reads Steam's files, and the shell call can stall: both off main.
+    off_main(move || {
+        let path = known_folder_path(which)?;
+        app.opener()
+            .open_path(path.to_string_lossy(), None::<&str>)
+            .map_err(|e| format!("Couldn't open {}: {e}", path.display()))
+    })
+    .await
 }
 
 // ── Library archive location (#166) ──
@@ -2441,7 +2612,13 @@ async fn archive_move_start(
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let new = modsroot::real_folder(std::path::Path::new(&path))?;
-        start_move(&app, &db, new, false)
+        if !picked::allows(picked::Purpose::Archive, &new) {
+            return Err(picked::NOT_PICKED.into());
+        }
+        let moved = start_move(&app, &db, new, false)?;
+        // Used: a later call can't replay it. (A refused start keeps it for "use as it is".)
+        picked::forget(picked::Purpose::Archive);
+        Ok(moved)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2571,7 +2748,13 @@ async fn archive_repoint(app: tauri::AppHandle, path: Option<String>) -> Result<
             return Err(why);
         }
         let new = match &path {
-            Some(p) => modsroot::real_folder(std::path::Path::new(p))?,
+            Some(p) => {
+                let new = modsroot::real_folder(std::path::Path::new(p))?;
+                if !picked::allows(picked::Purpose::Archive, &new) {
+                    return Err(picked::NOT_PICKED.into());
+                }
+                new
+            }
             None => organize::Layout::default_for(&modsroot::real_folder(&layout.mods)?).archive,
         };
         let problems = fence_problems(&layout, &new, &fences(&conn, &layout, app_data.as_deref()));
@@ -2583,6 +2766,9 @@ async fn archive_repoint(app: tauri::AppHandle, path: Option<String>) -> Result<
             modsroot::validate_folder(&new)?;
         }
         relocate::store_archive_setting(&conn, &key, &layout.mods, &new)?;
+        if path.is_some() {
+            picked::forget(picked::Purpose::Archive);
+        }
         eprintln!(
             "[Silo] re-pointed the library archive {} -> {} (nothing moved)",
             layout.archive.display(),
@@ -3170,6 +3356,15 @@ fn read_collection_json(
     url_or_id: &str,
     token: Option<&str>,
 ) -> Result<collection::Collection, String> {
+    read_collection_raw(url_or_id, token).map(|(c, _)| c)
+}
+
+/// `read_collection_json`, plus the file's exact text (for `collection::fingerprint`, so apply
+/// can refuse a collection that changed after its preview).
+fn read_collection_raw(
+    url_or_id: &str,
+    token: Option<&str>,
+) -> Result<(collection::Collection, String), String> {
     let reference = collection::parse_collection_ref(url_or_id)
         .ok_or_else(|| "That doesn't look like a GitHub gist or repo link".to_string())?;
     let json = match &reference {
@@ -3180,7 +3375,39 @@ fn read_collection_json(
             github::read_repo_file(owner, repo, collection::FILE_NAME, token)
         }
     }?;
-    collection::parse(&json)
+    Ok((collection::parse(&json)?, json))
+}
+
+/// Resolve every mod of a collection by techName with one catalog lookup, and fingerprint the
+/// file together with that result. Preview and apply both go through here, so apply installs
+/// exactly what the preview showed or refuses (`COLLECTION_CHANGED`).
+fn resolve_collection(
+    base: &str,
+    coll: &collection::Collection,
+    json: &str,
+) -> (Vec<collection::Target>, String) {
+    let names: Vec<String> = coll.mods.iter().map(|m| m.tech_name.clone()).collect();
+    let hits = siloapi::lookup(base, &names).unwrap_or_default();
+    let targets = collection::resolve_targets(&coll.mods, &catalog_matches(&hits));
+    let fingerprint = collection::fingerprint(json, &targets);
+    (targets, fingerprint)
+}
+
+/// The catalog lookup keyed by techName, for `collection::resolve_targets`.
+fn catalog_matches(
+    hits: &[siloapi::LookupResult],
+) -> std::collections::HashMap<String, collection::CatalogMatch> {
+    hits.iter()
+        .filter_map(|r| {
+            Some((
+                r.tech_name.clone()?,
+                collection::CatalogMatch {
+                    id: r.id.clone(),
+                    download_source: r.download.as_ref().map(|d| d.source.clone()),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// A collection the user has published, for the "Your collections" management list.
@@ -3327,6 +3554,9 @@ struct ImportPlan {
     already_present: Vec<PlanRow>,
     version_drift: Vec<PlanRow>,
     unresolved: Vec<PlanRow>,
+    /// Hash of the collection file and its catalog matches as previewed (`resolve_collection`);
+    /// `collection_apply` refuses if either changed.
+    fingerprint: String,
 }
 
 /// Fetch a shared collection by gist link/id, parse it, and bucket every mod against the
@@ -3343,20 +3573,16 @@ async fn collection_import_preview(
     tauri::async_runtime::spawn_blocking(move || -> Result<ImportPlan, String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token");
-        let coll = read_collection_json(&url_or_id, token.as_deref())?;
+        let (coll, json) = read_collection_raw(&url_or_id, token.as_deref())?;
 
         let installed_by: std::collections::HashMap<&str, Option<&str>> = installed
             .iter()
             .map(|m| (m.tech_name.as_str(), m.version.as_deref()))
             .collect();
 
-        // One lookup resolves catalog presence + best installable source for every mod.
-        let names: Vec<String> = coll.mods.iter().map(|m| m.tech_name.clone()).collect();
-        let hits = siloapi::lookup(&base, &names).unwrap_or_default();
-        let by_tech: std::collections::HashMap<&str, &siloapi::LookupResult> = hits
-            .iter()
-            .filter_map(|r| r.tech_name.as_deref().map(|t| (t, r)))
-            .collect();
+        // One lookup resolves catalog presence + best installable source for every mod, by
+        // techName, exactly as apply resolves them.
+        let (targets, fingerprint) = resolve_collection(&base, &coll, &json);
 
         let mut plan = ImportPlan {
             name: coll.name.clone(),
@@ -3367,18 +3593,14 @@ async fn collection_import_preview(
             already_present: Vec::new(),
             version_drift: Vec::new(),
             unresolved: Vec::new(),
+            fingerprint,
         };
 
-        for m in &coll.mods {
-            let hit = by_tech.get(m.tech_name.as_str());
-            let installable_source = hit
-                .and_then(|r| r.download.as_ref())
-                .map(|d| d.source.clone())
-                .or_else(|| m.source.clone());
+        for (m, t) in coll.mods.iter().zip(&targets) {
             let row = |installed_version: Option<String>| PlanRow {
                 tech_name: m.tech_name.clone(),
                 version: m.version.clone(),
-                source: installable_source.clone(),
+                source: t.display_source.clone(),
                 installed_version,
             };
 
@@ -3395,10 +3617,9 @@ async fn collection_import_preview(
                     }
                 }
                 None => {
-                    let installable = hit.is_some_and(|r| r.download.is_some());
-                    if installable {
+                    if t.download_source.is_some() {
                         plan.will_install.push(row(None));
-                    } else if hit.is_some() {
+                    } else if t.catalog_id.is_some() {
                         // In the catalog, but no direct download (ModHub gates it).
                         plan.open_page.push(row(None));
                     } else {
@@ -3464,6 +3685,7 @@ async fn collection_apply(
     app: tauri::AppHandle,
     url_or_id: String,
     installed: Vec<LocalMod>,
+    fingerprint: String,
     root: Option<String>,
 ) -> Result<ApplyReport, String> {
     ensure_no_move()?;
@@ -3474,18 +3696,19 @@ async fn collection_apply(
     tauri::async_runtime::spawn_blocking(move || -> Result<ApplyReport, String> {
         let mut conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token");
-        let coll = read_collection_json(&url_or_id, token.as_deref())?;
+        let (coll, json) = read_collection_raw(&url_or_id, token.as_deref())?;
+        // Resolve every mod by techName, exactly as the preview did. A collection's own
+        // `catalog_id` and source hint never decide what downloads. The fingerprint covers the
+        // file and this resolution, so a changed gist or catalog answer is refused.
+        let (targets, fp) = resolve_collection(&base, &coll, &json);
+        const COLLECTION_CHANGED: &str =
+            "This collection changed since you previewed it. Preview it again before installing.";
+        if fp != fingerprint {
+            return Err(COLLECTION_CHANGED.into());
+        }
 
         let have: std::collections::HashSet<&str> =
             installed.iter().map(|m| m.tech_name.as_str()).collect();
-
-        // Fill catalog ids for anything the collection didn't carry one for.
-        let names: Vec<String> = coll.mods.iter().map(|m| m.tech_name.clone()).collect();
-        let hits = siloapi::lookup(&base, &names).unwrap_or_default();
-        let id_by_tech: std::collections::HashMap<&str, &str> = hits
-            .iter()
-            .filter_map(|r| r.tech_name.as_deref().map(|t| (t, r.id.as_str())))
-            .collect();
 
         let total = coll.mods.len();
         let mut rows: Vec<ApplyRow> = Vec::with_capacity(total);
@@ -3494,7 +3717,7 @@ async fn collection_apply(
         // Finished downloads waiting to be placed under the lock (their rows are filled then).
         let mut pending: Vec<PendingPlace> = Vec::new();
 
-        for (i, m) in coll.mods.iter().enumerate() {
+        for (i, (m, t)) in coll.mods.iter().zip(&targets).enumerate() {
             let _ = emitter.emit(
                 "collection:progress",
                 ApplyProgress {
@@ -3516,11 +3739,7 @@ async fn collection_apply(
                 continue;
             }
 
-            let catalog_id = m
-                .catalog_id
-                .as_deref()
-                .or_else(|| id_by_tech.get(m.tech_name.as_str()).copied());
-            let Some(cid) = catalog_id else {
+            let Some(cid) = t.catalog_id.as_deref() else {
                 rows.push(ApplyRow {
                     tech_name: m.tech_name.clone(),
                     filename: None,
@@ -3530,8 +3749,13 @@ async fn collection_apply(
                 });
                 continue;
             };
+            // Catalogued, but no direct download (ModHub gates it): the preview's open-page row.
+            if t.download_source.is_none() {
+                rows.push(gated_row(&m.tech_name));
+                continue;
+            }
 
-            match siloapi::resolve_download(&base, cid, m.source.as_deref()) {
+            match siloapi::resolve_download(&base, cid, t.download_source.as_deref()) {
                 Ok(resolved) => {
                     if let Err(e) = paths::safe_file_name(&resolved.filename) {
                         rows.push(fail_row(&m.tech_name, e));
@@ -3587,15 +3811,7 @@ async fn collection_apply(
                     }
                 }
                 // No direct download (ModHub gates it) — leave it for the user.
-                Err(_) => {
-                    rows.push(ApplyRow {
-                        tech_name: m.tech_name.clone(),
-                        filename: None,
-                        status: "skipped".into(),
-                        verdict: None,
-                        detail: Some("Download-gated — get it from its page.".into()),
-                    });
-                }
+                Err(_) => rows.push(gated_row(&m.tech_name)),
             }
         }
 
@@ -3705,6 +3921,17 @@ fn fail_row(tech_name: &str, detail: String) -> ApplyRow {
         status: "failed".into(),
         verdict: None,
         detail: Some(detail),
+    }
+}
+
+/// A catalogued mod with no direct download (ModHub gates it), left for the user.
+fn gated_row(tech_name: &str) -> ApplyRow {
+    ApplyRow {
+        tech_name: tech_name.to_string(),
+        filename: None,
+        status: "skipped".into(),
+        verdict: None,
+        detail: Some("Download-gated — get it from its page.".into()),
     }
 }
 
@@ -3836,6 +4063,7 @@ async fn set_config(path: String, edits: Vec<xmlconfig::Edit>) -> Result<(), Str
         let p = std::path::Path::new(&path);
         let xml = paths::guarded_xml_read(&roots, p)?;
         let out = xmlconfig::set_values(&xml, &edits)?;
+        ensure_override_kept(&roots[0], p, Some(&xml), &out)?;
         paths::guarded_xml_write(&roots, p, &out)
     })
     .await
@@ -3874,6 +4102,7 @@ async fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Res
         let p = std::path::Path::new(&path);
         let raw = paths::guarded_xml_read(&roots, p)?;
         let updated = settings_form::apply_edits(&raw, &edits)?;
+        ensure_override_kept(&roots[0], p, Some(&raw), &updated)?;
         paths::guarded_xml_write(&roots, p, &updated)
     })
     .await
@@ -3884,7 +4113,9 @@ async fn save_mod_settings_raw(path: String, content: String) -> Result<(), Stri
     off_main(move || {
         config_write_refusal(gamelaunch::fs25_running())?;
         let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
-        paths::guarded_xml_write(&[user], std::path::Path::new(&path), &content)
+        let p = std::path::Path::new(&path);
+        ensure_override_kept(&user, p, None, &content)?;
+        paths::guarded_xml_write(&[user], p, &content)
     })
     .await
 }
@@ -4039,6 +4270,8 @@ pub fn run() {
             point_game_at_mods_root,
             create_mods_folder,
             folder_looks_empty,
+            pick_folder,
+            open_known_folder,
             archive_status,
             archive_move_preflight,
             archive_move_start,
@@ -4180,6 +4413,20 @@ mod tests {
 
     fn has(v: &[String], needle: &str) -> bool {
         v.iter().any(|p| p.contains(needle))
+    }
+
+    #[test]
+    fn the_mods_folder_changes_only_to_a_picked_known_or_default_folder() {
+        let a = std::path::Path::new("/x/mods-a");
+        let known = vec![PathBuf::from("/x/mods-known")];
+        let d = std::path::Path::new("/x/default");
+        let default = Some(d);
+        assert!(super::mods_root_choice_allowed(a, true, &known, default));
+        assert!(super::mods_root_choice_allowed(
+            &known[0], false, &known, default
+        ));
+        assert!(super::mods_root_choice_allowed(d, false, &known, default));
+        assert!(!super::mods_root_choice_allowed(a, false, &known, default));
     }
 
     #[test]
@@ -4472,6 +4719,18 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_update_download_is_not_placed_while_a_move_is_unfinished() {
+        use std::sync::atomic::Ordering::SeqCst;
+        super::MOVE_HOLDS_LOCK.store(true, SeqCst);
+        let r = super::update_recheck(Path::new("/nowhere/mods/FS25_A.zip"));
+        super::MOVE_HOLDS_LOCK.store(false, SeqCst);
+        assert_eq!(
+            r.err(),
+            Some("Finish or cancel the archive move first.".to_string())
+        );
+    }
+
+    #[test]
     fn the_library_lock_gives_up_instead_of_waiting_forever() {
         use std::time::Duration;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -4617,6 +4876,137 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("mods")).unwrap();
         base
+    }
+
+    fn game_settings(active: &str, dir: &str, port: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\" ?>\n<gameSettings \
+             revision=\"15\">\n    <modsDirectoryOverride active=\"{active}\" \
+             directory=\"{dir}\"/>\n    <defaultMultiplayerPort>{port}</defaultMultiplayerPort>\n\
+             </gameSettings>\n"
+        )
+    }
+
+    #[test]
+    fn a_config_edit_can_not_move_the_mods_folder() {
+        let old = game_settings("false", "C:/Temp", "10823");
+        assert_eq!(
+            super::override_edit_refusal(&old, &game_settings("false", "D:/Elsewhere", "10823")),
+            Err(super::OVERRIDE_IS_SILOS.to_string()),
+            "changed directory"
+        );
+        assert_eq!(
+            super::override_edit_refusal(&old, &game_settings("true", "C:/Temp", "10823")),
+            Err(super::OVERRIDE_IS_SILOS.to_string()),
+            "changed active"
+        );
+        assert_eq!(
+            super::override_edit_refusal(&old, &game_settings("false", "C:/Temp", "10900")),
+            Ok(()),
+            "an unrelated edit"
+        );
+        let plain =
+            "<gameSettings><defaultMultiplayerPort>1</defaultMultiplayerPort></gameSettings>";
+        let plain2 =
+            "<gameSettings><defaultMultiplayerPort>2</defaultMultiplayerPort></gameSettings>";
+        assert_eq!(
+            super::override_edit_refusal(plain, plain2),
+            Ok(()),
+            "no override element"
+        );
+        assert_eq!(
+            super::override_edit_refusal(plain, &old),
+            Err(super::OVERRIDE_IS_SILOS.to_string()),
+            "adding the element"
+        );
+    }
+
+    #[test]
+    fn only_game_settings_writes_are_checked_for_the_override() {
+        let base = temp_base("override_kept");
+        let gs = base.join("gameSettings.xml");
+        std::fs::write(&gs, game_settings("false", "C:/Temp", "1")).unwrap();
+        let moved = game_settings("true", "D:/Elsewhere", "1");
+        assert_eq!(
+            super::ensure_override_kept(&base, &gs, None, &moved),
+            Err(super::OVERRIDE_IS_SILOS.to_string()),
+            "the file is read when the caller hasn't"
+        );
+        let other = base.join("modSettings").join("FS25_X.xml");
+        assert_eq!(
+            super::ensure_override_kept(&base, &other, None, &moved),
+            Ok(())
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn only_known_folders_that_exist_can_be_opened() {
+        let base = temp_base("known_folder");
+        std::fs::create_dir_all(base.join("mods")).unwrap();
+        assert_eq!(
+            super::existing_dir(Some(base.join("mods"))).unwrap(),
+            base.join("mods")
+        );
+        assert_eq!(
+            super::existing_dir(Some(base.join("gone"))).unwrap_err(),
+            super::FOLDER_MISSING
+        );
+        assert_eq!(
+            super::existing_dir(None).unwrap_err(),
+            super::FOLDER_MISSING
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_update_only_replaces_a_mod_zip_in_the_library() {
+        let base = temp_base("update_target");
+        let mods = base.join("mods");
+        let layout = Layout::default_for(&mods);
+        let cat = layout.archive.join("Vehicles");
+        for d in [&mods, &cat, &mods.join("backups"), &mods.join("sub")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let ok = [mods.join("FS25_A.zip"), cat.join("FS25_B.zip")];
+        let bad = [
+            mods.join("backups").join("FS25_A.zip"),
+            mods.join("FS25_A.txt"),
+            layout.archive.join("FS25_C.zip"),
+            mods.join("sub").join("FS25_D.zip"),
+        ];
+        for p in ok.iter().chain(&bad) {
+            std::fs::write(p, b"zip").unwrap();
+        }
+        for p in &ok {
+            assert_eq!(super::update_target_problem(p, &layout), None, "{p:?}");
+        }
+        for p in &bad {
+            assert!(super::update_target_problem(p, &layout).is_some(), "{p:?}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_update_can_not_reach_a_backup_through_a_linked_category() {
+        let base = temp_base("update_target_link");
+        let mods = base.join("mods");
+        let layout = Layout::default_for(&mods);
+        let backups = mods.join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        std::fs::create_dir_all(&layout.archive).unwrap();
+        std::fs::write(backups.join("FS25_A.zip"), b"zip").unwrap();
+        // A "category" that is a junction (Windows) or symlink (unix) into `mods/backups`.
+        let linked = layout.archive.join("Linked");
+        crate::organize::link_dir_native(&backups, &linked).unwrap();
+        let dest = linked.join("FS25_A.zip");
+        assert!(dest.is_file());
+        assert!(
+            super::update_target_problem(&dest, &layout).is_some(),
+            "the category leads into backups"
+        );
+        let _ = std::fs::remove_dir(&linked);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

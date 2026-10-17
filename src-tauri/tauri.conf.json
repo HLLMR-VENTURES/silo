@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: asset: https://asset.localhost https://silo-api.hllmr.com https://*.githubusercontent.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+      "csp": "default-src 'self'; img-src 'self' data: https://silo-api.hllmr.com https://*.githubusercontent.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
     }
   },
   "bundle": {

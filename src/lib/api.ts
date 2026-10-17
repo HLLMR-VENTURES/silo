@@ -4,7 +4,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save, open, confirm as pluginConfirm } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir, openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
 import { serial } from "./serial";
 export { serial } from "./serial";
 import type {
@@ -187,10 +187,10 @@ export function onMoveProgress(cb: (p: MoveProgress) => void): Promise<UnlistenF
 export function folderLooksEmpty(path: string): Promise<boolean> {
   return invoke<boolean>("folder_looks_empty", { path });
 }
-/** System folder picker. Null if cancelled. */
-export async function pickFolder(): Promise<string | null> {
-  const p = await open({ directory: true, multiple: false });
-  return typeof p === "string" ? p : null;
+/** Ask for a folder with the picker Silo opens itself. Silo only moves the mods folder or the
+ *  library archive to a folder chosen here (or one it already knows). */
+export function pickFolderFor(purpose: "modsFolder" | "archive"): Promise<string | null> {
+  return invoke<string | null>("pick_folder", { purpose });
 }
 
 /** App version (from tauri.conf/Cargo), e.g. "0.2.0" — the single source the UI shows. */
@@ -396,8 +396,9 @@ export function revealInFolder(path: string): Promise<void> {
   return revealItemInDir(path);
 }
 
-export function openFolder(path: string): Promise<void> {
-  return openPath(path);
+/** Open one of Silo's folders in the file manager. Rust resolves the path from the name. */
+export function openKnownFolder(which: "modsFolder" | "archive" | "gameInstall"): Promise<void> {
+  return invoke("open_known_folder", { which });
 }
 
 export function openExternal(url: string): Promise<void> {
@@ -696,8 +697,9 @@ export function collectionImportPreview(
 export function collectionApply(
   urlOrId: string,
   installed: { techName: string; version: string | null }[],
+  fingerprint: string,
 ): Promise<ApplyReport> {
-  return invoke<ApplyReport>("collection_apply", { urlOrId, installed, root: null });
+  return invoke<ApplyReport>("collection_apply", { urlOrId, installed, fingerprint, root: null });
 }
 
 /**
