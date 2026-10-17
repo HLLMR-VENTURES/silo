@@ -59,11 +59,9 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement by opening an
-issue on the project repository at
-[HLLMR/silo](https://github.com/HLLMR/silo/issues). If the report is sensitive
-and should not be public, note that in the issue and a maintainer will arrange a
-private channel.
+reported privately to the community leaders responsible for enforcement at
+**legal@hllmr.com**. Please don't report conduct issues in public issues or
+Discussions.
 
 All complaints will be reviewed and investigated promptly and fairly.
 
