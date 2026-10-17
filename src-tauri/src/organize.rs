@@ -33,6 +33,40 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// A validated layout — use this for anything built from user input or settings. Both
+    /// folders must be absolute; the archive can't be the mods folder, can't contain it, and
+    /// can't sit inside it unless it is the default `<mods>/archive` (the game would otherwise
+    /// see parked mods, or Silo would file the mods folder into itself). Compared canonically.
+    pub fn new(mods: PathBuf, archive: PathBuf) -> Result<Layout, String> {
+        if !mods.is_absolute() {
+            return Err(format!(
+                "The mods folder must be an absolute path: {}",
+                mods.display()
+            ));
+        }
+        if !archive.is_absolute() {
+            return Err(format!(
+                "The library archive must be an absolute path: {}",
+                archive.display()
+            ));
+        }
+        let mods_key = crate::modsroot::canonical_key(&mods);
+        let arch_key = crate::modsroot::canonical_key(&archive);
+        if arch_key == mods_key {
+            return Err("The library archive can't be the mods folder itself".into());
+        }
+        if Path::new(&mods_key).starts_with(&arch_key) {
+            return Err("The library archive can't contain the mods folder".into());
+        }
+        let layout = Layout { mods, archive };
+        if Path::new(&arch_key).starts_with(&mods_key) && !layout.archive_is_default() {
+            return Err(format!(
+                "The library archive can't be inside the mods folder (except the default {ARCHIVE}/ folder)"
+            ));
+        }
+        Ok(layout)
+    }
+
     pub fn default_for(mods: &Path) -> Layout {
         Layout {
             mods: mods.to_path_buf(),
@@ -41,8 +75,10 @@ impl Layout {
     }
 
     /// True when the archive is the default `<mods>/archive` (Silo may remove it when empty).
+    /// Compared canonically, so a differently spelled path to the same folder still counts.
     pub fn archive_is_default(&self) -> bool {
-        self.archive == self.mods.join(ARCHIVE)
+        crate::modsroot::canonical_key(&self.archive)
+            == crate::modsroot::canonical_key(&self.mods.join(ARCHIVE))
     }
 }
 
@@ -191,12 +227,30 @@ pub fn apply_organize(
             continue;
         }
         let dir = archive_dir(&layout.archive, &m.category);
+        let to = dir.join(&m.file_name);
+        // Adopting a folder mod named like its category would move it into itself.
+        if to.starts_with(&from) {
+            rep.errors.push(format!(
+                "{}: {} would be filed inside itself — left it untouched",
+                m.tech_name, m.file_name
+            ));
+            continue;
+        }
+        // Never overwrite: a rename replaces an existing destination, and whatever sits there
+        // (another build, the user's own file) may be the only copy.
+        if to.symlink_metadata().is_ok() {
+            rep.errors.push(format!(
+                "{}: {} already exists in the archive — left both untouched",
+                m.tech_name, m.file_name
+            ));
+            rep.skipped += 1;
+            continue;
+        }
         if let Err(e) = std::fs::create_dir_all(&dir) {
             rep.errors
                 .push(format!("{}: mkdir {}: {e}", m.tech_name, dir.display()));
             continue;
         }
-        let to = dir.join(&m.file_name);
         // Manifest-first: record the row BEFORE moving the file. If the DB write fails we
         // never move, so we can't leave a file orphaned in the archive (which flatten
         // would later be unable to tell from junk). If the move then fails, roll the row
@@ -515,7 +569,9 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
+    let mut categories: HashSet<String> = HashSet::new();
     for row in db::load_organized(conn, &key) {
+        categories.insert(row.category.clone());
         let link = root.join(&row.file_name);
         let src = archive_path(&layout.archive, &row.category, &row.file_name);
 
@@ -561,15 +617,21 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
         }
         rep.changed += 1;
     }
-    // NEVER `remove_dir_all` the archive — that would destroy any file we don't have a
-    // manifest row for (e.g. a mod whose manifest write failed on a crash). Remove only
-    // provably-empty directories, and surface anything left behind untouched.
-    match cleanup_empty_archive(&layout.archive, layout.archive_is_default()) {
+    // A user-chosen archive is the user's folder: remove only the category folders Silo filed
+    // into (and only when empty), never recurse, and don't report their other content.
+    if !layout.archive_is_default() {
+        remove_empty_category_dirs(&layout.archive, &categories);
+        return rep;
+    }
+    // The default archive is Silo's own. NEVER `remove_dir_all` it — that would destroy any
+    // file we don't have a manifest row for (e.g. a mod whose manifest write failed on a
+    // crash). Remove only provably-empty directories, and surface anything left untouched.
+    match cleanup_empty_archive(&layout.archive, true) {
         Ok(leftover) => {
             for p in leftover {
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
                 rep.errors.push(format!(
-                    "kept an unrecognized file in archive/ (NOT deleted): {}",
+                    "kept an unrecognized file in your library archive (NOT deleted): {}",
                     name.unwrap_or_else(|| p.display().to_string())
                 ));
             }
@@ -577,6 +639,16 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
         Err(e) => rep.errors.push(format!("archive cleanup: {e}")),
     }
     rep
+}
+
+/// Remove each category folder Silo filed into under `archive`, but only if it is empty.
+/// Never recurses, never touches anything else, and reports nothing — for an archive folder
+/// the user chose, whose other content is theirs.
+pub(crate) fn remove_empty_category_dirs(archive: &Path, categories: &HashSet<String>) {
+    for cat in categories {
+        // `remove_dir` refuses a non-empty folder, which is exactly the guard we want.
+        let _ = std::fs::remove_dir(archive_dir(archive, cat));
+    }
 }
 
 /// Remove empty directories under `archive` bottom-up. NEVER deletes a file or a
@@ -1433,22 +1505,260 @@ mod tests {
         assert!(!mods.join("archive").exists(), "default archive untouched");
 
         let on: HashSet<String> = ["FS25_Foo".to_string()].into_iter().collect();
-        set_active(&conn, &layout, &on);
+        let rep = set_active(&conn, &layout, &on);
+        assert_eq!(rep.changed, 1);
         assert!(
             mods.join("FS25_Foo.zip").exists(),
             "projected into the mods folder"
         );
 
-        flatten(&conn, &layout);
+        let rep = flatten(&conn, &layout);
+        assert!(rep.errors.is_empty(), "no errors: {:?}", rep.errors);
+        assert_eq!(rep.changed, 1);
+        let restored = mods.join("FS25_Foo.zip");
+        let meta = std::fs::symlink_metadata(&restored).unwrap();
         assert!(
-            mods.join("FS25_Foo.zip").exists(),
-            "restored to the mods folder"
+            meta.file_type().is_file() && !meta.file_type().is_symlink(),
+            "restored as a regular file"
+        );
+        assert_eq!(std::fs::read(&restored).unwrap(), b"PK\x03\x04 foo");
+        assert!(
+            !arch.join("Vehicles").exists(),
+            "the emptied category folder is removed"
         );
         assert!(
             arch.exists(),
             "a user-chosen archive folder is never removed"
         );
+        assert!(
+            db::load_organized(&conn, &crate::modsroot::canonical_key(&mods)).is_empty(),
+            "the manifest is cleared"
+        );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn flatten_removes_an_emptied_default_archive() {
+        let base = std::env::temp_dir().join(format!("silo_defarch_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let layout = Layout::default_for(&mods);
+        std::fs::write(mods.join("FS25_Foo.zip"), b"PK\x03\x04 foo").unwrap();
+        let input = ModInput {
+            tech_name: "FS25_Foo".into(),
+            file_name: "FS25_Foo.zip".into(),
+            kind: "zip".into(),
+            category: "Vehicles".into(),
+            subcategory: None,
+        };
+
+        let rep = apply_organize(&conn, &layout, &mods, std::slice::from_ref(&input));
+        assert_eq!(rep.changed, 1);
+        assert!(mods.join("archive/Vehicles/FS25_Foo.zip").exists());
+
+        let rep = flatten(&conn, &layout);
+        assert!(rep.errors.is_empty(), "no errors: {:?}", rep.errors);
+        assert!(mods.join("FS25_Foo.zip").exists());
+        assert!(
+            !mods.join("archive").exists(),
+            "Silo's own emptied archive folder is removed"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn organize_never_overwrites_a_file_already_in_the_archive() {
+        let base = std::env::temp_dir().join(format!("silo_noclobber_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        let arch = base.join("hdd");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(arch.join("Vehicles")).unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let layout = Layout {
+            mods: mods.clone(),
+            archive: arch.clone(),
+        };
+        std::fs::write(mods.join("FS25_Foo.zip"), b"PK\x03\x04 the loose build").unwrap();
+        std::fs::write(
+            arch.join("Vehicles/FS25_Foo.zip"),
+            b"PK\x03\x04 a different build already in the archive",
+        )
+        .unwrap();
+        let input = ModInput {
+            tech_name: "FS25_Foo".into(),
+            file_name: "FS25_Foo.zip".into(),
+            kind: "zip".into(),
+            category: "Vehicles".into(),
+            subcategory: None,
+        };
+
+        let rep = apply_organize(&conn, &layout, &mods, std::slice::from_ref(&input));
+
+        assert_eq!(rep.changed, 0);
+        assert_eq!(rep.skipped, 1);
+        assert!(
+            rep.errors.iter().any(|e| e.contains("already exists")),
+            "the collision is reported, got: {:?}",
+            rep.errors
+        );
+        assert_eq!(
+            std::fs::read(mods.join("FS25_Foo.zip")).unwrap(),
+            b"PK\x03\x04 the loose build"
+        );
+        assert_eq!(
+            std::fs::read(arch.join("Vehicles/FS25_Foo.zip")).unwrap(),
+            b"PK\x03\x04 a different build already in the archive"
+        );
+        assert!(
+            db::load_organized(&conn, &crate::modsroot::canonical_key(&mods)).is_empty(),
+            "no manifest row for a mod that wasn't moved"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn organize_never_moves_a_folder_into_itself() {
+        let base = std::env::temp_dir().join(format!("silo_selfnest_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        let arch = base.join("hdd");
+        std::fs::create_dir_all(&mods).unwrap();
+        // A loose folder mod at the archive's top level named exactly like its category.
+        std::fs::create_dir_all(arch.join("Tools")).unwrap();
+        std::fs::write(arch.join("Tools/modDesc.xml"), b"<modDesc/>").unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let layout = Layout {
+            mods: mods.clone(),
+            archive: arch.clone(),
+        };
+        let input = ModInput {
+            tech_name: "Tools".into(),
+            file_name: "Tools".into(),
+            kind: "dir".into(),
+            category: "Tools".into(),
+            subcategory: None,
+        };
+
+        let rep = apply_organize(&conn, &layout, &arch, std::slice::from_ref(&input));
+
+        assert_eq!(rep.changed, 0);
+        assert_eq!(rep.errors.len(), 1, "reported: {:?}", rep.errors);
+        assert!(arch.join("Tools/modDesc.xml").exists(), "left in place");
+        assert!(!arch.join("Tools/Tools").exists(), "not nested into itself");
+        assert!(db::load_organized(&conn, &crate::modsroot::canonical_key(&mods)).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn flatten_leaves_a_user_archive_folders_own_content_alone() {
+        let base = std::env::temp_dir().join(format!("silo_ownedonly_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        let arch = base.join("hdd");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(arch.join("ToSort")).unwrap();
+        std::fs::write(arch.join("notes.txt"), b"my notes").unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let layout = Layout {
+            mods: mods.clone(),
+            archive: arch.clone(),
+        };
+        std::fs::write(mods.join("FS25_Foo.zip"), b"PK\x03\x04 foo").unwrap();
+        let input = ModInput {
+            tech_name: "FS25_Foo".into(),
+            file_name: "FS25_Foo.zip".into(),
+            kind: "zip".into(),
+            category: "Vehicles".into(),
+            subcategory: None,
+        };
+
+        let rep = apply_organize(&conn, &layout, &mods, std::slice::from_ref(&input));
+        assert_eq!(rep.changed, 1);
+        let rep = flatten(&conn, &layout);
+
+        assert!(
+            arch.join("ToSort").is_dir(),
+            "the user's empty folder is kept"
+        );
+        assert!(arch.join("notes.txt").is_file(), "the user's file is kept");
+        assert!(
+            !arch.join("Vehicles").exists(),
+            "the emptied category folder is removed"
+        );
+        assert!(arch.exists(), "the archive root is kept");
+        assert!(
+            !rep.errors.iter().any(|e| e.contains("unrecognized")),
+            "the user's own files aren't reported: {:?}",
+            rep.errors
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn archive_is_default_compares_canonically() {
+        let mods = std::env::temp_dir().join(format!("silo_isdef_{}", std::process::id()));
+        assert!(Layout::default_for(&mods).archive_is_default());
+        let custom = Layout {
+            mods: mods.clone(),
+            archive: mods.with_file_name("silo_isdef_elsewhere"),
+        };
+        assert!(!custom.archive_is_default());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn archive_is_default_ignores_case_on_windows() {
+        let mods = std::env::temp_dir().join(format!("silo_isdefcase_{}", std::process::id()));
+        let shouty = PathBuf::from(mods.to_string_lossy().to_uppercase()).join("ARCHIVE");
+        let layout = Layout {
+            mods: mods.clone(),
+            archive: shouty,
+        };
+        assert!(layout.archive_is_default());
+    }
+
+    #[test]
+    fn layout_new_accepts_the_default_and_a_sibling() {
+        let base = std::env::temp_dir().join(format!("silo_lnew_ok_{}", std::process::id()));
+        let mods = base.join("mods");
+        let def = Layout::new(mods.clone(), mods.join(ARCHIVE)).unwrap();
+        assert!(def.archive_is_default());
+        let sib = Layout::new(mods.clone(), base.join("hdd")).unwrap();
+        assert_eq!(sib.archive, base.join("hdd"));
+        assert!(!sib.archive_is_default());
+    }
+
+    #[test]
+    fn layout_new_rejects_unsafe_archives() {
+        let base = std::env::temp_dir().join(format!("silo_lnew_bad_{}", std::process::id()));
+        let mods = base.join("mods");
+        assert!(
+            Layout::new(PathBuf::from("mods"), base.join("hdd")).is_err(),
+            "relative mods"
+        );
+        assert!(
+            Layout::new(mods.clone(), PathBuf::from("hdd")).is_err(),
+            "relative archive"
+        );
+        assert!(
+            Layout::new(mods.clone(), mods.clone()).is_err(),
+            "same folder"
+        );
+        assert!(
+            Layout::new(mods.clone(), base.clone()).is_err(),
+            "archive containing the mods folder"
+        );
+        assert!(
+            Layout::new(mods.clone(), mods.join("stash")).is_err(),
+            "non-default archive inside the mods folder"
+        );
+        assert!(
+            Layout::new(mods.clone(), mods.join("archive").join("deeper")).is_err(),
+            "inside the default archive is still inside the mods folder"
+        );
     }
 
     #[test]
