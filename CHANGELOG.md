@@ -98,11 +98,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- **Nexus Mods integration has been removed entirely.** Silo's catalog now aggregates **ModHub and
-  GitHub** only. Nexus support flagged our SiloAPI index model as an Acceptable-Use-Policy violation
-  on a second review — after approving the same approach on the first — so rather than keep
-  rebuilding toward a moving compliance target for a minor Farming Simulator source, we pulled Nexus
-  out completely: the app's Browse and per-source UI, the SiloAPI catalog ingest, the website, and
+- **Nexus Mods integration has been removed.** Silo's catalog now aggregates **ModHub and GitHub**
+  only. After a policy review by Nexus Mods, we removed the integration rather than change how the
+  catalog works: the app's Browse and per-source UI, the SiloAPI catalog ingest, the website, and
   the docs. No Silo feature depended on it.
 
 ## [0.7.2] - 2026-08-11

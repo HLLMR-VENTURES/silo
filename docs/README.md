@@ -28,8 +28,6 @@ Per-feature notes:
   links. Phase 1 has shipped; both docs are kept as written.
 - **[BASE_SAVES.md](BASE_SAVES.md)** — base-save generator scope.
 - **[COMMUNITY_SERVER.md](COMMUNITY_SERVER.md)** — parked design.
-- **[superpowers/](superpowers/)** — design specs and implementation plans per feature
-  (e.g. mods folder selection #162, library archive location #166).
 
 Building, testing, releasing:
 
@@ -40,5 +38,5 @@ Building, testing, releasing:
 - **[VERIFY_DOWNLOAD.md](VERIFY_DOWNLOAD.md)** — verifying a download's signature,
   checksum, and build provenance.
 
-Also: [legal/](legal/) (privacy policy, terms, disclaimer, takedown) and
-[social/](social/) (launch and community copy).
+Also: [legal/](legal/) (privacy policy, terms, disclaimer, takedown). Per-feature design
+specs and plans live with each feature's issue and pull request.

@@ -82,7 +82,7 @@ We may update this disclaimer from time to time. When we do, we will revise the 
 
 ## Governing law
 
-This disclaimer is governed by the laws of the **Texas**, without regard to its conflict-of-laws principles.
+This disclaimer is governed by the laws of the **State of Texas**, without regard to its conflict-of-laws principles.
 
 ## Contact
 
@@ -90,7 +90,7 @@ Questions about this disclaimer, or trademark and catalog-content concerns, can 
 
 ---
 
-_This document is a draft template and must be reviewed by a qualified attorney before use. Bracketed items are placeholders to be completed._
+_This document is a draft and has not yet been reviewed by an attorney._
 
 ---
 [← Legal index](./README.md)
