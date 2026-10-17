@@ -24,13 +24,28 @@ pub fn bundle(
 /// "bo" doesn't eat ordinary words.
 const MIN_USER_LEN: usize = 3;
 
+/// Generic account names: ordinary words and folder names (`C:\Users\Public`, a Steam Deck's
+/// `deck`, `...\Steam\steamapps`) that identify no one, so only the home folder goes.
+const GENERIC_NAMES: &[&str] = &[
+    "user",
+    "owner",
+    "admin",
+    "administrator",
+    "guest",
+    "public",
+    "default",
+    "deck",
+    "steam",
+];
+
 /// Replace the home folder with `~` and the user name with `<user>`.
 ///
 /// The home folder goes in every spelling a path can take in a log or an error message: `\` or
 /// `/` separators, `\` doubled (a path printed with `{:?}`, or JSON), any ASCII case, and only
 /// as a whole folder (`/home/bob` never eats `/home/bobby`). The user name goes as a whole word
-/// (ASCII case-insensitive), for names of 3+ characters; the home folder's own name counts as a
-/// user name too, since on Windows it can differ from the sign-in name.
+/// (ASCII case-insensitive), for names of 3+ characters that aren't generic account names
+/// (`GENERIC_NAMES`); the home folder's own name counts as a user name too, since on Windows it
+/// can differ from the sign-in name.
 pub fn redact(text: &str, home: Option<&str>, user: Option<&str>) -> String {
     let mut out = text.to_string();
     let home = home
@@ -48,7 +63,10 @@ pub fn redact(text: &str, home: Option<&str>, user: Option<&str>) -> String {
     let mut seen: Vec<String> = Vec::new();
     for name in names {
         let key = name.to_ascii_lowercase();
-        if name.chars().count() < MIN_USER_LEN || seen.contains(&key) {
+        if name.chars().count() < MIN_USER_LEN
+            || seen.contains(&key)
+            || GENERIC_NAMES.contains(&key.as_str())
+        {
             continue;
         }
         out = replace_ci(&out, name, "<user>", Edges::Word);
@@ -190,6 +208,32 @@ mod tests {
     fn a_root_or_empty_home_is_ignored() {
         assert_eq!(redact("C:\\x and /y", Some("C:\\"), None), "C:\\x and /y");
         assert_eq!(redact("/y", Some("/"), Some("")), "/y");
+    }
+
+    /// Generic account names (a Steam Deck's "deck", Windows' "User") are ordinary words and
+    /// folder names (`C:\Users\Public`, `...\Steam\steamapps`) and identify no one: only the home
+    /// folder goes.
+    #[test]
+    fn generic_account_names_only_redact_paths() {
+        for name in [
+            "user",
+            "Owner",
+            "admin",
+            "Administrator",
+            "guest",
+            "public",
+            "default",
+            "deck",
+            "steam",
+        ] {
+            let home = format!("/home/{name}");
+            let text = format!("{home}/mods; the {name} folder; /mnt/{name}/x");
+            assert_eq!(
+                redact(&text, Some(&home), Some(name)),
+                format!("~/mods; the {name} folder; /mnt/{name}/x"),
+                "{name}"
+            );
+        }
     }
 
     #[test]
