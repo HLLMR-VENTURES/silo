@@ -409,7 +409,8 @@ export interface ApplyRow {
   detail: string | null;
 }
 export interface ApplyReport {
-  loadoutId: number;
+  /** Null when Silo stayed busy and couldn't add the downloads (their rows say why). */
+  loadoutId: number | null;
   installed: number;
   failed: number;
   rows: ApplyRow[];

@@ -701,7 +701,8 @@ async fn install_remote_mod(
                 );
             },
         )?;
-        let _write = library_write()?;
+        // A finished download waits out a busy spell instead of being thrown away.
+        let _write = library_write_within(PLACE_WAIT)?;
         place_part(part.path(), &dest)?;
         Ok(resolved.filename)
     })
@@ -709,14 +710,15 @@ async fn install_remote_mod(
     .map_err(|e| e.to_string())?
 }
 
-/// Downloads whose `.zip.part` is in use. Downloads run outside the library lock, so two at
-/// once for the same file must not share (and corrupt) one part file.
+/// Downloads whose `.zip.part` is in use, by `same_file_key`. Downloads run outside the
+/// library lock, so two at once for the same file must not share (and corrupt) one part file.
 static PARTS_IN_FLIGHT: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 /// A download's claim on its `.zip.part` file. Dropping it removes whatever part is left
 /// (a failed or abandoned download) and frees the name.
 struct PartClaim {
     path: PathBuf,
+    key: PathBuf,
 }
 
 impl PartClaim {
@@ -729,20 +731,37 @@ impl Drop for PartClaim {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
         let mut held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-        held.retain(|p| p != &self.path);
+        held.retain(|k| k != &self.key);
     }
+}
+
+/// Paths that name the same file compare equal: on Windows file names are case-insensitive,
+/// so the name is lowercased (the parent is kept as given; callers join names onto one root).
+fn same_file_key(p: &std::path::Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(name) = p.file_name() {
+            let lower = name.to_string_lossy().to_lowercase();
+            return match p.parent() {
+                Some(parent) => parent.join(lower),
+                None => PathBuf::from(lower),
+            };
+        }
+    }
+    p.to_path_buf()
 }
 
 /// Claim the part file a download of `dest` streams into, refusing while another download
 /// of the same file is running.
 fn claim_part(dest: &std::path::Path) -> Result<PartClaim, String> {
     let path = dest.with_extension("zip.part");
+    let key = same_file_key(&path);
     let mut held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-    if held.contains(&path) {
+    if held.contains(&key) {
         return Err(format!("{} is already downloading", file_label(dest)));
     }
-    held.push(path.clone());
-    Ok(PartClaim { path })
+    held.push(key.clone());
+    Ok(PartClaim { path, key })
 }
 
 /// Anything at `p`, including a broken link (which `Path::exists` would call absent).
@@ -760,27 +779,72 @@ fn already_in_library(dest: &std::path::Path) -> String {
     format!("{} is already in your library", file_label(dest))
 }
 
+const DOWNLOAD_GONE: &str = "The download disappeared before Silo could add it. Try again.";
+
 /// Move a finished download into the library at `dest`, never replacing anything there.
-/// Hardlink then drop the part (the link fails if `dest` exists); on a filesystem without
-/// hardlinks, check right before the rename. A taken `dest` removes the part and refuses.
-/// Call under the library lock.
+/// Hardlink then drop the part (the link fails if `dest` exists). Only when the link fails
+/// because the filesystem can't hardlink (`no_hardlink_support`) does it fall back to
+/// checking `dest` is free and renaming. A taken `dest` removes the part and refuses.
+///
+/// Call under the library lock, which keeps Silo's own writes out. The fallback still has a
+/// small window between the check and the rename in which another program could create
+/// `dest`; on Windows the rename would then replace it. Hardlink-capable filesystems (the
+/// usual case) have no such window.
 fn place_part(part: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    place_part_with(part, dest, |a, b| std::fs::hard_link(a, b))
+}
+
+fn place_part_with(
+    part: &std::path::Path,
+    dest: &std::path::Path,
+    link: impl Fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     let refuse = || {
         let _ = std::fs::remove_file(part);
         Err(already_in_library(dest))
     };
-    match std::fs::hard_link(part, dest) {
+    let io_err = |e: std::io::Error| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            DOWNLOAD_GONE.to_string()
+        } else {
+            e.to_string()
+        }
+    };
+    match link(part, dest) {
         Ok(()) => {
             let _ = std::fs::remove_file(part);
             return Ok(());
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return refuse(),
-        Err(_) => {} // no hardlinks here: check + rename below
+        Err(e) if no_hardlink_support(&e) => {} // check + rename below
+        Err(e) => return Err(io_err(e)),
     }
     if path_taken(dest) {
         return refuse();
     }
-    std::fs::rename(part, dest).map_err(|e| e.to_string())
+    std::fs::rename(part, dest).map_err(io_err)
+}
+
+/// A hardlink error that means "this filesystem / pair of folders can't hardlink", as
+/// opposed to a real failure (permissions on Windows, a missing part, a full disk):
+/// - `Unsupported` on any platform;
+/// - Windows: 1 ERROR_INVALID_FUNCTION (FAT/exFAT), 17 ERROR_NOT_SAME_DEVICE,
+///   50 ERROR_NOT_SUPPORTED, 396 (cloud-synced folders such as OneDrive / Proton Drive);
+/// - Unix: EPERM (filesystems without links, e.g. FAT on Linux), EXDEV (cross-device),
+///   ENOTSUP / EOPNOTSUPP.
+fn no_hardlink_support(e: &std::io::Error) -> bool {
+    if e.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(windows)]
+    const CODES: &[i32] = &[1, 17, 50, 396];
+    #[cfg(target_os = "linux")]
+    const CODES: &[i32] = &[1, 18, 95];
+    #[cfg(target_os = "macos")]
+    const CODES: &[i32] = &[1, 18, 45, 102];
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    const CODES: &[i32] = &[1, 18];
+    e.raw_os_error().is_some_and(|c| CODES.contains(&c))
 }
 
 #[derive(serde::Deserialize)]
@@ -996,7 +1060,10 @@ fn ensure_no_move() -> Result<(), String> {
 /// move only `try_lock`s, so it never waits behind, or starts under, another write.
 static LIBRARY_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-const LIBRARY_BUSY: &str = "Silo is busy updating your library — try again when it finishes.";
+/// Refusal when another change holds the library lock (a write that waited too long, or an
+/// archive move that won't start under another write).
+const LIBRARY_BUSY: &str =
+    "Silo is busy with another change to your library. Try again in a moment.";
 
 /// `try_move_lock`'s refusal while another move holds the library lock. Its own text (not
 /// relocate's "already running") so `cancel_falls_back` matches this case and nothing else.
@@ -1036,8 +1103,9 @@ fn lock_result(
 /// How long a write waits behind another one before giving up.
 const LIBRARY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-const LIBRARY_STILL_BUSY: &str =
-    "Silo is busy with another change to your library. Try again in a moment.";
+/// How long a finished download waits to be placed. Longer than `LIBRARY_WAIT` so a brief
+/// busy spell never throws away a completed download (move/loading refusals stay instant).
+const PLACE_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Take the library write lock, waiting behind another ordinary write (up to `LIBRARY_WAIT`)
 /// but never behind an archive move (refused at once, like `ensure_no_move`), then re-check
@@ -1073,7 +1141,7 @@ fn wait_for_library(
             return Ok(guard);
         }
         if start.elapsed() >= max {
-            return Err(LIBRARY_STILL_BUSY.into());
+            return Err(LIBRARY_BUSY.into());
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -3008,8 +3076,9 @@ struct ApplyRow {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ApplyReport {
-    /// The loadout created from the collection's full mod list.
-    loadout_id: i64,
+    /// The loadout created from the collection's full mod list; `None` when the library
+    /// stayed busy and the finished downloads couldn't be added (those rows say so).
+    loadout_id: Option<i64>,
     installed: usize,
     failed: usize,
     rows: Vec<ApplyRow>,
@@ -3115,17 +3184,21 @@ async fn collection_apply(
                     }
                     let dest = root.join(&resolved.filename);
                     // Already there, or another mod in this collection downloads the same file.
-                    if path_taken(&dest) || pending.iter().any(|p| p.dest == dest) {
+                    let key = same_file_key(&dest);
+                    if path_taken(&dest) || pending.iter().any(|p| same_file_key(&p.dest) == key) {
                         rows.push(present_row(&m.tech_name, &resolved.filename));
                         continue;
                     }
-                    let part = match claim_part(&dest) {
-                        Ok(part) => part,
-                        Err(e) => {
-                            rows.push(fail_row(&m.tech_name, e));
-                            failed_count += 1;
-                            continue;
-                        }
+                    // Taken only by another download running right now (e.g. from Browse).
+                    let Ok(part) = claim_part(&dest) else {
+                        rows.push(ApplyRow {
+                            tech_name: m.tech_name.clone(),
+                            filename: Some(resolved.filename.clone()),
+                            status: "skipped".into(),
+                            verdict: None,
+                            detail: Some("Already downloading elsewhere in Silo.".into()),
+                        });
+                        continue;
                     };
                     match siloapi::download_to_part(
                         &resolved.url,
@@ -3172,30 +3245,30 @@ async fn collection_apply(
 
         // Phase 2, under the lock: place each download whose destination is still free, then
         // save the loadout. Dropping a `PendingPlace` (any early return) removes its part.
-        let _write = library_write()?;
-        for p in pending {
-            let row = &mut rows[p.row];
-            if path_taken(&p.dest) {
-                // Appeared while we downloaded (another install): keep theirs.
-                row.status = "present".into();
-            } else {
-                match place_part(p.part.path(), &p.dest) {
-                    Ok(()) => {
-                        installed_count += 1;
-                        row.verdict = Some(p.verdict);
-                    }
-                    Err(e) => {
-                        *row = fail_row(&row.tech_name, e);
-                        failed_count += 1;
-                    }
-                }
+        // Finished downloads wait out a busy spell (`PLACE_WAIT`) rather than being dropped.
+        let lock = library_write_within(PLACE_WAIT);
+        if let Err(e) = &lock {
+            if pending.is_empty() {
+                return Err(e.clone()); // nothing downloaded, nothing lost
             }
         }
+        let locked = lock.as_ref().map(|_| ()).map_err(String::clone);
+        let (placed, place_failed) = place_pending(&mut rows, pending, locked);
+        installed_count += placed;
+        failed_count += place_failed;
 
         // The loadout lists the whole collection; applying it activates the ones you have,
-        // and it completes automatically once you fetch the rest and rescan.
-        let tech_names = coll.tech_names();
-        let loadout_id = db::save_loadout(&mut conn, None, &coll.name, &tech_names)?;
+        // and it completes automatically once you fetch the rest and rescan. Not saved when
+        // the library stayed busy (the report says which downloads couldn't be added).
+        let loadout_id = match lock {
+            Ok(_write) => Some(db::save_loadout(
+                &mut conn,
+                None,
+                &coll.name,
+                &coll.tech_names(),
+            )?),
+            Err(_) => None,
+        };
 
         let _ = emitter.emit(
             "collection:progress",
@@ -3223,6 +3296,40 @@ struct PendingPlace {
     part: PartClaim,
     dest: PathBuf,
     verdict: String,
+}
+
+/// Fill in the rows of finished collection downloads: placed (`installed`, with its verdict),
+/// `present` (the file appeared meanwhile; theirs is kept), or `failed`. `locked` is whether
+/// the library lock is held; without it every pending row fails with that reason. Each part
+/// not placed is removed as its claim drops. Returns (installed, failed).
+fn place_pending(
+    rows: &mut [ApplyRow],
+    pending: Vec<PendingPlace>,
+    locked: Result<(), String>,
+) -> (usize, usize) {
+    let (mut installed, mut failed) = (0, 0);
+    for p in pending {
+        let row = &mut rows[p.row];
+        if let Err(e) = &locked {
+            *row = fail_row(&row.tech_name, e.clone());
+            failed += 1;
+        } else if path_taken(&p.dest) {
+            // Appeared while we downloaded (another install): keep theirs.
+            row.status = "present".into();
+        } else {
+            match place_part(p.part.path(), &p.dest) {
+                Ok(()) => {
+                    installed += 1;
+                    row.verdict = Some(p.verdict);
+                }
+                Err(e) => {
+                    *row = fail_row(&row.tech_name, e);
+                    failed += 1;
+                }
+            }
+        }
+    }
+    (installed, failed)
 }
 
 fn present_row(tech_name: &str, filename: &str) -> ApplyRow {
@@ -3906,21 +4013,91 @@ mod tests {
             let _ = done_rx.recv_timeout(Duration::from_secs(5));
         });
         rx.recv().unwrap();
-        // The wait itself, independent of the move/loading state other tests may flip.
+        // The wait loop itself, with the move/loading checks stubbed out: `library_write`'s
+        // checks read global state other tests flip in parallel, so asserting through it would
+        // test those checks (often "still loading"), not the deadline.
         let start = std::time::Instant::now();
         let waited = super::wait_for_library(Duration::from_millis(300), || Ok(()));
         let waited_for = start.elapsed();
-        // The real entry point gives up too (busy, or refused by the move/loading checks).
-        let start = std::time::Instant::now();
-        let res = super::library_write_within(Duration::from_millis(300));
-        let took = start.elapsed();
         done_tx.send(()).unwrap();
         holder.join().unwrap();
-        assert_eq!(waited.err(), Some(super::LIBRARY_STILL_BUSY.to_string()));
+        assert_eq!(waited.err(), Some(super::LIBRARY_BUSY.to_string()));
         assert!(waited_for >= Duration::from_millis(300), "{waited_for:?}");
         assert!(waited_for < Duration::from_secs(2), "{waited_for:?}");
-        assert!(res.is_err());
-        assert!(took < Duration::from_secs(2), "{took:?}");
+    }
+
+    #[test]
+    fn placing_falls_back_to_rename_only_without_hardlink_support() {
+        use std::io::{Error, ErrorKind};
+        let base = temp_base("place_fallback");
+        let mods = base.join("mods");
+        let no_links = |_: &Path, _: &Path| Err(Error::from(ErrorKind::Unsupported));
+        // No hardlinks, destination free: renamed into place.
+        let dest = mods.join("FS25_A.zip");
+        let part = dest.with_extension("zip.part");
+        std::fs::write(&part, b"a").unwrap();
+        super::place_part_with(&part, &dest, no_links).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"a");
+        assert!(!part.exists());
+        // No hardlinks, destination taken: refused, theirs untouched, the part removed.
+        std::fs::write(&part, b"b").unwrap();
+        let err = super::place_part_with(&part, &dest, no_links).unwrap_err();
+        assert_eq!(err, "FS25_A.zip is already in your library");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"a");
+        assert!(!part.exists());
+        // A real link failure is reported, never papered over with a rename.
+        let free = mods.join("FS25_B.zip");
+        let part = free.with_extension("zip.part");
+        std::fs::write(&part, b"c").unwrap();
+        let broken = |_: &Path, _: &Path| Err(Error::other("disk on fire"));
+        let err = super::place_part_with(&part, &free, broken).unwrap_err();
+        assert_eq!(err, "disk on fire");
+        assert!(!free.exists());
+        // The part vanished: a plain message.
+        let gone = |_: &Path, _: &Path| Err(Error::from(ErrorKind::NotFound));
+        let err = super::place_part_with(&part, &free, gone).unwrap_err();
+        assert_eq!(err, super::DOWNLOAD_GONE);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_busy_library_fails_the_pending_downloads_and_removes_their_parts() {
+        let base = temp_base("place_pending_busy");
+        let dest = base.join("mods").join("FS25_Wait.zip");
+        let part = super::claim_part(&dest).unwrap();
+        std::fs::write(part.path(), b"done").unwrap();
+        let part_path = part.path().to_path_buf();
+        let mut rows = vec![super::ApplyRow {
+            tech_name: "FS25_Wait".into(),
+            filename: Some("FS25_Wait.zip".into()),
+            status: "installed".into(),
+            verdict: None,
+            detail: None,
+        }];
+        let pending = vec![super::PendingPlace {
+            row: 0,
+            part,
+            dest: dest.clone(),
+            verdict: "verified".into(),
+        }];
+        let (installed, failed) =
+            super::place_pending(&mut rows, pending, Err(super::LIBRARY_BUSY.to_string()));
+        assert_eq!((installed, failed), (0, 1));
+        assert_eq!(rows[0].status, "failed");
+        assert_eq!(rows[0].detail.as_deref(), Some(super::LIBRARY_BUSY));
+        assert!(!dest.exists());
+        assert!(!part_path.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claims_ignore_case_on_windows() {
+        let base = temp_base("claim_case");
+        let mods = base.join("mods");
+        let _first = super::claim_part(&mods.join("FS25_Foo.zip")).unwrap();
+        assert!(super::claim_part(&mods.join("fs25_foo.zip")).is_err());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
