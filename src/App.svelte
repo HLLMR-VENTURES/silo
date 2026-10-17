@@ -37,7 +37,6 @@
     getModRepos,
     checkModUpdate,
     catalogCheckUpdates,
-    catalogLibraryTags,
     downloadUpdate,
     saveTextFile,
     userDirPath,
@@ -80,7 +79,6 @@
   } from "./lib/configSchemas";
   import type {
     ModEntry,
-    ModTag,
     ScanResult,
     CurationRow,
     ModInput,
@@ -154,9 +152,6 @@
   // ("" = all). Replaces the old category rail + `selected`.
   let libCat = $state("");
   let libSub = $state("");
-  // Catalog facet filter for the Library (silo-api#9): "namespace:value" tags, ANDed, matched
-  // against each installed mod's catalog tags.
-  let libActiveTags = $state<string[]>([]);
   let curationMap = $state<Record<string, CurationRow>>({});
   let overrideMap = $state<
     Record<string, { category: string; subcategory: string | null }>
@@ -360,18 +355,6 @@
   });
   let gameInfo = $state<GameInfo | null>(null);
   let settingsModsSet = $state<Set<string>>(new Set());
-  // Catalog tags per installed mod (batch-fetched from the catalog), for the Library facets.
-  let catalogTagsMap = $state<Record<string, ModTag[]>>({});
-  async function loadCatalogTags(techNames: string[]) {
-    try {
-      const rows = await catalogLibraryTags(techNames);
-      const map: Record<string, ModTag[]> = {};
-      for (const row of rows) map[row.techName] = row.tags;
-      catalogTagsMap = map;
-    } catch {
-      // Best-effort — an older/offline catalog just leaves the facet dropdowns empty.
-    }
-  }
   let settingsMod = $state<{ techName: string; title: string } | null>(null);
 
   async function launch() {
@@ -1119,36 +1102,8 @@
           .map(([cname, ccount]) => ({ name: cname, count: ccount, value: cname })),
       }));
   });
-  // Aggregate the installed set's catalog tags into the same facet dropdowns as Browse.
-  const LIB_FACET_ORDER = ["region", "era", "theme", "brand", "realism"];
-  const LIB_FACET_LABEL: Record<string, string> = {
-    theme: "Theme",
-    brand: "Brand",
-    region: "Region",
-    realism: "Realism",
-    era: "Era",
-  };
-  const libFacets = $derived.by(() => {
-    const acc: Record<string, Map<string, number>> = {};
-    for (const m of effectiveMods) {
-      for (const t of catalogTagsMap[m.techName] ?? []) {
-        (acc[t.namespace] ??= new Map()).set(
-          t.value,
-          (acc[t.namespace]?.get(t.value) ?? 0) + 1,
-        );
-      }
-    }
-    const out: Record<string, { value: string; count: number }[]> = {};
-    for (const ns of Object.keys(acc)) {
-      out[ns] = [...acc[ns].entries()]
-        .sort((a, b) => b[1] - a[1])
-        .map(([value, count]) => ({ value, count }));
-    }
-    return out;
-  });
   const libFilterCount = $derived(
     (libCat ? 1 : 0) +
-      libActiveTags.length +
       (favoritesOnly ? 1 : 0) +
       (showHidden ? 1 : 0) +
       (flaggedOnly ? 1 : 0) +
@@ -1159,7 +1114,6 @@
   function clearLibFilters() {
     libCat = "";
     libSub = "";
-    libActiveTags = [];
     favoritesOnly = false;
     showHidden = false;
     flaggedOnly = false;
@@ -1174,19 +1128,6 @@
       list = list.filter(
         (m) => m.category === libCat && (!libSub || m.subcategory === libSub),
       );
-    }
-    if (libActiveTags.length > 0) {
-      // Each active tag is "namespace:value"; a mod matches when its catalog tags include it.
-      // Split only on the first colon so values with colons survive.
-      list = list.filter((m) => {
-        const mt = catalogTagsMap[m.techName] ?? [];
-        return libActiveTags.every((t) => {
-          const i = t.indexOf(":");
-          const ns = t.slice(0, i);
-          const val = t.slice(i + 1);
-          return mt.some((x) => x.namespace === ns && x.value === val);
-        });
-      });
     }
     if (!showHidden) {
       list = list.filter((m) => !cur(m.techName).hidden);
@@ -1920,9 +1861,8 @@
       detectForeignFiles(roots[0])
         .then((f) => (foreignFiles = f))
         .catch(() => (foreignFiles = []));
-      // Catalog facet tags for the library (silo-api#9) — powers the facet dropdowns.
-      // Fire-and-forget; the bar just shows no facets until it lands.
-      void loadCatalogTags(r.mods.map((m) => m.techName));
+      // Privacy: a scan never sends the library to the catalog. Catalog calls happen only
+      // when the user asks (Browse, a mod's details, Updates, integrity check).
       // NOTE: the update check is NOT auto-run on launch — on a large library the burst of
       // scan + catalog-tags + a whole-library update pass all landing at once could jank the
       // window right after it opened. The "Needs update" toggle runs it on demand instead.
@@ -2555,10 +2495,6 @@
         ]}
         bind:sortDir
         dirEnabled={true}
-        facetOrder={LIB_FACET_ORDER}
-        facetData={libFacets}
-        facetLabels={LIB_FACET_LABEL}
-        bind:activeTags={libActiveTags}
         showYear={false}
         showClear={false}
         filterCount={libFilterCount}

@@ -762,43 +762,6 @@ async fn catalog_check_updates(
     .map_err(|e| e.to_string())?
 }
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LibraryTags {
-    tech_name: String,
-    tags: Vec<siloapi::Tag>,
-}
-
-/// Fetch catalog semantic tags for the installed library in one batch (silo-api#9), so the
-/// Library can build the same facet dropdowns as Browse. Best-effort — mods with no catalog
-/// match (or an older server) come back absent; only tagged mods are returned.
-#[tauri::command]
-async fn catalog_library_tags(
-    app: tauri::AppHandle,
-    tech_names: Vec<String>,
-) -> Result<Vec<LibraryTags>, String> {
-    let base = siloapi_base(&app)?;
-    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<LibraryTags>, String> {
-        let results = siloapi::lookup(&base, &tech_names)?;
-        Ok(results
-            .into_iter()
-            .filter_map(|r| {
-                let tech = r.tech_name?;
-                if r.tags.is_empty() {
-                    None
-                } else {
-                    Some(LibraryTags {
-                        tech_name: tech,
-                        tags: r.tags,
-                    })
-                }
-            })
-            .collect())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 /// Verify one installed mod against its canonical build: hash the local zip, look the mod
 /// up in the catalog, fetch the canonical manifest for the local version, and compare.
 /// Verified (byte/content match), Modified (with the exact file diff), or Unverified (no
@@ -3399,7 +3362,6 @@ pub fn run() {
             catalog_image,
             install_remote_mod,
             catalog_check_updates,
-            catalog_library_tags,
             verify_mod,
             get_overrides,
             set_override,

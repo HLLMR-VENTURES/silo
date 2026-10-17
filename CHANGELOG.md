@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Silo no longer sends your mod list in the background.** Every scan used to send the names
+  of all installed mods to the catalog, only to fill the region / era / theme / brand / realism
+  dropdowns in the Library. Those dropdowns are gone from the Library (they stay in Browse),
+  and Silo now contacts the catalog only when you ask: searching Browse, opening a mod's
+  details, checking for updates, or checking a mod's integrity.
+
 - **Silo no longer works around ModHub's image protection.** GIANTS' ModHub CDN only serves
   images to its own website. Silo used to send a farming-simulator.com `Referer` header to get
   thumbnails anyway; it now sends its own User-Agent and no Referer, and only proxies images
