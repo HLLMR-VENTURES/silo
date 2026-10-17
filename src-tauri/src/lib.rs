@@ -4261,6 +4261,34 @@ async fn detect_foreign_files(
     .map_err(|e| e.to_string())?
 }
 
+/// The log: `app_log_dir()/silo.log` when `to_file` (Windows `%LOCALAPPDATA%\com.hllmr.silo\logs`,
+/// macOS `~/Library/Logs/com.hllmr.silo`, Linux `~/.local/share/com.hllmr.silo/logs`), and
+/// stderr. Release builds have no console, so the file is the only record of what Silo did. It
+/// holds full paths; "Copy diagnostics" removes the home folder and user name (`diagnostics`).
+/// Never log secrets (tokens, gist contents) through it.
+fn log_plugin<R: tauri::Runtime>(to_file: bool) -> tauri::plugin::TauriPlugin<R> {
+    use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
+    let mut targets = vec![Target::new(TargetKind::Stderr)];
+    if to_file {
+        targets.push(Target::new(TargetKind::LogDir {
+            file_name: Some("silo".into()),
+        }));
+    }
+    tauri_plugin_log::Builder::new()
+        .clear_targets()
+        .targets(targets)
+        .level(log::LevelFilter::Info)
+        .level_for("tao", log::LevelFilter::Warn)
+        .level_for("wry", log::LevelFilter::Warn)
+        .level_for("ureq", log::LevelFilter::Warn)
+        .level_for("rustls", log::LevelFilter::Warn)
+        .max_file_size(2_000_000)
+        // KeepSome(n) keeps n rotated files besides the live one: five files in all.
+        .rotation_strategy(RotationStrategy::KeepSome(4))
+        .timezone_strategy(TimezoneStrategy::UseLocal)
+        .build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
@@ -4280,32 +4308,6 @@ pub fn run() {
         }));
     }
 
-    // The log file: `app_log_dir()/silo.log` (Windows `%LOCALAPPDATA%\com.hllmr.silo\logs`,
-    // macOS `~/Library/Logs/com.hllmr.silo`, Linux `~/.local/share/com.hllmr.silo/logs`).
-    // Release builds have no console, so this is the only record of what Silo did. It holds
-    // full paths; "Copy diagnostics" removes the home folder and user name (`diagnostics`).
-    // Never log secrets (tokens, gist contents) through it.
-    builder = builder.plugin(
-        tauri_plugin_log::Builder::new()
-            .clear_targets()
-            .targets([
-                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
-                    file_name: Some("silo".into()),
-                }),
-                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stderr),
-            ])
-            .level(log::LevelFilter::Info)
-            .level_for("tao", log::LevelFilter::Warn)
-            .level_for("wry", log::LevelFilter::Warn)
-            .level_for("ureq", log::LevelFilter::Warn)
-            .level_for("rustls", log::LevelFilter::Warn)
-            .max_file_size(2_000_000)
-            // KeepSome(n) keeps n rotated files besides the live one: five files in all.
-            .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(4))
-            .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
-            .build(),
-    );
-
     builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
@@ -4313,6 +4315,13 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // Started here, not on the builder: a plugin that fails on the builder stops the app,
+            // and a log folder Silo can't write (or an old log another program holds open) must
+            // never keep Silo from starting. Then it logs to stderr only.
+            if let Err(e) = app.handle().plugin(log_plugin(true)) {
+                let _ = app.handle().plugin(log_plugin(false));
+                log::warn!("couldn't open the log file: {e}");
+            }
             log::info!(
                 "Silo {} starting on {}",
                 app.package_info().version,
