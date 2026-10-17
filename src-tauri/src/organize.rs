@@ -1291,8 +1291,9 @@ pub(crate) fn remove_link(link: &Path) -> std::io::Result<()> {
     let meta = link.symlink_metadata()?;
     let ft = meta.file_type();
     if ft.is_symlink() {
-        // A dir symlink/junction must be removed with remove_dir on Windows.
-        if link.metadata().map(|m| m.is_dir()).unwrap_or(false) {
+        // A dir symlink/junction must be removed with remove_dir on Windows. On Unix every
+        // symlink — even one to a folder — is unlinked as a file: rmdir on it fails (ENOTDIR).
+        if cfg!(windows) && link.metadata().map(|m| m.is_dir()).unwrap_or(false) {
             std::fs::remove_dir(link)
         } else {
             std::fs::remove_file(link)
@@ -2658,6 +2659,40 @@ mod tests {
         assert_eq!(
             std::fs::read(&src).unwrap(),
             b"PK\x03\x04 the archived build"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deactivate_removes_a_silo_folder_symlink_and_keeps_the_folder() {
+        // rmdir on a symlink fails on Unix (ENOTDIR), so a folder link must be unlinked.
+        let (base, conn, _, _) = symlink_fixture("deactdir", false);
+        let src = base.join(ARCHIVE).join("Vehicles").join("FS25_Dir");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        let key = crate::modsroot::canonical_key(&base);
+        db::upsert_organized(
+            &conn,
+            &key,
+            &OrganizedRow {
+                tech_name: "FS25_Dir".into(),
+                file_name: "FS25_Dir".into(),
+                kind: "dir".into(),
+                category: "Vehicles".into(),
+                subcategory: None,
+                active: true,
+            },
+        )
+        .unwrap();
+        let link = base.join("FS25_Dir");
+        std::os::unix::fs::symlink(&src, &link).unwrap();
+        let rep = set_active(&conn, &Layout::default_for(&base), &HashSet::new());
+        assert_eq!(rep.changed, 1, "errors: {:?}", rep.errors);
+        assert!(link.symlink_metadata().is_err(), "the folder link is gone");
+        assert!(
+            src.join("modDesc.xml").is_file(),
+            "the archived folder stays"
         );
         let _ = std::fs::remove_dir_all(&base);
     }
