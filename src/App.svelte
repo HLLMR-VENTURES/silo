@@ -38,6 +38,9 @@
     checkModUpdate,
     catalogCheckUpdates,
     downloadUpdate,
+    appBusy,
+    forceQuit,
+    onCloseBlocked,
     saveTextFile,
     userDirPath,
     bisectSnapshotGet,
@@ -281,6 +284,17 @@
 
   async function applyUpdate() {
     if (updating) return;
+    // Installing relaunches Silo: never in the middle of a change to the library.
+    let writing = false;
+    try {
+      writing = await appBusy();
+    } catch {
+      /* the check failed; the state below still guards */
+    }
+    if (busy || moveRunning || moveUnfinished || bisecting || bisectRecovery || writing) {
+      errorMsg = "Finish what Silo is doing first, then update.";
+      return;
+    }
     updating = true;
     try {
       await installUpdate((p) => (updatePct = p));
@@ -1923,6 +1937,7 @@
     let dlUnlisten: (() => void) | undefined;
     let focusUnlisten: (() => void) | undefined;
     let moveUnlisten: (() => void) | undefined;
+    let closeUnlisten: (() => void) | undefined;
     // Suppress the WebView's built-in right-click menu (reload/inspect junk) app-wide,
     // but keep the native cut/copy/paste menu inside editable fields. Our own row menu
     // (ModRow → ContextMenu) still opens; it sets its own handler on the row.
@@ -2027,12 +2042,25 @@
       } catch {
         /* not a desktop window context */
       }
+      // Closing while Silo is changing files is held by the backend; ask before quitting.
+      try {
+        closeUnlisten = await onCloseBlocked(async () => {
+          const quit = await confirmDialog(
+            "Silo is still changing files. Quitting now could leave a mod half-moved. Quit anyway?",
+            { okLabel: "Quit anyway", cancelLabel: "Keep Silo open" },
+          );
+          if (quit) await forceQuit();
+        });
+      } catch {
+        /* not a desktop window context */
+      }
     })();
     return () => {
       unlisten?.();
       dlUnlisten?.();
       focusUnlisten?.();
       moveUnlisten?.();
+      closeUnlisten?.();
       window.removeEventListener("contextmenu", onCtx);
     };
   });

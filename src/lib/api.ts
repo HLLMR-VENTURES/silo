@@ -471,6 +471,15 @@ export function downloadUpdate(path: string, assetUrl: string): Promise<string |
   return invoke<string | null>("download_update", { path, assetUrl });
 }
 
+/** True while Silo is changing files (a library write or an archive move is running). */
+export const appBusy = () => invoke<boolean>("app_busy");
+/** Quit even though Silo is busy (after the user confirmed it). */
+export const forceQuit = () => invoke<void>("force_quit");
+/** Fires when the window was asked to close while Silo is changing files (the close was held). */
+export function onCloseBlocked(cb: () => void): Promise<UnlistenFn> {
+  return listen("close-blocked", () => cb());
+}
+
 // ── SiloAPI (mod browser / discovery) ──
 export function siloapiStatus(): Promise<string> {
   return invoke<string>("siloapi_status");

@@ -1185,6 +1185,33 @@ fn move_in_progress() -> bool {
     MOVE_HOLDS_LOCK.load(std::sync::atomic::Ordering::SeqCst) || relocate::is_running()
 }
 
+/// Set by `force_quit` so the close guard lets the window go after the user said "Quit anyway".
+static FORCE_QUIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True while Silo is changing files: a library write holds the lock, or an archive move is
+/// running (including between its lock drops). Never waits for the lock.
+fn library_busy() -> bool {
+    busy_with(&LIBRARY_WRITE, move_in_progress())
+}
+
+/// [`library_busy`] against a given lock. A poisoned lock that nobody holds is not busy.
+fn busy_with(lock: &std::sync::Mutex<()>, moving: bool) -> bool {
+    moving || matches!(lock.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+}
+
+/// Whether Silo is changing files right now (the frontend asks before a self-update).
+#[tauri::command]
+fn app_busy() -> bool {
+    library_busy()
+}
+
+/// Quit even though Silo is busy, after the user confirmed it.
+#[tauri::command]
+fn force_quit(app: tauri::AppHandle) {
+    FORCE_QUIT.store(true, std::sync::atomic::Ordering::SeqCst);
+    app.exit(0);
+}
+
 /// The library write lock as held by an archive move; clears `MOVE_HOLDS_LOCK` on drop
 /// (before the lock itself is released).
 struct MoveLock {
@@ -3814,8 +3841,20 @@ pub fn run() {
             adopt_foreign_file,
             restore_foreign_file,
             relink_projections,
-            hardlink_support
+            hardlink_support,
+            app_busy,
+            force_quit
         ])
+        // Closing the window while Silo is changing files could leave a mod half-moved: keep
+        // the window open and let the frontend ask (it calls `force_quit` on "Quit anyway").
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if !FORCE_QUIT.load(std::sync::atomic::Ordering::SeqCst) && library_busy() {
+                    api.prevent_close();
+                    let _ = window.emit("close-blocked", ());
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running Silo");
 }
@@ -4103,6 +4142,31 @@ mod tests {
         // Unknown free space never blocks.
         assert!(move_problems(facts(space(false, None))).is_empty());
         assert!(move_problems(facts(space(true, None))).is_empty());
+    }
+
+    // Against a lock of its own: other tests hold `LIBRARY_WRITE`, so asserting "not busy" on
+    // the real one would race them.
+    #[test]
+    fn library_busy_reflects_the_write_lock() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        assert!(!super::busy_with(&LOCK, false));
+        let g = LOCK.lock().unwrap();
+        assert!(super::busy_with(&LOCK, false));
+        drop(g);
+        assert!(!super::busy_with(&LOCK, false));
+        assert!(super::busy_with(&LOCK, true), "a running move counts");
+    }
+
+    #[test]
+    fn a_poisoned_but_free_lock_is_not_busy() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _ = std::thread::spawn(|| {
+            let _g = LOCK.lock().unwrap();
+            panic!("poison the lock (expected in this test)");
+        })
+        .join();
+        assert!(LOCK.is_poisoned());
+        assert!(!super::busy_with(&LOCK, false));
     }
 
     #[test]
