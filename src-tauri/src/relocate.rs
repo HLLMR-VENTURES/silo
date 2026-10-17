@@ -629,8 +629,9 @@ fn back_one(
 /// Delete stale scratch entries left by a crash under each category folder of `archive`: a
 /// move's temp and half-deleted old copies, and an interrupted cross-drive organize's
 /// `.{name}.silo-tmp` (its original is only removed after the temp is renamed into place, so a
-/// leftover temp is never the only copy). Only Silo's own names (`scan::is_silo_temp`) are
-/// touched; the move holds the library lock, so no organize is writing one right now.
+/// leftover temp is never the only copy). Only those names (`is_move_scratch`) are touched —
+/// never a mod update's leftovers, whose `-old` file may be the only copy of a mod; the move
+/// holds the library lock, so no organize is writing one right now.
 fn clean_temps(archive: &Path) {
     if let Ok(cats) = std::fs::read_dir(archive) {
         for c in cats.flatten() {
@@ -639,13 +640,58 @@ fn clean_temps(archive: &Path) {
             }
             if let Ok(es) = std::fs::read_dir(c.path()) {
                 for e in es.flatten() {
-                    if crate::scan::is_silo_temp(&e.file_name().to_string_lossy()) {
+                    if is_move_scratch(&e.file_name().to_string_lossy()) {
                         let _ = remove_any(&e.path());
                     }
                 }
             }
         }
     }
+}
+
+/// A move's own scratch names, plus relink temps and organize's `.{name}.silo-tmp`: safe to
+/// delete after a crash. Unlike `scan::is_silo_temp`, never a mod update's `.silo-update.part`
+/// or `.silo-update-old` (`update::recover_interrupted` deals with those).
+fn is_move_scratch(name: &str) -> bool {
+    let l = name.to_lowercase();
+    l.ends_with(TMP_SUFFIX)
+        || l.ends_with(OLD_SUFFIX)
+        || l.ends_with(RELINK_SUFFIX)
+        || (l.starts_with('.') && l.ends_with(".silo-tmp"))
+}
+
+/// Finish or roll back interrupted mod updates in the mods folder and both archives' category
+/// folders (the move holds the library lock). Returns why the move must pause, if an update's
+/// previous version is still set aside: moving around it could leave it behind.
+fn settle_updates(mods: &Path, marker: &MoveMarker) -> Option<String> {
+    let mut leftovers = Vec::new();
+    for archive in [&marker.from, &marker.to] {
+        let layout = Layout {
+            mods: mods.to_path_buf(),
+            archive: archive.clone(),
+        };
+        let mut dirs = crate::update::layout_dirs(&layout);
+        if archive != &marker.from {
+            dirs.retain(|d| d != mods); // the mods folder once is enough
+        }
+        let r = crate::update::settle(&dirs, mods, &mut LinkPolicy::new(&layout));
+        for n in r.notices.iter().chain(&r.problems) {
+            eprintln!("[silo] {n}");
+        }
+        leftovers.extend(r.leftovers);
+    }
+    if leftovers.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = leftovers
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    Some(format!(
+        "An interrupted mod update left a previous version Silo couldn't put away ({}). Close \
+         any program using it, rescan, then resume.",
+        names.join(", ")
+    ))
 }
 
 /// Delete a stale `RELINK_SUFFIX` temp left by a crash mid-relink next to each library zip's
@@ -975,6 +1021,10 @@ fn run_locked(
     marker.pause_reason = None;
     marker.errors.clear();
     save_marker(env.conn, env.mods_key, &marker)?;
+    if let Some(reason) = settle_updates(env.mods, &marker) {
+        marker.pause_reason = Some(reason);
+        return pause(&env, marker);
+    }
     clean_temps(&marker.from);
     clean_temps(&marker.to);
     clean_relink_temps(env.mods, &db::load_organized(env.conn, env.mods_key));
@@ -1514,6 +1564,59 @@ mod tests {
         assert!(zip_at(&f.new, "FS25_B").exists());
         assert!(!zip_at(&f.old, "FS25_A").exists() && !zip_at(&f.old, "FS25_B").exists());
         let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_move_puts_back_an_update_interrupted_before_the_new_file_landed() {
+        let f = fx("upd_rollback");
+        add_zip(&f, "FS25_A", false);
+        let a = zip_at(&f.old, "FS25_A");
+        let old = crate::update::old_path(&a);
+        std::fs::rename(&a, &old).unwrap(); // stopped after step b
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
+        assert_eq!(
+            std::fs::read(zip_at(&f.new, "FS25_A")).unwrap(),
+            b"PK\x03\x04 FS25_A"
+        );
+        assert!(!old.exists());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_move_never_deletes_an_update_leftover_it_cant_resolve() {
+        let f = fx("upd_leftover");
+        add_zip(&f, "FS25_A", false);
+        let a = zip_at(&f.old, "FS25_A");
+        let old = crate::update::old_path(&a);
+        std::fs::write(&old, b"the previous version").unwrap();
+        // The backups folder can't be made, so the old version can't be put away.
+        std::fs::write(f.mods.join("backups"), b"in the way").unwrap();
+        let part = crate::update::part_path(&zip_at(&f.old, "FS25_B"));
+        std::fs::write(&part, b"stale download").unwrap();
+
+        let paused = run_with(&f, Op::Start, &|| false).unwrap().unwrap();
+
+        assert!(paused.paused);
+        let reason = paused.pause_reason.unwrap_or_default();
+        assert!(reason.contains("FS25_A.zip.silo-update-old"), "{reason}");
+        assert_eq!(std::fs::read(&old).unwrap(), b"the previous version");
+        assert!(
+            a.exists() && !zip_at(&f.new, "FS25_A").exists(),
+            "nothing moved"
+        );
+        assert!(!part.exists(), "an unclaimed stale download is removed");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn move_scratch_never_includes_update_leftovers() {
+        assert!(is_move_scratch("FS25_A.zip.silo-move-tmp"));
+        assert!(is_move_scratch("FS25_A.zip.SILO-MOVE-OLD"));
+        assert!(is_move_scratch("FS25_A.zip.silo-relink-tmp"));
+        assert!(is_move_scratch(".FS25_A.zip.silo-tmp"));
+        assert!(!is_move_scratch("FS25_A.zip.silo-update-old"));
+        assert!(!is_move_scratch("FS25_A.zip.silo-update.part"));
+        assert!(!is_move_scratch("FS25_A.zip"));
     }
 
     #[test]

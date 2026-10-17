@@ -8,13 +8,15 @@
 //! d. if it was projected, re-point the projection at the new file (temp + rename);
 //! e. move the old file to `<mods>/backups/` and keep the newest [`KEEP_BACKUPS`].
 //!
-//! A crash at any step leaves either `dest` or its `-old` twin (or both), and
-//! [`recover_interrupted`] finishes or rolls back from there. Nothing is ever truncated or
-//! overwritten in place, and the old version is never deleted until a newer one is in backups.
+//! If c or d fails the swap is undone (the old version is `dest` again). A crash at any step
+//! leaves either `dest` or its `-old` twin (or both), and [`recover_interrupted`] finishes or
+//! rolls back from there. Nothing is ever truncated or overwritten in place, and the old
+//! version is never deleted until a newer one is in backups.
 
 use crate::organize::{self, LinkPolicy};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// The download, beside the mod it replaces. `scan` skips it.
 pub const PART_SUFFIX: &str = ".silo-update.part";
@@ -80,13 +82,15 @@ fn write_part(reader: impl Read, part: &Path, dest: &Path) -> Result<(), String>
 #[derive(Debug, Default)]
 pub struct Swapped {
     /// Where the previous version is kept. `None` if moving it there failed (see `problems`);
-    /// it then stays beside the mod as `<dest>.silo-update-old` and the next scan retries.
+    /// it then stays beside the mod as `<dest>.silo-update-old` and a later scan retries.
     pub backup: Option<PathBuf>,
     /// The mods-folder entry Silo re-pointed at the new file (an archived mod's projection).
     pub relinked: Option<PathBuf>,
     /// What went wrong after the new version was in place. The update itself stands.
     pub problems: Vec<String>,
 }
+
+type Relink<'r> = &'r mut dyn FnMut(&Path, &Path, &mut LinkPolicy) -> std::io::Result<()>;
 
 /// Put the downloaded `part` in place of `dest` (steps a–e above). Call under the library lock.
 /// `mods_root` is the flat mods folder (projections and `backups/` live there). Refuses, with
@@ -96,6 +100,23 @@ pub(crate) fn swap(
     part: &Path,
     mods_root: &Path,
     policy: &mut LinkPolicy,
+) -> Result<Swapped, String> {
+    swap_with(
+        dest,
+        part,
+        mods_root,
+        policy,
+        &mut organize::replace_zip_link,
+    )
+}
+
+/// [`swap`] with step d's link replacement injected (tests make it fail).
+fn swap_with(
+    dest: &Path,
+    part: &Path,
+    mods_root: &Path,
+    policy: &mut LinkPolicy,
+    relink: Relink,
 ) -> Result<Swapped, String> {
     let name = file_name(dest)?;
     match dest.symlink_metadata() {
@@ -141,12 +162,13 @@ pub(crate) fn swap(
     }
 
     let mut out = Swapped::default();
-    // d. Point the mods folder at the new version.
+    // d. Point the mods folder at the new version, or undo the swap: the game must never be
+    //    left loading the old build behind Silo's back.
     if projected {
-        match organize::replace_zip_link(&flat, dest, policy) {
-            Ok(()) => out.relinked = Some(flat),
-            Err(e) => out.problems.push(stale_link_problem(&name, &e)),
+        if let Err(e) = relink(&flat, dest, policy) {
+            return Err(undo_swap(dest, part, &old, &name, &e));
         }
+        out.relinked = Some(flat);
     }
     // e. Keep the previous version in backups.
     match keep_backup(&old, mods_root, &name) {
@@ -160,11 +182,22 @@ pub(crate) fn swap(
     Ok(out)
 }
 
-fn stale_link_problem(name: &str, e: &std::io::Error) -> String {
-    format!(
-        "{name} was updated, but Silo couldn't point your mods folder at the new version ({e}), \
-         so the game still loads the old one. Use Restore on that mod to fix it."
-    )
+/// Undo steps b–c after step d failed: the new file goes back to `part`, the old one to `dest`.
+fn undo_swap(dest: &Path, part: &Path, old: &Path, name: &str, e: &std::io::Error) -> String {
+    let why = format!("Couldn't point your mods folder at the new {name} ({e})");
+    if let Err(back) = std::fs::rename(dest, part) {
+        return format!(
+            "{why}, and couldn't undo the update ({back}). Silo finishes it on the next scan."
+        );
+    }
+    match std::fs::rename(old, dest) {
+        Ok(()) => format!("{why}, so the update was undone and the current version kept."),
+        Err(back) => format!(
+            "{why}, and couldn't put the current version back ({back}). It is safe at {}; \
+             Silo puts it back on the next scan.",
+            old.display()
+        ),
+    }
 }
 
 /// Move the set-aside `old` into `<mods_root>/backups/` and prune that mod's older backups.
@@ -175,18 +208,36 @@ fn keep_backup(old: &Path, mods_root: &Path, name: &str) -> std::io::Result<Path
     Ok(bak)
 }
 
+/// Old versions whose move to backups recovery already tried (and failed) this session. Each is
+/// retried at most once per run, so a stuck cross-drive copy isn't repeated on every scan.
+static BACKUP_TRIED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// What recovery did, and what it couldn't fix.
+#[derive(Debug, Default)]
+pub struct Recovery {
+    /// Updates finished or rolled back, for the user.
+    pub notices: Vec<String>,
+    /// What couldn't be fixed, for the user.
+    pub problems: Vec<String>,
+    /// Set-aside old versions still there afterwards (filled in by [`settle`]).
+    pub leftovers: Vec<PathBuf>,
+    /// Of those, the ones whose mod file is missing: the library is short that mod until the
+    /// old version can be put back.
+    pub stranded: Vec<PathBuf>,
+}
+
 /// Finish or roll back any update in `dir` that stopped partway (non-recursive): a lone
 /// `X.silo-update-old` goes back to `X`; one beside a new `X` finishes the swap (re-point,
 /// backup); a part file no download in this run has claimed is removed. Call under the library
-/// lock. Returns a line per thing done, for the log.
+/// lock.
 pub(crate) fn recover_interrupted(
     dir: &Path,
     mods_root: &Path,
     policy: &mut LinkPolicy,
-) -> Vec<String> {
-    let mut notes = Vec::new();
+) -> Recovery {
+    let mut out = Recovery::default();
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return notes;
+        return out;
     };
     for entry in entries.flatten() {
         if !entry.file_type().is_ok_and(|t| t.is_file()) {
@@ -194,21 +245,13 @@ pub(crate) fn recover_interrupted(
         }
         let path = entry.path();
         let entry_name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(base) = entry_name.strip_suffix(PART_SUFFIX) {
-            if crate::remove_unclaimed_part(&path) {
-                notes.push(format!("{base}: removed an unfinished update download."));
-            }
+        if entry_name.ends_with(PART_SUFFIX) {
+            crate::remove_unclaimed_part(&path);
         } else if let Some(base) = entry_name.strip_suffix(OLD_SUFFIX) {
-            notes.push(finish_or_roll_back(
-                &dir.join(base),
-                &path,
-                base,
-                mods_root,
-                policy,
-            ));
+            finish_or_roll_back(&dir.join(base), &path, base, mods_root, policy, &mut out);
         }
     }
-    notes
+    out
 }
 
 fn finish_or_roll_back(
@@ -217,60 +260,164 @@ fn finish_or_roll_back(
     name: &str,
     mods_root: &Path,
     policy: &mut LinkPolicy,
-) -> String {
+    out: &mut Recovery,
+) {
     if dest.symlink_metadata().is_err() {
         // Stopped before the new version was placed: the old one is the mod again.
-        return match std::fs::rename(old, dest) {
-            Ok(()) => format!("{name}: an update was interrupted; the previous version is back."),
-            Err(e) => format!(
-                "{name}: an update was interrupted and Silo couldn't put the previous version \
-                 back ({e}). It is at {}.",
+        match std::fs::rename(old, dest) {
+            Ok(()) => out.notices.push(format!(
+                "An update of {name} was interrupted, so Silo put the previous version back."
+            )),
+            Err(e) => out.problems.push(format!(
+                "An update of {name} was interrupted and Silo couldn't put the previous version \
+                 back ({e}). It is safe at {}.",
                 old.display()
-            ),
-        };
+            )),
+        }
+        return;
     }
-    // The new version is in place. A projection still on the old file is re-pointed first.
-    let mut note = format!("{name}: finished an interrupted update.");
+    // The new version is in place. A projection still on the old file is re-pointed first; if
+    // that fails, the old file stays set aside so the next pass tries again.
     let flat = mods_root.join(name);
     if !in_folder(dest, mods_root) && organize::is_silo_projection(&flat, old, "zip") {
         if let Err(e) = organize::replace_zip_link(&flat, dest, policy) {
-            note = stale_link_problem(name, &e);
+            out.problems.push(format!(
+                "Silo couldn't finish an interrupted update of {name}: your mods folder still \
+                 has the previous version ({e})."
+            ));
+            return;
         }
     }
+    {
+        let mut tried = BACKUP_TRIED.lock().unwrap_or_else(|e| e.into_inner());
+        if tried.iter().any(|p| p == old) {
+            return; // already tried once this session; it stays set aside
+        }
+        tried.push(old.to_path_buf());
+    }
     match keep_backup(old, mods_root, name) {
-        Ok(b) => format!("{note} The previous version is in {}.", b.display()),
-        Err(e) => format!(
-            "{note} Couldn't move the previous version to backups ({e}); it stays at {}.",
+        Ok(b) => {
+            // Put away: a later update of this mod gets its own retry.
+            let mut tried = BACKUP_TRIED.lock().unwrap_or_else(|e| e.into_inner());
+            tried.retain(|p| p != old);
+            out.notices.push(format!(
+                "Silo finished an interrupted update of {name}. The previous version is kept \
+                 in {}.",
+                b.display()
+            ));
+        }
+        Err(e) => out.problems.push(format!(
+            "Silo couldn't move the previous version of {name} to backups ({e}). It is kept at \
+             {}.",
             old.display()
-        ),
+        )),
     }
 }
 
+/// Run [`recover_interrupted`] over `dirs`, then list what is still set aside. Call under the
+/// library lock.
+pub(crate) fn settle(dirs: &[PathBuf], mods_root: &Path, policy: &mut LinkPolicy) -> Recovery {
+    let mut out = Recovery::default();
+    for dir in dirs {
+        let r = recover_interrupted(dir, mods_root, policy);
+        out.notices.extend(r.notices);
+        out.problems.extend(r.problems);
+    }
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            let Some(base) = n.strip_suffix(OLD_SUFFIX) else {
+                continue;
+            };
+            if dir.join(base).symlink_metadata().is_err() {
+                out.stranded.push(e.path());
+            }
+            out.leftovers.push(e.path());
+        }
+    }
+    out
+}
+
+/// The folders an update can write in for `layout`: the mods folder and each archive category.
+pub(crate) fn layout_dirs(layout: &organize::Layout) -> Vec<PathBuf> {
+    let mut dirs = vec![layout.mods.clone()];
+    if let Ok(entries) = std::fs::read_dir(&layout.archive) {
+        let mut cats: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.path())
+            .collect();
+        cats.sort();
+        dirs.extend(cats);
+    }
+    dirs
+}
+
+/// The refusal while an update's previous version is stranded (see [`Recovery::stranded`]).
+pub(crate) fn stranded_message(stranded: &[PathBuf]) -> String {
+    let names: Vec<String> = stranded
+        .iter()
+        .filter_map(|p| p.file_name())
+        .map(|n| {
+            let n = n.to_string_lossy();
+            n.strip_suffix(OLD_SUFFIX).unwrap_or(&n).to_string()
+        })
+        .collect();
+    format!(
+        "Silo couldn't finish an interrupted update of {}. Close any program using it, then try \
+         again.",
+        names.join(", ")
+    )
+}
+
 /// Keep the `keep` newest update backups of `file_name` in `backups` (named
-/// `<file_name>.<unix_secs>[-n].update.bak`); remove older ones. Never touches anything else
-/// there, including the `.bak` files adopt/restore keep.
+/// `<file_name>.<unix_secs>[-n].update.bak`); remove older ones, and the half-copied
+/// `.<file_name>.….update.bak.silo-tmp` a stopped cross-drive move leaves. Never touches anything
+/// else there, including the `.bak` files adopt/restore keep.
 pub fn prune_backups(backups: &Path, file_name: &str, keep: usize) {
     let Ok(entries) = std::fs::read_dir(backups) else {
         return;
     };
     let prefix = format!("{file_name}.");
-    let mut found: Vec<((u64, u64), PathBuf)> = entries
-        .flatten()
-        .filter_map(|e| {
-            let n = e.file_name().to_string_lossy().into_owned();
-            let stamp = n
-                .strip_prefix(&prefix)?
-                .strip_suffix(organize::UPDATE_BACKUP_SUFFIX)?;
-            let order = match stamp.split_once('-') {
-                Some((secs, seq)) => (secs.parse().ok()?, seq.parse().ok()?),
-                None => (stamp.parse().ok()?, 1),
-            };
-            e.file_type().ok()?.is_file().then_some((order, e.path()))
-        })
-        .collect();
+    let tmp_prefix = format!(".{file_name}.");
+    let tmp_suffix = format!("{}.silo-tmp", organize::UPDATE_BACKUP_SUFFIX);
+    let mut found: Vec<((u64, u64), PathBuf)> = Vec::new();
+    for e in entries.flatten() {
+        if !e.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let n = e.file_name().to_string_lossy().into_owned();
+        if let Some(stamp) = n
+            .strip_prefix(&tmp_prefix)
+            .and_then(|s| s.strip_suffix(&tmp_suffix))
+        {
+            if backup_order(stamp).is_some() {
+                let _ = std::fs::remove_file(e.path());
+            }
+            continue;
+        }
+        let order = n
+            .strip_prefix(&prefix)
+            .and_then(|s| s.strip_suffix(organize::UPDATE_BACKUP_SUFFIX))
+            .and_then(backup_order);
+        if let Some(order) = order {
+            found.push((order, e.path()));
+        }
+    }
     found.sort_by_key(|(order, _)| std::cmp::Reverse(*order));
     for (_, p) in found.into_iter().skip(keep) {
         let _ = std::fs::remove_file(p);
+    }
+}
+
+/// `<secs>` or `<secs>-<n>` as a sort key.
+fn backup_order(stamp: &str) -> Option<(u64, u64)> {
+    match stamp.split_once('-') {
+        Some((secs, seq)) => Some((secs.parse().ok()?, seq.parse().ok()?)),
+        None => Some((stamp.parse().ok()?, 1)),
     }
 }
 
@@ -369,6 +516,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&mods);
     }
 
+    /// A second name for the installed file's bytes must still read the old version after the
+    /// update: proof nothing was written into the installed file in place.
+    #[test]
+    fn an_update_never_writes_into_the_installed_file() {
+        let mods = fresh("witness");
+        let layout = Layout::default_for(&mods);
+        let dest = mods.join("FS25_A.zip");
+        make_mod_zip(&dest, "A", "1.0.0.0");
+        let witness = mods.join("witness.bin");
+        std::fs::hard_link(&dest, &witness).unwrap();
+        let part = part_path(&dest);
+        make_mod_zip(&part, "A", "2.0.0.0");
+
+        swap(&dest, &part, &mods, &mut LinkPolicy::new(&layout)).unwrap();
+
+        assert_eq!(version_of(&dest).as_deref(), Some("2.0.0.0"));
+        assert_eq!(version_of(&witness).as_deref(), Some("1.0.0.0"));
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
     #[test]
     fn a_projected_update_repoints_the_link_to_the_new_file() {
         let mods = fresh("projected");
@@ -388,6 +555,45 @@ mod tests {
         assert!(!mods.join("FS25_A.zip.silo-relink-tmp").exists());
         let backup = done.backup.expect("the old version is kept");
         assert_eq!(version_of(&backup).as_deref(), Some("1.0.0.0"));
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_failed_relink_undoes_the_update() {
+        let mods = fresh("relink_fails");
+        let layout = Layout::default_for(&mods);
+        let dest = layout.archive.join("Misc").join("FS25_A.zip");
+        make_mod_zip(&dest, "A", "1.0.0.0");
+        let flat = mods.join("FS25_A.zip");
+        std::fs::hard_link(&dest, &flat).unwrap();
+        let part = part_path(&dest);
+        make_mod_zip(&part, "A", "2.0.0.0");
+        let mut fail = |_: &Path, _: &Path, _: &mut LinkPolicy| -> std::io::Result<()> {
+            Err(std::io::Error::other("no links today"))
+        };
+
+        let err = swap_with(
+            &dest,
+            &part,
+            &mods,
+            &mut LinkPolicy::new(&layout),
+            &mut fail,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("undone"), "{err}");
+        assert_eq!(version_of(&dest).as_deref(), Some("1.0.0.0"));
+        assert!(
+            organize::is_silo_projection(&flat, &dest, "zip"),
+            "still Silo's link"
+        );
+        assert_eq!(
+            version_of(&part).as_deref(),
+            Some("2.0.0.0"),
+            "back at the part"
+        );
+        assert!(!old_path(&dest).exists());
+        assert!(backups_of(&mods).is_empty());
         let _ = std::fs::remove_dir_all(&mods);
     }
 
@@ -432,6 +638,62 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_backup_keeps_the_old_version_until_recovery_finishes() {
+        let mods = fresh("backup_fails");
+        let layout = Layout::default_for(&mods);
+        let dest = mods.join("FS25_A.zip");
+        make_mod_zip(&dest, "A", "1.0.0.0");
+        // `backups` is a file, so the backups folder can't be made.
+        std::fs::write(mods.join("backups"), b"in the way").unwrap();
+        let part = part_path(&dest);
+        make_mod_zip(&part, "A", "2.0.0.0");
+
+        let done = swap(&dest, &part, &mods, &mut LinkPolicy::new(&layout)).unwrap();
+
+        assert!(done.backup.is_none());
+        assert_eq!(done.problems.len(), 1, "{:?}", done.problems);
+        assert_eq!(version_of(&dest).as_deref(), Some("2.0.0.0"));
+        assert_eq!(version_of(&old_path(&dest)).as_deref(), Some("1.0.0.0"));
+
+        // Once the way is clear, the next recovery finishes the job.
+        std::fs::remove_file(mods.join("backups")).unwrap();
+        let r = recover_interrupted(&mods, &mods, &mut LinkPolicy::new(&layout));
+        assert_eq!(r.notices.len(), 1, "{r:?}");
+        assert!(!old_path(&dest).exists());
+        let baks = backups_of(&mods);
+        assert_eq!(baks.len(), 1);
+        assert_eq!(version_of(&baks[0]).as_deref(), Some("1.0.0.0"));
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_failing_backup_is_retried_once_per_session() {
+        let mods = fresh("backup_retry");
+        let layout = Layout::default_for(&mods);
+        let dest = mods.join("FS25_A.zip");
+        make_mod_zip(&dest, "A", "2.0.0.0");
+        make_mod_zip(&old_path(&dest), "A", "1.0.0.0");
+        std::fs::write(mods.join("backups"), b"in the way").unwrap();
+
+        let first = recover_interrupted(&mods, &mods, &mut LinkPolicy::new(&layout));
+        assert_eq!(first.problems.len(), 1, "{first:?}");
+        let second = recover_interrupted(&mods, &mods, &mut LinkPolicy::new(&layout));
+        assert!(
+            second.problems.is_empty() && second.notices.is_empty(),
+            "{second:?}"
+        );
+        assert_eq!(version_of(&old_path(&dest)).as_deref(), Some("1.0.0.0"));
+        let s = settle(
+            std::slice::from_ref(&mods),
+            &mods,
+            &mut LinkPolicy::new(&layout),
+        );
+        assert_eq!(s.leftovers, vec![old_path(&dest)]);
+        assert!(s.stranded.is_empty(), "the mod itself is in place");
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
     fn a_swap_refuses_while_an_earlier_one_is_unfinished() {
         let mods = fresh("unfinished");
         let layout = Layout::default_for(&mods);
@@ -453,9 +715,10 @@ mod tests {
         let dest = mods.join("FS25_A.zip");
         make_mod_zip(&old_path(&dest), "A", "1.0.0.0");
 
-        let notes = recover_interrupted(&mods, &mods, &mut LinkPolicy::new(&layout));
+        let r = recover_interrupted(&mods, &mods, &mut LinkPolicy::new(&layout));
 
-        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(r.notices.len(), 1, "{r:?}");
+        assert!(r.problems.is_empty());
         assert_eq!(version_of(&dest).as_deref(), Some("1.0.0.0"));
         assert!(!old_path(&dest).exists());
         assert!(backups_of(&mods).is_empty());
@@ -503,6 +766,26 @@ mod tests {
     }
 
     #[test]
+    fn recovery_leaves_a_users_own_file_in_the_mods_folder_alone() {
+        let mods = fresh("recover_users_flat");
+        let layout = Layout::default_for(&mods);
+        let cat = layout.archive.join("Misc");
+        let dest = cat.join("FS25_A.zip");
+        make_mod_zip(&old_path(&dest), "A", "1.0.0.0");
+        make_mod_zip(&dest, "A", "2.0.0.0");
+        let flat = mods.join("FS25_A.zip");
+        make_mod_zip(&flat, "A", "9.9.9.9-mine");
+
+        recover_interrupted(&cat, &mods, &mut LinkPolicy::new(&layout));
+
+        assert_eq!(version_of(&flat).as_deref(), Some("9.9.9.9-mine"));
+        assert!(!organize::is_silo_projection(&flat, &dest, "zip"));
+        assert_eq!(version_of(&dest).as_deref(), Some("2.0.0.0"));
+        assert_eq!(backups_of(&mods).len(), 1);
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
     fn recovery_removes_stale_part_files() {
         let mods = fresh("recover_part");
         let layout = Layout::default_for(&mods);
@@ -541,6 +824,30 @@ mod tests {
     }
 
     #[test]
+    fn the_stranded_message_names_the_mod_file() {
+        let msg = stranded_message(&[PathBuf::from("mods/FS25_A.zip.silo-update-old")]);
+        assert!(msg.contains("update of FS25_A.zip."), "{msg}");
+    }
+
+    #[test]
+    fn layout_dirs_are_the_mods_folder_and_each_archive_category() {
+        let mods = fresh("layout_dirs");
+        let layout = Layout::default_for(&mods);
+        std::fs::create_dir_all(layout.archive.join("Tools")).unwrap();
+        std::fs::create_dir_all(layout.archive.join("Maps")).unwrap();
+        std::fs::write(layout.archive.join("stray.txt"), b"x").unwrap();
+        assert_eq!(
+            layout_dirs(&layout),
+            vec![
+                mods.clone(),
+                layout.archive.join("Maps"),
+                layout.archive.join("Tools")
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
     fn only_the_newest_three_backups_are_kept() {
         let mods = fresh("prune");
         let backups = mods.join("backups");
@@ -550,9 +857,12 @@ mod tests {
         }
         // Same second as t=5: the `-2` one is newer still.
         std::fs::write(backups.join("FS25_A.zip.5-2.update.bak"), b"x").unwrap();
+        // A half-copied backup from a stopped cross-drive move: removed.
+        std::fs::write(backups.join(".FS25_A.zip.6.update.bak.silo-tmp"), b"half").unwrap();
         // Not update backups of this mod: never touched.
         std::fs::write(backups.join("FS25_A.zip.1.bak"), b"user's own").unwrap();
         std::fs::write(backups.join("FS25_B.zip.1.update.bak"), b"other mod").unwrap();
+        std::fs::write(backups.join(".FS25_B.zip.1.update.bak.silo-tmp"), b"other").unwrap();
 
         prune_backups(&backups, "FS25_A.zip", KEEP_BACKUPS);
 
@@ -563,6 +873,7 @@ mod tests {
         assert_eq!(
             left,
             vec![
+                ".FS25_B.zip.1.update.bak.silo-tmp",
                 "FS25_A.zip.1.bak",
                 "FS25_A.zip.4.update.bak",
                 "FS25_A.zip.5-2.update.bak",

@@ -89,6 +89,10 @@ pub struct ScanResult {
     pub roots: Vec<String>,
     pub took_ms: u128,
     pub total: usize,
+    /// Interrupted mod updates finished or rolled back before the scan, for the user.
+    pub notices: Vec<String>,
+    /// What that recovery couldn't fix, for the user.
+    pub problems: Vec<String>,
 }
 
 /// Result of a cached scan: the full list plus which paths were freshly parsed
@@ -627,6 +631,8 @@ where
                 .collect(),
             took_ms: started.elapsed().as_millis(),
             total,
+            notices: Vec::new(),
+            problems: Vec::new(),
         },
         fresh_paths,
     }

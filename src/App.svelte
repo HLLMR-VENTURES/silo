@@ -40,6 +40,7 @@
     downloadUpdate,
     appBusy,
     forceQuit,
+    setSelfUpdating,
     onCloseBlocked,
     saveTextFile,
     userDirPath,
@@ -282,25 +283,50 @@
   let updating = $state(false);
   let updatePct = $state<number | null>(null);
 
-  async function applyUpdate() {
-    if (updating) return;
-    // Installing relaunches Silo: never in the middle of a change to the library.
+  const FINISH_FIRST = "Finish what Silo is doing first, then update.";
+
+  /** Silo is in the middle of something an install (which relaunches) must not cut short. */
+  async function changingFiles(): Promise<boolean> {
     let writing = false;
     try {
       writing = await appBusy();
     } catch {
       /* the check failed; the state below still guards */
     }
-    if (busy || moveRunning || moveUnfinished || bisecting || bisectRecovery || writing) {
-      errorMsg = "Finish what Silo is doing first, then update.";
+    return !!(busy || moveRunning || moveUnfinished || bisecting || bisectRecovery || writing);
+  }
+
+  async function applyUpdate() {
+    if (updating) return;
+    // Installing relaunches Silo: never in the middle of a change to the library.
+    if (await changingFiles()) {
+      errorMsg = FINISH_FIRST;
       return;
     }
     updating = true;
+    let blocking = false;
     try {
-      await installUpdate((p) => (updatePct = p));
-      // installUpdate relaunches on success; if we're still here, it was a no-op.
+      // The download changes nothing. Right before installing, block new library changes in
+      // the backend, then check again that nothing is running.
+      const installed = await installUpdate(
+        (p) => (updatePct = p),
+        async () => {
+          await setSelfUpdating(true);
+          blocking = true;
+          return !(await changingFiles());
+        },
+      );
+      if (!installed) {
+        errorMsg = FINISH_FIRST;
+        await setSelfUpdating(false);
+        blocking = false;
+        updating = false;
+        updatePct = null;
+      }
+      // Installed: Silo relaunches; if we're still here, it was a no-op.
     } catch (e) {
       errorMsg = `Update failed: ${String(e)}`;
+      if (blocking) await setSelfUpdating(false).catch(() => {});
       updating = false;
       updatePct = null;
     }
@@ -1094,17 +1120,23 @@
   async function installFromRow(row: UpdateRow) {
     if (!row.assetUrl) return;
     busy = `Installing ${row.title}…`;
+    let warning: string | null = null;
     try {
-      const note = await downloadUpdate(row.path, row.assetUrl);
-      if (note) infoMsg = note;
+      const out = await downloadUpdate(row.path, row.assetUrl);
+      if (out.backup) {
+        infoMsg = `Updated ${row.title}. The previous version is kept in ${out.backup}.`;
+      }
+      if (out.problems.length) warning = out.problems.join(" ");
       updateResults = updateResults.map((r) =>
         r.techName === row.techName ? { ...r, hasUpdate: false, current: r.latest } : r,
       );
     } catch (e) {
-      errorMsg = String(e);
+      warning = String(e);
     }
     busy = null;
     await runScan(false);
+    // After the rescan, which clears the error banner.
+    if (warning) errorMsg = warning;
   }
 
   const availableUpdates = $derived(updateResults.filter((r) => r.hasUpdate));
@@ -1904,6 +1936,9 @@
       result = r;
       mods = r.mods;
       activeSet = new Set(r.mods.filter((m) => m.active).map((m) => m.techName));
+      // Interrupted mod updates Silo finished or rolled back before scanning.
+      if (r.notices?.length) infoMsg = r.notices.join(" ");
+      if (r.problems?.length) errorMsg = r.problems.join(" ");
       // Filesystem-level check (Rust): files at a managed name that aren't Silo's projection.
       detectForeignFiles(roots[0])
         .then((f) => (foreignFiles = f))
@@ -2044,12 +2079,20 @@
       }
       // Closing while Silo is changing files is held by the backend; ask before quitting.
       try {
+        // One question at a time: a second close while the dialog is up is ignored.
+        let asking = false;
         closeUnlisten = await onCloseBlocked(async () => {
-          const quit = await confirmDialog(
-            "Silo is still changing files. Quitting now could leave a mod half-moved. Quit anyway?",
-            { okLabel: "Quit anyway", cancelLabel: "Keep Silo open" },
-          );
-          if (quit) await forceQuit();
+          if (asking) return;
+          asking = true;
+          try {
+            const quit = await confirmDialog(
+              "Silo is still changing files. Quitting now could leave a mod half-moved. Quit anyway?",
+              { okLabel: "Quit anyway", cancelLabel: "Keep Silo open" },
+            );
+            if (quit) await forceQuit();
+          } finally {
+            asking = false;
+          }
         });
       } catch {
         /* not a desktop window context */
