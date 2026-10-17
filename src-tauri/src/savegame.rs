@@ -152,7 +152,13 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     for e in std::fs::read_dir(src)? {
         let e = e?;
         let to = dst.join(e.file_name());
-        if e.file_type()?.is_dir() {
+        let kind = e.file_type()?;
+        if kind.is_symlink() {
+            // Never follow a link (symlink or junction) out of the save: what it points at
+            // isn't part of the savegame and could be anywhere.
+            continue;
+        }
+        if kind.is_dir() {
             copy_dir(&e.path(), &to)?;
         } else {
             std::fs::copy(e.path(), &to)?;
@@ -276,6 +282,30 @@ mod tests {
 
         #[cfg(windows)]
         junction::delete(root.join("savegame3")).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn backup_does_not_follow_links_inside_a_savegame() {
+        let base = std::env::temp_dir().join(format!("silo_sg_inner_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("user");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("savegame1")).unwrap();
+        std::fs::write(root.join("savegame1/careerSavegame.xml"), SAMPLE).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "not part of the save").unwrap();
+        link_dir(&outside, &root.join("savegame1/escape"));
+
+        let dst = PathBuf::from(backup(&root, "savegame1").unwrap());
+        assert!(dst.join("careerSavegame.xml").is_file());
+        assert!(
+            std::fs::symlink_metadata(dst.join("escape")).is_err(),
+            "the link and what it points at stay out of the backup"
+        );
+
+        #[cfg(windows)]
+        junction::delete(root.join("savegame1/escape")).unwrap();
         let _ = std::fs::remove_dir_all(&base);
     }
 
