@@ -696,8 +696,9 @@ export function collectionImportPreview(
 export function collectionApply(
   urlOrId: string,
   installed: { techName: string; version: string | null }[],
+  fingerprint: string,
 ): Promise<ApplyReport> {
-  return invoke<ApplyReport>("collection_apply", { urlOrId, installed, root: null });
+  return invoke<ApplyReport>("collection_apply", { urlOrId, installed, fingerprint, root: null });
 }
 
 /**

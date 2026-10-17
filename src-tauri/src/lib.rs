@@ -3260,6 +3260,15 @@ fn read_collection_json(
     url_or_id: &str,
     token: Option<&str>,
 ) -> Result<collection::Collection, String> {
+    read_collection_raw(url_or_id, token).map(|(c, _)| c)
+}
+
+/// `read_collection_json`, plus the fingerprint of the exact file text (see
+/// `collection::fingerprint`), so apply can refuse a collection that changed after its preview.
+fn read_collection_raw(
+    url_or_id: &str,
+    token: Option<&str>,
+) -> Result<(collection::Collection, String), String> {
     let reference = collection::parse_collection_ref(url_or_id)
         .ok_or_else(|| "That doesn't look like a GitHub gist or repo link".to_string())?;
     let json = match &reference {
@@ -3270,7 +3279,24 @@ fn read_collection_json(
             github::read_repo_file(owner, repo, collection::FILE_NAME, token)
         }
     }?;
-    collection::parse(&json)
+    Ok((collection::parse(&json)?, collection::fingerprint(&json)))
+}
+
+/// The catalog lookup keyed by techName, for `collection::resolve_targets`.
+fn catalog_matches(
+    hits: &[siloapi::LookupResult],
+) -> std::collections::HashMap<String, collection::CatalogMatch> {
+    hits.iter()
+        .filter_map(|r| {
+            Some((
+                r.tech_name.clone()?,
+                collection::CatalogMatch {
+                    id: r.id.clone(),
+                    download_source: r.download.as_ref().map(|d| d.source.clone()),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// A collection the user has published, for the "Your collections" management list.
@@ -3417,6 +3443,8 @@ struct ImportPlan {
     already_present: Vec<PlanRow>,
     version_drift: Vec<PlanRow>,
     unresolved: Vec<PlanRow>,
+    /// Hash of the collection file as previewed; `collection_apply` refuses if it changed.
+    fingerprint: String,
 }
 
 /// Fetch a shared collection by gist link/id, parse it, and bucket every mod against the
@@ -3433,20 +3461,18 @@ async fn collection_import_preview(
     tauri::async_runtime::spawn_blocking(move || -> Result<ImportPlan, String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token");
-        let coll = read_collection_json(&url_or_id, token.as_deref())?;
+        let (coll, fingerprint) = read_collection_raw(&url_or_id, token.as_deref())?;
 
         let installed_by: std::collections::HashMap<&str, Option<&str>> = installed
             .iter()
             .map(|m| (m.tech_name.as_str(), m.version.as_deref()))
             .collect();
 
-        // One lookup resolves catalog presence + best installable source for every mod.
+        // One lookup resolves catalog presence + best installable source for every mod, by
+        // techName, exactly as apply resolves them.
         let names: Vec<String> = coll.mods.iter().map(|m| m.tech_name.clone()).collect();
         let hits = siloapi::lookup(&base, &names).unwrap_or_default();
-        let by_tech: std::collections::HashMap<&str, &siloapi::LookupResult> = hits
-            .iter()
-            .filter_map(|r| r.tech_name.as_deref().map(|t| (t, r)))
-            .collect();
+        let targets = collection::resolve_targets(&coll.mods, &catalog_matches(&hits));
 
         let mut plan = ImportPlan {
             name: coll.name.clone(),
@@ -3457,18 +3483,14 @@ async fn collection_import_preview(
             already_present: Vec::new(),
             version_drift: Vec::new(),
             unresolved: Vec::new(),
+            fingerprint,
         };
 
-        for m in &coll.mods {
-            let hit = by_tech.get(m.tech_name.as_str());
-            let installable_source = hit
-                .and_then(|r| r.download.as_ref())
-                .map(|d| d.source.clone())
-                .or_else(|| m.source.clone());
+        for (m, t) in coll.mods.iter().zip(&targets) {
             let row = |installed_version: Option<String>| PlanRow {
                 tech_name: m.tech_name.clone(),
                 version: m.version.clone(),
-                source: installable_source.clone(),
+                source: t.display_source.clone(),
                 installed_version,
             };
 
@@ -3485,10 +3507,9 @@ async fn collection_import_preview(
                     }
                 }
                 None => {
-                    let installable = hit.is_some_and(|r| r.download.is_some());
-                    if installable {
+                    if t.download_source.is_some() {
                         plan.will_install.push(row(None));
-                    } else if hit.is_some() {
+                    } else if t.catalog_id.is_some() {
                         // In the catalog, but no direct download (ModHub gates it).
                         plan.open_page.push(row(None));
                     } else {
@@ -3554,6 +3575,7 @@ async fn collection_apply(
     app: tauri::AppHandle,
     url_or_id: String,
     installed: Vec<LocalMod>,
+    fingerprint: String,
     root: Option<String>,
 ) -> Result<ApplyReport, String> {
     ensure_no_move()?;
@@ -3564,18 +3586,21 @@ async fn collection_apply(
     tauri::async_runtime::spawn_blocking(move || -> Result<ApplyReport, String> {
         let mut conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token");
-        let coll = read_collection_json(&url_or_id, token.as_deref())?;
+        let (coll, fp) = read_collection_raw(&url_or_id, token.as_deref())?;
+        const COLLECTION_CHANGED: &str =
+            "This collection changed since you previewed it. Preview it again before installing.";
+        if fp != fingerprint {
+            return Err(COLLECTION_CHANGED.into());
+        }
 
         let have: std::collections::HashSet<&str> =
             installed.iter().map(|m| m.tech_name.as_str()).collect();
 
-        // Fill catalog ids for anything the collection didn't carry one for.
+        // Resolve every mod by techName, exactly as the preview did. A collection's own
+        // `catalog_id` and source hint never decide what downloads.
         let names: Vec<String> = coll.mods.iter().map(|m| m.tech_name.clone()).collect();
         let hits = siloapi::lookup(&base, &names).unwrap_or_default();
-        let id_by_tech: std::collections::HashMap<&str, &str> = hits
-            .iter()
-            .filter_map(|r| r.tech_name.as_deref().map(|t| (t, r.id.as_str())))
-            .collect();
+        let targets = collection::resolve_targets(&coll.mods, &catalog_matches(&hits));
 
         let total = coll.mods.len();
         let mut rows: Vec<ApplyRow> = Vec::with_capacity(total);
@@ -3584,7 +3609,7 @@ async fn collection_apply(
         // Finished downloads waiting to be placed under the lock (their rows are filled then).
         let mut pending: Vec<PendingPlace> = Vec::new();
 
-        for (i, m) in coll.mods.iter().enumerate() {
+        for (i, (m, t)) in coll.mods.iter().zip(&targets).enumerate() {
             let _ = emitter.emit(
                 "collection:progress",
                 ApplyProgress {
@@ -3606,11 +3631,7 @@ async fn collection_apply(
                 continue;
             }
 
-            let catalog_id = m
-                .catalog_id
-                .as_deref()
-                .or_else(|| id_by_tech.get(m.tech_name.as_str()).copied());
-            let Some(cid) = catalog_id else {
+            let Some(cid) = t.catalog_id.as_deref() else {
                 rows.push(ApplyRow {
                     tech_name: m.tech_name.clone(),
                     filename: None,
@@ -3620,8 +3641,13 @@ async fn collection_apply(
                 });
                 continue;
             };
+            // Catalogued, but no direct download (ModHub gates it): the preview's open-page row.
+            if t.download_source.is_none() {
+                rows.push(gated_row(&m.tech_name));
+                continue;
+            }
 
-            match siloapi::resolve_download(&base, cid, m.source.as_deref()) {
+            match siloapi::resolve_download(&base, cid, t.download_source.as_deref()) {
                 Ok(resolved) => {
                     if let Err(e) = paths::safe_file_name(&resolved.filename) {
                         rows.push(fail_row(&m.tech_name, e));
@@ -3677,15 +3703,7 @@ async fn collection_apply(
                     }
                 }
                 // No direct download (ModHub gates it) — leave it for the user.
-                Err(_) => {
-                    rows.push(ApplyRow {
-                        tech_name: m.tech_name.clone(),
-                        filename: None,
-                        status: "skipped".into(),
-                        verdict: None,
-                        detail: Some("Download-gated — get it from its page.".into()),
-                    });
-                }
+                Err(_) => rows.push(gated_row(&m.tech_name)),
             }
         }
 
@@ -3795,6 +3813,17 @@ fn fail_row(tech_name: &str, detail: String) -> ApplyRow {
         status: "failed".into(),
         verdict: None,
         detail: Some(detail),
+    }
+}
+
+/// A catalogued mod with no direct download (ModHub gates it), left for the user.
+fn gated_row(tech_name: &str) -> ApplyRow {
+    ApplyRow {
+        tech_name: tech_name.to_string(),
+        filename: None,
+        status: "skipped".into(),
+        verdict: None,
+        detail: Some("Download-gated — get it from its page.".into()),
     }
 }
 

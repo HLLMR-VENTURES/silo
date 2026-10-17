@@ -107,6 +107,55 @@ pub fn parse(json: &str) -> Result<Collection, String> {
     Ok(c)
 }
 
+/// What the catalog lookup said about one techName.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogMatch {
+    pub id: String,
+    /// The source the catalog can download directly, if any.
+    pub download_source: Option<String>,
+}
+
+/// One collection mod resolved for preview and apply alike.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Target {
+    pub tech_name: String,
+    /// Catalog entry found by techName. A collection's own `catalog_id` is never used.
+    pub catalog_id: Option<String>,
+    /// Set when Silo can install it: the source apply downloads from.
+    pub download_source: Option<String>,
+    /// What the preview shows as the source (the download source, else the collection's hint).
+    pub display_source: Option<String>,
+}
+
+/// Resolve every mod by its techName, exactly as the import preview shows it, so a shared file
+/// can't preview one mod and install another.
+pub fn resolve_targets(
+    mods: &[CollectionMod],
+    hits: &std::collections::HashMap<String, CatalogMatch>,
+) -> Vec<Target> {
+    mods.iter()
+        .map(|m| {
+            let hit = hits.get(&m.tech_name);
+            let download_source = hit.and_then(|h| h.download_source.clone());
+            Target {
+                tech_name: m.tech_name.clone(),
+                catalog_id: hit.map(|h| h.id.clone()),
+                display_source: download_source.clone().or_else(|| m.source.clone()),
+                download_source,
+            }
+        })
+        .collect()
+}
+
+/// SHA-256 (hex) of the collection file's exact text: apply refuses if it changed after preview.
+pub fn fingerprint(json: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(json.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// A GitHub gist id is an opaque hex string (see `github::valid_gist_id`, the one rule).
 fn is_gist_id(s: &str) -> bool {
     crate::github::valid_gist_id(s)
@@ -309,6 +358,59 @@ pub fn readme(c: &Collection, page_url: &str, source_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cm(tech: &str, catalog_id: Option<&str>, source: Option<&str>) -> CollectionMod {
+        CollectionMod {
+            tech_name: tech.into(),
+            version: None,
+            source: source.map(Into::into),
+            source_url: None,
+            manifest_hash: None,
+            installable: None,
+            catalog_id: catalog_id.map(Into::into),
+        }
+    }
+
+    fn hit(id: &str, download_source: Option<&str>) -> CatalogMatch {
+        CatalogMatch {
+            id: id.into(),
+            download_source: download_source.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn the_tech_name_lookup_decides_what_installs() {
+        let mods = vec![
+            cm("FS25_A", Some("cat-B"), None), // carried id disagrees with the lookup
+            cm("FS25_C", Some("cat-C"), None), // agrees
+            cm("FS25_D", None, Some("modhub")), // catalogued, no direct download
+            cm("FS25_X", Some("cat-evil"), None), // unknown to the catalog
+        ];
+        let hits = std::collections::HashMap::from([
+            ("FS25_A".to_string(), hit("cat-A", Some("github"))),
+            ("FS25_C".to_string(), hit("cat-C", Some("github"))),
+            ("FS25_D".to_string(), hit("cat-D", None)),
+        ]);
+        let t = resolve_targets(&mods, &hits);
+        assert_eq!(
+            t[0].catalog_id.as_deref(),
+            Some("cat-A"),
+            "lookup wins over the carried id"
+        );
+        assert_eq!(t[0].download_source.as_deref(), Some("github"));
+        assert_eq!(t[1].catalog_id.as_deref(), Some("cat-C"));
+        assert!(t[2].catalog_id.is_some() && t[2].download_source.is_none());
+        assert_eq!(t[2].display_source.as_deref(), Some("modhub"));
+        assert_eq!(t[3].catalog_id, None, "a carried id alone never installs");
+        assert_eq!(t[3].download_source, None);
+    }
+
+    #[test]
+    fn the_fingerprint_follows_the_exact_text() {
+        assert_eq!(fingerprint("{\"a\":1}"), fingerprint("{\"a\":1}"));
+        assert_ne!(fingerprint("{\"a\":1}"), fingerprint("{\"a\":2}"));
+        assert_eq!(fingerprint("x").len(), 64);
+    }
 
     fn sample() -> Collection {
         Collection {

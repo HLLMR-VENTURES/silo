@@ -420,6 +420,8 @@ export interface ImportPlan {
   versionDrift: ImportPlanRow[];
   /** Not found in the catalog — can't be resolved automatically. */
   unresolved: ImportPlanRow[];
+  /** Hash of the collection file as previewed; apply refuses if it changed. */
+  fingerprint: string;
 }
 export interface ApplyRow {
   techName: string;
