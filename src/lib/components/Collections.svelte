@@ -510,11 +510,17 @@
         {/if}
       {:else}
         {@const a = applyReport}
-        <div class="ok-note">
-          Saved “{p.name}” as a loadout.
-          {a.installed} installed{a.failed > 0 ? `, ${a.failed} failed` : ""}. Rescanning your
-          library…
-        </div>
+        {#if a.loadoutId === null}
+          <div class="err">
+            Didn't save “{p.name}” as a loadout. {a.failed} failed. Try again in a moment.
+          </div>
+        {:else}
+          <div class="ok-note">
+            Saved “{p.name}” as a loadout.
+            {a.installed} installed{a.failed > 0 ? `, ${a.failed} failed` : ""}. Rescanning your
+            library…
+          </div>
+        {/if}
         {#each a.rows.filter((r) => r.status === "installed" || r.status === "failed") as r (r.techName)}
           <div class="row">
             <span class="mn">{r.techName}</span>
@@ -526,9 +532,11 @@
             </span>
           </div>
         {/each}
-        <p class="caveat">
-          Apply the “{p.name}” loadout from the Loadouts panel to activate it.
-        </p>
+        {#if a.loadoutId !== null}
+          <p class="caveat">
+            Apply the “{p.name}” loadout from the Loadouts panel to activate it.
+          </p>
+        {/if}
       {/if}
     {/if}
   </div>
