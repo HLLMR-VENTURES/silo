@@ -4,15 +4,17 @@
   // set changes + launch; the player provides the verdict each round (a crash is
   // auto-detected from the log). The player's real mod set is snapshotted first and
   // restored on finish/cancel — nothing here is destructive.
+  import { onDestroy } from "svelte";
   import {
     bisectPlan,
     bisectNarrow,
     bisectSnapshotSave,
+    bisectSnapshotGet,
     bisectSnapshotClear,
-    setActive,
     launchGame,
     scanLog,
   } from "../api";
+  import { BISECT_RESTORE_FIRST, canStartBisect, finishBisect } from "../bisect";
   import type { BisectStep } from "../types";
 
   interface Props {
@@ -20,9 +22,17 @@
     pool: string[];
     /** Mods kept active every round (maps/required deps) so the save still loads. */
     alwaysOn: string[];
+    /** Make exactly these mods active. Shows any problems to the user and rejects if the
+     *  set couldn't be applied cleanly. */
+    onApply: (techNames: string[]) => Promise<void>;
+    /** Told when a bisection starts (snapshot saved) and when it ends. */
+    onBisecting: (active: boolean) => void;
+    /** An interrupted run's snapshot is waiting in App's restore banner; don't start. */
+    recoveryPending?: boolean;
     onExit: () => void;
   }
-  let { pool, alwaysOn, onExit }: Props = $props();
+  let { pool, alwaysOn, onApply, onBisecting, recoveryPending = false, onExit }: Props =
+    $props();
 
   type Phase =
     | "intro"
@@ -42,16 +52,46 @@
   let crashHint = $state<boolean | null>(null); // from the log after a round
   let culprit = $state<string | null>(null);
 
+  let started = $state(false); // true once the snapshot is saved; until then nothing changed
+  // Set when the panel closes under us. Every await re-checks it so an unmounted flow never
+  // applies a set or reports itself as running.
+  let destroyed = false;
+
   const total = $derived(pool.length);
 
+  // Unmounted before the run really started: make sure App doesn't think we're running.
+  function abandon() {
+    if (!started) onBisecting(false);
+  }
+
   async function begin() {
+    if (recoveryPending) {
+      error = BISECT_RESTORE_FIRST;
+      return;
+    }
     working = "Saving your current mod set…";
     error = null;
     try {
+      // Never overwrite an interrupted run's snapshot: it's the only record of the real set.
+      const prior = await bisectSnapshotGet();
+      if (destroyed) return abandon();
+      if (!canStartBisect(prior)) {
+        error = BISECT_RESTORE_FIRST;
+        onBisecting(false); // App re-reads the snapshot and shows the restore banner
+        return;
+      }
       // Snapshot the REAL set first (crash-safe restore lives in the DB).
       await bisectSnapshotSave([...alwaysOn, ...pool]);
+      if (destroyed) {
+        // Nothing was changed yet, so the fresh snapshot isn't needed.
+        await bisectSnapshotClear().catch(() => {});
+        return abandon();
+      }
+      started = true;
+      onBisecting(true); // no await since the check above, so we're still mounted
       await advance([...pool]);
     } catch (e) {
+      if (destroyed) return abandon();
       error = String(e);
       phase = "error";
     } finally {
@@ -63,6 +103,7 @@
   async function advance(next: string[]) {
     current = next;
     const s = await bisectPlan(next);
+    if (destroyed) return;
     step = s;
     if (s.kind === "culprit") {
       culprit = s.modName;
@@ -71,7 +112,8 @@
       phase = "inconclusive";
     } else {
       working = `Applying ${s.test.length} of ${next.length} mods…`;
-      await setActive([...alwaysOn, ...s.test]);
+      await onApply([...alwaysOn, ...s.test]);
+      if (destroyed) return;
       working = null;
       round += 1;
       crashHint = null;
@@ -110,6 +152,7 @@
     working = "Narrowing…";
     try {
       const next = await bisectNarrow(step.test, step.rest, stillBroken);
+      if (destroyed) return;
       await advance(next);
     } catch (e) {
       error = String(e);
@@ -119,19 +162,49 @@
     }
   }
 
-  // Always restore the real set before leaving, however we leave.
+  // Always restore the real set before leaving, however we leave. The set comes from the
+  // snapshot saved at start, not the live props: a rescan mid-round would have turned
+  // `pool` into the test half. The snapshot is cleared only after a clean restore, so if
+  // this fails the restore banner can offer it again.
   async function finish() {
-    working = "Restoring your mods…";
-    try {
-      await setActive([...alwaysOn, ...pool]);
-      await bisectSnapshotClear();
-    } catch (e) {
-      error = String(e);
-    } finally {
-      working = null;
-      onExit();
+    if (working) return;
+    if (!started) {
+      // Nothing was saved or changed yet (or saving failed): just leave.
+      exitUnchanged();
+      return;
     }
+    working = "Restoring your mods…";
+    error = null;
+    const r = await finishBisect(
+      { get: bisectSnapshotGet, apply: onApply, clear: bisectSnapshotClear },
+      alwaysOn,
+      pool,
+    );
+    working = null;
+    if (!r.ok) {
+      // Stay open with the message (and any culprit still on screen); ✕ or the restore
+      // button retries. Closing the panel instead leaves the snapshot for App's banner.
+      if (!destroyed) error = r.error;
+      return;
+    }
+    started = false;
+    // Called even if the panel closed mid-restore: App re-reads the (now cleared) snapshot.
+    onBisecting(false);
+    if (!destroyed) onExit();
   }
+
+  function exitUnchanged() {
+    if (working) return;
+    onBisecting(false);
+    onExit();
+  }
+
+  // Closing the panel mid-run unmounts this flow without finishing. The snapshot stays
+  // (App then offers to restore it); just make sure App stops treating us as running.
+  onDestroy(() => {
+    destroyed = true;
+    if (started) onBisecting(false);
+  });
 
   const roundsLeft = $derived(step?.kind === "split" ? step.roundsLeft : 0);
 </script>
@@ -139,7 +212,7 @@
 <div class="bf">
   <div class="bf-head">
     <h3>Guided bisection</h3>
-    <button class="x" title="Cancel & restore" onclick={finish}>✕</button>
+    <button class="x" title="Cancel & restore" onclick={finish} disabled={!!working}>✕</button>
   </div>
 
   {#if working}
@@ -157,9 +230,17 @@
       > launches. Maps and required mods stay on the whole time, and your exact mod set is
       saved now and restored when you finish.
     </p>
+    {#if recoveryPending && !error}
+      <div class="err">{BISECT_RESTORE_FIRST}</div>
+    {/if}
     <div class="actions">
-      <button class="btn ghost" onclick={onExit}>Not now</button>
-      <button class="btn primary" onclick={begin} disabled={!!working}>Start</button>
+      <button class="btn ghost" onclick={exitUnchanged} disabled={!!working}>Not now</button>
+      <button
+        class="btn primary"
+        onclick={begin}
+        disabled={!!working || recoveryPending}
+        title={recoveryPending ? BISECT_RESTORE_FIRST : ""}>Start</button
+      >
     </div>
   {:else if phase === "await-launch"}
     {#if step?.kind === "split"}
