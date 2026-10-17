@@ -34,18 +34,43 @@ pub fn safe_file_name(name: &str) -> Result<&str, String> {
 }
 
 /// Windows reserves these names whatever the extension (`nul.zip` is the NUL device), so a
-/// mod file can never be called that on any system Silo syncs with.
+/// mod file can never be called that on any system Silo syncs with. Microsoft's list includes
+/// `CONIN$`, `CONOUT$`, and `COM`/`LPT` followed by a digit or a superscript ¹ ² ³.
 fn is_device_name(name: &str) -> bool {
+    // ASCII-only uppercasing leaves the superscript digits untouched.
     let stem = name
         .split('.')
         .next()
         .unwrap_or("")
         .trim_end()
         .to_ascii_uppercase();
-    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (stem.len() == 4
-            && (stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.as_bytes()[3].is_ascii_digit())
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    // `get` keeps the split on a char boundary, so a multi-byte name can't panic here.
+    matches!(
+        (stem.get(..3), stem.get(3..)),
+        (
+            Some("COM" | "LPT"),
+            Some(
+                "0" | "1"
+                    | "2"
+                    | "3"
+                    | "4"
+                    | "5"
+                    | "6"
+                    | "7"
+                    | "8"
+                    | "9"
+                    | "\u{b9}"
+                    | "\u{b2}"
+                    | "\u{b3}"
+            )
+        )
+    )
 }
 
 /// True when `target` (after resolving symlinks/`..`) lives inside `root`. Both must
@@ -282,6 +307,11 @@ mod tests {
             "COM0.zip",
             "LPT1.xml",
             "lpt9",
+            "COM\u{b9}.zip",
+            "lpt\u{b2}",
+            "LPT\u{b3}.xml",
+            "CONIN$",
+            "conout$.zip",
             "mod.zip.",
             "mod.zip ",
             " ",
@@ -294,6 +324,8 @@ mod tests {
             "COM10.zip",
             "FS25_Aux_Tools.zip",
             "LPTX.zip",
+            "COM\u{b9}0.zip",
+            "CONIN.zip",
             ".silo-archive.json",
             "FS25_Mod v1.2.zip",
         ] {
