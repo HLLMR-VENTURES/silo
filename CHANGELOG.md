@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Put your library archive on any drive.** Settings → Library archive → **Change…** moves your
+  parked mods (for example to a big HDD) while your mods folder stays where the game reads it. The
+  move verifies every mod before removing the original, shows progress, refuses to run while
+  Farming Simulator 25 is open, and can be **paused** — play, then resume — or **cancelled**, which
+  moves everything back. Pointing it at a folder that already holds mods offers to file them into
+  your library. Across drives, active mods are linked (Linux, macOS, Windows with Developer Mode)
+  or copied. If the archive's drive is unplugged, Silo keeps your library and waits for it to come
+  back — or, if you moved or restored the archive yourself, **Choose another** points Silo at it
+  without moving anything. (#166)
+
 ### Security
 
 - **Updated the zip library (2.4 → 9.0)** for RUSTSEC-2026-0367, -0368 and -0369, which concern

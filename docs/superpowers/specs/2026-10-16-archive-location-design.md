@@ -2,7 +2,7 @@
 
 - **Date:** 2026-10-16
 - **Issue:** #166 (configurable library/archive location). Builds on mods-folder selection (#162, #176).
-- **Status:** approved design, not yet implemented
+- **Status:** implemented — see [Implementation notes](#implementation-notes) for where the build differs
 
 ## Problem
 
@@ -89,7 +89,7 @@ impl Layout {
    - only the old copy exists ⇒ copy to `<new>/<Category>/<file>.silo-move-tmp`, verify (size; SHA-256 for zips; recursive size+count for folders), rename into place, then delete the old copy;
    - both exist and the new one verifies ⇒ delete the old copy;
    - only the new one exists ⇒ already done.
-   - An **active folder mod** has its link in the mods folder re-pointed to the new location as part of its step. An active zip hardlinked to the old archive keeps its data after the old copy is deleted (it becomes a standalone copy; its `projection` record still matches).
+   - An **active folder mod** has its link in the mods folder re-pointed to the new location as part of its step. An active zip hardlinked to the old copy is atomically re-linked to the new copy first (link a `.silo-relink-tmp`, rename it over the entry; hardlink or symlink per `LinkPolicy`), so deleting the old copy really frees its bytes — a same-drive move is space-neutral. Where only a copy is possible (another drive, no symlinks) the hardlink is kept and simply becomes the mod's standalone copy. Stale relink temps at the library's mods-folder names are removed when a run starts. Its `projection` record is refreshed. Copies keep the original's modified time.
    - Before each mod: if `fs25_running()` ⇒ pause (reason: game started). If pause/cancel requested ⇒ abandon the in-flight copy (delete its temp file; the old copy is untouched) and stop at this boundary.
 5. **Finish:** only when every mod is in the new archive — set `archive_root:<key>` (or remove it when the new location is the default), clear the marker, remove now-empty old category folders (never anything else), rescan.
 
@@ -113,6 +113,7 @@ If the chosen folder has loose `.zip` files or mod folders at its top level, aft
 - `archive_move_preflight(path)` — see above.
 - `archive_move_start(path)`, `archive_move_pause()`, `archive_move_resume()`, `archive_move_cancel()`.
 - `archive_use_default()` — starts a move back to `<mods>/archive`.
+- `archive_repoint(path | null)` — re-points a missing archive without moving anything (see Banners).
 - All `async` + `spawn_blocking`.
 
 ## Frontend
@@ -129,7 +130,7 @@ Under "Mods folder": the path, labeled *Inside your mods folder (default)* or *C
 - Moving: *"Moving your library to D:\… — 212/736 mods · 3.1/11.2 GB"* — **Pause** · **Cancel move**.
 - Paused: *"Archive move paused — 412 of 736 moved."* (+ *"Farming Simulator 25 started."* when that was the reason) — **Resume** · **Cancel move**.
 - Paused with errors: *"3 mods couldn't be moved"* (expandable list) — **Retry** · **Cancel move**.
-- Custom archive unavailable (no move): *"Your library archive D:\… isn't available."* — parked mods hidden, organize actions disabled; if active mods are symlinked, add *"Active mods linked from it won't load in-game until the drive is back."* — **Retry** · **Choose another**.
+- Custom archive unavailable (no move): *"Your library archive D:\… isn't available."* — parked mods hidden, organize actions disabled; if active mods are symlinked, add *"Active mods linked from it won't load in-game until the drive is back."* — **Retry** · **Choose another**. A scan never reconciles the manifest while the archive is missing (the library isn't forgotten), and new moves are refused. **Choose another** (and Settings' Change… / Use default while it's missing) call `archive_repoint(path | null)`: it changes `archive_root:<key>` without moving anything — for an archive the user moved or restored elsewhere, or to start fresh with the default — after a confirm that says so; same path/overlap fences as a move, but mods already filed there are welcome. Then the library rescans. Re-pointing is also allowed when the current archive holds no mods (nothing can be orphaned): the preflight reports `canRepoint`, and Change… offers **Use this folder** when a move is refused only because the folder already has mods filed — the way back after starting fresh. A dangling link (into the old drive) at an organized mod's mods-folder name is Silo's stale projection: activate / park / restore-vanilla remove it instead of treating the mod as already linked.
 
 ### Disabled while a move is running or paused
 
@@ -152,7 +153,7 @@ Rust unit tests (temp dirs, no app):
 - `Layout::default_for`; organize functions honor a custom archive.
 - Per-mod relocation states: old only, both (new verified), both (new corrupt ⇒ recopy), new only.
 - Interrupted move: stop after N mods, resume ⇒ same final tree as an uninterrupted move.
-- Pause safe point: an active folder mod is re-linked to the new archive; an active hardlinked zip is still readable after its old copy is deleted.
+- Pause safe point: an active folder mod is re-linked to the new archive; an active hardlinked zip is re-linked to the new copy (same identity on one drive) and still readable after its old copy is deleted, including after a crash before or after the re-link.
 - Cancel ⇒ the original tree is restored exactly (paths + sizes).
 - Per-mod failure (unreadable source) ⇒ original kept, error recorded, setting not switched.
 - Preflight free-space check with injected sizes; refuses the current archive and paths inside the mods root.
@@ -174,3 +175,16 @@ Manual (RC rules — never on the real library):
 2. **Off-thread:** the move runs on a blocking worker with progress events; all commands are `async` + `spawn_blocking`.
 3. **Tested against:** a disposable mods folder (never the real library) for destructive steps.
 4. **XML:** not involved.
+
+## Implementation notes
+
+Where the built feature differs from, or pins down, the design above:
+
+- **`Layout` lives in `organize`** (`organize::Layout { mods, archive }`), as designed. The move job itself is its own module, `relocate`, rather than `organize::relocate_archive`; its persisted marker (`relocate::MoveMarker`) records `from`, `to`, `direction` (`Forward` | `Back`), `paused`, `pause_reason`, `errors` and `moved` instead of the `state` string sketched above. Cancel flips `direction` and moves back only the mods listed in `moved`.
+- **The active-root seam in `modsroot` is `Active { layout, move_to }`**: the active layout plus the other archive of an unfinished move. There is no `move_running` field — whether a move is copying right now is `relocate::is_running()`.
+- **`LIBRARY_WRITE`** (a mutex in `lib.rs`) serializes every library write (organize, projections, installs, adopt, archive moves). A move only `try_lock`s it and holds it for the whole job, setting **`MOVE_HOLDS_LOCK`** so other writes refuse at once ("Finish or cancel the archive move first.") instead of waiting behind it.
+- **`sysinfo` 0.36** (locked 0.36.1, `rust-version` 1.75) fits Silo's `rust-version = "1.77"`; it is resolved by Cargo's MSRV-aware resolver. Features are limited to `system` and `disk`.
+- **Free space and same-drive detection** use `sysinfo`'s disk list (`organize::mount_of` / `same_volume`; longest matching mount point wins). `same_volume` assumes "same" when a mount can't be determined, so a hardlink attempt falls back safely to a copy; the preflight in `lib.rs` treats an unknown mount separately so its checks still run.
+- **`organize::LinkPolicy` is lazy**: it probes symlink support at most once per engine call, and only after a hardlink has already failed, so the common same-volume case never writes a probe file. Symlinks are allowed only for an archive on a different volume, outside a Mac App Store container, with a successful probe. Folder mods inside a Mac App Store container are always copied.
+- **Game check** runs through `gamelaunch::fs25_running()` in two passes (names, then command line and exe for candidates) and is throttled to once per 2 seconds during a move; once it has seen the game it stays true for that boundary.
+- **UI:** the move banner and its state handling currently live in `App.svelte`; extracting them is tracked in #187.

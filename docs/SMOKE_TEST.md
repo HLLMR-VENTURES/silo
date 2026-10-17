@@ -47,6 +47,30 @@ closes the app). A packaged build is `npm run tauri:build`.
 - [ ] `[app]` Rename the chosen folder while Silo is closed → launch → the "isn't available" banner shows and nothing is scanned; renaming it back + **Retry** recovers.
 - [ ] `[linux]` (tester) Silo finds the Proton prefix user folder; an override set in-game round-trips.
 
+## 1c. Library archive location  _(auto-verified: relocate move/pause/resume/cancel/adopt state machine, Layout, link policy, process matcher)_
+
+Never on the real library — switch to a **disposable mods folder** (§1b) with ~20 copied mods, and
+capture the forensic baseline from `RC_TESTING.md` first.
+
+- [ ] `[app]` Settings → **Library archive** shows the path labelled *Inside your mods folder (default)*. **Change…** → pick a folder on **another drive** → the confirm dialog shows the mod count, size and free space → **Move library**. The banner shows progress; when it finishes the setting reads *Custom location*, the library lists every mod, and the old archive's now-empty folders are cleaned up. Forensic before/after diff: every change explained, no mod lost, no `.silo-move-tmp` / `.silo-move-old` left behind.
+- [ ] `[app]` **Use default** moves the library back to `<mods folder>/archive` the same way.
+- [ ] `[app]` **Same-drive move frees space:** with a few large mods **active**, move the archive to another folder on the **same drive** as the mods folder → afterwards the drive's free space is about what it was before (not short by the active mods' size), each active mod in the mods folder still loads, and moved mods keep their original modified dates.
+- [ ] `[game]` **Pause → play:** start a move, **Pause** mid-move, then **Launch** from Silo → FS25 starts and the active mods load (an active mod already moved still loads). With FS25 still running, **Resume** is refused with "Close Farming Simulator 25 first…". Close FS25 → **Resume** finishes the move.
+- [ ] `[game]` **Game starts mid-move:** start a move, then launch FS25 yourself (not through Silo) → the move pauses itself within a few seconds, nothing is half-moved, and **Resume** is refused until FS25 is closed.
+- [ ] `[app]` **Cancel mid-move:** start a move, **Cancel move** → the mods Silo already moved go back; the archive tree matches the baseline (paths + sizes) and the setting is unchanged.
+- [ ] `[app]` **While a move is unfinished** (running or paused): Organize, activate/park, Optimize links, mods-folder switching and the Settings archive controls are disabled ("Finish or cancel the archive move first."); **auto-file** does nothing; **Launch** is blocked while running and works while paused.
+- [ ] `[app]` **Adopt:** point the archive at a folder that already holds loose `.zip` mods (include one whose techName is already in the library) → after the move, the Organize preview opens in adopt mode → applying it files the new mods under `<archive>/<Category>/` as parked; the duplicate is listed as already in your library and left untouched in the folder.
+- [ ] `[app]` **Archive unavailable — not forgotten:** with a custom archive set, close Silo, unplug/rename the archive drive, relaunch → the "Your library archive isn't available" banner shows, parked mods are hidden, nothing is deleted. **Rescan** a couple of times while it's still missing. Reconnect (or rename it back) → **Retry** → every parked mod is listed again, still parked in its category — the library was not forgotten. While it's missing, Organize / Change… preflight / **Use default** as a move are refused with "Your library archive at … isn't available…".
+- [ ] `[app]` **Archive unavailable — re-point:** with the archive still missing, copy its folder (with its `<Category>/` subfolders) somewhere else → banner **Choose another** → pick the copy → the confirm says nothing is moved → **Use this folder** → the banner clears, the library rescans and lists every mod from the copy as parked; activate one and confirm it lands in the mods folder. Then unplug again and use Settings → **Use default** → the confirm says it starts fresh and the old drive's mods stay untouched → afterwards the archive reads *Inside your mods folder (default)*, the old folder is unchanged on disk, and nothing was copied anywhere. Activating / parking a mod that was linked from the old drive works (its stale link is replaced). **Way back:** reconnect the old drive → Settings → **Change…** → pick the old archive → the move is refused (it holds filed mods) but Silo offers **Use this folder** (moves nothing) → the library lists the old archive's mods again.
+- [ ] `[app]` **Cross-drive copies notice:** with the archive on another drive where links aren't possible (Windows without Developer Mode), Settings → **Optimize links** reports "Your library archive is on another drive and Windows can't link across drives without Developer Mode — active mods stay as copies." and changes nothing. The Change… confirm dialog also suggests Developer Mode.
+
+**Release gate** — do not ship the archive location until each of these passes. They need a real game and can't be unit-tested:
+- [ ] `[game]` **Windows, Developer Mode on:** FS25 loads **symlinked active zips** (archive on another drive; the mods folder entry is a symlink into the archive).
+- [ ] `[game]` **macOS, Steam install:** FS25 loads symlinked active zips from an archive on another volume.
+- [ ] `[game]` **macOS, Mac App Store install:** the mods folder is inside the app's sandbox container, so active zips and **folder (unzipped) mods** are **copied, not linked** — confirm they load and no symlink is created.
+- [ ] `[game]` **Linux / Proton:** FS25 loads symlinked active zips (ask the #166 reporter to verify on CachyOS).
+- [ ] If symlinked zips do **not** load on Windows, `supports_symlinks` must return `false` on Windows before release (copy only).
+
 ## 2. Curation & detail drawer  _(auto-verified: curation/tags/rating store)_
 - [x] `[app]` Click a mod row → detail drawer opens with icon, metadata, deps (with present/missing status).
 - [x] `[app]` Favorite / Broken / Hidden toggles persist across a rescan; star rating persists; tags add/remove & filter; notes save on blur.

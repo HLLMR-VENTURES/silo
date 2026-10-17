@@ -67,7 +67,8 @@ fn main() {
     );
 
     println!("\n[apply organize]");
-    let rep = organize::apply_organize(&conn, &root, &inputs);
+    let rep =
+        organize::apply_organize(&conn, &organize::Layout::default_for(&root), &root, &inputs);
     assert(
         rep.changed == 3 && rep.errors.is_empty(),
         "organized 3, no errors",
@@ -95,7 +96,7 @@ fn main() {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let rep = organize::set_active(&conn, &root, &active);
+    let rep = organize::set_active(&conn, &organize::Layout::default_for(&root), &active);
     assert(rep.errors.is_empty(), "activate no errors");
     assert(
         exists(&root.join("FS25_Fendt.zip")),
@@ -120,7 +121,11 @@ fn main() {
     );
 
     println!("\n[deactivate all]");
-    let rep = organize::set_active(&conn, &root, &HashSet::new());
+    let rep = organize::set_active(
+        &conn,
+        &organize::Layout::default_for(&root),
+        &HashSet::new(),
+    );
     assert(rep.errors.is_empty(), "deactivate no errors");
     assert(
         !exists(&root.join("FS25_Fendt.zip")),
@@ -138,8 +143,8 @@ fn main() {
     println!("\n[flatten -> vanilla]");
     // Re-activate one first, to prove flatten handles an active projection.
     let one: HashSet<String> = ["FS25_Claas"].iter().map(|s| s.to_string()).collect();
-    let _ = organize::set_active(&conn, &root, &one);
-    let rep = organize::flatten(&conn, &root);
+    let _ = organize::set_active(&conn, &organize::Layout::default_for(&root), &one);
+    let rep = organize::flatten(&conn, &organize::Layout::default_for(&root));
     assert(rep.errors.is_empty(), "flatten no errors");
     for (tech, _cat, body) in &mods {
         let p = root.join(format!("{tech}.zip"));

@@ -86,6 +86,39 @@ mutating library originals, fully reversibly. Capability differs by OS:
    **Silo-owned** entries — never a user's real file.
 4. Cross-volume: hardlinks and some symlinks fail across drives → copy-mode.
 
+## Library archive (any drive)
+
+The archive — `<archive>/<Category>/<file>`, where parked mods live — defaults to
+`<mods folder>/archive` but can be moved to any drive (#166), **per mods folder** (setting
+`archive_root:<mods key>`; absent means the default). The mods folder itself never moves: it stays
+where FS25 reads it, so only the *active* set has to cross drives.
+
+**Projection of an active mod** (`organize::make_link` + `LinkPolicy`), tried in order:
+1. **Hardlink** — same volume as the archive. No privilege, no duplicated disk space.
+2. **Symlink** — only when the archive is on a **different volume**, the mods folder is **not
+   inside a Mac App Store container**, and a one-time probe succeeds (it creates a file symlink in
+   the mods folder pointing into the archive, then removes it). The probe runs lazily — only after a
+   hardlink actually failed — so the common same-volume case never probes.
+3. **Copy** — everything else: Windows without Developer Mode (file symlinks need it), a filesystem
+   that refuses links, a cloud-synced folder that rejects hardlinks.
+
+Folder (unzipped) mods keep the symlink-else-copy logic, but inside a **Mac App Store container**
+they are always copied: the sandboxed game can't follow a link out of its container (matched on
+`/library/containers/` in the mods path, case-insensitively).
+
+When the archive is on another drive and links aren't available, **Optimize links** reports it
+(`RelinkReport.cross_drive_copies`) instead of doing anything. Whether FS25 actually loads symlinked
+zips on each OS is a release gate — see `SMOKE_TEST.md` §1c.
+
+**Is FS25 running?** An archive move refuses to start or resume — and pauses itself — while the game
+is up. `gamelaunch::fs25_running()` uses the `sysinfo` crate: a name-only process snapshot, then
+(only for plausible names) each process's command line and exe path, matched by
+`is_fs25_process`: `FarmingSimulator2025.exe` (launcher), `FarmingSimulator2025Game.exe` (game),
+`dedicatedServer.exe` when it belongs to an FS25 install, a Wine/Proton host whose command line names
+`FarmingSimulator2025Game`, and any process with `FarmingSimulator2025` / `Farming Simulator 25` in
+its name (the macOS bundle). Linux truncates process names to 15 characters, so those fall back to
+the command line and exe path. Free space and same-drive detection use `sysinfo`'s disk list too.
+
 ## Path / filesystem hygiene (all platforms)
 
 - **Use Rust `PathBuf`** everywhere; never string-concatenate separators.

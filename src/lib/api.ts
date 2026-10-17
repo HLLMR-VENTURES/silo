@@ -102,6 +102,88 @@ export function pointGameAtModsRoot(): Promise<ModsRootStatus> {
 export function createModsFolder(): Promise<ModsRootStatus> {
   return invoke<ModsRootStatus>("create_mods_folder");
 }
+// ── Library archive location (#166) ──
+
+/** An unfinished archive move. `from` is where it started (home), `to` where it's going;
+ *  cancelling flips `direction` to "back". Running vs paused comes from `ArchiveStatus.running`. */
+export interface MoveMarker {
+  from: string;
+  to: string;
+  direction: "forward" | "back";
+  paused: boolean;
+  pauseReason: string | null;
+  errors: string[];
+  /** techNames placed in `to` and not yet moved back. */
+  moved: string[];
+}
+
+export interface ArchiveStatus {
+  /** The active archive — during an unfinished move, where the move started. */
+  path: string | null;
+  isDefault: boolean;
+  /** False when a custom archive's folder is missing (its drive unplugged). */
+  available: boolean;
+  moving: MoveMarker | null;
+  /** A move is copying right now (Pause applies, Launch is blocked). */
+  running: boolean;
+}
+
+export interface ArchivePreflight {
+  modCount: number;
+  bytes: number;
+  freeBytes: number | null;
+  sameDrive: boolean;
+  symlinksAvailable: boolean;
+  looseMods: number;
+  problems: string[];
+  /** The current archive holds no mods and the folder passes every path check, so it can be
+   *  used as the archive as it is (`archiveRepoint`, moves nothing) even if a move is refused. */
+  canRepoint: boolean;
+}
+
+export interface MoveProgress {
+  done: number;
+  total: number;
+  bytesDone: number;
+  bytesTotal: number;
+  current: string;
+  cancelling: boolean;
+}
+
+export interface AdoptPreview {
+  plan: PlannedMove[];
+  inputs: ModInput[];
+  /** File names left untouched (techName already in the library, or repeated). */
+  duplicates: string[];
+}
+
+/** Rejects with a "still loading" message until the layout is resolved at startup. */
+export const archiveStatus = () => invoke<ArchiveStatus>("archive_status");
+export const archiveMovePreflight = (path: string) =>
+  invoke<ArchivePreflight>("archive_move_preflight", { path });
+/** Stays pending for the whole move; resolves null (finished) or the marker (paused). */
+export const archiveMoveStart = (path: string) =>
+  invoke<MoveMarker | null>("archive_move_start", { path });
+export const archiveMoveResume = () => invoke<MoveMarker | null>("archive_move_resume");
+/** Just a request — the running move pauses at the next mod boundary. */
+export const archiveMovePause = () => invoke<void>("archive_move_pause");
+/** A running move is asked to turn around (resolves null at once); a paused one is run back
+ *  home here (pending until it lands). */
+export const archiveMoveCancel = () => invoke<MoveMarker | null>("archive_move_cancel");
+export const archiveUseDefault = () => invoke<MoveMarker | null>("archive_use_default");
+/** Point Silo at another archive folder (null = the default) WITHOUT moving anything. Only
+ *  while the current archive is unavailable or holds no mods, and no move is unfinished;
+ *  rescan afterwards. */
+export const archiveRepoint = (path: string | null) =>
+  invoke<void>("archive_repoint", { path });
+export const archiveAdoptPreview = () => invoke<AdoptPreview>("archive_adopt_preview");
+/** File the picked loose mods (by file name) into the archive's category folders. */
+export const archiveAdoptApply = (fileNames: string[]) =>
+  invoke<OrganizeReport>("archive_adopt_apply", { fileNames });
+export function onMoveProgress(cb: (p: MoveProgress) => void): Promise<UnlistenFn> {
+  return listen<MoveProgress>("archive-move-progress", (e) => cb(e.payload));
+}
+
 export function folderLooksEmpty(path: string): Promise<boolean> {
   return invoke<boolean>("folder_looks_empty", { path });
 }
@@ -160,6 +242,9 @@ export interface RelinkReport {
   reclaimedBytes: number;
   /** The mods folder is cloud-synced (no hardlinks) — Silo uses copies; nothing to optimize. */
   hardlinksUnsupported: boolean;
+  /** The library archive is on another drive and symlinks aren't available (Windows without
+   *  Developer Mode) — active mods stay copies; nothing was done. */
+  crossDriveCopies: boolean;
   errors: string[];
 }
 

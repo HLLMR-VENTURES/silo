@@ -3,6 +3,7 @@
 use crate::xmlconfig;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
 /// `app_setting` keys.
@@ -79,17 +80,36 @@ pub fn resolve(
     }
 }
 
-/// The single trusted write root, published by the mods-root commands. `lib::allowed_roots`
-/// reads it, so every organize/install command follows the folder the user picked.
-static ACTIVE: RwLock<Option<PathBuf>> = RwLock::new(None);
-
-pub fn set_active(p: Option<PathBuf>) {
-    if let Ok(mut g) = ACTIVE.write() {
-        *g = p;
-    }
+/// The trusted write targets, published by the mods-root/archive commands: the active layout
+/// and, while an archive move is unfinished, its other archive. `lib::allowed_roots` reads it,
+/// so every organize/install command follows the folder (and archive) the user picked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Active {
+    pub layout: crate::organize::Layout,
+    /// The other archive of an unfinished move (`layout.archive` is where it started). Whether
+    /// a move is copying right now is `relocate::is_running()`.
+    pub move_to: Option<PathBuf>,
 }
 
-pub fn active() -> Option<PathBuf> {
+static ACTIVE: RwLock<Option<Active>> = RwLock::new(None);
+
+/// Set once the mods folder has been resolved at least once (at startup or by a mods-root
+/// command), so "no active layout" can be told apart from "not worked out yet".
+static RESOLVED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_active(a: Option<Active>) {
+    if let Ok(mut g) = ACTIVE.write() {
+        *g = a;
+    }
+    RESOLVED.store(true, Ordering::SeqCst);
+}
+
+/// Whether `active()` reflects a resolution (it may still be `None`: no usable mods folder).
+pub fn resolved() -> bool {
+    RESOLVED.load(Ordering::SeqCst)
+}
+
+pub fn active() -> Option<Active> {
     ACTIVE.read().ok().and_then(|g| g.clone())
 }
 
@@ -172,13 +192,8 @@ pub fn write_override(xml: &str, game_path: &str) -> Result<String, String> {
 /// prefix, unify separators, lowercase (NTFS is case-insensitive). Elsewhere: keep case.
 /// Trailing separators are dropped except on a bare root.
 pub fn normalize_key(raw: &str, windows: bool) -> String {
-    let mut s = raw.to_string();
+    let mut s = strip_verbatim(raw, windows);
     if windows {
-        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-            s = format!(r"\\{rest}");
-        } else if let Some(rest) = s.strip_prefix(r"\\?\") {
-            s = rest.to_string();
-        }
         s = s.replace('/', "\\");
         while s.len() > 3 && s.ends_with('\\') {
             s.pop();
@@ -190,6 +205,37 @@ pub fn normalize_key(raw: &str, windows: bool) -> String {
         }
         s
     }
+}
+
+/// Windows: drop the verbatim prefix `canonicalize` adds (`\\?\C:\x` → `C:\x`,
+/// `\\?\UNC\srv\share` → `\\srv\share`), keeping case. Elsewhere: unchanged.
+pub fn strip_verbatim(raw: &str, windows: bool) -> String {
+    if windows {
+        if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{rest}");
+        }
+        if let Some(rest) = raw.strip_prefix(r"\\?\") {
+            return rest.to_string();
+        }
+    }
+    raw.to_string()
+}
+
+/// An existing folder the user picked, resolved to its real location and spelled the way
+/// Silo stores it (no verbatim prefix, case kept). Relative paths are refused before
+/// anything touches the disk.
+pub fn real_folder(p: &Path) -> Result<PathBuf, String> {
+    if !p.is_absolute() {
+        return Err(format!("Choose a folder by its full path: {}", p.display()));
+    }
+    let c = std::fs::canonicalize(p).map_err(|_| "That folder doesn't exist".to_string())?;
+    if !c.is_dir() {
+        return Err("That's a file, not a folder".into());
+    }
+    Ok(PathBuf::from(strip_verbatim(
+        &c.to_string_lossy(),
+        cfg!(windows),
+    )))
 }
 
 /// The identity key for a folder: canonicalized when it exists, then normalized. This is the
@@ -310,6 +356,34 @@ mod tests {
             r"\\nas\share\mods"
         );
         assert_eq!(normalize_key(r"C:\", true), r"c:\");
+    }
+
+    #[test]
+    fn strip_verbatim_keeps_case() {
+        assert_eq!(strip_verbatim(r"\\?\D:\My Archive", true), r"D:\My Archive");
+        assert_eq!(
+            strip_verbatim(r"\\?\UNC\NAS\Share\Arch", true),
+            r"\\NAS\Share\Arch"
+        );
+        assert_eq!(strip_verbatim(r"D:\Plain", true), r"D:\Plain");
+        // Not Windows: never touched.
+        assert_eq!(strip_verbatim(r"\\?\x", false), r"\\?\x");
+    }
+
+    #[test]
+    fn real_folder_refuses_relative_missing_and_files() {
+        assert!(real_folder(Path::new("relative/dir")).is_err());
+        let d = std::env::temp_dir().join(format!("silo-real-folder-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("file.txt");
+        std::fs::write(&f, b"x").unwrap();
+        assert!(real_folder(&d.join("missing")).is_err());
+        assert!(real_folder(&f).is_err());
+        let r = real_folder(&d).unwrap();
+        assert!(r.is_absolute() && r.is_dir());
+        assert!(!r.to_string_lossy().starts_with(r"\\?\"));
+        assert!(same_folder(&r, &d));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -481,11 +555,19 @@ mod tests {
     }
 
     #[test]
-    fn active_root_round_trips() {
-        set_active(Some(PathBuf::from("/x")));
-        assert_eq!(active(), Some(PathBuf::from("/x")));
+    fn active_layout_round_trips() {
+        let l = crate::organize::Layout::default_for(Path::new("/x"));
+        set_active(Some(Active {
+            layout: l.clone(),
+            move_to: None,
+        }));
+        assert_eq!(active().map(|a| a.layout), Some(l));
         set_active(None);
-        assert_eq!(active(), None);
+        assert!(active().is_none());
+        assert!(
+            resolved(),
+            "publishing — even \"no folder\" — marks the layout resolved"
+        );
     }
 
     #[test]

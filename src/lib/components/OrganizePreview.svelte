@@ -7,13 +7,22 @@
     applying,
     onConfirm,
     onCancel,
+    adopt = null,
   }: {
     plan: PlannedMove[];
     loading: boolean;
     applying: boolean;
     onConfirm: (skipNext: boolean) => void;
     onCancel: () => void;
+    /** Adopting loose mods already sitting in a custom library archive (#166): `path` is that
+     *  folder, `note` an info line (e.g. duplicates left untouched). */
+    adopt?: { path: string | null; note: string | null } | null;
   } = $props();
+
+  // plan_organize's relTo is `archive/<Category>/<file>` — right for the default archive, but an
+  // adopted mod lands in a custom archive folder, so show the path inside that folder instead.
+  const dest = (mv: PlannedMove) => (adopt ? mv.relTo.replace(/^archive\//, "") : mv.relTo);
+  const noun = (n: number) => `${n} mod${n === 1 ? "" : "s"}`;
 
   let skipNext = $state(false);
 
@@ -34,9 +43,14 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="modal-backdrop" onclick={onCancel}></div>
-<div class="modal" role="dialog" aria-modal="true" aria-label="Organize preview">
+<div
+  class="modal"
+  role="dialog"
+  aria-modal="true"
+  aria-label={adopt ? "File mods into your library" : "Organize preview"}
+>
   <div class="modal-head">
-    <h3>Organize {plan.length} mod{plan.length === 1 ? "" : "s"}</h3>
+    <h3>{adopt ? `File ${noun(plan.length)} into your library` : `Organize ${noun(plan.length)}`}</h3>
     <button class="drawer-x" title="Close" onclick={onCancel}>✕</button>
   </div>
 
@@ -45,6 +59,13 @@
       <p class="muted">Working out what would move…</p>
     {:else if plan.length === 0}
       <p class="muted">Nothing to organize — every loose mod is already filed.</p>
+    {:else if adopt}
+      <p class="lead">
+        Your library archive{#if adopt.path}{" "}(<code>{adopt.path}</code>){/if} already holds loose
+        mod zips. Silo can file them into its category folders there so they show up in your
+        library (parked — activate them as usual). Nothing is overwritten, and nothing has moved yet.
+      </p>
+      {#if adopt.note}<p class="muted">{adopt.note}</p>{/if}
     {:else}
       <p class="lead">
         This files your loose mod zips into <code>mods/archive/&lt;Category&gt;/</code>.
@@ -62,10 +83,10 @@
             </div>
             <ul class="files">
               {#each g.moves as mv (mv.techName)}
-                <li title={mv.relTo}>
+                <li title={dest(mv)}>
                   <span class="fn">{mv.fileName}</span>
                   <span class="arrow">→</span>
-                  <span class="dest mono">{mv.relTo}</span>
+                  <span class="dest mono">{dest(mv)}</span>
                 </li>
               {/each}
             </ul>
@@ -76,10 +97,14 @@
   </div>
 
   <div class="modal-foot">
-    <label class="skip">
-      <input type="checkbox" bind:checked={skipNext} disabled={loading || applying} />
-      Don't preview next time
-    </label>
+    {#if adopt}
+      <span></span>
+    {:else}
+      <label class="skip">
+        <input type="checkbox" bind:checked={skipNext} disabled={loading || applying} />
+        Don't preview next time
+      </label>
+    {/if}
     <div class="acts">
       <button class="btn ghost" onclick={onCancel} disabled={applying}>Cancel</button>
       <button
@@ -87,7 +112,11 @@
         onclick={() => onConfirm(skipNext)}
         disabled={loading || applying || plan.length === 0}
       >
-        {applying ? "Organizing…" : `Organize ${plan.length} mod${plan.length === 1 ? "" : "s"}`}
+        {#if adopt}
+          {applying ? "Filing…" : `File ${noun(plan.length)} into your library`}
+        {:else}
+          {applying ? "Organizing…" : `Organize ${noun(plan.length)}`}
+        {/if}
       </button>
     </div>
   </div>

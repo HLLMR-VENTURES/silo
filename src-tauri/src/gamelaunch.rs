@@ -40,6 +40,89 @@ pub struct GameInfo {
     pub store: Store,
 }
 
+/// Cheap, name-only pre-filter: could a process with this name be FS25 (or a host for it)?
+/// Anything this lets through is then judged by [`is_fs25_process`] with its command line.
+fn is_candidate_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("farmingsimulator")
+        || n.contains("farming simulator")
+        || n.starts_with("dedicatedserver")
+        || n.starts_with("wine")
+        || n.contains("preloader")
+}
+
+/// True for an FS25 process: launcher/game, a Proton/Wine host running the game, or the
+/// dedicated server shipped in an FS25 install. Deliberately conservative: a false positive only
+/// blocks a mods move, a false negative would let Silo move files the game has open.
+///
+/// `name` is the process name (truncated to 15 chars on Linux), `cmd` its command line and `exe`
+/// its executable path when known. Policy:
+/// - name contains `farmingsimulator2025` / `farming simulator 25` => FS25;
+/// - Linux-truncated name (`farmingsimulato…`) => FS25 if `cmd` or `exe` mentions the game;
+/// - Wine host (`wine…` / `…preloader`) => FS25 if `cmd` mentions `farmingsimulator2025game`;
+/// - `dedicatedServer…` => FS25 if `cmd` or `exe` points into an FS25 install, and also when we
+///   cannot tell (empty `cmd` and no `exe`); a path that names something else (FS22) => no.
+///
+/// Anything else, including a launcher such as `steam` that merely mentions the game, is no.
+/// Pure so it unit-tests without a running game.
+pub fn is_fs25_process(name: &str, cmd: &[String], exe: Option<&str>) -> bool {
+    let n = name.to_ascii_lowercase();
+    let line = cmd.join(" ").to_ascii_lowercase();
+    let exe = exe.map(str::to_ascii_lowercase);
+    let game = |s: &str| s.contains("farmingsimulator2025") || s.contains("farming simulator 25");
+    let mentions_game = || game(&line) || exe.as_deref().is_some_and(game);
+
+    if game(&n) {
+        return true;
+    }
+    if n.starts_with("farmingsimulato") {
+        return mentions_game();
+    }
+    if n.starts_with("wine") || n.contains("preloader") {
+        return line.contains("farmingsimulator2025game");
+    }
+    if n.starts_with("dedicatedserver") {
+        return mentions_game() || (cmd.is_empty() && exe.is_none());
+    }
+    false
+}
+
+/// True if FS25 (or its dedicated server) is running right now. Used to refuse moving mods the
+/// game may have open, so it runs before every mod of an archive move: it must stay cheap.
+///
+/// Two passes: a name-only snapshot of all processes, then — only for the few whose name could
+/// be FS25 — the command line and exe path (a cross-process read per process on Windows).
+pub fn fs25_running() -> bool {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    let pids: Vec<Pid> = sys
+        .processes()
+        .iter()
+        .filter(|(_, p)| is_candidate_name(&p.name().to_string_lossy()))
+        .map(|(pid, _)| *pid)
+        .collect();
+    if pids.is_empty() {
+        return false;
+    }
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&pids),
+        true,
+        ProcessRefreshKind::nothing()
+            .with_cmd(UpdateKind::Always)
+            .with_exe(UpdateKind::OnlyIfNotSet),
+    );
+    pids.iter().filter_map(|pid| sys.process(*pid)).any(|p| {
+        let cmd: Vec<String> = p
+            .cmd()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        let exe = p.exe().map(|e| e.to_string_lossy());
+        is_fs25_process(&p.name().to_string_lossy(), &cmd, exe.as_deref())
+    })
+}
+
 /// Candidate Steam install roots per platform.
 fn steam_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
@@ -353,5 +436,93 @@ mod tests {
         }
         assert!(is_app_bundle(&p("/A/X.App")));
         assert!(!is_app_bundle(&p("/A/X.zip")));
+    }
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::*;
+
+    const GAME_EXE: &str =
+        "Z:\\SteamLibrary\\steamapps\\common\\Farming Simulator 25\\x64\\FarmingSimulator2025Game.exe";
+
+    #[test]
+    fn matches_fs25_processes_on_every_platform() {
+        // Windows
+        assert!(is_fs25_process("FarmingSimulator2025.exe", &[], None));
+        assert!(is_fs25_process("FarmingSimulator2025Game.exe", &[], None));
+        assert!(is_fs25_process("farmingsimulator2025game.exe", &[], None));
+        // Proton: Linux truncates comm to 15 chars; the command line carries the exe path.
+        assert!(is_fs25_process("FarmingSimulato", &[GAME_EXE.into()], None));
+        assert!(is_fs25_process(
+            "FarmingSimulato",
+            &[],
+            Some("/home/u/.steam/Farming Simulator 25/FarmingSimulator2025")
+        ));
+        // macOS
+        assert!(is_fs25_process("FarmingSimulator2025Game", &[], None));
+        assert!(is_fs25_process("Farming Simulator 25", &[], None));
+        // Dedicated server when it lives in an FS25 install.
+        assert!(is_fs25_process(
+            "dedicatedServer.exe",
+            &[
+                "E:\\SteamLibrary\\steamapps\\common\\Farming Simulator 25\\dedicatedServer.exe"
+                    .into()
+            ],
+            None
+        ));
+        // Linux: the command line is just the relative launcher, the exe path names the install.
+        assert!(is_fs25_process(
+            "dedicatedServer",
+            &["./dedicatedServer".into()],
+            Some("/opt/Farming Simulator 25/dedicatedServer")
+        ));
+        // Wine/Proton host process running the game.
+        assert!(is_fs25_process(
+            "wine64-preloader",
+            &[GAME_EXE.into()],
+            None
+        ));
+    }
+
+    #[test]
+    fn dedicated_server_we_cannot_identify_blocks_conservatively() {
+        // Neither a command line nor an exe path: can't tell, so treat it as FS25.
+        assert!(is_fs25_process("dedicatedServer.exe", &[], None));
+    }
+
+    #[test]
+    fn ignores_unrelated_processes() {
+        assert!(!is_fs25_process("silo.exe", &[], None));
+        assert!(!is_fs25_process("FarmingSimulator2022.exe", &[], None));
+        assert!(!is_fs25_process(
+            "explorer.exe",
+            &["C:\\Windows\\explorer.exe".into()],
+            None
+        ));
+        // A dedicated server we can place elsewhere is not FS25.
+        assert!(!is_fs25_process(
+            "dedicatedServer.exe",
+            &["C:\\OtherGame\\dedicatedServer.exe".into()],
+            None
+        ));
+        assert!(!is_fs25_process(
+            "dedicatedServer.exe",
+            &[
+                "E:\\SteamLibrary\\steamapps\\common\\Farming Simulator 22\\dedicatedServer.exe"
+                    .into()
+            ],
+            None
+        ));
+        // A launcher that merely mentions the game on its command line is not the game.
+        assert!(!is_fs25_process("steam.exe", &[GAME_EXE.into()], None));
+    }
+
+    /// Smoke test against the real process table (catches sysinfo API breakage). It only
+    /// asserts that the call completes; the answer depends on whether FS25 happens to be running.
+    #[test]
+    #[ignore = "scans the live process table"]
+    fn fs25_running_smoke() {
+        let _ = fs25_running();
     }
 }

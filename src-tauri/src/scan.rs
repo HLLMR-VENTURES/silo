@@ -138,6 +138,17 @@ fn candidate_from(path: PathBuf, name: &str, ft: std::fs::FileType) -> Option<Ca
     None
 }
 
+/// True for the scratch entries Silo leaves mid-operation (an archive move's in-flight copy or
+/// the old copy it is deleting, relink, or organize's `.{name}.silo-tmp`). They can hold a full
+/// copy of a mod and must never be scanned as one.
+pub(crate) fn is_silo_temp(name: &str) -> bool {
+    let l = name.to_lowercase();
+    l.ends_with(".silo-move-tmp")
+        || l.ends_with(".silo-move-old")
+        || l.ends_with(".silo-relink-tmp")
+        || (l.starts_with('.') && l.ends_with(".silo-tmp"))
+}
+
 /// Mods in the flat root (what the game reads) — excluding Silo's `archive/` and
 /// any `backups/` folder.
 fn collect_root_candidates(root: &Path) -> Vec<Candidate> {
@@ -148,7 +159,7 @@ fn collect_root_candidates(root: &Path) -> Vec<Candidate> {
     for entry in rd.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let lname = name.to_lowercase();
-        if lname == "archive" || lname == "backups" {
+        if lname == "archive" || lname == "backups" || is_silo_temp(&name) {
             continue;
         }
         if let Ok(ft) = entry.file_type() {
@@ -160,11 +171,10 @@ fn collect_root_candidates(root: &Path) -> Vec<Candidate> {
     out
 }
 
-/// Mods parked in `mods/archive/<Category>/` (Silo-managed, one level of folders).
-fn collect_archive_candidates(root: &Path) -> Vec<Candidate> {
+/// Mods parked in an archive folder's `<Category>/` subfolders (Silo-managed, one level of folders).
+fn collect_archive_candidates(archive: &Path) -> Vec<Candidate> {
     let mut out = Vec::new();
-    let archive = root.join("archive");
-    let Ok(cats) = fs::read_dir(&archive) else {
+    let Ok(cats) = fs::read_dir(archive) else {
         return out;
     };
     for cat in cats.flatten() {
@@ -176,6 +186,9 @@ fn collect_archive_candidates(root: &Path) -> Vec<Candidate> {
         };
         for entry in mods.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
+            if is_silo_temp(&name) {
+                continue;
+            }
             if let Ok(ft) = entry.file_type() {
                 if let Some(c) = candidate_from(entry.path(), &name, ft) {
                     out.push(c);
@@ -478,9 +491,38 @@ fn resolve_entry(c: &Candidate, cache: &HashMap<String, CacheEntry>) -> (ModEntr
     (build_entry(c), true)
 }
 
-/// Core scan: walk the roots, resolving each candidate from `cache` when possible
-/// and parsing the rest in parallel. Reports progress via a callback (invoked from
-/// many rayon threads, hence Sync). No Tauri dependency — testable / CLI-reusable.
+/// Core scan over mods folders with explicit archive folders. Archives are read in order and a
+/// techName already seen in an earlier archive is skipped (during a paused archive move the new
+/// archive is listed first). No Tauri dependency — testable / CLI-reusable.
+pub fn scan_layouts<F>(
+    layouts: Vec<(PathBuf, Vec<PathBuf>)>,
+    cache: &HashMap<String, CacheEntry>,
+    progress: F,
+) -> ScanOutput
+where
+    F: Fn(usize, usize) + Sync + Send,
+{
+    let started = std::time::Instant::now();
+    let mut root_cands: Vec<Candidate> = Vec::new();
+    let mut archive_cands: Vec<Candidate> = Vec::new();
+    for (root, archives) in &layouts {
+        // Dedupe is per layout: two mods folders may legitimately each hold the same techName.
+        let mut seen: HashSet<String> = HashSet::new();
+        root_cands.extend(collect_root_candidates(root));
+        for a in archives {
+            // Skip only names seen in an EARLIER archive; a single archive's own contents are
+            // kept as-is so a one-archive scan behaves exactly as before.
+            let cands = collect_archive_candidates(a);
+            let names: Vec<String> = cands.iter().map(|c| c.tech_name.clone()).collect();
+            archive_cands.extend(cands.into_iter().filter(|c| !seen.contains(&c.tech_name)));
+            seen.extend(names);
+        }
+    }
+    let roots: Vec<PathBuf> = layouts.into_iter().map(|(r, _)| r).collect();
+    finish_scan(roots, root_cands, archive_cands, cache, progress, started)
+}
+
+/// Scan with each root's default archive (`<root>/archive`).
 pub fn scan_cached<F>(
     roots: Vec<PathBuf>,
     cache: &HashMap<String, CacheEntry>,
@@ -489,15 +531,29 @@ pub fn scan_cached<F>(
 where
     F: Fn(usize, usize) + Sync + Send,
 {
-    let started = std::time::Instant::now();
+    let layouts = roots
+        .into_iter()
+        .map(|r| {
+            let a = r.join("archive");
+            (r, vec![a])
+        })
+        .collect();
+    scan_layouts(layouts, cache, progress)
+}
 
-    let mut root_cands: Vec<Candidate> = Vec::new();
-    let mut archive_cands: Vec<Candidate> = Vec::new();
-    for root in &roots {
-        root_cands.extend(collect_root_candidates(root));
-        archive_cands.extend(collect_archive_candidates(root));
-    }
-
+/// Resolve each candidate from `cache` when possible and parse the rest in parallel.
+/// Reports progress via a callback (invoked from many rayon threads, hence Sync).
+fn finish_scan<F>(
+    roots: Vec<PathBuf>,
+    root_cands: Vec<Candidate>,
+    archive_cands: Vec<Candidate>,
+    cache: &HashMap<String, CacheEntry>,
+    progress: F,
+    started: std::time::Instant,
+) -> ScanOutput
+where
+    F: Fn(usize, usize) + Sync + Send,
+{
     // Tech-names present in the archive (organized) and in the flat root (loaded).
     let archived: HashSet<String> = archive_cands.iter().map(|c| c.tech_name.clone()).collect();
     let in_root: HashSet<String> = root_cands.iter().map(|c| c.tech_name.clone()).collect();
@@ -707,5 +763,174 @@ mod settings_detect_tests {
         std::fs::write(d.join("v.lua"), b"function v:saveToXMLFile() end").unwrap();
         assert_eq!(detect_settings(&d, "dir"), (false, SettingsSource::None));
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn moddesc_zip(path: &std::path::Path, title: &str) {
+        let f = std::fs::File::create(path).unwrap();
+        let mut w = zip::ZipWriter::new(f);
+        w.start_file("modDesc.xml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        use std::io::Write;
+        write!(
+            w,
+            "<modDesc descVersion=\"92\"><title><en>{title}</en></title><version>1.0.0.0</version></modDesc>"
+        )
+        .unwrap();
+        w.finish().unwrap();
+    }
+
+    /// Fresh, uniquely named temp dir for one test.
+    fn fresh(tag: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!("silo_layout_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    fn scan(layouts: Vec<(PathBuf, Vec<PathBuf>)>) -> Vec<ModEntry> {
+        scan_layouts(layouts, &HashMap::new(), |_, _| {})
+            .result
+            .mods
+    }
+
+    #[test]
+    fn reads_two_archives_without_duplicating_a_mod() {
+        let base = fresh("two_archives");
+        let mods = base.join("mods");
+        let new_arch = base.join("new");
+        let old_arch = base.join("old");
+        for d in [&mods, &new_arch.join("Tools"), &old_arch.join("Tools")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        moddesc_zip(&new_arch.join("Tools/FS25_Moved.zip"), "Moved");
+        moddesc_zip(&old_arch.join("Tools/FS25_Moved.zip"), "Moved");
+        moddesc_zip(&old_arch.join("Tools/FS25_NotYet.zip"), "Not yet");
+
+        let found = scan(vec![(
+            mods.clone(),
+            vec![new_arch.clone(), old_arch.clone()],
+        )]);
+        let names: Vec<_> = found.iter().map(|m| m.tech_name.clone()).collect();
+        assert_eq!(names.iter().filter(|n| *n == "FS25_Moved").count(), 1);
+        assert!(names.contains(&"FS25_NotYet".to_string()));
+        let moved = found.iter().find(|m| m.tech_name == "FS25_Moved").unwrap();
+        assert!(
+            Path::new(&moved.path).starts_with(&new_arch),
+            "the new archive wins"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn first_listed_archive_wins_in_either_order() {
+        let base = fresh("order");
+        let mods = base.join("mods");
+        let a = base.join("a");
+        let b = base.join("b");
+        for d in [&mods, &a.join("Tools"), &b.join("Tools")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        moddesc_zip(&a.join("Tools/FS25_Moved.zip"), "Moved");
+        moddesc_zip(&b.join("Tools/FS25_Moved.zip"), "Moved");
+
+        // Reversed order: [old, new] → the first-listed (old) wins.
+        let found = scan(vec![(mods.clone(), vec![b.clone(), a.clone()])]);
+        assert_eq!(found.len(), 1);
+        assert!(Path::new(&found[0].path).starts_with(&b));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn same_tech_name_in_two_categories_of_one_archive_is_kept() {
+        let base = fresh("one_archive_dupe");
+        let mods = base.join("mods");
+        let arch = base.join("arch");
+        for d in [&mods, &arch.join("Tools"), &arch.join("Misc")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        moddesc_zip(&arch.join("Tools/FS25_Dup.zip"), "Dup");
+        moddesc_zip(&arch.join("Misc/FS25_Dup.zip"), "Dup");
+
+        // One archive keeps behaving exactly like the old `<root>/archive` scan.
+        let found = scan(vec![(mods.clone(), vec![arch.clone()])]);
+        assert_eq!(
+            found.iter().filter(|m| m.tech_name == "FS25_Dup").count(),
+            2
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn archive_dedupe_is_per_layout() {
+        let base = fresh("per_layout");
+        let (mods1, mods2) = (base.join("mods1"), base.join("mods2"));
+        let (arch1, arch2) = (base.join("arch1"), base.join("arch2"));
+        for d in [&mods1, &mods2, &arch1.join("Tools"), &arch2.join("Tools")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        moddesc_zip(&arch1.join("Tools/FS25_Same.zip"), "Same");
+        moddesc_zip(&arch2.join("Tools/FS25_Same.zip"), "Same");
+
+        let found = scan(vec![
+            (mods1.clone(), vec![arch1.clone()]),
+            (mods2.clone(), vec![arch2.clone()]),
+        ]);
+        let same: Vec<_> = found
+            .iter()
+            .filter(|m| m.tech_name == "FS25_Same")
+            .collect();
+        assert_eq!(same.len(), 2, "each layout keeps its own copy");
+        assert!(same.iter().any(|m| Path::new(&m.path).starts_with(&arch1)));
+        assert!(same.iter().any(|m| Path::new(&m.path).starts_with(&arch2)));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn silo_temp_entries_are_not_mods() {
+        let base = fresh("temp_entries");
+        let mods = base.join("mods");
+        let arch = base.join("arch");
+        let cat = arch.join("Tools");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(&cat).unwrap();
+        let desc = "<modDesc descVersion=\"92\"><version>1.0.0.0</version></modDesc>";
+        for dir in [
+            cat.join("FS25_X.silo-move-tmp"),
+            cat.join("FS25_V.silo-move-old"),
+            cat.join("FS25_Y.silo-relink-tmp"),
+            cat.join(".FS25_Z.silo-tmp"),
+            mods.join("FS25_X.silo-move-tmp"),
+            mods.join(".FS25_Z.silo-tmp"),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("modDesc.xml"), desc).unwrap();
+        }
+        // Zip flavours of the same temp names are ignored too.
+        moddesc_zip(&cat.join("FS25_W.zip.silo-move-tmp"), "W");
+        moddesc_zip(&cat.join("FS25_U.zip.silo-move-old"), "U");
+        // A real mod alongside them is still found.
+        moddesc_zip(&cat.join("FS25_Real.zip"), "Real");
+
+        let found = scan(vec![(mods.clone(), vec![arch.clone()])]);
+        let names: Vec<_> = found.iter().map(|m| m.tech_name.as_str()).collect();
+        assert_eq!(names, vec!["FS25_Real"], "got: {names:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn is_silo_temp_matches_move_relink_and_dot_tmp_names() {
+        assert!(is_silo_temp("FS25_X.silo-move-tmp"));
+        assert!(is_silo_temp("FS25_X.zip.silo-move-old"));
+        assert!(is_silo_temp("FS25_X.SILO-MOVE-OLD"));
+        assert!(is_silo_temp("FS25_X.SILO-RELINK-TMP"));
+        assert!(is_silo_temp(".FS25_X.silo-tmp"));
+        assert!(!is_silo_temp("FS25_X.silo-tmp")); // only the dot-prefixed form is organize's
+        assert!(!is_silo_temp("FS25_X.zip"));
+        assert!(!is_silo_temp("FS25_X"));
     }
 }

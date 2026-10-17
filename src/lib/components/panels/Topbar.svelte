@@ -19,6 +19,8 @@
     updateChecking,
     scanning,
     busy,
+    launchBlocked,
+    organizeBlocked,
     hasGame,
     activeCount,
     settingsOpen,
@@ -52,6 +54,10 @@
     updateChecking: boolean;
     scanning: boolean;
     busy: string | null;
+    /** An archive move is copying right now — launching would race it. */
+    launchBlocked: boolean;
+    /** An archive move is unfinished (running or paused) — writes are refused. */
+    organizeBlocked: boolean;
     hasGame: boolean;
     activeCount: number;
     settingsOpen: boolean;
@@ -108,7 +114,12 @@
     {/if}
 
     {#if showOrganize}
-      <button class="btn" onclick={onOrganize} disabled={!!busy || scanning}>
+      <button
+        class="btn"
+        onclick={onOrganize}
+        disabled={!!busy || scanning || organizeBlocked}
+        title={organizeBlocked ? "Finish or cancel the archive move first" : undefined}
+      >
         Organize {unorganizedCount}
       </button>
     {/if}
@@ -128,9 +139,11 @@
     {#if hasGame}
       <button
         class="btn primary launch-btn"
-        title="Launch Farming Simulator 25 with the current active set"
+        title={launchBlocked
+          ? "An archive move is running — pause it to play"
+          : "Launch Farming Simulator 25 with the current active set"}
         onclick={onLaunch}
-        disabled={!!busy}
+        disabled={!!busy || launchBlocked}
       >
         ▶ Launch{activeCount ? ` (${activeCount})` : ""}
       </button>

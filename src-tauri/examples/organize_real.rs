@@ -31,7 +31,7 @@ fn main() {
     let conn = silo_lib::db::open(&db_path).expect("open db");
 
     if mode == "flatten" {
-        let rep = organize::flatten(&conn, &root);
+        let rep = organize::flatten(&conn, &organize::Layout::default_for(&root));
         println!(
             "FLATTEN: {} restored, {} errors",
             rep.changed,
@@ -95,7 +95,8 @@ fn main() {
     }
 
     println!("\nAPPLYING…");
-    let rep = organize::apply_organize(&conn, &root, &inputs);
+    let rep =
+        organize::apply_organize(&conn, &organize::Layout::default_for(&root), &root, &inputs);
     println!(
         "ORGANIZED: {} moved, {} skipped, {} errors",
         rep.changed,
