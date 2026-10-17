@@ -7,7 +7,7 @@
 <p align="center"><em>The mod manager Farming Simulator 25 should have shipped with.</em></p>
 
 <p align="center">
-  <a href="https://github.com/HLLMR/silo/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/HLLMR/silo?include_prereleases&sort=semver&color=4a7330&label=release"></a>
+  <a href="https://github.com/HLLMR/silo/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/HLLMR/silo?sort=semver&color=4a7330&label=release"></a>
   <a href="https://github.com/HLLMR/silo/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/HLLMR/silo/actions/workflows/ci.yml/badge.svg"></a>
   <a href="docs/VERIFY_DOWNLOAD.md"><img alt="Windows: code signed" src="https://img.shields.io/badge/Windows-code%20signed-4a7330"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4a7330"></a>
@@ -32,8 +32,10 @@ disk is reversible. **Free and open source. Windows (tested) · macOS & Linux (e
 > shows the publisher, not "unknown"). macOS/Linux builds are OS-unsigned — Gatekeeper may warn.
 >
 > **Platforms: Windows is the tested, supported platform.** macOS (Intel & Apple Silicon)
-> and Linux builds are **experimental and largely untested** — we'd love testers on those
-> platforms, but expect rough edges (e.g. Linux/Proton game-path discovery isn't complete yet).
+> and Linux builds are **experimental and largely untested on real machines** — we'd love
+> testers on those platforms, but expect rough edges. Silo runs natively on both; on Linux it
+> finds FS25's folder inside the Steam Proton prefix (native or Flatpak Steam), and on macOS it
+> handles Steam, GIANTS and Mac App Store installs. See [`docs/CROSS-PLATFORM.md`](docs/CROSS-PLATFORM.md).
 
 ## Why
 
@@ -60,12 +62,22 @@ is the management layer the game left out.
 - **Guided bisection** — when the log can't name the culprit, automates "disable half,
   relaunch" to isolate it, and safely restores your active set afterward.
 - **Loadouts & projection** — curate profiles and project only the active set into the
-  game's flat folder at launch, via symlink/junction. Organizing files your zips into a
-  reversible local archive; Flatten puts everything back.
+  game's flat folder at launch (hardlinks for zips, junctions/symlinks for folder mods, copies
+  where links aren't allowed). Organizing files your zips into a reversible local archive;
+  *Restore vanilla layout* puts everything back.
+- **Any mods folder** — follows FS25's own mods-folder override, or pick any folder in
+  Settings; Silo can point the game at it too (backing up `gameSettings.xml`) and keeps each
+  folder's organized library separately.
+- **Library archive on any drive** _(after v0.8.0)_ — move your parked mods to a bigger drive
+  while the mods folder stays where the game reads it. Every mod is verified before the
+  original is removed; the move can be paused to play, or cancelled to put everything back.
+- **Collections** — share a mod-set as a link (secret gist or public repo); others preview it
+  against their library before importing.
 - **Per-source actions** — star a repo on GitHub, rate on ModHub, all
   through *your own* accounts. Silo just opens the door; your credentials stay yours.
-- **Multiplayer sync**, a **filltype-compatibility bridge generator**, **savegame backup**,
-  and a full **control-binding map**.
+- **Multiplayer sync**, a **filltype-compatibility bridge generator**, **savegame &
+  graphics settings editing** (with `.bak` backups), a **mod-settings editor**, **savegame
+  backup**, and a full **control-binding map**.
 
 ## Install
 
