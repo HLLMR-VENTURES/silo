@@ -1,7 +1,7 @@
 //! SQLite persistence. First use: a scan cache keyed by path+mtime+size that lets
 //! warm rescans skip opening/parsing archives entirely. Real indexed tables (a PK
-//! on path), not `LIKE 'mods_%'` key-value scans. Additive migrations; we never
-//! wipe the cache on version bumps.
+//! on path), not `LIKE 'mods_%'` key-value scans. Versioned, additive migrations
+//! (`SCHEMA_VERSION`); we never wipe the cache on version bumps.
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -85,15 +85,114 @@ pub struct Loadout {
     pub mods: Vec<String>,
 }
 
-/// Open (creating if needed) the Silo database and ensure the schema exists.
+/// The schema this build reads and writes. Every migration added to `migrate` bumps it. Version
+/// 0 is every database from before versioning (Silo 0.9 and older), whatever its shape.
+///
+/// Keep migrations additive where possible so an older Silo can still read the file; when one
+/// can't be, the version gate in `open` is what protects the user.
+pub const SCHEMA_VERSION: i64 = 1;
+
+fn newer_schema(found: i64) -> String {
+    format!(
+        "Your Silo library was saved by a newer version of Silo (database version {found}; this \
+         version reads up to {SCHEMA_VERSION}). Install the latest Silo to keep using it. Nothing \
+         was changed."
+    )
+}
+
+fn schema_version(conn: &Connection) -> Result<i64, String> {
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|e| e.to_string())
+}
+
+/// Open the Silo database, bringing an older one up to date first. A database from a newer
+/// Silo is refused before anything writes to it.
 pub fn open(db_path: &Path) -> Result<Connection, String> {
     if let Some(dir) = db_path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         CREATE TABLE IF NOT EXISTS mod_cache (
+    let mut conn = Connection::open(db_path).map_err(|e| e.to_string())?;
+    match schema_version(&conn)? {
+        v if v == SCHEMA_VERSION => Ok(conn),
+        v if v > SCHEMA_VERSION => Err(newer_schema(v)),
+        _ => {
+            migrate(&mut conn)?;
+            Ok(conn)
+        }
+    }
+}
+
+/// Step an older database up to `SCHEMA_VERSION`. Each step runs in a `BEGIN IMMEDIATE`
+/// transaction that re-reads the version first, so when two connections (two commands, or two
+/// copies of Silo) open an old database at once, one migrates and the other waits for it and
+/// then finds nothing to do. A step and its version stamp commit together, so a failed step
+/// leaves the database as it was.
+fn migrate(conn: &mut Connection) -> Result<(), String> {
+    // WAL is a property of the file and can't be switched inside a transaction.
+    enable_wal(conn)?;
+    loop {
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let v = schema_version(&tx)?;
+        if v == SCHEMA_VERSION {
+            return Ok(()); // someone else finished it; dropping `tx` just ends the read
+        }
+        if v > SCHEMA_VERSION {
+            return Err(newer_schema(v));
+        }
+        #[cfg(test)]
+        tests::count_migration_step(&tx);
+        match v {
+            0 => migrate_0_to_1(&tx)?,
+            other => return Err(format!("no migration from database version {other}")),
+        }
+        tx.pragma_update(None, "user_version", v + 1)
+            .map_err(|e| e.to_string())?;
+        tx.commit()
+            .map_err(|e| format!("database migration failed: {e}"))?;
+    }
+}
+
+/// Switch the file to WAL so readers can run beside a writer. The switch needs the file to
+/// itself for a moment, and SQLite returns "database is locked" at once rather than waiting
+/// when another connection is busy with it, so retry for up to the usual 5 second wait.
+fn enable_wal(conn: &Connection) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match conn.execute_batch("PRAGMA journal_mode=WAL;") {
+            Ok(()) => return Ok(()),
+            Err(e) if is_busy(&e) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
+fn is_busy(e: &rusqlite::Error) -> bool {
+    matches!(
+        e.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy) | Some(rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
+/// Version 1 = everything Silo 0.9 had: the base tables, `curation.rating`, and the manifest
+/// scoped by mods folder.
+fn migrate_0_to_1(tx: &Connection) -> Result<(), String> {
+    tx.execute_batch(BASE_SCHEMA).map_err(|e| e.to_string())?;
+    if !has_column(tx, "curation", "rating") {
+        tx.execute(
+            "ALTER TABLE curation ADD COLUMN rating INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    scope_by_root(tx)
+}
+
+/// Every table as of schema version 1. Only `migrate_0_to_1` runs it.
+const BASE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mod_cache (
              path      TEXT PRIMARY KEY,
              mtime_ms  INTEGER NOT NULL,
              size      INTEGER NOT NULL,
@@ -161,18 +260,7 @@ pub fn open(db_path: &Path) -> Result<Connection, String> {
              size      INTEGER NOT NULL,
              mtime_ms  INTEGER NOT NULL,
              PRIMARY KEY (root, file_name)
-         );",
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Additive migrations (ignore "duplicate column" on existing DBs).
-    let _ = conn.execute(
-        "ALTER TABLE curation ADD COLUMN rating INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    migrate_scope_by_root(&conn)?;
-    Ok(conn)
-}
+         );";
 
 fn has_column(conn: &Connection, table: &str, col: &str) -> bool {
     let Ok(mut st) = conn.prepare(&format!("PRAGMA table_info({table})")) else {
@@ -187,14 +275,14 @@ fn has_column(conn: &Connection, table: &str, col: &str) -> bool {
 /// v0.8 (#162): scope the organize manifest and projection records to a mods folder. SQLite
 /// can't change a primary key in place, so both tables are rebuilt in one transaction; old
 /// rows get `root = ''` until `claim_unscoped` stamps them with the default folder. Skipped
-/// when already migrated. A failure rolls back and leaves the old schema intact.
-fn migrate_scope_by_root(conn: &Connection) -> Result<(), String> {
+/// when already migrated. Runs inside the caller's migration transaction, so a failure rolls
+/// back with it and leaves the old schema intact.
+fn scope_by_root(conn: &Connection) -> Result<(), String> {
     if has_column(conn, "organized", "root") && has_column(conn, "projection", "root") {
         return Ok(());
     }
     conn.execute_batch(
-        "BEGIN;
-         CREATE TABLE organized_new (
+        "CREATE TABLE organized_new (
              root TEXT NOT NULL DEFAULT '', tech_name TEXT NOT NULL, file_name TEXT NOT NULL,
              kind TEXT NOT NULL, category TEXT NOT NULL, subcategory TEXT,
              active INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (root, tech_name));
@@ -208,13 +296,9 @@ fn migrate_scope_by_root(conn: &Connection) -> Result<(), String> {
          INSERT INTO projection_new(root, file_name, size, mtime_ms)
              SELECT '', file_name, size, mtime_ms FROM projection;
          DROP TABLE projection;
-         ALTER TABLE projection_new RENAME TO projection;
-         COMMIT;",
+         ALTER TABLE projection_new RENAME TO projection;",
     )
-    .map_err(|e| {
-        let _ = conn.execute_batch("ROLLBACK;");
-        format!("database migration failed: {e}")
-    })
+    .map_err(|e| format!("database migration failed: {e}"))
 }
 
 /// Stamp rows written before folders were tracked (`root = ''`) with `root`. Before v0.8 Silo
@@ -779,6 +863,43 @@ pub fn prune_missing(conn: &mut Connection, present: &HashSet<String>) -> Result
 mod tests {
     use super::*;
 
+    /// Migration steps started, by database file (tests run in parallel, so per file).
+    static MIGRATION_STEPS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    /// Files whose migration step lingers, so a concurrent open gets every chance to start a
+    /// second, overlapping migration if nothing stops it.
+    static SLOW_MIGRATIONS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn count_migration_step(conn: &Connection) {
+        let path = conn.path().unwrap_or_default().to_string();
+        let slow = SLOW_MIGRATIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&path);
+        MIGRATION_STEPS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(path);
+        if slow {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    }
+
+    fn sqlite_path(path: &Path) -> String {
+        let opened = Connection::open(path).unwrap();
+        opened.path().unwrap_or_default().to_string()
+    }
+
+    fn migration_steps(path: &Path) -> usize {
+        let path = sqlite_path(path);
+        MIGRATION_STEPS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|p| **p == path)
+            .count()
+    }
+
     fn temp_db(tag: &str) -> std::path::PathBuf {
         let base = std::env::temp_dir().join(format!("silo_db_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -804,6 +925,11 @@ mod tests {
             .unwrap();
         }
         let conn = open(&path).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        assert!(has_column(&conn, "curation", "rating"));
         // Old rows arrive unscoped (root = '') until claimed.
         assert_eq!(load_organized(&conn, "").len(), 1);
         claim_unscoped(&conn, "c:\\mods").unwrap();
@@ -817,6 +943,85 @@ mod tests {
         // Re-opening must not rebuild again or lose rows.
         let conn = open(&path).unwrap();
         assert_eq!(load_organized(&conn, "c:\\mods").len(), 1);
+    }
+
+    #[test]
+    fn a_new_database_is_stamped_with_the_current_schema() {
+        let path = temp_db("fresh_version");
+        let conn = open(&path).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn a_database_from_a_newer_silo_is_refused_untouched() {
+        let path = temp_db("newer");
+        {
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute_batch(&format!(
+                "CREATE TABLE future (x); PRAGMA user_version = {};",
+                SCHEMA_VERSION + 1
+            ))
+            .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let err = open(&path).unwrap_err();
+        assert!(err.contains("newer version of Silo"), "{err}");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the file is not modified"
+        );
+    }
+
+    #[test]
+    fn concurrent_first_opens_migrate_exactly_once() {
+        // A pre-versioning (v0.7-shaped) database, opened by several connections at once.
+        // Without a write lock around "read version, migrate, stamp", two of them would both
+        // rebuild `organized` and one would fail or lose rows.
+        for round in 0..5 {
+            let path = temp_db(&format!("concurrent_{round}"));
+            {
+                let c = rusqlite::Connection::open(&path).unwrap();
+                c.execute_batch(
+                    "CREATE TABLE organized (tech_name TEXT PRIMARY KEY, file_name TEXT NOT NULL,
+                         kind TEXT NOT NULL, category TEXT NOT NULL, subcategory TEXT,
+                         active INTEGER NOT NULL DEFAULT 0);
+                     CREATE TABLE projection (file_name TEXT PRIMARY KEY, size INTEGER NOT NULL,
+                         mtime_ms INTEGER NOT NULL);
+                     INSERT INTO organized VALUES ('FS25_A','FS25_A.zip','zip','Vehicles',NULL,1);
+                     INSERT INTO projection VALUES ('FS25_A.zip', 10, 20);",
+                )
+                .unwrap();
+            }
+            SLOW_MIGRATIONS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(sqlite_path(&path));
+            let start = std::sync::Arc::new(std::sync::Barrier::new(6));
+            let handles: Vec<_> = (0..6)
+                .map(|_| {
+                    let (path, start) = (path.clone(), start.clone());
+                    std::thread::spawn(move || {
+                        start.wait();
+                        open(&path).map(drop)
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap().expect("every concurrent open succeeds");
+            }
+            assert_eq!(migration_steps(&path), 1, "migrated exactly once");
+            let conn = open(&path).unwrap();
+            let v: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, SCHEMA_VERSION);
+            assert_eq!(load_organized(&conn, "").len(), 1, "no row lost or doubled");
+            assert_eq!(projection_stats(&conn, "", "FS25_A.zip"), Some((10, 20)));
+        }
     }
 
     #[test]

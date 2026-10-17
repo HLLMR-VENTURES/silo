@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The open-folder links in Settings work.** They silently did nothing before. (#215)
 
+- **Going back to an older Silo can't damage your library.** Silo now records its database
+  version and won't touch a database made by a newer Silo; it asks you to install the latest
+  version instead. (#PR)
+
 ### Security
 
 - **Stricter file-name checks.** File names with a colon, a trailing dot or space, or a reserved
