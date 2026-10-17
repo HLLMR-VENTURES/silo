@@ -112,6 +112,13 @@ fn parse(xml: &str, index: u32, folder: &str) -> Savegame {
     }
 }
 
+/// True when `p` is a directory itself, not a symlink or junction to one (links aren't followed).
+fn is_plain_dir(p: &Path) -> bool {
+    std::fs::symlink_metadata(p)
+        .map(|m| m.file_type().is_dir())
+        .unwrap_or(false)
+}
+
 /// List all savegames under the FS25 user dir, parsed and sorted by slot.
 pub fn list_savegames(user_dir: &Path) -> Vec<Savegame> {
     let mut out = Vec::new();
@@ -119,6 +126,10 @@ pub fn list_savegames(user_dir: &Path) -> Vec<Savegame> {
         return out;
     };
     for entry in rd.flatten() {
+        // A real folder only: a symlink or junction named like a savegame points somewhere else.
+        if !is_plain_dir(&entry.path()) {
+            continue;
+        }
         let folder = entry.file_name().to_string_lossy().into_owned();
         let Some(index) = folder
             .strip_prefix("savegame")
@@ -150,17 +161,22 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The folder of savegame `folder`, if it's a plain name that `list_savegames` reports. A
-/// backup can then only ever copy a real savegame, never another folder a caller names.
+/// The folder of savegame `folder`, if it's a plain name that `list_savegames` reports and a
+/// real folder (not a symlink or junction). A backup can then only ever copy a real savegame,
+/// never another folder a caller names or a link points at.
 pub fn listed_folder(user_dir: &Path, folder: &str) -> Result<PathBuf, String> {
+    let not_found =
+        || format!("Savegame \"{folder}\" wasn't found. Refresh the list and try again.");
     if crate::paths::safe_file_name(folder).is_err()
         || !list_savegames(user_dir).iter().any(|s| s.folder == folder)
     {
-        return Err(format!(
-            "Savegame \"{folder}\" wasn't found. Refresh the list and try again."
-        ));
+        return Err(not_found());
     }
-    Ok(user_dir.join(folder))
+    let p = user_dir.join(folder);
+    if !is_plain_dir(&p) {
+        return Err(not_found());
+    }
+    Ok(p)
 }
 
 /// Back up a savegame folder to `SiloBackups/<folder>_<epoch>` (a plain copy —
@@ -222,6 +238,45 @@ mod tests {
         // Original untouched.
         assert!(root.join("savegame1/careerSavegame.xml").is_file());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A directory link: a symlink on Linux/macOS, an NTFS junction on Windows (no privilege
+    /// needed, and what a user or another tool would most likely have made).
+    fn link_dir(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        junction::create(target, link).unwrap();
+    }
+
+    #[test]
+    fn a_linked_savegame_folder_is_neither_listed_nor_backed_up() {
+        let base = std::env::temp_dir().join(format!("silo_sg_link_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("user");
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(root.join("savegame1")).unwrap();
+        std::fs::write(root.join("savegame1/careerSavegame.xml"), SAMPLE).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("careerSavegame.xml"), SAMPLE).unwrap();
+        link_dir(&elsewhere, &root.join("savegame3"));
+
+        let listed: Vec<String> = list_savegames(&root)
+            .into_iter()
+            .map(|s| s.folder)
+            .collect();
+        assert_eq!(listed, vec!["savegame1".to_string()]);
+        assert!(listed_folder(&root, "savegame3").is_err());
+        assert!(backup(&root, "savegame3").is_err());
+        assert!(!root.join("SiloBackups").exists(), "nothing was copied");
+        assert!(
+            elsewhere.join("careerSavegame.xml").is_file(),
+            "the target is untouched"
+        );
+
+        #[cfg(windows)]
+        junction::delete(root.join("savegame3")).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
