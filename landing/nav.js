@@ -55,6 +55,7 @@
     '<span class="silo-sp"></span>' +
     '<nav class="silo-ftlinks" aria-label="Footer">' +
     '<a href="/">Home</a><a href="/browse/">Browse</a><a href="/help/">Help</a>' +
+    '<a href="https://github.com/HLLMR/silo/discussions" rel="noopener">Community</a>' +
     '<a href="/trust/">Trust</a><a href="/legal/">Legal</a>' +
     '<a href="https://github.com/HLLMR/silo" rel="noopener">Source</a>' +
     "</nav>" +
