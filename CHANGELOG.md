@@ -40,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set saved when it started, even if Silo rescanned while you were testing in the game, and any
   problems are shown instead of ignored. (#202)
 
+- **Mod updates you can undo.** Updating a mod no longer overwrites it in place: Silo downloads
+  the new version beside it, swaps it in, and keeps the previous version in `backups/` (the
+  newest three per mod). If Silo stops mid-update, it finishes or rolls back the swap on the next
+  scan and tells you what it did. Mods aren't updated while Farming Simulator 25 is running.
+  Silo also asks before quitting, and won't install its own update, while it's still changing
+  files. (#202)
+
 ### Security
 
 - **Stricter image-host check.** The image proxy now parses URLs properly before checking the

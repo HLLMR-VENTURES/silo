@@ -7,7 +7,6 @@
 //! that to 5000/hr later. All network stays in Rust (the webview CSP blocks it).
 
 use serde::Serialize;
-use std::io::Read;
 
 // ── Input validation + safe API URLs ──
 // Owner/repo/gist ids reach these functions from the webview, a pasted link, or a modDesc.
@@ -301,33 +300,14 @@ pub fn is_github_host(url: &str) -> bool {
     }
 }
 
-/// Download a release .zip asset and install it at `dest`. Streams to a sibling `.part`
-/// file (bounded memory — so a multi-GB map mod that an in-RAM buffer would reject still
-/// installs), validates the complete archive opens, backs up the current file (aborting
-/// if that fails), then writes the bytes over the existing file IN PLACE — the same inode,
-/// truncated and re-filled — so an active hardlink projection reflects the update
-/// automatically. The `.part` temp file is always cleaned up.
-///
 /// Updates come only from GitHub release assets: the URL must pass the outbound-URL guard
 /// (https, no private/loopback address) and name a GitHub host, or nothing is fetched.
-pub fn download_zip(url: &str, token: Option<&str>, dest: &std::path::Path) -> Result<(), String> {
+pub(crate) fn check_update_url(url: &str) -> Result<(), String> {
     crate::net::validate_outbound_url(url, false)?;
     if !is_github_host(url) {
         return Err("Updates can only be downloaded from GitHub.".into());
     }
-    let mut req = crate::net::download().get(url);
-    // Attach the token ONLY to GitHub hosts. Public release assets don't need it anyway;
-    // this guarantees the credential never travels to a non-GitHub URL.
-    if let Some(t) = token.filter(|_| is_github_host(url)) {
-        req = req.set("Authorization", &format!("Bearer {t}"));
-    }
-    let resp = req.call().map_err(|e| e.to_string())?;
-
-    let part = dest.with_extension("zip.part");
-    let _ = std::fs::remove_file(&part); // clear any stale temp from a prior run
-    let result = stream_install(resp, &part, dest);
-    let _ = std::fs::remove_file(&part); // always clean up, success or failure
-    result
+    Ok(())
 }
 
 /// Verify a downloaded update is actually the mod it's replacing, before overwriting the
@@ -341,7 +321,10 @@ pub fn download_zip(url: &str, token: Option<&str>, dest: &std::path::Path) -> R
 /// Only a *provable* mismatch refuses the update. Missing/uncomparable identity fields (or an
 /// unreadable current file) fall through to the structural guard, so a legitimate update is never
 /// blocked just because a modDesc omits a field.
-fn verify_update_identity(new_zip: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+pub(crate) fn verify_update_identity(
+    new_zip: &std::path::Path,
+    dest: &std::path::Path,
+) -> Result<(), String> {
     let new_xml = crate::scan::read_moddesc_xml(new_zip, "zip").map_err(|_| {
         "the downloaded file isn't a Farming Simulator mod (no modDesc.xml) — it may be a source \
          archive or the wrong release asset"
@@ -389,93 +372,6 @@ fn verify_update_identity(new_zip: &std::path::Path, dest: &std::path::Path) -> 
         }
     }
     Ok(())
-}
-
-/// Stream `resp` to `part`, validate it's a real zip, back up `dest`, then overwrite
-/// `dest` in place (inode preserved). The caller removes `part` afterward.
-fn stream_install(
-    resp: ureq::Response,
-    part: &std::path::Path,
-    dest: &std::path::Path,
-) -> Result<(), String> {
-    // 4 GB bounds a runaway/hostile stream without rejecting a legitimately large map mod
-    // the way the old in-memory buffer's 500 MB cap did.
-    const MAX: u64 = 4 * 1024 * 1024 * 1024;
-
-    // 1. Stream the response to the .part file (bounded memory).
-    {
-        let mut out = std::fs::File::create(part).map_err(|e| e.to_string())?;
-        let mut reader = resp.into_reader().take(MAX + 1);
-        let n = std::io::copy(&mut reader, &mut out).map_err(|e| e.to_string())?;
-        if n > MAX {
-            return Err(format!("update exceeds the {MAX}-byte size limit"));
-        }
-        out.sync_all().map_err(|e| e.to_string())?;
-    }
-
-    // 2. Validate the completed archive opens (central directory intact) — a truncated or
-    //    corrupt download must not reach the install step.
-    let f = std::fs::File::open(part).map_err(|e| e.to_string())?;
-    zip::ZipArchive::new(f).map_err(|_| {
-        "Downloaded file is not a valid .zip archive (corrupt or truncated)".to_string()
-    })?;
-
-    // 2b. Identity guard: prove the download really is the mod it's replacing before we touch
-    //     dest. A GitHub release can hold many assets (source archives, docs, other editions),
-    //     and a valid ZIP of the *wrong* mod is still a valid ZIP — this refuses to overwrite an
-    //     installed mod with something that isn't the same mod.
-    verify_update_identity(part, dest)?;
-
-    // 3. Back up the current file FIRST; abort if we can't preserve a copy.
-    let bak = dest.with_extension("zip.bak");
-    let had_dest = dest.exists();
-    if had_dest {
-        std::fs::copy(dest, &bak).map_err(|e| {
-            format!("aborted before overwriting — couldn't back up the current file: {e}")
-        })?;
-    }
-
-    // 4. Write the validated bytes over dest IN PLACE: truncate the existing inode and
-    //    stream the .part into it, so any active hardlink projection stays valid. If this
-    //    fails after truncation, dest is now corrupt — restore it from the backup so the
-    //    user is never left with a broken (and silently unusable) mod file.
-    let write = (|| -> Result<(), String> {
-        let mut src = std::fs::File::open(part).map_err(|e| e.to_string())?;
-        let mut dst = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(dest)
-            .map_err(|e| e.to_string())?;
-        std::io::copy(&mut src, &mut dst).map_err(|e| e.to_string())?;
-        dst.sync_all().map_err(|e| e.to_string())
-    })();
-
-    match write {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&bak); // update landed — drop the backup
-            Ok(())
-        }
-        Err(e) => {
-            if had_dest && bak.exists() {
-                // Best-effort rollback to the pre-update file (inode preserved).
-                if let Ok(mut b) = std::fs::File::open(&bak) {
-                    if let Ok(mut d) = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .open(dest)
-                    {
-                        let _ = std::io::copy(&mut b, &mut d);
-                        let _ = d.sync_all();
-                    }
-                }
-            }
-            Err(format!(
-                "update failed and was rolled back to the previous version: {e}"
-            ))
-        }
-    }
 }
 
 /// The authenticated user's login name (verifies a token).
@@ -1117,11 +1013,12 @@ mod tests {
 
     #[test]
     fn update_downloads_only_come_from_github() {
-        let tmp = std::env::temp_dir().join("silo-dz-refuse.zip");
-        let err = download_zip("https://evil.example/x.zip", None, &tmp).unwrap_err();
+        let err = check_update_url("https://evil.example/x.zip").unwrap_err();
         assert!(err.contains("GitHub"), "{err}");
-        let err = download_zip("https://127.0.0.1/x.zip", None, &tmp).unwrap_err();
+        let err = check_update_url("https://127.0.0.1/x.zip").unwrap_err();
         assert!(!err.is_empty());
+        assert!(check_update_url("http://github.com/o/r/releases/download/v1/x.zip").is_err());
+        assert!(check_update_url("https://github.com/o/r/releases/download/v1/x.zip").is_ok());
     }
 
     #[test]

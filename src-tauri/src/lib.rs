@@ -27,6 +27,7 @@ pub mod secrets;
 pub mod settings_form;
 pub mod siloapi;
 pub mod store;
+pub mod update;
 pub mod xmlconfig;
 pub mod xmltext;
 
@@ -91,6 +92,9 @@ async fn scan_mods(
     let active = modsroot::active();
 
     tauri::async_runtime::spawn_blocking(move || {
+        // A mod update Silo was in the middle of when it stopped is finished or rolled back
+        // first, so the scan sees the library as it should be.
+        let recovered = recover_interrupted_updates();
         // Warm cache: parsed entries persist between launches, keyed by
         // path+mtime+size, so unchanged mods skip archive parsing entirely.
         let mut conn = db::open(&db_path(&app)?)?;
@@ -160,7 +164,10 @@ async fn scan_mods(
             let _ = db::reconcile_organized(&mut conn, key, &organized_rows);
         }
 
-        Ok::<_, String>(out.result)
+        let mut result = out.result;
+        result.notices = recovered.notices;
+        result.problems = recovered.problems;
+        Ok::<_, String>(result)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -488,29 +495,148 @@ async fn gh_watch(
     .map_err(|e| e.to_string())?
 }
 
+/// What `download_update` tells the frontend: where the previous version is kept, and anything
+/// that went wrong after the new version was in place (the update itself stands).
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateOutcome {
+    backup: Option<String>,
+    problems: Vec<String>,
+}
+
+const UPDATE_GAME_RUNNING: &str = "Close Farming Simulator 25 first, then update.";
+
+/// Update an installed mod from a GitHub release asset (`update` module): download beside it
+/// without the library lock, then swap it in under the lock, keeping the previous version in
+/// `backups/`. Refused while FS25 runs (its files may be open).
 #[tauri::command]
 async fn download_update(
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
     path: String,
     asset_url: String,
-) -> Result<(), String> {
+) -> Result<UpdateOutcome, String> {
     ensure_no_move()?;
-    // No DB/token needed: a public release asset is downloaded unauthenticated.
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let _write = library_write()?;
-        let dest = std::path::Path::new(&path);
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<UpdateOutcome, String> {
+        if gamelaunch::fs25_running() {
+            return Err(UPDATE_GAME_RUNNING.into());
+        }
+        let dest = PathBuf::from(&path);
         // Defence against a compromised webview naming an arbitrary write target: the path
         // must contain no `..` AND its parent must resolve inside a real mods root (the flat
         // root or its archive, wherever that lives). An absolute path outside them — which
         // `no_traversal` alone would pass — is rejected here.
-        paths::no_traversal(dest)?;
-        paths::ensure_write_under(&allowed_roots(), dest)?;
+        paths::no_traversal(&dest)?;
+        paths::ensure_write_under(&allowed_roots(), &dest)?;
         // Public release assets don't need auth, and a download must never carry the user's
         // GitHub credential — keep the token for explicit API actions only.
-        github::download_zip(&asset_url, None, dest)
+        let part = update::fetch(&asset_url, &dest)?;
+        // A finished download waits out a busy spell instead of being thrown away.
+        let _write = library_write_within(PLACE_WAIT)?;
+        // Things may have changed while downloading: check again under the lock.
+        paths::ensure_write_under(&allowed_roots(), &dest)?;
+        if gamelaunch::fs25_running() {
+            return Err(UPDATE_GAME_RUNNING.into());
+        }
+        let layout = primary_layout(None)?;
+        let mut policy = organize::LinkPolicy::new(&layout);
+        // Finish an earlier, interrupted update first (the user asked: every step is retried),
+        // so it doesn't block this one; if it can't be finished, say exactly why.
+        let mut dirs = update::layout_dirs(&layout);
+        if let Some(parent) = dest.parent() {
+            if !dirs.iter().any(|d| d == parent) {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+        let settled = update::settle(&dirs, &layout.mods, &mut policy, update::Attempt::UserAsked);
+        log_recovery(&settled);
+        let old = update::old_path(&dest);
+        if settled.leftovers.contains(&old) {
+            return Err(update::leftover_message(&settled, &[old]));
+        }
+        github::verify_update_identity(part.path(), &dest)?;
+        let done = update::swap(&dest, part.path(), &layout.mods, &mut policy)?;
+        if let Some(flat) = &done.relinked {
+            if let (Ok(conn), Some(name)) = (db::open(&db), flat.file_name()) {
+                let key = modsroot::canonical_key(&layout.mods);
+                organize::note_zip_projection(&conn, &key, &name.to_string_lossy(), flat);
+            }
+        }
+        let label = file_label(&dest);
+        match &done.backup {
+            Some(b) => eprintln!(
+                "[silo] updated {label}; previous version kept at {}",
+                b.display()
+            ),
+            None => eprintln!("[silo] updated {label}; previous version not moved to backups"),
+        }
+        for p in &done.problems {
+            eprintln!("[silo] {p}");
+        }
+        Ok(UpdateOutcome {
+            backup: done.backup.map(|b| b.to_string_lossy().into_owned()),
+            problems: done.problems,
+        })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn log_recovery(r: &update::Recovery) {
+    for n in r.notices.iter().chain(&r.problems) {
+        eprintln!("[silo] {n}");
+    }
+}
+
+/// Finish or roll back mod updates a crash interrupted (`update::settle`), in the active mods
+/// folder and each archive category folder, and return what happened for the user. Only when
+/// the library lock is free right now (a scan never waits for it), no archive move is
+/// unfinished (its files are in flux), and Silo isn't installing its own update.
+fn recover_interrupted_updates() -> update::Recovery {
+    if move_in_progress() || self_updating() {
+        return update::Recovery::default();
+    }
+    let Some(active) = modsroot::active() else {
+        return update::Recovery::default();
+    };
+    if active.move_to.is_some() {
+        return update::Recovery::default();
+    }
+    let Some(_write) = lock_result(LIBRARY_WRITE.try_lock()) else {
+        return update::Recovery::default();
+    };
+    let r = settle_layout(&active.layout);
+    log_recovery(&r);
+    r
+}
+
+/// Background recovery over `layout` (costly steps at most once per session per file).
+fn settle_layout(layout: &organize::Layout) -> update::Recovery {
+    update::settle(
+        &update::layout_dirs(layout),
+        &layout.mods,
+        &mut organize::LinkPolicy::new(layout),
+        update::Attempt::Background,
+    )
+}
+
+/// Resolve update leftovers in the active layout before a library write (call with the library
+/// lock held). Refuses while a mod's previous version can't be put back, since the library is
+/// short that mod until it is.
+fn settle_updates_locked() -> Result<(), String> {
+    let Some(active) = modsroot::active() else {
+        return Ok(());
+    };
+    if active.move_to.is_some() {
+        return Ok(());
+    }
+    let r = settle_layout(&active.layout);
+    log_recovery(&r);
+    if r.stranded.is_empty() {
+        Ok(())
+    } else {
+        Err(update::leftover_message(&r, &r.stranded))
+    }
 }
 
 // ── SiloAPI (mod browser / discovery) ──
@@ -723,15 +849,15 @@ async fn install_remote_mod(
 /// library lock, so two at once for the same file must not share (and corrupt) one part file.
 static PARTS_IN_FLIGHT: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
-/// A download's claim on its `.zip.part` file. Dropping it removes whatever part is left
+/// A download's claim on its part file. Dropping it removes whatever part is left
 /// (a failed or abandoned download) and frees the name.
-struct PartClaim {
+pub struct PartClaim {
     path: PathBuf,
     key: PathBuf,
 }
 
 impl PartClaim {
-    fn path(&self) -> &std::path::Path {
+    pub fn path(&self) -> &std::path::Path {
         &self.path
     }
 }
@@ -763,7 +889,11 @@ fn same_file_key(p: &std::path::Path) -> PathBuf {
 /// Claim the part file a download of `dest` streams into, refusing while another download
 /// of the same file is running.
 fn claim_part(dest: &std::path::Path) -> Result<PartClaim, String> {
-    let path = dest.with_extension("zip.part");
+    claim_part_at(dest, dest.with_extension("zip.part"))
+}
+
+/// Claim `path` as the part file a download of `dest` streams into (see [`claim_part`]).
+fn claim_part_at(dest: &std::path::Path, path: PathBuf) -> Result<PartClaim, String> {
     let key = same_file_key(&path);
     let mut held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
     if held.contains(&key) {
@@ -771,6 +901,17 @@ fn claim_part(dest: &std::path::Path) -> Result<PartClaim, String> {
     }
     held.push(key.clone());
     Ok(PartClaim { path, key })
+}
+
+/// Remove a part file left by an earlier run, unless a download in this run has claimed it.
+/// The claim list stays locked across the check and the removal, so a download can't claim it
+/// in between. Returns whether a file was removed.
+fn remove_unclaimed_part(path: &std::path::Path) -> bool {
+    let held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+    if held.contains(&same_file_key(path)) {
+        return false;
+    }
+    std::fs::remove_file(path).is_ok()
 }
 
 /// Anything at `p`, including a broken link (which `Path::exists` would call absent).
@@ -1087,6 +1228,34 @@ fn move_in_progress() -> bool {
     MOVE_HOLDS_LOCK.load(std::sync::atomic::Ordering::SeqCst) || relocate::is_running()
 }
 
+/// Set by `force_quit` so the close guard lets the window go after the user said "Quit anyway".
+static FORCE_QUIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True while Silo is changing files: a library write holds the lock, or an archive move is
+/// running (including between its lock drops). Never waits for the lock.
+fn library_busy() -> bool {
+    busy_with(&LIBRARY_WRITE, move_in_progress())
+}
+
+/// [`library_busy`] against a given lock. A poisoned lock that nobody holds is not busy.
+fn busy_with(lock: &std::sync::Mutex<()>, moving: bool) -> bool {
+    moving || matches!(lock.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+}
+
+/// Whether Silo is changing files right now (the frontend asks before a self-update).
+#[tauri::command]
+fn app_busy() -> bool {
+    library_busy()
+}
+
+/// Quit even though Silo is busy, after the user confirmed it. `exit` raises `ExitRequested`,
+/// which `hold_quit` lets through once `FORCE_QUIT` is set.
+#[tauri::command]
+fn force_quit(app: tauri::AppHandle) {
+    FORCE_QUIT.store(true, std::sync::atomic::Ordering::SeqCst);
+    app.exit(0);
+}
+
 /// The library write lock as held by an archive move; clears `MOVE_HOLDS_LOCK` on drop
 /// (before the lock itself is released).
 struct MoveLock {
@@ -1123,17 +1292,46 @@ fn library_write() -> Result<std::sync::MutexGuard<'static, ()>, String> {
     library_write_within(LIBRARY_WAIT)
 }
 
-/// `library_write` with an explicit deadline.
+/// `library_write` with an explicit deadline. Once the lock is held, update leftovers in the
+/// active layout are resolved first (`settle_updates_locked`), so no write starts on top of a
+/// half-finished mod update.
 fn library_write_within(
     max: std::time::Duration,
 ) -> Result<std::sync::MutexGuard<'static, ()>, String> {
-    wait_for_library(max, || {
+    let guard = wait_for_library(max, || {
+        ensure_not_self_updating()?;
         ensure_no_move()?;
         if move_in_progress() {
             return Err("Finish or cancel the archive move first.".into());
         }
         Ok(())
-    })
+    })?;
+    settle_updates_locked()?;
+    Ok(guard)
+}
+
+/// Set while Silo installs its own update (`set_self_updating`): library writes and archive
+/// moves refuse, so nothing starts changing files just before Silo restarts.
+static SELF_UPDATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+const SELF_UPDATE_RUNNING: &str = "Silo is installing an update.";
+
+fn self_updating() -> bool {
+    SELF_UPDATING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn ensure_not_self_updating() -> Result<(), String> {
+    if self_updating() {
+        Err(SELF_UPDATE_RUNNING.into())
+    } else {
+        Ok(())
+    }
+}
+
+/// The frontend marks the start (and, if it fails, the end) of installing Silo's own update.
+#[tauri::command]
+fn set_self_updating(on: bool) {
+    SELF_UPDATING.store(on, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Poll for the library lock until `max` has passed. `ready` runs before every attempt and
@@ -1158,8 +1356,14 @@ fn wait_for_library(
 
 /// The library write lock for an archive move, without waiting: a busy library refuses.
 fn try_move_lock() -> Result<MoveLock, String> {
+    ensure_not_self_updating()?;
     match lock_result(LIBRARY_WRITE.try_lock()) {
         Some(g) => {
+            // A self-update may have started between the check above and taking the lock.
+            if self_updating() {
+                drop(g);
+                return Err(SELF_UPDATE_RUNNING.into());
+            }
             // Order matters: clear requests left from before (a pause or cancel nothing was
             // running to receive) only once the lock is ours, and only then announce the move —
             // a cancel that sees the flag from here on is sent to this move and kept.
@@ -3716,10 +3920,62 @@ pub fn run() {
             adopt_foreign_file,
             restore_foreign_file,
             relink_projections,
-            hardlink_support
+            hardlink_support,
+            app_busy,
+            force_quit,
+            set_self_updating
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Silo");
+        // Closing the main window while Silo is changing files could leave a mod half-moved:
+        // keep it open and let the frontend ask (it calls `force_quit` on "Quit anyway").
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if hold_quit() {
+                    api.prevent_close();
+                    let _ = window.emit("close-blocked", ());
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building Silo")
+        // Quitting the app another way (the macOS Quit menu, Cmd+Q) is held the same way.
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if hold_quit() {
+                    api.prevent_exit();
+                    if app.get_webview_window("main").is_some() {
+                        let _ = app.emit("close-blocked", ());
+                    } else {
+                        // No window left to ask in: quit as soon as the change is done.
+                        exit_when_idle(app.clone());
+                    }
+                }
+            }
+        });
+}
+
+/// Set while a thread waits to quit once Silo stops changing files (one at a time).
+static EXIT_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Quit once `library_busy()` clears, from a thread of its own.
+fn exit_when_idle(app: tauri::AppHandle) {
+    if EXIT_PENDING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        while library_busy() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        FORCE_QUIT.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.exit(0);
+    });
+}
+
+/// Hold a quit: Silo is changing files and the user hasn't chosen "Quit anyway".
+fn hold_quit() -> bool {
+    !FORCE_QUIT.load(std::sync::atomic::Ordering::SeqCst) && library_busy()
 }
 
 #[cfg(test)]
@@ -4005,6 +4261,31 @@ mod tests {
         // Unknown free space never blocks.
         assert!(move_problems(facts(space(false, None))).is_empty());
         assert!(move_problems(facts(space(true, None))).is_empty());
+    }
+
+    // Against a lock of its own: other tests hold `LIBRARY_WRITE`, so asserting "not busy" on
+    // the real one would race them.
+    #[test]
+    fn library_busy_reflects_the_write_lock() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        assert!(!super::busy_with(&LOCK, false));
+        let g = LOCK.lock().unwrap();
+        assert!(super::busy_with(&LOCK, false));
+        drop(g);
+        assert!(!super::busy_with(&LOCK, false));
+        assert!(super::busy_with(&LOCK, true), "a running move counts");
+    }
+
+    #[test]
+    fn a_poisoned_but_free_lock_is_not_busy() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _ = std::thread::spawn(|| {
+            let _g = LOCK.lock().unwrap();
+            panic!("poison the lock (expected in this test)");
+        })
+        .join();
+        assert!(LOCK.is_poisoned());
+        assert!(!super::busy_with(&LOCK, false));
     }
 
     #[test]

@@ -7,6 +7,7 @@ import { save, open, confirm as pluginConfirm } from "@tauri-apps/plugin-dialog"
 import { revealItemInDir, openPath, openUrl } from "@tauri-apps/plugin-opener";
 import type {
   ScanResult,
+  UpdateOutcome,
   ScanProgress,
   CurationRow,
   CategoryOverride,
@@ -462,9 +463,24 @@ export function ghWatch(owner: string, repo: string, on: boolean): Promise<boole
   return invoke<boolean>("gh_watch", { owner, repo, on });
 }
 
-/** Download a release .zip and install it in place (backs up the old file). */
-export function downloadUpdate(path: string, assetUrl: string): Promise<void> {
-  return invoke("download_update", { path, assetUrl });
+/**
+ * Download a release .zip beside the mod and swap it in, keeping the previous version in the
+ * mods folder's backups. Resolves to where that backup is and anything that went wrong after
+ * the update landed (warnings: the update itself stands).
+ */
+export function downloadUpdate(path: string, assetUrl: string): Promise<UpdateOutcome> {
+  return invoke<UpdateOutcome>("download_update", { path, assetUrl });
+}
+
+/** True while Silo is changing files (a library write or an archive move is running). */
+export const appBusy = () => invoke<boolean>("app_busy");
+/** Quit even though Silo is busy (after the user confirmed it). */
+export const forceQuit = () => invoke<void>("force_quit");
+/** While on, library writes and archive moves refuse ("Silo is installing an update."). */
+export const setSelfUpdating = (on: boolean) => invoke<void>("set_self_updating", { on });
+/** Fires when the window was asked to close while Silo is changing files (the close was held). */
+export function onCloseBlocked(cb: () => void): Promise<UnlistenFn> {
+  return listen("close-blocked", () => cb());
 }
 
 // ── SiloAPI (mod browser / discovery) ──

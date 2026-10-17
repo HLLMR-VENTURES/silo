@@ -89,6 +89,10 @@ pub struct ScanResult {
     pub roots: Vec<String>,
     pub took_ms: u128,
     pub total: usize,
+    /// Interrupted mod updates finished or rolled back before the scan, for the user.
+    pub notices: Vec<String>,
+    /// What that recovery couldn't fix, for the user.
+    pub problems: Vec<String>,
 }
 
 /// Result of a cached scan: the full list plus which paths were freshly parsed
@@ -139,13 +143,16 @@ fn candidate_from(path: PathBuf, name: &str, ft: std::fs::FileType) -> Option<Ca
 }
 
 /// True for the scratch entries Silo leaves mid-operation (an archive move's in-flight copy or
-/// the old copy it is deleting, relink, or organize's `.{name}.silo-tmp`). They can hold a full
-/// copy of a mod and must never be scanned as one.
+/// the old copy it is deleting, relink, organize's `.{name}.silo-tmp`, or a mod update's
+/// download and set-aside old version). They can hold a full copy of a mod and must never be
+/// scanned as one.
 pub(crate) fn is_silo_temp(name: &str) -> bool {
     let l = name.to_lowercase();
     l.ends_with(".silo-move-tmp")
         || l.ends_with(".silo-move-old")
         || l.ends_with(".silo-relink-tmp")
+        || l.ends_with(crate::update::PART_SUFFIX)
+        || l.ends_with(crate::update::OLD_SUFFIX)
         || (l.starts_with('.') && l.ends_with(".silo-tmp"))
 }
 
@@ -624,6 +631,8 @@ where
                 .collect(),
             took_ms: started.elapsed().as_millis(),
             total,
+            notices: Vec::new(),
+            problems: Vec::new(),
         },
         fresh_paths,
     }
@@ -929,6 +938,8 @@ mod layout_tests {
         assert!(is_silo_temp("FS25_X.SILO-MOVE-OLD"));
         assert!(is_silo_temp("FS25_X.SILO-RELINK-TMP"));
         assert!(is_silo_temp(".FS25_X.silo-tmp"));
+        assert!(is_silo_temp("FS25_X.zip.silo-update.part"));
+        assert!(is_silo_temp("FS25_X.zip.SILO-UPDATE-OLD"));
         assert!(!is_silo_temp("FS25_X.silo-tmp")); // only the dot-prefixed form is organize's
         assert!(!is_silo_temp("FS25_X.zip"));
         assert!(!is_silo_temp("FS25_X"));

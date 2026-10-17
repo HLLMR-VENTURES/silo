@@ -65,18 +65,32 @@
 
   async function installUpdate() {
     if (!update?.release.assetUrl) return;
-    if (!(await confirmDialog(`Download and install ${update.release.tag}? The current file is backed up to .bak.`)))
+    if (!(await confirmDialog(`Download and install ${update.release.tag}? The current version is kept in your mods folder's backups.`)))
       return;
     installing = true;
     ghError = null;
+    installNote = null;
+    const path = mod.path;
     try {
-      await downloadUpdate(mod.path, update.release.assetUrl);
+      const out = await downloadUpdate(path, update.release.assetUrl);
+      installNote = {
+        path,
+        backup: out.backup ? `The previous version is kept in ${out.backup}.` : null,
+        warning: out.problems.length ? out.problems.join(" ") : null,
+      };
       onInstalled();
     } catch (e) {
       ghError = String(e);
     }
     installing = false;
   }
+
+  // What the last install said. Kept across the rescan `onInstalled` triggers (which hands this
+  // panel a fresh `mod`), and shown only while the same mod is open.
+  let installNote = $state<{ path: string; backup: string | null; warning: string | null } | null>(
+    null,
+  );
+  const note = $derived(installNote?.path === mod.path ? installNote : null);
 </script>
 
 <div class="d-section">
@@ -102,6 +116,8 @@
     </div>
   {/if}
   {#if ghError}<div class="gh-err">{ghError}</div>{/if}
+  {#if note?.warning}<div class="gh-err">{note.warning}</div>{/if}
+  {#if note?.backup}<div class="gh-suggest">Updated. {note.backup}</div>{/if}
   {#if update}
     <div class="gh-result" class:has={update.hasUpdate}>
       {#if update.hasUpdate}

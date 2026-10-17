@@ -41,6 +41,18 @@ export interface ScanResult {
   roots: string[];
   tookMs: number;
   total: number;
+  /** Interrupted mod updates finished or rolled back before the scan. */
+  notices: string[];
+  /** What that recovery couldn't fix. */
+  problems: string[];
+}
+
+/** Mirrors the Rust `UpdateOutcome` returned by `download_update`. */
+export interface UpdateOutcome {
+  /** Where the previous version is kept, or null if it couldn't be moved there. */
+  backup: string | null;
+  /** What went wrong after the new version was in place (the update itself stands). */
+  problems: string[];
 }
 
 export interface ScanProgress {

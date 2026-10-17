@@ -21,9 +21,9 @@ const TMP_SUFFIX: &str = ".silo-move-tmp";
 /// Suffix of an old copy being deleted (renamed first, so a half-deleted folder never keeps the
 /// mod's real name). `scan` skips it too.
 const OLD_SUFFIX: &str = ".silo-move-old";
-/// Temp sibling for an atomic link replacement in the mods folder (shared with organize's relink,
-/// already skipped by `scan`).
-const RELINK_SUFFIX: &str = ".silo-relink-tmp";
+/// Temp sibling for an atomic link replacement in the mods folder (organize's, already skipped
+/// by `scan`).
+const RELINK_SUFFIX: &str = organize::RELINK_SUFFIX;
 
 const GAME_RUNNING: &str =
     "Close Farming Simulator 25 first — Silo won't move mods while the game is using them.";
@@ -449,10 +449,8 @@ fn repoint(
     replace_zip_link(env, row, &link, dst, policy)
 }
 
-/// Atomically swap a zip's mods-folder entry `link` for a new link to `dst` (hardlink →
-/// symlink → copy, per `policy`): make the link at a `RELINK_SUFFIX` temp sibling, then rename
-/// it over `link`. At every point `link` is either the old working entry or the new one; a crash
-/// leaves at most the temp, which the next attempt replaces (and `scan` skips).
+/// Atomically swap a zip's mods-folder entry `link` for a new link to `dst`
+/// (`organize::replace_zip_link`), then refresh its projection record.
 fn replace_zip_link(
     env: &Env,
     row: &OrganizedRow,
@@ -460,13 +458,7 @@ fn replace_zip_link(
     dst: &Path,
     policy: &mut LinkPolicy,
 ) -> Result<(), String> {
-    let tmp = suffixed(link, RELINK_SUFFIX);
-    let _ = remove_any(&tmp);
-    organize::make_link(dst, &tmp, &row.kind, policy).map_err(|e| format!("relink: {e}"))?;
-    std::fs::rename(&tmp, link).map_err(|e| {
-        let _ = remove_any(&tmp);
-        format!("relink: {e}")
-    })?;
+    organize::replace_zip_link(link, dst, policy).map_err(|e| format!("relink: {e}"))?;
     env.note_projection(row, link);
     Ok(())
 }
@@ -503,10 +495,7 @@ impl Env<'_> {
         if row.kind == "dir" {
             return;
         }
-        db::forget_projection(self.conn, self.mods_key, &row.file_name);
-        if let Some((size, mtime)) = organize::file_stats(link) {
-            db::record_projection(self.conn, self.mods_key, &row.file_name, size, mtime);
-        }
+        organize::note_zip_projection(self.conn, self.mods_key, &row.file_name, link);
     }
 }
 
@@ -640,8 +629,9 @@ fn back_one(
 /// Delete stale scratch entries left by a crash under each category folder of `archive`: a
 /// move's temp and half-deleted old copies, and an interrupted cross-drive organize's
 /// `.{name}.silo-tmp` (its original is only removed after the temp is renamed into place, so a
-/// leftover temp is never the only copy). Only Silo's own names (`scan::is_silo_temp`) are
-/// touched; the move holds the library lock, so no organize is writing one right now.
+/// leftover temp is never the only copy). Only those names (`is_move_scratch`) are touched —
+/// never a mod update's leftovers, whose `-old` file may be the only copy of a mod; the move
+/// holds the library lock, so no organize is writing one right now.
 fn clean_temps(archive: &Path) {
     if let Ok(cats) = std::fs::read_dir(archive) {
         for c in cats.flatten() {
@@ -650,12 +640,64 @@ fn clean_temps(archive: &Path) {
             }
             if let Ok(es) = std::fs::read_dir(c.path()) {
                 for e in es.flatten() {
-                    if crate::scan::is_silo_temp(&e.file_name().to_string_lossy()) {
+                    if is_move_scratch(&e.file_name().to_string_lossy()) {
                         let _ = remove_any(&e.path());
                     }
                 }
             }
         }
+    }
+}
+
+/// A move's own scratch names, plus relink temps and organize's `.{name}.silo-tmp`: safe to
+/// delete after a crash. Unlike `scan::is_silo_temp`, never a mod update's `.silo-update.part`
+/// or `.silo-update-old` (`update::recover_interrupted` deals with those).
+fn is_move_scratch(name: &str) -> bool {
+    let l = name.to_lowercase();
+    l.ends_with(TMP_SUFFIX)
+        || l.ends_with(OLD_SUFFIX)
+        || l.ends_with(RELINK_SUFFIX)
+        || (l.starts_with('.') && l.ends_with(".silo-tmp"))
+}
+
+/// Finish or roll back interrupted mod updates in the mods folder and both archives' category
+/// folders (the move holds the library lock; the user asked for the move, so every step is
+/// retried). Returns why the move can't go on:
+/// - forward: any previous version still set aside (moving around it would leave it behind);
+/// - back (a cancel): only one whose mod is missing. Otherwise the mod is in place and nothing
+///   deletes the leftover, so the cancel must be able to finish and give the library back.
+fn settle_updates(mods: &Path, marker: &MoveMarker, direction: Direction) -> Option<String> {
+    let mut all = crate::update::Recovery::default();
+    for archive in [&marker.from, &marker.to] {
+        let layout = Layout {
+            mods: mods.to_path_buf(),
+            archive: archive.clone(),
+        };
+        let mut dirs = crate::update::layout_dirs(&layout);
+        if archive != &marker.from {
+            dirs.retain(|d| d != mods); // the mods folder once is enough
+        }
+        let r = crate::update::settle(
+            &dirs,
+            mods,
+            &mut LinkPolicy::new(&layout),
+            crate::update::Attempt::UserAsked,
+        );
+        for n in r.notices.iter().chain(&r.problems) {
+            eprintln!("[silo] {n}");
+        }
+        all.problems.extend(r.problems);
+        all.leftovers.extend(r.leftovers);
+        all.stranded.extend(r.stranded);
+    }
+    let blocking = match direction {
+        Direction::Forward => &all.leftovers,
+        Direction::Back => &all.stranded,
+    };
+    if blocking.is_empty() {
+        None
+    } else {
+        Some(crate::update::leftover_message(&all, blocking))
     }
 }
 
@@ -937,7 +979,16 @@ pub fn start(ctx: &mut RunCtx, from: PathBuf, to: PathBuf) -> Result<Option<Move
     if load_marker(ctx.conn, ctx.mods_key).is_some() {
         return Err(ALREADY_UNFINISHED.into());
     }
-    run_locked(ctx, &held, MoveMarker::new(from, to))
+    if (ctx.game_running)() {
+        return Err(GAME_RUNNING.into());
+    }
+    let marker = MoveMarker::new(from, to);
+    // Before any marker exists: a leftover that can't be put away refuses the move outright,
+    // so it can never leave an unfinished move (which blocks every library change) behind.
+    if let Some(reason) = settle_updates(ctx.mods, &marker, Direction::Forward) {
+        return Err(reason);
+    }
+    run_locked(ctx, &held, marker)
 }
 
 /// Resume the unfinished move (in whichever direction it was going).
@@ -986,6 +1037,10 @@ fn run_locked(
     marker.pause_reason = None;
     marker.errors.clear();
     save_marker(env.conn, env.mods_key, &marker)?;
+    if let Some(reason) = settle_updates(env.mods, &marker, marker.direction) {
+        marker.pause_reason = Some(reason);
+        return pause(&env, marker);
+    }
     clean_temps(&marker.from);
     clean_temps(&marker.to);
     clean_relink_temps(env.mods, &db::load_organized(env.conn, env.mods_key));
@@ -1525,6 +1580,90 @@ mod tests {
         assert!(zip_at(&f.new, "FS25_B").exists());
         assert!(!zip_at(&f.old, "FS25_A").exists() && !zip_at(&f.old, "FS25_B").exists());
         let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_move_puts_back_an_update_interrupted_before_the_new_file_landed() {
+        let f = fx("upd_rollback");
+        add_zip(&f, "FS25_A", false);
+        let a = zip_at(&f.old, "FS25_A");
+        let old = crate::update::old_path(&a);
+        std::fs::rename(&a, &old).unwrap(); // stopped after step b
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
+        assert_eq!(
+            std::fs::read(zip_at(&f.new, "FS25_A")).unwrap(),
+            b"PK\x03\x04 FS25_A"
+        );
+        assert!(!old.exists());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_move_never_deletes_an_update_leftover_it_cant_resolve() {
+        let f = fx("upd_leftover");
+        add_zip(&f, "FS25_A", false);
+        let a = zip_at(&f.old, "FS25_A");
+        let old = crate::update::old_path(&a);
+        std::fs::write(&old, b"the previous version").unwrap();
+        // The backups folder can't be made, so the old version can't be put away.
+        std::fs::write(f.mods.join("backups"), b"in the way").unwrap();
+        let part = crate::update::part_path(&zip_at(&f.old, "FS25_B"));
+        std::fs::write(&part, b"stale download").unwrap();
+
+        let err = run_with(&f, Op::Start, &|| false).unwrap_err();
+
+        // Refused before any marker exists, naming the file and the cause.
+        assert!(err.contains(&old.display().to_string()), "{err}");
+        assert!(err.contains("Free space on"), "{err}");
+        assert_eq!(
+            load_marker(&f.conn, &f.key),
+            None,
+            "no unfinished move left behind"
+        );
+        assert_eq!(std::fs::read(&old).unwrap(), b"the previous version");
+        assert!(
+            a.exists() && !zip_at(&f.new, "FS25_A").exists(),
+            "nothing moved"
+        );
+        assert!(!part.exists(), "an unclaimed stale download is removed");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_cancel_finishes_despite_an_update_leftover_whose_mod_is_in_place() {
+        let f = fx("upd_cancel");
+        add_zip(&f, "FS25_A", false);
+        add_zip(&f, "FS25_B", false);
+        let new_a = zip_at(&f.new, "FS25_A");
+        let game = || new_a.exists();
+        let paused = run_with(&f, Op::Start, &game).unwrap().unwrap();
+        assert!(paused.paused);
+        // Now an update leftover appears beside B, and backups can't be made.
+        let old_b = crate::update::old_path(&zip_at(&f.old, "FS25_B"));
+        std::fs::write(&old_b, b"B's previous version").unwrap();
+        std::fs::write(f.mods.join("backups"), b"in the way").unwrap();
+
+        // Resuming forward pauses on it, naming it...
+        let again = run_with(&f, Op::Resume, &|| false).unwrap().unwrap();
+        let reason = again.pause_reason.unwrap_or_default();
+        assert!(reason.contains(&old_b.display().to_string()), "{reason}");
+        // ...but cancelling still finishes and gives the library back.
+        assert!(run_with(&f, Op::Cancel, &|| false).unwrap().is_none());
+        assert_eq!(load_marker(&f.conn, &f.key), None);
+        assert!(zip_at(&f.old, "FS25_A").exists() && !new_a.exists());
+        assert_eq!(std::fs::read(&old_b).unwrap(), b"B's previous version");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn move_scratch_never_includes_update_leftovers() {
+        assert!(is_move_scratch("FS25_A.zip.silo-move-tmp"));
+        assert!(is_move_scratch("FS25_A.zip.SILO-MOVE-OLD"));
+        assert!(is_move_scratch("FS25_A.zip.silo-relink-tmp"));
+        assert!(is_move_scratch(".FS25_A.zip.silo-tmp"));
+        assert!(!is_move_scratch("FS25_A.zip.silo-update-old"));
+        assert!(!is_move_scratch("FS25_A.zip.silo-update.part"));
+        assert!(!is_move_scratch("FS25_A.zip"));
     }
 
     #[test]

@@ -32,23 +32,33 @@ export async function checkUpdate(): Promise<AvailableUpdate | null> {
 }
 
 /**
- * Download and install the pending update, then relaunch into the new version.
+ * Download the pending update, then (if `mayInstall` still agrees) install it and relaunch into
+ * the new version. Downloading changes nothing; `mayInstall` runs right before the install, so a
+ * change Silo started meanwhile can still stop it.
  * @param onProgress percent 0–100, or null when the total size is unknown.
+ * @param mayInstall resolves false to stop before installing.
+ * @returns false if `mayInstall` stopped it (nothing was installed).
  */
-export async function installUpdate(onProgress?: (pct: number | null) => void): Promise<void> {
-  if (!pending) return;
+export async function installUpdate(
+  onProgress: (pct: number | null) => void,
+  mayInstall: () => Promise<boolean>,
+): Promise<boolean> {
+  if (!pending) return true;
   let total = 0;
   let got = 0;
-  await pending.downloadAndInstall((ev) => {
+  await pending.download((ev) => {
     if (ev.event === "Started") {
       total = ev.data.contentLength ?? 0;
-      onProgress?.(total ? 0 : null);
+      onProgress(total ? 0 : null);
     } else if (ev.event === "Progress") {
       got += ev.data.chunkLength;
-      onProgress?.(total ? Math.min(100, Math.round((got / total) * 100)) : null);
+      onProgress(total ? Math.min(100, Math.round((got / total) * 100)) : null);
     } else if (ev.event === "Finished") {
-      onProgress?.(100);
+      onProgress(100);
     }
   });
+  if (!(await mayInstall())) return false;
+  await pending.install();
   await relaunch();
+  return true;
 }
