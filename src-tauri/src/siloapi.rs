@@ -301,8 +301,31 @@ pub fn stats(base: &str) -> Result<Stats, String> {
 /// rows carry — the detail endpoint sends them, and dropping them here is exactly what
 /// left the drawer showing "rating not synced" while the grid card had it.
 pub fn detail(base: &str, id: &str) -> Result<BrowseMod, String> {
-    let resp = get(&format!("{}/mods/{}", base.trim_end_matches('/'), id))?;
+    let resp = get(catalog_url(base, &["mods", id])?.as_str())?;
     resp.into_json().map_err(|e| e.to_string())
+}
+
+/// `{base}/<segments...>`, each segment percent-encoded on its own (a `/`, `?` or `#` in a
+/// mod id stays inside that one segment). Refuses an empty, `.`/`..`, or control-character
+/// segment (see `net::safe_path_segment`). Any path already in `base` is kept.
+fn catalog_url(base: &str, segments: &[&str]) -> Result<url::Url, String> {
+    if !segments.iter().all(|s| crate::net::safe_path_segment(s)) {
+        return Err("That catalog address isn't valid.".to_string());
+    }
+    let mut u = url::Url::parse(base.trim_end_matches('/'))
+        .map_err(|_| format!("Not a valid SiloAPI address: {base}"))?;
+    u.path_segments_mut()
+        .map_err(|_| format!("Not a valid SiloAPI address: {base}"))?
+        .pop_if_empty()
+        .extend(segments);
+    Ok(u)
+}
+
+/// `{base}/mods/{id}/manifest?version=<v>`.
+fn manifest_url(base: &str, id: &str, version: &str) -> Result<url::Url, String> {
+    let mut u = catalog_url(base, &["mods", id, "manifest"])?;
+    u.set_query(Some(&format!("version={}", urlencode(version))));
+    Ok(u)
 }
 
 /// One entry in a canonical content manifest.
@@ -333,13 +356,8 @@ pub struct CanonicalManifest {
 /// Fetch the canonical manifest for a specific version. `Ok(None)` when the server has no
 /// hashed build for that version (404) — that's an "unverified", not an error.
 pub fn manifest(base: &str, id: &str, version: &str) -> Result<Option<CanonicalManifest>, String> {
-    let url = format!(
-        "{}/mods/{}/manifest?version={}",
-        base.trim_end_matches('/'),
-        id,
-        urlencode(version)
-    );
-    match crate::net::api().get(&url).call() {
+    let url = manifest_url(base, id, version)?;
+    match crate::net::api().get(url.as_str()).call() {
         Ok(resp) => resp.into_json().map(Some).map_err(|e| e.to_string()),
         Err(ureq::Error::Status(404, _)) => Ok(None),
         Err(ureq::Error::Status(code, _)) => Err(format!("SiloAPI manifest returned {code}")),
@@ -606,6 +624,23 @@ pub fn fetch_image(url: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mod_ids_stay_in_one_path_segment() {
+        let u = catalog_url("https://silo-api.hllmr.com", &["mods", "a/b?c#d"]).unwrap();
+        assert_eq!(u.as_str(), "https://silo-api.hllmr.com/mods/a%2Fb%3Fc%23d");
+        assert_eq!(u.host_str(), Some("silo-api.hllmr.com"));
+        let u = catalog_url("https://h.example/api/", &["mods", "x", "manifest"]).unwrap();
+        assert_eq!(u.as_str(), "https://h.example/api/mods/x/manifest");
+        assert!(catalog_url("https://h.example", &["mods", ".\t."]).is_err());
+        assert!(catalog_url("https://h.example", &["mods", ".."]).is_err());
+        assert!(catalog_url("https://h.example", &["mods", ""]).is_err());
+        let m = manifest_url("https://h.example", "a/b?x", "1.0 beta&y=1").unwrap();
+        assert_eq!(
+            m.as_str(),
+            "https://h.example/mods/a%2Fb%3Fx/manifest?version=1.0%20beta%26y%3D1"
+        );
+    }
 
     #[test]
     fn filename_parsing() {

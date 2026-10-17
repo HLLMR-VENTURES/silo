@@ -9,6 +9,76 @@
 use serde::Serialize;
 use std::io::Read;
 
+// ── Input validation + safe API URLs ──
+// Owner/repo/gist ids reach these functions from the webview, a pasted link, or a modDesc.
+// They are checked against GitHub's own naming rules and then placed into API URLs one
+// percent-encoded path segment at a time, so a value like `r/collaborators/x` can never
+// reach a different endpoint than the one the caller meant.
+
+/// A GitHub user or org name: ASCII letters, digits and `-`, 1 to 39 chars.
+pub fn valid_owner(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 39 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// A GitHub repo name: ASCII letters, digits and `.` `_` `-`, 1 to 100 chars, not `.`/`..`.
+pub fn valid_repo(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 100
+        && s != "."
+        && s != ".."
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// A gist id is an opaque hex string. Historically 32 chars; a lenient hex range survives
+/// GitHub changing the length.
+pub fn valid_gist_id(s: &str) -> bool {
+    (20..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `Ok` when `owner/repo` is a valid GitHub repository name, otherwise a user-facing error.
+pub fn check_repo(owner: &str, repo: &str) -> Result<(), String> {
+    if valid_owner(owner) && valid_repo(repo) {
+        Ok(())
+    } else {
+        Err(format!(
+            "\"{owner}/{repo}\" isn't a valid GitHub repository name."
+        ))
+    }
+}
+
+/// `Ok` when `id` is a valid gist id, otherwise a user-facing error.
+pub fn check_gist_id(id: &str) -> Result<(), String> {
+    if valid_gist_id(id) {
+        Ok(())
+    } else {
+        Err("That isn't a valid gist ID.".to_string())
+    }
+}
+
+/// Build `https://api.github.com/<segments...>`, percent-encoding each segment (including
+/// any `/`, `?` or `#` inside one), so the host and the endpoint are fixed by the caller.
+/// Refuses an empty, `.`/`..`, or control-character segment (see `net::safe_path_segment`).
+pub(crate) fn api_url(segments: &[&str]) -> Result<url::Url, String> {
+    if !segments.iter().all(|s| crate::net::safe_path_segment(s)) {
+        return Err("That GitHub address isn't valid.".to_string());
+    }
+    let mut u = url::Url::parse("https://api.github.com/").expect("static URL");
+    u.path_segments_mut()
+        .expect("https URL has a path")
+        .clear()
+        .extend(segments);
+    Ok(u)
+}
+
+/// The Contents API URL for `path` in `owner/repo`. `path` may hold `/` separators for a
+/// nested file; each piece becomes its own encoded segment.
+fn contents_url(owner: &str, repo: &str, path: &str) -> Result<url::Url, String> {
+    let mut segs = vec!["repos", owner, repo, "contents"];
+    segs.extend(path.split('/').filter(|p| !p.is_empty()));
+    api_url(&segs)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReleaseInfo {
@@ -31,9 +101,10 @@ pub struct UpdateInfo {
 /// Fetch the latest release for `owner/repo`. A token (when present) raises the
 /// rate limit to 5000/hr and allows private repos.
 pub fn latest_release(owner: &str, repo: &str, token: Option<&str>) -> Result<ReleaseInfo, String> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
+    check_repo(owner, repo)?;
+    let url = api_url(&["repos", owner, repo, "releases", "latest"])?;
     let mut req = crate::net::api()
-        .get(&url)
+        .get(url.as_str())
         .set("Accept", "application/vnd.github+json");
     if let Some(t) = token {
         req = req.set("Authorization", &format!("Bearer {t}"));
@@ -206,27 +277,28 @@ pub fn device_poll(client_id: &str, device_code: &str) -> Result<PollResult, Str
 /// True only for GitHub-owned hosts. The token is attached ONLY to these — never to an
 /// arbitrary URL handed in from the webview/catalog, so a hostile `downloadUrl` can't
 /// harvest the user's credential.
+///
+/// The host comes from a real URL parser (the same one the HTTP client uses), so tricks
+/// like userinfo (`github.com@evil`) or a backslash read as a path separator can't make
+/// the string check and the actual request disagree.
 pub fn is_github_host(url: &str) -> bool {
-    let (scheme, rest) = match url.split_once("://") {
-        Some(x) => x,
-        None => return false,
+    let Ok(u) = url::Url::parse(url) else {
+        return false;
     };
     // Require HTTPS — never attach a bearer credential to a plaintext `http://github.com`
     // URL, where it would be sent in the clear before any TLS redirect.
-    if !scheme.eq_ignore_ascii_case("https") {
+    if u.scheme() != "https" {
         return false;
     }
-    let host = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let host = host.split('@').next_back().unwrap_or(""); // ignore any userinfo
-    let host = host.split(':').next().unwrap_or(""); // strip port
-    host == "github.com"
-        || host == "api.github.com"
-        || host == "codeload.github.com"
-        || host.ends_with(".githubusercontent.com")
+    match u.host_str().map(|h| h.to_ascii_lowercase()) {
+        Some(h) => {
+            matches!(
+                h.as_str(),
+                "github.com" | "api.github.com" | "codeload.github.com"
+            ) || h.ends_with(".githubusercontent.com")
+        }
+        None => false,
+    }
 }
 
 /// Download a release .zip asset and install it at `dest`. Streams to a sibling `.part`
@@ -235,7 +307,14 @@ pub fn is_github_host(url: &str) -> bool {
 /// if that fails), then writes the bytes over the existing file IN PLACE — the same inode,
 /// truncated and re-filled — so an active hardlink projection reflects the update
 /// automatically. The `.part` temp file is always cleaned up.
+///
+/// Updates come only from GitHub release assets: the URL must pass the outbound-URL guard
+/// (https, no private/loopback address) and name a GitHub host, or nothing is fetched.
 pub fn download_zip(url: &str, token: Option<&str>, dest: &std::path::Path) -> Result<(), String> {
+    crate::net::validate_outbound_url(url, false)?;
+    if !is_github_host(url) {
+        return Err("Updates can only be downloaded from GitHub.".into());
+    }
     let mut req = crate::net::download().get(url);
     // Attach the token ONLY to GitHub hosts. Public release assets don't need it anyway;
     // this guarantees the credential never travels to a non-GitHub URL.
@@ -475,10 +554,8 @@ fn gh_err(e: ureq::Error) -> String {
 
 /// GET /repos/{owner}/{repo} plus (when authenticated) the user's star/watch state.
 pub fn repo_stats(owner: &str, repo: &str, token: Option<&str>) -> Result<RepoStats, String> {
-    let v = gh_get(
-        &format!("https://api.github.com/repos/{owner}/{repo}"),
-        token,
-    )?;
+    check_repo(owner, repo)?;
+    let v = gh_get(api_url(&["repos", owner, repo])?.as_str(), token)?;
     if v["full_name"].as_str().unwrap_or("").is_empty() {
         return Err("Repo not found on GitHub".into());
     }
@@ -522,16 +599,15 @@ fn present_check(url: &str, token: &str) -> Result<bool, String> {
 
 /// GET /user/starred/{owner}/{repo} — 204 starred, 404 not.
 pub fn star_state(owner: &str, repo: &str, token: &str) -> Result<bool, String> {
-    present_check(
-        &format!("https://api.github.com/user/starred/{owner}/{repo}"),
-        token,
-    )
+    check_repo(owner, repo)?;
+    present_check(api_url(&["user", "starred", owner, repo])?.as_str(), token)
 }
 
 /// GET /repos/{owner}/{repo}/subscription — 200 watching, 404 not.
 pub fn watch_state(owner: &str, repo: &str, token: &str) -> Result<bool, String> {
+    check_repo(owner, repo)?;
     present_check(
-        &format!("https://api.github.com/repos/{owner}/{repo}/subscription"),
+        api_url(&["repos", owner, repo, "subscription"])?.as_str(),
         token,
     )
 }
@@ -539,11 +615,12 @@ pub fn watch_state(owner: &str, repo: &str, token: &str) -> Result<bool, String>
 /// PUT/DELETE /user/starred/{owner}/{repo}. Needs `public_repo` (OAuth) or a PAT with
 /// the Starring permission. Returns the new starred state (= `on`).
 pub fn set_star(owner: &str, repo: &str, token: &str, on: bool) -> Result<bool, String> {
-    let url = format!("https://api.github.com/user/starred/{owner}/{repo}");
+    check_repo(owner, repo)?;
+    let url = api_url(&["user", "starred", owner, repo])?;
     let req = if on {
-        crate::net::api().put(&url)
+        crate::net::api().put(url.as_str())
     } else {
-        crate::net::api().delete(&url)
+        crate::net::api().delete(url.as_str())
     }
     .set("Accept", "application/vnd.github+json")
     .set("Content-Length", "0")
@@ -554,17 +631,18 @@ pub fn set_star(owner: &str, repo: &str, token: &str, on: bool) -> Result<bool, 
 
 /// PUT (subscribe) / DELETE (unsubscribe) /repos/{owner}/{repo}/subscription.
 pub fn set_watch(owner: &str, repo: &str, token: &str, on: bool) -> Result<bool, String> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/subscription");
+    check_repo(owner, repo)?;
+    let url = api_url(&["repos", owner, repo, "subscription"])?;
     if on {
         crate::net::api()
-            .put(&url)
+            .put(url.as_str())
             .set("Accept", "application/vnd.github+json")
             .set("Authorization", &format!("Bearer {token}"))
             .send_json(ureq::json!({ "subscribed": true, "ignored": false }))
             .map_err(gh_err)?;
     } else {
         crate::net::api()
-            .delete(&url)
+            .delete(url.as_str())
             .set("Accept", "application/vnd.github+json")
             .set("Content-Length", "0")
             .set("Authorization", &format!("Bearer {token}"))
@@ -625,8 +703,9 @@ pub fn update_gist_file(
     filename: &str,
     content: &str,
 ) -> Result<(), String> {
+    check_gist_id(id)?;
     crate::net::api()
-        .request("PATCH", &format!("https://api.github.com/gists/{id}"))
+        .request("PATCH", api_url(&["gists", id])?.as_str())
         .set("Accept", "application/vnd.github+json")
         .set("Authorization", &format!("Bearer {token}"))
         .send_json(ureq::json!({ "files": { filename: { "content": content } } }))
@@ -669,8 +748,9 @@ pub fn list_user_gists(token: &str) -> Result<Vec<GistListItem>, String> {
 
 /// DELETE /gists/{id} — unpublish a gist we own. Needs `gist`.
 pub fn delete_gist(token: &str, id: &str) -> Result<(), String> {
+    check_gist_id(id)?;
     crate::net::api()
-        .delete(&format!("https://api.github.com/gists/{id}"))
+        .delete(api_url(&["gists", id])?.as_str())
         .set("Accept", "application/vnd.github+json")
         .set("Authorization", &format!("Bearer {token}"))
         .call()
@@ -715,7 +795,8 @@ pub fn list_owned_repos(token: &str) -> Result<Vec<RepoListItem>, String> {
 /// but pass the owner token when available (higher rate limit; required for a secret gist
 /// the anonymous API won't return). Errors if the file is absent from the gist.
 pub fn read_gist_file(id: &str, filename: &str, token: Option<&str>) -> Result<String, String> {
-    let v = gh_get(&format!("https://api.github.com/gists/{id}"), token)?;
+    check_gist_id(id)?;
+    let v = gh_get(api_url(&["gists", id])?.as_str(), token)?;
     let file = &v["files"][filename];
     if file.is_null() {
         return Err(format!(
@@ -763,9 +844,10 @@ pub fn read_repo_file(
     path: &str,
     token: Option<&str>,
 ) -> Result<String, String> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/contents/{path}");
+    check_repo(owner, repo)?;
+    let url = contents_url(owner, repo, path)?;
     let mut req = crate::net::api()
-        .get(&url)
+        .get(url.as_str())
         .set("Accept", "application/vnd.github.raw");
     if let Some(t) = token {
         req = req.set("Authorization", &format!("Bearer {t}"));
@@ -832,6 +914,7 @@ pub fn put_repo_file(
     message: &str,
 ) -> Result<(), String> {
     use base64::Engine;
+    check_repo(owner, repo)?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
     let mut body = ureq::json!({
         "message": message,
@@ -844,9 +927,7 @@ pub fn put_repo_file(
         body["sha"] = serde_json::Value::String(sha);
     }
     crate::net::api()
-        .put(&format!(
-            "https://api.github.com/repos/{owner}/{repo}/contents/{path}"
-        ))
+        .put(contents_url(owner, repo, path)?.as_str())
         .set("Accept", "application/vnd.github+json")
         .set("Authorization", &format!("Bearer {token}"))
         .send_json(body)
@@ -857,16 +938,14 @@ pub fn put_repo_file(
 /// The current blob sha of a repo file, if it exists — needed to replace it via the Contents
 /// API. Best-effort: any error (missing file, empty repo, network) yields `None` → treat as new.
 fn repo_file_sha(token: &str, owner: &str, repo: &str, path: &str) -> Option<String> {
-    let v = gh_get(
-        &format!("https://api.github.com/repos/{owner}/{repo}/contents/{path}"),
-        Some(token),
-    )
-    .ok()?;
+    check_repo(owner, repo).ok()?;
+    let v = gh_get(contents_url(owner, repo, path).ok()?.as_str(), Some(token)).ok()?;
     v["sha"].as_str().map(String::from)
 }
 
 /// Best-effort scan of arbitrary text (a modDesc.xml) for the first
-/// `github.com/owner/repo` reference. Skips non-repo GitHub paths.
+/// `github.com/owner/repo` reference. Skips non-repo GitHub paths and names that aren't
+/// valid GitHub owner/repo names.
 pub fn find_repo_in_text(text: &str) -> Option<(String, String)> {
     let ident = |s: &str| {
         s.chars()
@@ -892,7 +971,8 @@ pub fn find_repo_in_text(text: &str) -> Option<(String, String)> {
         if let Some(stripped) = repo.strip_suffix(".git") {
             repo = stripped.to_string();
         }
-        if !owner.is_empty() && !repo.is_empty() && !skip.contains(&owner.as_str()) {
+        // Only a real GitHub name counts; otherwise keep scanning for a later, valid link.
+        if valid_owner(&owner) && valid_repo(&repo) && !skip.contains(&owner.as_str()) {
             return Some((owner, repo));
         }
         from += i + "github.com/".len();
@@ -941,6 +1021,107 @@ mod tests {
             "http://github.com/o/r/releases/download/v1/a.zip"
         ));
         assert!(!is_github_host("http://api.github.com/repos/o/r"));
+    }
+
+    #[test]
+    fn owner_repo_and_gist_validation() {
+        assert!(valid_owner("HLLMR") && valid_owner("a-b-1"));
+        for bad in ["", "a/b", "a b", "a?", "..", &"x".repeat(40)] {
+            assert!(!valid_owner(bad), "{bad}");
+        }
+        assert!(valid_repo("silo") && valid_repo("FS25_Mod.v2") && valid_repo("a-b_c"));
+        for bad in [
+            "",
+            ".",
+            "..",
+            "r/collaborators/x",
+            "r?x",
+            "r#x",
+            &"x".repeat(101),
+        ] {
+            assert!(!valid_repo(bad), "{bad}");
+        }
+        assert!(valid_gist_id("aa5a315d61ae9438b18d"));
+        assert!(!valid_gist_id("../../user/repos") && !valid_gist_id("xyz"));
+        assert!(check_repo("HLLMR", "Silo").is_ok());
+        assert!(check_repo("HLLMR", "r/collaborators/x").is_err());
+        assert!(check_gist_id("aa5a315d61ae9438b18d").is_ok());
+        assert!(check_gist_id("../../user/repos").is_err());
+    }
+
+    #[test]
+    fn api_url_refuses_dot_empty_and_control_segments() {
+        // The url crate drops tab/LF/CR after its own dot check, so ".\t." would turn into a
+        // real `..` and climb out of the intended endpoint.
+        let evil = [
+            "repos",
+            "o",
+            "r",
+            "contents",
+            ".\t.",
+            "..\t",
+            "collaborators",
+            "evil",
+        ];
+        assert!(api_url(&evil).is_err());
+        assert!(api_url(&["repos", "o", "r", "contents", "..", "x"]).is_err());
+        assert!(api_url(&["repos", "o", "r", "contents", "."]).is_err());
+        assert!(api_url(&["repos", "o", "", "x"]).is_err());
+        assert!(api_url(&["gists", "a\nb"]).is_err());
+        assert!(contents_url("o", "r", "a/../../x").is_err());
+        assert!(contents_url("o", "r", ".\t./x").is_err());
+        let err = api_url(&["repos", ".."]).unwrap_err();
+        assert_eq!(err, "That GitHub address isn't valid.");
+    }
+
+    #[test]
+    fn repo_guess_skips_invalid_names_and_keeps_scanning() {
+        assert_eq!(
+            find_repo_in_text("see github.com/user_name/x then github.com/real-owner/repo"),
+            Some(("real-owner".into(), "repo".into()))
+        );
+        assert_eq!(find_repo_in_text("only github.com/user_name/x here"), None);
+    }
+
+    #[test]
+    fn api_urls_escape_every_segment() {
+        let u = api_url(&["repos", "o", "r", "releases", "latest"]).unwrap();
+        assert_eq!(
+            u.as_str(),
+            "https://api.github.com/repos/o/r/releases/latest"
+        );
+        let evil = api_url(&["repos", "o", "r/collaborators/x?", "subscription"]).unwrap();
+        assert_eq!(evil.host_str(), Some("api.github.com"));
+        assert!(evil.path().contains("r%2Fcollaborators%2Fx%3F"));
+        assert_eq!(
+            contents_url("o", "r", "dir/silo-collection.json")
+                .unwrap()
+                .as_str(),
+            "https://api.github.com/repos/o/r/contents/dir/silo-collection.json"
+        );
+    }
+
+    #[test]
+    fn github_host_check_parses_the_real_host() {
+        assert!(is_github_host(
+            "https://github.com/o/r/releases/download/v1/x.zip"
+        ));
+        assert!(is_github_host("https://objects.githubusercontent.com/x"));
+        assert!(!is_github_host("http://github.com/x"));
+        assert!(!is_github_host(
+            "https://169.254.169.254\\.githubusercontent.com/x"
+        ));
+        assert!(!is_github_host("https://github.com.evil.example/x"));
+        assert!(!is_github_host("https://evil.example/@github.com/x"));
+    }
+
+    #[test]
+    fn update_downloads_only_come_from_github() {
+        let tmp = std::env::temp_dir().join("silo-dz-refuse.zip");
+        let err = download_zip("https://evil.example/x.zip", None, &tmp).unwrap_err();
+        assert!(err.contains("GitHub"), "{err}");
+        let err = download_zip("https://127.0.0.1/x.zip", None, &tmp).unwrap_err();
+        assert!(!err.is_empty());
     }
 
     #[test]

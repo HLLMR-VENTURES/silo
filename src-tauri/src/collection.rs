@@ -107,10 +107,9 @@ pub fn parse(json: &str) -> Result<Collection, String> {
     Ok(c)
 }
 
-/// A GitHub gist id is an opaque hex string. Historically 32 chars; we accept a lenient
-/// hex range so the parse survives GitHub changing the length.
+/// A GitHub gist id is an opaque hex string (see `github::valid_gist_id`, the one rule).
 fn is_gist_id(s: &str) -> bool {
-    (20..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
+    crate::github::valid_gist_id(s)
 }
 
 /// Pull a gist id out of whatever the user pasted: a bare id, a
@@ -178,16 +177,15 @@ pub fn parse_collection_ref(input: &str) -> Option<CollectionRef> {
 
 /// GitHub usernames/orgs: alphanumeric + hyphen, ≤39 chars (no dots — that's how we
 /// reject a non-github host masquerading as an owner in a bare `host/path`).
+/// Delegates to `github::valid_owner`, the one rule.
 fn is_gh_owner(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 39 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    crate::github::valid_owner(s)
 }
 
-/// GitHub repo names: alphanumeric + `-` `_` `.`, ≤100 chars.
+/// GitHub repo names: alphanumeric + `-` `_` `.`, ≤100 chars, not `.`/`..`.
+/// Delegates to `github::valid_repo`, the one rule.
 fn is_gh_repo(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 100
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+    crate::github::valid_repo(s)
 }
 
 /// Extract `(owner, repo)` from a `github.com/{owner}/{repo}` URL (with optional

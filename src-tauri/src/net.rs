@@ -56,6 +56,13 @@ pub fn download() -> &'static ureq::Agent {
     AGENT.get_or_init(|| build_agent(Duration::from_secs(10), Duration::from_secs(30), None))
 }
 
+/// True when `s` is safe to hand to `Url::path_segments_mut` as ONE path segment: not
+/// empty, not `.`/`..`, and free of ASCII control characters. The url crate strips tab/LF/CR
+/// only after its own dot-segment check, so `.\t.` would otherwise become a real `..`.
+pub(crate) fn safe_path_segment(s: &str) -> bool {
+    !s.is_empty() && s != "." && s != ".." && !s.bytes().any(|b| b.is_ascii_control())
+}
+
 /// Validate a URL the native layer is about to fetch.
 ///
 /// - Scheme must be `https`, except plain `http` to a loopback/localhost host when
