@@ -26,6 +26,7 @@ pub mod scan;
 pub mod secrets;
 pub mod settings_form;
 pub mod siloapi;
+pub mod source;
 pub mod store;
 pub mod update;
 pub mod xmlconfig;
@@ -254,6 +255,57 @@ fn set_mod_repo(
     }
     let conn = db::open(&db_path(&app)?)?;
     db::set_repo(&conn, &tech_name, &owner, &repo)
+}
+
+// ── Source pages: where each mod came from (#196) ──
+// Silo only stores these addresses. No command here (or anywhere) requests them; the
+// frontend hands them to the user's browser via `openExternal`.
+#[tauri::command]
+async fn get_mod_sources(app: tauri::AppHandle) -> Result<Vec<db::SourceRow>, String> {
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<db::SourceRow>, String> {
+        let conn = db::open(&db)?;
+        Ok(db::load_sources(&conn))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Save (or remove, when `url` is empty or null) a mod's source page. Returns the GitHub repo
+/// link it also made, when the page is a GitHub repository and the mod had none.
+#[tauri::command]
+async fn set_mod_source(
+    app: tauri::AppHandle,
+    tech_name: String,
+    url: Option<String>,
+) -> Result<Option<db::RepoRow>, String> {
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<Option<db::RepoRow>, String> {
+        let conn = db::open(&db)?;
+        source::save(&conn, &tech_name, url.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Record that the user checked a mod's source page just now. Returns the time (unix secs).
+#[tauri::command]
+async fn mark_source_checked(app: tauri::AppHandle, tech_name: String) -> Result<i64, String> {
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<i64, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let conn = db::open(&db)?;
+        if db::mark_source_checked(&conn, &tech_name, now)? {
+            Ok(now)
+        } else {
+            Err("Save the page this mod came from first.".to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Scan a mod's modDesc.xml for a github.com/owner/repo reference.
@@ -3832,6 +3884,9 @@ pub fn run() {
             set_tags,
             get_mod_repos,
             set_mod_repo,
+            get_mod_sources,
+            set_mod_source,
+            mark_source_checked,
             guess_repo,
             check_mod_update,
             gh_status,

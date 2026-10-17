@@ -1,19 +1,27 @@
 <script lang="ts">
   import type { UpdateRow } from "../../types";
+  import { checkedDate, type CheckYourselfRow } from "../../sources";
 
   let {
     updateResults,
     availableUpdates,
     updateChecking,
     busy,
+    checkYourself,
     onInstall,
+    onOpenSource,
+    onMarkChecked,
     onClose,
   }: {
     updateResults: UpdateRow[];
     availableUpdates: UpdateRow[];
     updateChecking: boolean;
     busy: string | null;
+    /** Mods with a saved source page that the automatic check couldn't answer. */
+    checkYourself: CheckYourselfRow[];
     onInstall: (row: UpdateRow) => void;
+    onOpenSource: (row: CheckYourselfRow) => void;
+    onMarkChecked: (row: CheckYourselfRow) => void;
     onClose: () => void;
   } = $props();
 </script>
@@ -54,6 +62,29 @@
       Up to date ({updateResults.filter((r) => r.hasUpdate === false).length}) ·
       Errors ({updateResults.filter((r) => r.error).length})
     </div>
+  {/if}
+  {#if !updateChecking && checkYourself.length > 0}
+    <div class="hz-group">Check these yourself ({checkYourself.length})</div>
+    <div class="up-note">
+      Silo can't check these automatically. Open the page you saved to see if there's a newer
+      version.
+    </div>
+    {#each checkYourself as s (s.techName)}
+      <div class="hz-row">
+        <div class="up-row">
+          <div>
+            <div class="hz-name">{s.title}</div>
+            <div class="hz-detail">
+              {s.host} · {s.lastChecked ? `last checked ${checkedDate(s.lastChecked)}` : "not checked yet"}
+            </div>
+          </div>
+          <div class="up-acts">
+            <button class="sg-make" onclick={() => onOpenSource(s)}>Open page ↗</button>
+            <button class="sg-make" onclick={() => onMarkChecked(s)}>I checked it</button>
+          </div>
+        </div>
+      </div>
+    {/each}
   {/if}
 </div>
 
@@ -131,6 +162,17 @@
   }
   .up-new {
     color: var(--accent);
+  }
+  .up-acts {
+    display: flex;
+    gap: 6px;
+    flex: 0 0 auto;
+  }
+  .up-note {
+    font-size: 12px;
+    color: var(--text-muted);
+    padding: 0 8px 6px;
+    line-height: 1.5;
   }
   .up-src {
     font-size: 10px;

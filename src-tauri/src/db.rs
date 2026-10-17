@@ -36,12 +36,22 @@ pub struct TagRow {
 }
 
 /// A mod linked to its GitHub repo for update-checking.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoRow {
     pub tech_name: String,
     pub owner: String,
     pub repo: String,
+}
+
+/// The web page a mod came from, saved by the user (#196). Silo never requests it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRow {
+    pub tech_name: String,
+    pub url: String,
+    /// When the user last said they checked the page (unix seconds).
+    pub last_checked: Option<i64>,
 }
 
 /// A manual category reassignment, keyed by tech-name.
@@ -129,6 +139,13 @@ pub fn open(db_path: &Path) -> Result<Connection, String> {
              tech_name TEXT PRIMARY KEY,
              owner     TEXT NOT NULL,
              repo      TEXT NOT NULL
+         );
+         -- The web page each mod came from, saved by the user (#196). Silo never requests it;
+         -- the browser opens it. last_checked is when the user said they looked (unix secs).
+         CREATE TABLE IF NOT EXISTS mod_source (
+             tech_name    TEXT PRIMARY KEY,
+             url          TEXT NOT NULL,
+             last_checked INTEGER
          );
          CREATE TABLE IF NOT EXISTS app_setting (
              key   TEXT PRIMARY KEY,
@@ -299,6 +316,64 @@ pub fn set_repo(conn: &Connection, tech_name: &str, owner: &str, repo: &str) -> 
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// True when the mod has a GitHub repo linked.
+pub fn has_repo(conn: &Connection, tech_name: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM mod_repo WHERE tech_name = ?1",
+        [tech_name],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// Load every saved source page.
+pub fn load_sources(conn: &Connection) -> Vec<SourceRow> {
+    let Ok(mut stmt) = conn.prepare("SELECT tech_name, url, last_checked FROM mod_source") else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map([], |r| {
+        Ok(SourceRow {
+            tech_name: r.get(0)?,
+            url: r.get(1)?,
+            last_checked: r.get(2)?,
+        })
+    });
+    rows.map(|r| r.flatten().collect()).unwrap_or_default()
+}
+
+/// Save a mod's source page, or remove it when `url` is None or blank. The caller validates.
+/// Saving the same page keeps its last-checked date; a different page starts unchecked.
+pub fn set_source(conn: &Connection, tech_name: &str, url: Option<&str>) -> Result<(), String> {
+    let url = url.map(str::trim).unwrap_or("");
+    if url.is_empty() {
+        conn.execute("DELETE FROM mod_source WHERE tech_name = ?1", [tech_name])
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO mod_source(tech_name, url, last_checked) VALUES(?1, ?2, NULL)
+         ON CONFLICT(tech_name) DO UPDATE SET
+             last_checked = CASE WHEN mod_source.url = excluded.url
+                                 THEN mod_source.last_checked ELSE NULL END,
+             url = excluded.url",
+        rusqlite::params![tech_name, url],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Record that the user checked a mod's source page at `now` (unix seconds).
+/// @return false when the mod has no saved page
+pub fn mark_source_checked(conn: &Connection, tech_name: &str, now: i64) -> Result<bool, String> {
+    let n = conn
+        .execute(
+            "UPDATE mod_source SET last_checked = ?2 WHERE tech_name = ?1",
+            rusqlite::params![tech_name, now],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(n > 0)
 }
 
 /// Replace all tags for a mod.
@@ -810,5 +885,48 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn source_pages_round_trip() {
+        let conn = open(&temp_db("sources")).unwrap();
+        assert!(load_sources(&conn).is_empty());
+
+        set_source(&conn, "FS25_A", Some("https://example.com/a")).unwrap();
+        let rows = load_sources(&conn);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tech_name, "FS25_A");
+        assert_eq!(rows[0].url, "https://example.com/a");
+        assert_eq!(rows[0].last_checked, None);
+
+        assert!(mark_source_checked(&conn, "FS25_A", 1_700_000_000).unwrap());
+        assert_eq!(load_sources(&conn)[0].last_checked, Some(1_700_000_000));
+
+        // Saving the same page again keeps the date; a different page starts over.
+        set_source(&conn, "FS25_A", Some("https://example.com/a")).unwrap();
+        assert_eq!(load_sources(&conn)[0].last_checked, Some(1_700_000_000));
+        set_source(&conn, "FS25_A", Some("https://example.com/b")).unwrap();
+        let rows = load_sources(&conn);
+        assert_eq!(rows[0].url, "https://example.com/b");
+        assert_eq!(rows[0].last_checked, None);
+
+        // Marking a mod with no saved page changes nothing.
+        assert!(!mark_source_checked(&conn, "FS25_None", 1).unwrap());
+
+        // None (or empty) removes the row.
+        set_source(&conn, "FS25_A", None).unwrap();
+        assert!(load_sources(&conn).is_empty());
+        set_source(&conn, "FS25_A", Some("https://example.com/a")).unwrap();
+        set_source(&conn, "FS25_A", Some("  ")).unwrap();
+        assert!(load_sources(&conn).is_empty());
+    }
+
+    #[test]
+    fn has_repo_reports_a_linked_repo() {
+        let conn = open(&temp_db("hasrepo")).unwrap();
+        assert!(!has_repo(&conn, "FS25_A"));
+        set_repo(&conn, "FS25_A", "owner", "repo").unwrap();
+        assert!(has_repo(&conn, "FS25_A"));
+        assert!(!has_repo(&conn, "FS25_B"));
     }
 }

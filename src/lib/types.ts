@@ -193,6 +193,14 @@ export interface RepoRow {
   repo: string;
 }
 
+/** The web page a mod came from, saved by the user. Silo never requests it. */
+export interface SourceRow {
+  techName: string;
+  url: string;
+  /** When the user last said they checked the page (unix seconds). */
+  lastChecked: number | null;
+}
+
 export interface ReleaseInfo {
   tag: string;
   name: string | null;

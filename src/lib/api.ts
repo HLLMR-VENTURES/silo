@@ -24,6 +24,7 @@ import type {
   SettingsFile,
   SettingsEdit,
   RepoRow,
+  SourceRow,
   UpdateInfo,
   GhStatus,
   RepoStats,
@@ -399,6 +400,22 @@ export function openFolder(path: string): Promise<void> {
 
 export function openExternal(url: string): Promise<void> {
   return openUrl(url);
+}
+
+/** Saved source pages (where each mod came from). Silo stores them and never requests them. */
+export function getModSources(): Promise<SourceRow[]> {
+  return invoke<SourceRow[]>("get_mod_sources");
+}
+
+/** Save a mod's source page (null or "" removes it). Resolves to the GitHub repo link this
+ *  also made, when the page is a GitHub repository and the mod had none. */
+export function setModSource(techName: string, url: string | null): Promise<RepoRow | null> {
+  return invoke<RepoRow | null>("set_mod_source", { techName, url });
+}
+
+/** Record that the user checked a mod's source page now. Resolves to that time (unix secs). */
+export function markSourceChecked(techName: string): Promise<number> {
+  return invoke<number>("mark_source_checked", { techName });
 }
 
 export function getModRepos(): Promise<RepoRow[]> {
