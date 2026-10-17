@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so problems can be traced after the fact. Every file Silo moves, links, replaces, backs up or
   edits is recorded. (#PR)
 
+- **Copy diagnostics.** Settings → Diagnostics → Copy diagnostics copies your report and Silo's
+  recent log, with your user name removed, ready to paste into a bug report. Exported reports leave
+  out your user name too. (#PR)
+
 ### Fixed
 
 - **Your original game settings are kept.** The first time Silo edits gameSettings.xml or a mod's

@@ -776,6 +776,12 @@ export async function saveTextFile(
   return true;
 }
 
+/** The diagnostics report plus (optionally) Silo's recent log, with the home folder and user
+ *  name removed. */
+export function diagnosticsBundle(report: string, includeLog: boolean): Promise<string> {
+  return invoke<string>("diagnostics_bundle", { report, includeLog });
+}
+
 // ── Mod settings form ──
 export function userDirPath(): Promise<string | null> {
   return invoke<string | null>("user_dir_path");

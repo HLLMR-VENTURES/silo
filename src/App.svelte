@@ -46,6 +46,7 @@
     setSelfUpdating,
     onCloseBlocked,
     saveTextFile,
+    diagnosticsBundle,
     userDirPath,
     bisectSnapshotGet,
     bisectSnapshotClear,
@@ -541,9 +542,18 @@
 
   async function exportReport() {
     try {
-      await saveTextFile("silo-report.md", buildReport());
+      await saveTextFile("silo-report.md", await diagnosticsBundle(buildReport(), false));
     } catch (e) {
       errorMsg = String(e);
+    }
+  }
+
+  async function copyDiagnostics() {
+    try {
+      await navigator.clipboard.writeText(await diagnosticsBundle(buildReport(), true));
+      infoMsg = "Diagnostics copied. Paste them into your bug report.";
+    } catch (e) {
+      errorMsg = `Couldn't copy diagnostics: ${e}`;
     }
   }
 
@@ -2278,6 +2288,7 @@
       onSetTheme={setTheme}
       onOpenGameGraphics={openGameGraphics}
       onExportReport={exportReport}
+      onCopyDiagnostics={copyDiagnostics}
       onSetAutoFile={setAutoFile}
       onOrganize={() => {
         settingsOpen = false;

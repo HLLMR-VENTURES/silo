@@ -31,6 +31,7 @@
     onSetTheme,
     onOpenGameGraphics,
     onExportReport,
+    onCopyDiagnostics,
     onSetAutoFile,
     onOrganize,
     onRebuild,
@@ -61,6 +62,7 @@
     onSetTheme: (t: "system" | "light" | "dark") => void;
     onOpenGameGraphics: () => void;
     onExportReport: () => void;
+    onCopyDiagnostics: () => void;
     onSetAutoFile: (v: boolean) => void;
     onOrganize: () => void;
     onRebuild: () => void;
@@ -260,8 +262,12 @@
     <div class="set-row">
       <div class="set-label">Diagnostics</div>
       <button class="set-link" onclick={onExportReport}>Export report ↗</button>
+      <button class="set-link" onclick={onCopyDiagnostics}>Copy diagnostics</button>
     </div>
-    <div class="set-hint">A shareable summary of your library, conflicts, and health issues.</div>
+    <div class="set-hint">
+      A summary of your library, conflicts and health issues, plus Silo's recent log. Your user name
+      is removed.
+    </div>
   </div>
 
   <div class="set-section">

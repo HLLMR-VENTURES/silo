@@ -8,6 +8,7 @@ pub mod category;
 pub mod collection;
 pub mod conflicts;
 pub mod db;
+mod diagnostics;
 pub mod fsgame;
 mod fslog;
 pub mod gamelaunch;
@@ -3083,6 +3084,38 @@ async fn save_text(path: String, content: String) -> Result<(), String> {
     .await
 }
 
+/// The diagnostics report (built by the frontend) plus, if asked, the recent log, with the
+/// home folder and user name removed from both.
+#[tauri::command]
+async fn diagnostics_bundle(
+    app: tauri::AppHandle,
+    report: String,
+    include_log: bool,
+) -> Result<String, String> {
+    let log = app.path().app_log_dir().ok().map(|d| d.join("silo.log"));
+    let version = app.package_info().version.to_string();
+    off_main(move || {
+        let header = format!("Silo {version} on {}", std::env::consts::OS);
+        let recent = include_log.then(|| {
+            log.as_deref()
+                .map(|p| diagnostics::tail(p, 300, 64 * 1024))
+                .unwrap_or_default()
+        });
+        let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
+        let user = std::env::var("USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .ok();
+        Ok(diagnostics::bundle(
+            &header,
+            &report,
+            recent.as_deref(),
+            home.as_deref(),
+            user.as_deref(),
+        ))
+    })
+    .await
+}
+
 /// Clear the scan cache so the next scan re-parses & re-categorizes every mod.
 #[tauri::command]
 async fn clear_scan_cache(app: tauri::AppHandle) -> Result<(), String> {
@@ -4392,6 +4425,7 @@ pub fn run() {
             detect_game,
             launch_game,
             save_text,
+            diagnostics_bundle,
             user_dir_path,
             clear_scan_cache,
             scan_log,
