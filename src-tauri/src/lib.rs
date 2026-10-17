@@ -2484,6 +2484,16 @@ fn move_outcome(what: &str, out: &Result<Option<relocate::MoveMarker>, String>) 
     }
 }
 
+/// Pure: how loud the outcome's log line is. Finished, or paused because the user asked, is
+/// info; a pause for a reason (the game started) or on errors, or a refusal, is a warning.
+fn move_outcome_level(out: &Result<Option<relocate::MoveMarker>, String>) -> log::Level {
+    match out {
+        Ok(None) => log::Level::Info,
+        Ok(Some(m)) if m.pause_reason.is_none() && m.errors.is_empty() => log::Level::Info,
+        _ => log::Level::Warn,
+    }
+}
+
 /// Run `f` with the production move context (the command layer's request flag, the real
 /// FS25 process check, progress emitted as `archive-move-progress`) under the library write
 /// lock — refused, never waited for, when another write holds it — then re-resolve the
@@ -2524,10 +2534,7 @@ fn with_move_ctx(
     // refusal.
     let handed_off = what == "cancel" && matches!(&out, Err(e) if cancel_falls_back(e));
     if !handed_off {
-        match &out {
-            Ok(None) => log::info!("{}", move_outcome(what, &out)),
-            _ => log::warn!("{}", move_outcome(what, &out)),
-        }
+        log::log!(move_outcome_level(&out), "{}", move_outcome(what, &out));
     }
     out
 }
@@ -4555,9 +4562,9 @@ fn hold_quit() -> bool {
 mod tests {
     use super::{
         archive_holds_mods, build_gh_scope, cancel_falls_back, fence_problems,
-        foreign_mods_problem, known_same_mount, move_outcome, move_problems, overlap_problems,
-        repoint_refusal, scan_archives, scope_grants, select_adopt, split_adopt, Fences, MoveFacts,
-        Space,
+        foreign_mods_problem, known_same_mount, move_outcome, move_outcome_level, move_problems,
+        overlap_problems, repoint_refusal, scan_archives, scope_grants, select_adopt, split_adopt,
+        Fences, MoveFacts, Space,
     };
     use crate::{
         organize::{Layout, ModInput},
@@ -4724,6 +4731,22 @@ mod tests {
         assert!(!known_same_mount(&c, &d));
         assert!(!known_same_mount(&c, &None));
         assert!(!known_same_mount(&None, &None));
+    }
+
+    /// Finishing, or pausing because the user asked, is routine; a pause for a reason (the game
+    /// started), a pause on errors, or a refusal is worth a warning.
+    #[test]
+    fn move_outcome_level_warns_only_when_something_went_wrong() {
+        let m = MoveMarker::new("/a".into(), "/b".into());
+        assert_eq!(move_outcome_level(&Ok(None)), log::Level::Info);
+        assert_eq!(move_outcome_level(&Ok(Some(m.clone()))), log::Level::Info);
+        let mut e = m.clone();
+        e.errors.push("x".into());
+        assert_eq!(move_outcome_level(&Ok(Some(e))), log::Level::Warn);
+        let mut g = m;
+        g.pause_reason = Some("Farming Simulator 25 started".into());
+        assert_eq!(move_outcome_level(&Ok(Some(g))), log::Level::Warn);
+        assert_eq!(move_outcome_level(&Err("nope".into())), log::Level::Warn);
     }
 
     #[test]
