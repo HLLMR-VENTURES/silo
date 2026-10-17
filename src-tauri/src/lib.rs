@@ -540,14 +540,19 @@ async fn download_update(
         }
         let layout = primary_layout(None)?;
         let mut policy = organize::LinkPolicy::new(&layout);
-        // Finish an earlier, interrupted update of this mod first, so it doesn't block this one.
+        // Finish an earlier, interrupted update first (the user asked: every step is retried),
+        // so it doesn't block this one; if it can't be finished, say exactly why.
+        let mut dirs = update::layout_dirs(&layout);
         if let Some(parent) = dest.parent() {
-            let settled = update::settle(
-                &[parent.to_path_buf(), layout.mods.clone()],
-                &layout.mods,
-                &mut policy,
-            );
-            log_recovery(&settled);
+            if !dirs.iter().any(|d| d == parent) {
+                dirs.push(parent.to_path_buf());
+            }
+        }
+        let settled = update::settle(&dirs, &layout.mods, &mut policy, update::Attempt::UserAsked);
+        log_recovery(&settled);
+        let old = update::old_path(&dest);
+        if settled.leftovers.contains(&old) {
+            return Err(update::leftover_message(&settled, &[old]));
         }
         github::verify_update_identity(part.path(), &dest)?;
         let done = update::swap(&dest, part.path(), &layout.mods, &mut policy)?;
@@ -605,11 +610,13 @@ fn recover_interrupted_updates() -> update::Recovery {
     r
 }
 
+/// Background recovery over `layout` (costly steps at most once per session per file).
 fn settle_layout(layout: &organize::Layout) -> update::Recovery {
     update::settle(
         &update::layout_dirs(layout),
         &layout.mods,
         &mut organize::LinkPolicy::new(layout),
+        update::Attempt::Background,
     )
 }
 
@@ -628,7 +635,7 @@ fn settle_updates_locked() -> Result<(), String> {
     if r.stranded.is_empty() {
         Ok(())
     } else {
-        Err(update::stranded_message(&r.stranded))
+        Err(update::leftover_message(&r, &r.stranded))
     }
 }
 
@@ -1352,6 +1359,11 @@ fn try_move_lock() -> Result<MoveLock, String> {
     ensure_not_self_updating()?;
     match lock_result(LIBRARY_WRITE.try_lock()) {
         Some(g) => {
+            // A self-update may have started between the check above and taking the lock.
+            if self_updating() {
+                drop(g);
+                return Err(SELF_UPDATE_RUNNING.into());
+            }
             // Order matters: clear requests left from before (a pause or cancel nothing was
             // running to receive) only once the lock is ours, and only then announce the move —
             // a cancel that sees the flag from here on is sent to this move and kept.
@@ -3933,10 +3945,32 @@ pub fn run() {
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 if hold_quit() {
                     api.prevent_exit();
-                    let _ = app.emit("close-blocked", ());
+                    if app.get_webview_window("main").is_some() {
+                        let _ = app.emit("close-blocked", ());
+                    } else {
+                        // No window left to ask in: quit as soon as the change is done.
+                        exit_when_idle(app.clone());
+                    }
                 }
             }
         });
+}
+
+/// Set while a thread waits to quit once Silo stops changing files (one at a time).
+static EXIT_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Quit once `library_busy()` clears, from a thread of its own.
+fn exit_when_idle(app: tauri::AppHandle) {
+    if EXIT_PENDING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        while library_busy() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        FORCE_QUIT.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.exit(0);
+    });
 }
 
 /// Hold a quit: Silo is changing files and the user hasn't chosen "Quit anyway".

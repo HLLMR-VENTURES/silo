@@ -661,10 +661,13 @@ fn is_move_scratch(name: &str) -> bool {
 }
 
 /// Finish or roll back interrupted mod updates in the mods folder and both archives' category
-/// folders (the move holds the library lock). Returns why the move must pause, if an update's
-/// previous version is still set aside: moving around it could leave it behind.
-fn settle_updates(mods: &Path, marker: &MoveMarker) -> Option<String> {
-    let mut leftovers = Vec::new();
+/// folders (the move holds the library lock; the user asked for the move, so every step is
+/// retried). Returns why the move can't go on:
+/// - forward: any previous version still set aside (moving around it would leave it behind);
+/// - back (a cancel): only one whose mod is missing. Otherwise the mod is in place and nothing
+///   deletes the leftover, so the cancel must be able to finish and give the library back.
+fn settle_updates(mods: &Path, marker: &MoveMarker, direction: Direction) -> Option<String> {
+    let mut all = crate::update::Recovery::default();
     for archive in [&marker.from, &marker.to] {
         let layout = Layout {
             mods: mods.to_path_buf(),
@@ -674,24 +677,28 @@ fn settle_updates(mods: &Path, marker: &MoveMarker) -> Option<String> {
         if archive != &marker.from {
             dirs.retain(|d| d != mods); // the mods folder once is enough
         }
-        let r = crate::update::settle(&dirs, mods, &mut LinkPolicy::new(&layout));
+        let r = crate::update::settle(
+            &dirs,
+            mods,
+            &mut LinkPolicy::new(&layout),
+            crate::update::Attempt::UserAsked,
+        );
         for n in r.notices.iter().chain(&r.problems) {
             eprintln!("[silo] {n}");
         }
-        leftovers.extend(r.leftovers);
+        all.problems.extend(r.problems);
+        all.leftovers.extend(r.leftovers);
+        all.stranded.extend(r.stranded);
     }
-    if leftovers.is_empty() {
-        return None;
+    let blocking = match direction {
+        Direction::Forward => &all.leftovers,
+        Direction::Back => &all.stranded,
+    };
+    if blocking.is_empty() {
+        None
+    } else {
+        Some(crate::update::leftover_message(&all, blocking))
     }
-    let names: Vec<String> = leftovers
-        .iter()
-        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .collect();
-    Some(format!(
-        "An interrupted mod update left a previous version Silo couldn't put away ({}). Close \
-         any program using it, rescan, then resume.",
-        names.join(", ")
-    ))
 }
 
 /// Delete a stale `RELINK_SUFFIX` temp left by a crash mid-relink next to each library zip's
@@ -972,7 +979,16 @@ pub fn start(ctx: &mut RunCtx, from: PathBuf, to: PathBuf) -> Result<Option<Move
     if load_marker(ctx.conn, ctx.mods_key).is_some() {
         return Err(ALREADY_UNFINISHED.into());
     }
-    run_locked(ctx, &held, MoveMarker::new(from, to))
+    if (ctx.game_running)() {
+        return Err(GAME_RUNNING.into());
+    }
+    let marker = MoveMarker::new(from, to);
+    // Before any marker exists: a leftover that can't be put away refuses the move outright,
+    // so it can never leave an unfinished move (which blocks every library change) behind.
+    if let Some(reason) = settle_updates(ctx.mods, &marker, Direction::Forward) {
+        return Err(reason);
+    }
+    run_locked(ctx, &held, marker)
 }
 
 /// Resume the unfinished move (in whichever direction it was going).
@@ -1021,7 +1037,7 @@ fn run_locked(
     marker.pause_reason = None;
     marker.errors.clear();
     save_marker(env.conn, env.mods_key, &marker)?;
-    if let Some(reason) = settle_updates(env.mods, &marker) {
+    if let Some(reason) = settle_updates(env.mods, &marker, marker.direction) {
         marker.pause_reason = Some(reason);
         return pause(&env, marker);
     }
@@ -1594,17 +1610,48 @@ mod tests {
         let part = crate::update::part_path(&zip_at(&f.old, "FS25_B"));
         std::fs::write(&part, b"stale download").unwrap();
 
-        let paused = run_with(&f, Op::Start, &|| false).unwrap().unwrap();
+        let err = run_with(&f, Op::Start, &|| false).unwrap_err();
 
-        assert!(paused.paused);
-        let reason = paused.pause_reason.unwrap_or_default();
-        assert!(reason.contains("FS25_A.zip.silo-update-old"), "{reason}");
+        // Refused before any marker exists, naming the file and the cause.
+        assert!(err.contains(&old.display().to_string()), "{err}");
+        assert!(err.contains("Free space on"), "{err}");
+        assert_eq!(
+            load_marker(&f.conn, &f.key),
+            None,
+            "no unfinished move left behind"
+        );
         assert_eq!(std::fs::read(&old).unwrap(), b"the previous version");
         assert!(
             a.exists() && !zip_at(&f.new, "FS25_A").exists(),
             "nothing moved"
         );
         assert!(!part.exists(), "an unclaimed stale download is removed");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_cancel_finishes_despite_an_update_leftover_whose_mod_is_in_place() {
+        let f = fx("upd_cancel");
+        add_zip(&f, "FS25_A", false);
+        add_zip(&f, "FS25_B", false);
+        let new_a = zip_at(&f.new, "FS25_A");
+        let game = || new_a.exists();
+        let paused = run_with(&f, Op::Start, &game).unwrap().unwrap();
+        assert!(paused.paused);
+        // Now an update leftover appears beside B, and backups can't be made.
+        let old_b = crate::update::old_path(&zip_at(&f.old, "FS25_B"));
+        std::fs::write(&old_b, b"B's previous version").unwrap();
+        std::fs::write(f.mods.join("backups"), b"in the way").unwrap();
+
+        // Resuming forward pauses on it, naming it...
+        let again = run_with(&f, Op::Resume, &|| false).unwrap().unwrap();
+        let reason = again.pause_reason.unwrap_or_default();
+        assert!(reason.contains(&old_b.display().to_string()), "{reason}");
+        // ...but cancelling still finishes and gives the library back.
+        assert!(run_with(&f, Op::Cancel, &|| false).unwrap().is_none());
+        assert_eq!(load_marker(&f.conn, &f.key), None);
+        assert!(zip_at(&f.old, "FS25_A").exists() && !new_a.exists());
+        assert_eq!(std::fs::read(&old_b).unwrap(), b"B's previous version");
         let _ = std::fs::remove_dir_all(&f.base);
     }
 

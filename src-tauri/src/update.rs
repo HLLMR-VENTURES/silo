@@ -135,7 +135,9 @@ fn swap_with(
     let old = old_path(dest);
     if old.symlink_metadata().is_ok() {
         return Err(format!(
-            "An earlier update of {name} didn't finish. Rescan, then try again."
+            "An earlier update of {name} didn't finish: its previous version is still at {}. \
+             Move it somewhere else, then try again.",
+            old.display()
         ));
     }
 
@@ -174,12 +176,23 @@ fn swap_with(
     match keep_backup(&old, mods_root, &name) {
         Ok(b) => out.backup = Some(b),
         Err(e) => out.problems.push(format!(
-            "{name} was updated, but Silo couldn't move the previous version to backups ({e}). \
-             It is kept at {}.",
-            old.display()
+            "{name} was updated, but {}",
+            backup_problem(&name, &old, mods_root, &e)
         )),
     }
     Ok(out)
+}
+
+/// Why the previous version `old` of `name` couldn't go to `<mods_root>/backups/`, and what to do.
+fn backup_problem(name: &str, old: &Path, mods_root: &Path, e: &std::io::Error) -> String {
+    let drive = organize::mount_of(mods_root)
+        .map(|(m, _)| m.display().to_string())
+        .unwrap_or_else(|| mods_root.display().to_string());
+    format!(
+        "Silo couldn't move the previous version of {name} to backups: {e}. Free space on {drive} \
+         or move it yourself from {}, then try again.",
+        old.display()
+    )
 }
 
 /// Undo steps b–c after step d failed: the new file goes back to `part`, the old one to `dest`.
@@ -208,36 +221,85 @@ fn keep_backup(old: &Path, mods_root: &Path, name: &str) -> std::io::Result<Path
     Ok(bak)
 }
 
-/// Old versions whose move to backups recovery already tried (and failed) this session. Each is
-/// retried at most once per run, so a stuck cross-drive copy isn't repeated on every scan.
-static BACKUP_TRIED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+/// Old versions whose re-point or move to backups recovery already tried (and failed) this
+/// session. In the background (scans, ordinary library writes) each is tried at most once per
+/// run, so a stuck multi-GB cross-drive copy isn't repeated on every scan; an action the user
+/// asked for ([`Attempt::UserAsked`]) always tries again.
+static TRIED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Who is asking recovery to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Attempt {
+    /// A scan or an ordinary library write: costly steps run at most once per session per file.
+    Background,
+    /// The user started something that needs the leftovers gone (an update, an archive move).
+    UserAsked,
+}
+
+/// Take a turn at the costly steps for `old`: false in the background once it has had one.
+fn take_turn(old: &Path, attempt: Attempt) -> bool {
+    let mut tried = TRIED.lock().unwrap_or_else(|e| e.into_inner());
+    if attempt == Attempt::Background && tried.iter().any(|p| p == old) {
+        return false;
+    }
+    if !tried.iter().any(|p| p == old) {
+        tried.push(old.to_path_buf());
+    }
+    true
+}
+
+/// `old` was put away: a later update of the same mod gets its own turns.
+fn turn_done(old: &Path) {
+    let mut tried = TRIED.lock().unwrap_or_else(|e| e.into_inner());
+    tried.retain(|p| p != old);
+}
 
 /// What recovery did, and what it couldn't fix.
 #[derive(Debug, Default)]
 pub struct Recovery {
     /// Updates finished or rolled back, for the user.
     pub notices: Vec<String>,
-    /// What couldn't be fixed, for the user.
+    /// What couldn't be fixed, for the user (each names the file and why).
     pub problems: Vec<String>,
     /// Set-aside old versions still there afterwards (filled in by [`settle`]).
     pub leftovers: Vec<PathBuf>,
-    /// Of those, the ones whose mod file is missing: the library is short that mod until the
+    /// Of those, the ones whose mod is missing from the library: it is short that mod until the
     /// old version can be put back.
     pub stranded: Vec<PathBuf>,
 }
 
-/// Finish or roll back any update in `dir` that stopped partway (non-recursive): a lone
-/// `X.silo-update-old` goes back to `X`; one beside a new `X` finishes the swap (re-point,
-/// backup); a part file no download in this run has claimed is removed. Call under the library
-/// lock.
+/// Finish or roll back any update in `dir` that stopped partway (non-recursive), in the
+/// background ([`Attempt::Background`]) and with no other folders to consult. See
+/// [`recover_in`].
+#[cfg(test)]
 pub(crate) fn recover_interrupted(
     dir: &Path,
     mods_root: &Path,
     policy: &mut LinkPolicy,
 ) -> Recovery {
     let mut out = Recovery::default();
+    recover_in(dir, mods_root, &[], policy, Attempt::Background, &mut out);
+    out
+}
+
+/// Finish or roll back any update in `dir` that stopped partway (non-recursive):
+/// - a lone `X.silo-update-old` goes back to `X`, unless the mod now lives in one of `others`
+///   (another archive category, or the archive for a mod in the mods folder): then it goes to
+///   backups, so the library never ends up with the mod twice;
+/// - one beside a new `X` finishes the swap (re-point the projection, then backup);
+/// - a part file no download in this run has claimed is removed.
+///
+/// Call under the library lock.
+fn recover_in(
+    dir: &Path,
+    mods_root: &Path,
+    others: &[PathBuf],
+    policy: &mut LinkPolicy,
+    attempt: Attempt,
+    out: &mut Recovery,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return out;
+        return;
     };
     for entry in entries.flatten() {
         if !entry.file_type().is_ok_and(|t| t.is_file()) {
@@ -248,21 +310,63 @@ pub(crate) fn recover_interrupted(
         if entry_name.ends_with(PART_SUFFIX) {
             crate::remove_unclaimed_part(&path);
         } else if let Some(base) = entry_name.strip_suffix(OLD_SUFFIX) {
-            finish_or_roll_back(&dir.join(base), &path, base, mods_root, policy, &mut out);
+            let ctx = Leftover {
+                dest: dir.join(base),
+                old: path,
+                name: base,
+                mods_root,
+                elsewhere: lives_elsewhere(others, base),
+            };
+            finish_or_roll_back(&ctx, policy, attempt, out);
         }
     }
-    out
+}
+
+/// One set-aside old version and where its mod belongs.
+struct Leftover<'a> {
+    dest: PathBuf,
+    old: PathBuf,
+    name: &'a str,
+    mods_root: &'a Path,
+    /// The same mod file in another library folder.
+    elsewhere: Option<PathBuf>,
+}
+
+/// The mod file `name` in one of `others`, if it's there.
+fn lives_elsewhere(others: &[PathBuf], name: &str) -> Option<PathBuf> {
+    others
+        .iter()
+        .map(|d| d.join(name))
+        .find(|p| p.symlink_metadata().is_ok())
 }
 
 fn finish_or_roll_back(
-    dest: &Path,
-    old: &Path,
-    name: &str,
-    mods_root: &Path,
+    l: &Leftover,
     policy: &mut LinkPolicy,
+    attempt: Attempt,
     out: &mut Recovery,
 ) {
+    let (dest, old, name, mods_root) = (&l.dest, &l.old, l.name, l.mods_root);
     if dest.symlink_metadata().is_err() {
+        if let Some(other) = &l.elsewhere {
+            // The mod lives somewhere else now: putting this back would file it twice.
+            if !take_turn(old, attempt) {
+                return;
+            }
+            match keep_backup(old, mods_root, name) {
+                Ok(b) => {
+                    turn_done(old);
+                    out.notices.push(format!(
+                        "An update of {name} was interrupted. The mod is now at {}, so Silo kept \
+                         the previous version in {}.",
+                        other.display(),
+                        b.display()
+                    ));
+                }
+                Err(e) => out.problems.push(backup_problem(name, old, mods_root, &e)),
+            }
+            return;
+        }
         // Stopped before the new version was placed: the old one is the mod again.
         match std::fs::rename(old, dest) {
             Ok(()) => out.notices.push(format!(
@@ -270,58 +374,59 @@ fn finish_or_roll_back(
             )),
             Err(e) => out.problems.push(format!(
                 "An update of {name} was interrupted and Silo couldn't put the previous version \
-                 back ({e}). It is safe at {}.",
+                 back: {e}. It is at {}; close any program using it, then try again.",
                 old.display()
             )),
         }
         return;
     }
-    // The new version is in place. A projection still on the old file is re-pointed first; if
-    // that fails, the old file stays set aside so the next pass tries again.
+    // The new version is in place. A projection still on the old file is re-pointed first (a
+    // cross-drive copy can be large, hence the turn); if that fails, the old file stays set
+    // aside for a later turn.
+    if !take_turn(old, attempt) {
+        return;
+    }
     let flat = mods_root.join(name);
     if !in_folder(dest, mods_root) && organize::is_silo_projection(&flat, old, "zip") {
         if let Err(e) = organize::replace_zip_link(&flat, dest, policy) {
             out.problems.push(format!(
-                "Silo couldn't finish an interrupted update of {name}: your mods folder still \
-                 has the previous version ({e})."
+                "Silo couldn't point your mods folder at the new version of {name}: {e}. The \
+                 previous version is kept at {} until it can; close the game, then try again.",
+                old.display()
             ));
             return;
         }
     }
-    {
-        let mut tried = BACKUP_TRIED.lock().unwrap_or_else(|e| e.into_inner());
-        if tried.iter().any(|p| p == old) {
-            return; // already tried once this session; it stays set aside
-        }
-        tried.push(old.to_path_buf());
-    }
     match keep_backup(old, mods_root, name) {
         Ok(b) => {
-            // Put away: a later update of this mod gets its own retry.
-            let mut tried = BACKUP_TRIED.lock().unwrap_or_else(|e| e.into_inner());
-            tried.retain(|p| p != old);
+            turn_done(old);
             out.notices.push(format!(
                 "Silo finished an interrupted update of {name}. The previous version is kept \
                  in {}.",
                 b.display()
             ));
         }
-        Err(e) => out.problems.push(format!(
-            "Silo couldn't move the previous version of {name} to backups ({e}). It is kept at \
-             {}.",
-            old.display()
-        )),
+        Err(e) => out.problems.push(backup_problem(name, old, mods_root, &e)),
     }
 }
 
-/// Run [`recover_interrupted`] over `dirs`, then list what is still set aside. Call under the
-/// library lock.
-pub(crate) fn settle(dirs: &[PathBuf], mods_root: &Path, policy: &mut LinkPolicy) -> Recovery {
+/// Run recovery over `dirs` (the mods folder and archive categories of one layout), then list
+/// what is still set aside. Call under the library lock.
+pub(crate) fn settle(
+    dirs: &[PathBuf],
+    mods_root: &Path,
+    policy: &mut LinkPolicy,
+    attempt: Attempt,
+) -> Recovery {
+    let others_of = |dir: &PathBuf| -> Vec<PathBuf> {
+        dirs.iter()
+            .filter(|d| *d != dir && d.as_path() != mods_root)
+            .cloned()
+            .collect()
+    };
     let mut out = Recovery::default();
     for dir in dirs {
-        let r = recover_interrupted(dir, mods_root, policy);
-        out.notices.extend(r.notices);
-        out.problems.extend(r.problems);
+        recover_in(dir, mods_root, &others_of(dir), policy, attempt, &mut out);
     }
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -332,13 +437,29 @@ pub(crate) fn settle(dirs: &[PathBuf], mods_root: &Path, policy: &mut LinkPolicy
             let Some(base) = n.strip_suffix(OLD_SUFFIX) else {
                 continue;
             };
-            if dir.join(base).symlink_metadata().is_err() {
+            let missing = dir.join(base).symlink_metadata().is_err()
+                && lives_elsewhere(&others_of(dir), base).is_none();
+            if missing {
                 out.stranded.push(e.path());
             }
             out.leftovers.push(e.path());
         }
     }
     out
+}
+
+/// Why something must wait for `paths` (set-aside old versions): the recorded problems when
+/// there are any (they name each file and the cause), else the paths themselves.
+pub(crate) fn leftover_message(r: &Recovery, paths: &[PathBuf]) -> String {
+    if !r.problems.is_empty() {
+        return r.problems.join(" ");
+    }
+    let list: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    format!(
+        "An interrupted mod update left a previous version Silo couldn't put away: {}. Close \
+         any program using it, or move it somewhere else, then try again.",
+        list.join(", ")
+    )
 }
 
 /// The folders an update can write in for `layout`: the mods folder and each archive category.
@@ -354,23 +475,6 @@ pub(crate) fn layout_dirs(layout: &organize::Layout) -> Vec<PathBuf> {
         dirs.extend(cats);
     }
     dirs
-}
-
-/// The refusal while an update's previous version is stranded (see [`Recovery::stranded`]).
-pub(crate) fn stranded_message(stranded: &[PathBuf]) -> String {
-    let names: Vec<String> = stranded
-        .iter()
-        .filter_map(|p| p.file_name())
-        .map(|n| {
-            let n = n.to_string_lossy();
-            n.strip_suffix(OLD_SUFFIX).unwrap_or(&n).to_string()
-        })
-        .collect();
-    format!(
-        "Silo couldn't finish an interrupted update of {}. Close any program using it, then try \
-         again.",
-        names.join(", ")
-    )
 }
 
 /// Keep the `keep` newest update backups of `file_name` in `backups` (named
@@ -687,6 +791,7 @@ mod tests {
             std::slice::from_ref(&mods),
             &mods,
             &mut LinkPolicy::new(&layout),
+            Attempt::Background,
         );
         assert_eq!(s.leftovers, vec![old_path(&dest)]);
         assert!(s.stranded.is_empty(), "the mod itself is in place");
@@ -824,9 +929,94 @@ mod tests {
     }
 
     #[test]
-    fn the_stranded_message_names_the_mod_file() {
-        let msg = stranded_message(&[PathBuf::from("mods/FS25_A.zip.silo-update-old")]);
-        assert!(msg.contains("update of FS25_A.zip."), "{msg}");
+    fn a_leftover_message_names_the_full_path_or_the_cause() {
+        let old = PathBuf::from("mods").join("FS25_A.zip.silo-update-old");
+        let msg = leftover_message(&Recovery::default(), std::slice::from_ref(&old));
+        assert!(msg.contains(&old.display().to_string()), "{msg}");
+        let r = Recovery {
+            problems: vec!["the disk is full".into()],
+            ..Default::default()
+        };
+        assert_eq!(leftover_message(&r, &[old]), "the disk is full");
+    }
+
+    #[test]
+    fn a_backup_problem_names_the_cause_and_where_the_old_version_is() {
+        let mods = fresh("backup_problem_msg");
+        let old = mods.join("FS25_A.zip.silo-update-old");
+        let msg = backup_problem(
+            "FS25_A.zip",
+            &old,
+            &mods,
+            &std::io::Error::other("no space left"),
+        );
+        assert!(msg.contains("no space left"), "{msg}");
+        assert!(msg.contains(&old.display().to_string()), "{msg}");
+        assert!(msg.contains("Free space on"), "{msg}");
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_user_asked_settle_retries_what_the_background_gave_up_on() {
+        let mods = fresh("user_retry");
+        let layout = Layout::default_for(&mods);
+        let dest = mods.join("FS25_A.zip");
+        make_mod_zip(&dest, "A", "2.0.0.0");
+        make_mod_zip(&old_path(&dest), "A", "1.0.0.0");
+        std::fs::write(mods.join("backups"), b"in the way").unwrap();
+        let dirs = vec![mods.clone()];
+        let bg = |l: &Layout| settle(&dirs, &mods, &mut LinkPolicy::new(l), Attempt::Background);
+
+        assert_eq!(bg(&layout).problems.len(), 1, "first background turn");
+        assert!(bg(&layout).problems.is_empty(), "no second background turn");
+        let asked = settle(
+            &dirs,
+            &mods,
+            &mut LinkPolicy::new(&layout),
+            Attempt::UserAsked,
+        );
+        assert_eq!(asked.problems.len(), 1, "the user's action tries again");
+        assert_eq!(asked.leftovers, vec![old_path(&dest)]);
+
+        std::fs::remove_file(mods.join("backups")).unwrap();
+        let asked = settle(
+            &dirs,
+            &mods,
+            &mut LinkPolicy::new(&layout),
+            Attempt::UserAsked,
+        );
+        assert!(asked.leftovers.is_empty(), "{asked:?}");
+        assert_eq!(backups_of(&mods).len(), 1);
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_lone_old_version_goes_to_backups_when_the_mod_lives_elsewhere() {
+        let mods = fresh("lives_elsewhere");
+        let layout = Layout::default_for(&mods);
+        let tools = layout.archive.join("Tools");
+        let misc = layout.archive.join("Misc");
+        // The mod was refiled under Misc; Tools still holds a set-aside old version.
+        make_mod_zip(&misc.join("FS25_A.zip"), "A", "2.0.0.0");
+        make_mod_zip(&old_path(&tools.join("FS25_A.zip")), "A", "1.0.0.0");
+
+        let s = settle(
+            &layout_dirs(&layout),
+            &mods,
+            &mut LinkPolicy::new(&layout),
+            Attempt::Background,
+        );
+
+        assert!(!tools.join("FS25_A.zip").exists(), "not filed twice");
+        assert!(s.leftovers.is_empty() && s.stranded.is_empty(), "{s:?}");
+        let baks = backups_of(&mods);
+        assert_eq!(baks.len(), 1);
+        assert_eq!(version_of(&baks[0]).as_deref(), Some("1.0.0.0"));
+        assert_eq!(
+            version_of(&misc.join("FS25_A.zip")).as_deref(),
+            Some("2.0.0.0")
+        );
+        let _ = std::fs::remove_dir_all(&mods);
     }
 
     #[test]
