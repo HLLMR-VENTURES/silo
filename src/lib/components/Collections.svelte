@@ -464,7 +464,7 @@
       {/snippet}
 
       {@render bucket("Silo can install these", p.willInstall)}
-      {@render bucket("Get these yourself — ModHub gates downloads", p.openPage)}
+      {@render bucket("Get these yourself from ModHub", p.openPage)}
       {@render bucket("Different version — update to match", p.versionDrift, true)}
       {@render bucket("Not in the catalog — find these manually", p.unresolved)}
       {@render bucket("Already in your library", p.alreadyPresent)}

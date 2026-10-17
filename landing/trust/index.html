@@ -18,7 +18,7 @@
 <meta name="twitter:image" content="https://silo.hllmr.com/og.png" />
 <link rel="canonical" href="https://silo.hllmr.com/trust/" />
 <meta name="robots" content="index, follow, max-image-preview:large" />
-<meta name="author" content="HLLMR" />
+<meta name="author" content="HLLMR Ventures LLC" />
 <meta name="theme-color" content="#4a7330" media="(prefers-color-scheme: light)" />
 <meta name="theme-color" content="#171a14" media="(prefers-color-scheme: dark)" />
 <link rel="icon" href="/favicon.ico" sizes="any" />
@@ -167,10 +167,10 @@
       <a class="btn" href="/#download">Get the app</a>
     </div>
     <div class="stats" id="stats">
-      <div class="stat"><div class="n" id="statMods">6,585</div><div class="l">mods indexed</div>
+      <div class="stat"><div class="n" id="statMods">~7,000</div><div class="l">mods indexed</div>
         <div class="src"><span class="src-chip">ModHub</span><span class="src-chip">GitHub</span></div></div>
-      <div class="stat"><div class="n" id="statSources">6,639</div><div class="l">source records aggregated</div></div>
-      <div class="stat"><div class="n" id="statCats">140</div><div class="l">categories</div></div>
+      <div class="stat"><div class="n" id="statSources">~7,000</div><div class="l">ModHub and GitHub listings</div></div>
+      <div class="stat"><div class="n" id="statCats">~140</div><div class="l">categories</div></div>
     </div>
   </div>
 </section>
@@ -186,17 +186,17 @@
       <div class="card">
         <div class="glyph">⌗</div>
         <h3>One canonical record</h3>
-        <p>A mod's ModHub and GitHub listings are resolved to a single record, so you see the true latest version across both — not whichever site updated last.</p>
+        <p>A mod's ModHub and GitHub listings are resolved to a single record, so you see the latest version found across both.</p>
       </div>
       <div class="card">
         <div class="glyph">✓</div>
         <h3>Provenance, not antivirus</h3>
-        <p>We hash each build from its source. Silo hashes your installed copy and compares: a clean match, or the exact files that differ. It confirms what a mod <em>is</em> — it doesn't guess intent.</p>
+        <p>We hash published builds. Silo hashes your installed copy on your computer and compares: a clean match, or the exact files that differ. It confirms what a mod <em>is</em>. It doesn't guess intent.</p>
       </div>
       <div class="card">
         <div class="glyph">⟳</div>
-        <h3>Fresh, and growing</h3>
-        <p>An hourly sweep keeps versions and metadata current, popular-first. Coverage of hashed builds fills in continuously across GitHub and ModHub.</p>
+        <h3>What's covered</h3>
+        <p>An hourly job refreshes versions and metadata, most popular mods first. New hashed builds currently come from GitHub releases. ModHub hashing is paused, so only ModHub versions we already hashed can be verified.</p>
       </div>
     </div>
 
@@ -208,8 +208,12 @@
     </div>
 
     <p class="note">
-      Silo <strong>indexes public mod information and links back to each source</strong> — it does not host,
+      Silo <strong>indexes public mod information and links back to each source</strong>. It does not host,
       mirror, or redistribute mod files. Downloads always go to the original source, whose own terms apply.
+      Our catalog server keeps cover images and integrity hashes it cached earlier, ModHub ones included.
+      We keep those to show what the full platform can do, should GIANTS allow us an official feed. We've
+      asked them. Until then, the server fetches nothing new from GIANTS' CDN, and we'll remove the ModHub
+      cache if GIANTS asks us to.
     </p>
   </div>
 </section>
@@ -218,23 +222,21 @@
   <div class="wrap">
     <div class="authors">
       <p class="eyebrow">For mod authors</p>
-      <h2>Own your builds in the catalog.</h2>
+      <h2>Help us get your builds right.</h2>
       <p>
-        Provenance is only as good as its source of truth — and no one knows a mod's real build better than
-        the person who made it. We're opening a way for authors to <strong>claim their mods</strong>, so your
-        published builds become the canonical ones Silo verifies against, and your work carries the
-        <span class="vbadge" style="vertical-align:middle;">✓ Verified</span> badge users trust.
+        Provenance is only as good as its source of truth, and no one knows a mod's real build better than
+        the person who made it. We'd like mod authors to be able to confirm their own builds, so the
+        <span class="vbadge" style="vertical-align:middle;">✓ Verified</span> check uses the files you published.
+        There's no way to do that yet.
       </p>
       <ul>
-        <li>Claim your mods and confirm which builds are authentic.</li>
-        <li>Your releases become the reference Silo checks installed copies against.</li>
-        <li>Users can tell a genuine build from a tampered repack at a glance.</li>
+        <li>When Silo has your published build on file, players can check whether their copy matches it.</li>
+        <li>If your mod is listed wrongly, or you'd rather it wasn't listed, tell us and we'll fix it.</li>
       </ul>
-      <span class="soon">Author contributions — opening soon</span>
       <p style="margin-top:14px;font-size:14px;">
-        Want in early? Watch or open an issue on
-        <a href="https://github.com/HLLMR/silo" rel="noopener" style="color:var(--gold-300);">GitHub</a> —
-        we'll announce the author onboarding there first.
+        Interested? Open an issue on
+        <a href="https://github.com/HLLMR/silo/issues" rel="noopener" style="color:var(--gold-300);">GitHub</a>
+        or email <a href="mailto:legal@hllmr.com" style="color:var(--gold-300);">legal@hllmr.com</a>.
       </p>
     </div>
   </div>
@@ -254,6 +256,9 @@
         <code>GET /categories</code>
         <code>GET /mods?q=&amp;category=&amp;sort=&amp;limit=&amp;offset=</code>
         <code>GET /mods/:id</code>
+        <code>GET /mods/:id/manifest?version=</code>
+        <code>POST /mods/lookup</code>
+        <code>GET /facets</code>
         <code>GET /img/:id</code>
       </div>
       <p style="margin:14px 0 0;font-size:14px;">The <a href="/browse/">Browse</a> page is built entirely on these endpoints — view its source for a working example.</p>
@@ -266,12 +271,12 @@
     <div class="sec-head">
       <p class="eyebrow">For nerds</p>
       <h2>The whole system, by the numbers.</h2>
-      <p>These are <strong>aggregate counts</strong> only. There's no account and no telemetry, and the app contacts the catalog only when you search Browse, open a mod's details, check for updates or verify a mod. Here are the numbers, warts and small numbers included (it's an early beta).</p>
+      <p>These are <strong>aggregate counts</strong> only. There's no account and no telemetry, and the app contacts the catalog only when you search Browse, open a mod's details, check for updates or verify a mod. The traffic numbers come from our server access logs, which keep IP addresses for 30 days (see the <a href="/legal/privacy-policy.html">privacy policy</a>). Here are the numbers, small ones included (it's an early beta).</p>
     </div>
     <div class="nerd-grid">
       <div class="stat"><div class="n" id="nDownloads">—</div><div class="l">installer &amp; app-package downloads</div></div>
-      <div class="stat"><div class="n" id="nReleases">4</div><div class="l">releases shipped</div></div>
-      <div class="stat"><div class="n" id="nLatest">0.2.3</div><div class="l">latest version</div></div>
+      <div class="stat"><div class="n" id="nReleases">16+</div><div class="l">releases shipped</div></div>
+      <div class="stat"><div class="n" id="nLatest"><a href="https://github.com/HLLMR/silo/releases/latest">see Releases</a></div><div class="l">latest version</div></div>
       <div class="stat"><div class="n" id="nHosted">0</div><div class="l">mods we host</div></div>
     </div>
 
@@ -295,7 +300,7 @@
             </tbody>
           </table>
         </div>
-        <p class="nerd-cap" id="nerdCap">Aggregate request counts only — never anything about you. Fills in the moment the metrics feed goes live.</p>
+        <p class="nerd-cap" id="nerdCap">Counted from our server access logs, which keep IP addresses for 30 days. We publish only the totals. Fills in when the metrics feed loads.</p>
       </div>
     </div>
 
@@ -304,7 +309,7 @@
       <div class="rstat"><span class="rn" id="rApp">—</span><span class="rl">Silo app clients</span></div>
       <div class="rstat"><span class="rn" id="rWeb">—</span><span class="rl">Browse visitors</span></div>
       <div class="rstat"><span class="rn" id="rSite">—</span><span class="rl">Landing visitors</span></div>
-      <span class="rcap">unique, by surface · small now, honest — it climbs at launch</span>
+      <span class="rcap">unique in the last 30 days, by surface</span>
     </div>
   </div>
 </section>
@@ -359,8 +364,8 @@
       if(cap)cap.textContent="Installer & app-package files only (.exe · .msi · .dmg · .AppImage · .deb · .rpm). GitHub served "+fmt(totalAll)+" files total across these releases — the rest are auto-update polls, signature checks, and mirror sweeps, not installs.";
     }).catch(function(){});
 
-    // Time-window API traffic — from a privacy-preserving feed (aggregate counts only, derived from
-    // NPM access logs). Same-origin /metrics.json first (no CORS), then the API. The table always
+    // Time-window API traffic: aggregate counts derived from our reverse proxy's access logs
+    // (30-day retention, disclosed in the privacy policy). Same-origin /metrics.json first (no CORS), then the API. The table always
     // shows its window rows; when the feed is live they fill in and the dot turns green.
     var WINDOWS=["1h","24h","5d","30d"];
     function cell(v){return v!=null?fmt(v):"—";}
@@ -373,7 +378,7 @@
       document.getElementById("actBody").innerHTML=rows;
       var dot=document.getElementById("liveDot"); if(dot){dot.className="livedot live";dot.title="live";}
       var cap=document.getElementById("nerdCap");
-      if(cap)cap.textContent="Aggregate request counts only — never anything about you. Unique clients are counted per window, not stored per person.";
+      if(cap)cap.textContent="Counted from our server access logs, which keep IP addresses for 30 days. We publish only the totals.";
       if(m.catalog&&m.catalog.hostedMods!=null)set("nHosted",m.catalog.hostedMods);
 
       // Reach split (the "both Silo & SiloAPI" view): 30-day uniques by surface.

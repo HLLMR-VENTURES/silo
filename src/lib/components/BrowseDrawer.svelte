@@ -77,7 +77,6 @@
       {/if}
       <dl class="facts">
         {#if d.category}<dt>Category</dt><dd>{d.category}</dd>{/if}
-        {#if d.trustScore != null}<dt>Trust</dt><dd class="tnum">{d.trustScore}/100</dd>{/if}
         {#if d.rating != null}
           <dt>Rating</dt>
           <dd class="tnum">

@@ -29,14 +29,12 @@ export function loadCatalogImage(url: string): Promise<string> {
 export const SOURCE_LABEL: Record<string, string> = {
   github: "GitHub",
   modhub: "ModHub",
-  kingmods: "KingMods",
 };
 
 // Compact codes for the card's source buttons, where space is tight.
 export const SOURCE_SHORT: Record<string, string> = {
   github: "GH",
   modhub: "MH",
-  kingmods: "KM",
 };
 
 export const shortLabel = (s: string): string => SOURCE_SHORT[s] ?? s;

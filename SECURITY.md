@@ -36,10 +36,14 @@ stay anonymous).
   in-scope concerns.
 - Silo's outbound network calls. Silo talks to:
   - **`silo-api.hllmr.com`** — the SiloAPI catalog backend, for cross-source mod
-    metadata.
-  - **GitHub and ModHub** — reached **through the user's own accounts
-    and credentials** (e.g. an OAuth token to star a GitHub repo). Silo brokers
-    the action; it does not hold or proxy your credentials on any server of ours.
+    metadata, only when the user browses, opens a mod, checks for updates, verifies a mod,
+    installs from Browse or uses Collections.
+  - **GitHub** — the app update check at launch, release downloads, update checks for
+    linked repos, shared collections, and (with the user's own OAuth token) star / watch and
+    publishing collections. The token stays on the user's machine; no server of ours holds
+    or proxies it.
+  - The full list is the table in the
+    [privacy policy](docs/legal/privacy-policy.md#every-connection-silo-makes).
 
 **Generally out of scope:**
 
@@ -55,10 +59,11 @@ stay anonymous).
 ## Privacy posture: no telemetry, no account
 
 Silo has **no analytics, no telemetry, and no account system** — there is
-nothing to sign up for and nothing phones home about your usage. Its only
-outbound traffic is the catalog lookups to `silo-api.hllmr.com` and the
-per-source actions you explicitly trigger through your own GitHub /
-ModHub credentials. This is intentional and part of the app's trust model; a
+nothing to sign up for and nothing phones home about your usage. Apart from the
+app update check at launch (GitHub), its outbound traffic happens only when the
+user asks for something: catalog lookups to `silo-api.hllmr.com`, GitHub
+downloads and update checks, and actions taken through the user's own GitHub
+account. This is intentional and part of the app's trust model; a
 change that quietly adds tracking or exfiltrates data would itself be treated as
 a security issue.
 

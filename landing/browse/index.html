@@ -248,8 +248,8 @@
       <h2>Browse the FS25 mod catalog.</h2>
       <p>
         <span class="count" id="statLine">Loading the catalog…</span>
-        aggregated from ModHub and GitHub into one searchable record each.
-        Every mod links back to its original source — Silo indexes, it doesn't host.
+        merged into one searchable record per mod.
+        Every mod links back to its original source. Silo indexes mods; it doesn't host them.
       </p>
     </div>
   </section>
@@ -300,9 +300,9 @@
       <div class="sheet-tags" id="sheetTags"></div>
       <div class="src-list" id="sheetSources"></div>
       <p class="attrib">
-        Information indexed from public sources and linked above. Silo does not host these files —
-        download from the original source. Provenance status reflects whether Silo has hashed the
-        published build against its source; it is an integrity signal, not a safety guarantee.
+        Information indexed from public sources and linked above. Silo does not host these files.
+        Download from the original source. Verified means Silo has the published build's hashes on
+        file to compare against. It is an integrity signal, not a safety guarantee.
       </p>
     </div>
   </div>
@@ -316,7 +316,7 @@
     return (p || "https://silo-api.hllmr.com").replace(/\/+$/, "");
   })();
 
-  var SRC_LABEL = { modhub: "ModHub", github: "GitHub", kingmods: "KingMods", silo: "Silo" };
+  var SRC_LABEL = { modhub: "ModHub", github: "GitHub", silo: "Silo" };
 
   // ── State ──
   var state = { q: "", category: "", sort: "popular", tags: [], availableBy: null, offset: 0, limit: 30, total: 0, loading: false };
@@ -348,7 +348,7 @@
       ? '<img loading="lazy" src="' + esc(m.imageUrl) + '" alt="" onerror="this.remove();this.parentNode.classList.add(\'noimg\')">'
       : "";
     var thumbCls = m.imageUrl ? "thumb" : "thumb noimg";
-    var badge = m.verified ? '<span class="verified-badge" title="Silo verified this build against its source">✓ Verified</span>' : "";
+    var badge = m.verified ? '<span class="verified-badge" title="Silo has hashed this mod's published build, so the app can check your copy against it">✓ Verified</span>' : "";
     var rating = (m.rating != null && m.ratingCount) ? '<span class="rating">★ ' + Number(m.rating).toFixed(1) + "</span>" : "";
     var ver = m.latestVersion ? '<span class="ver">v' + esc(String(m.latestVersion).replace(/^v/i, "")) + "</span>" : "";
     return (
@@ -410,8 +410,8 @@
   async function boot() {
     try {
       var s = await (await fetch(API + "/stats")).json();
-      document.getElementById("statLine").textContent = fmt(s.mods) + " mods across " + fmt(s.sources) + " sources,";
-    } catch (e) { document.getElementById("statLine").textContent = "Thousands of mods,"; }
+      document.getElementById("statLine").textContent = fmt(s.mods) + " mods from " + fmt(s.sources) + " ModHub and GitHub listings,";
+    } catch (e) { document.getElementById("statLine").textContent = "About 7,000 mods from ModHub and GitHub listings,"; }
 
     try {
       var c = await (await fetch(API + "/categories")).json();
@@ -513,7 +513,6 @@
     if (m.latestVersion) meta.push('<span class="pill">v' + esc(String(m.latestVersion).replace(/^v/i, "")) + "</span>");
     if (m.rating != null && m.ratingCount) meta.push('<span class="pill">★ ' + Number(m.rating).toFixed(1) + " (" + fmt(m.ratingCount) + ")</span>");
     if (m.downloads != null) meta.push('<span class="pill">⬇ ' + fmt(m.downloads) + "</span>");
-    if (m.trustScore != null) meta.push('<span class="pill">trust ' + m.trustScore + "/100</span>");
     document.getElementById("sheetMeta").innerHTML = meta.join("");
     document.getElementById("sheetDesc").textContent = m.description || "";
     var tagsEl = document.getElementById("sheetTags");
