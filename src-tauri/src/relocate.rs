@@ -97,7 +97,7 @@ fn clear_marker(conn: &Connection, mods_key: &str) -> Result<(), String> {
 const PAUSE: u8 = 1;
 const CANCEL: u8 = 2;
 
-/// The command layer's pause/cancel requests (0 = none, 1 = pause, 2 = cancel). `run` reads
+/// The command layer's pause/cancel requests (0 = none, 1 = pause, 2 = cancel). A move reads
 /// whichever atomic its `RunCtx` names; production passes this one.
 static REQUEST: AtomicU8 = AtomicU8::new(0);
 
@@ -124,7 +124,8 @@ pub fn is_running() -> bool {
     RUNNING.load(Ordering::SeqCst)
 }
 
-/// Holds `RUNNING` for one `run`; released on every exit path, including a panic unwinding.
+/// Holds `RUNNING` for one `start` / `resume` / `cancel`; released on every exit path, including
+/// a panic unwinding.
 struct RunGuard;
 
 impl RunGuard {
@@ -453,9 +454,29 @@ impl Env<'_> {
     }
 }
 
-/// One mod, `from` → `to`. Idempotent. Only a file Silo placed (in `moved`) — or one identical
-/// to the original (a crash between placing and recording) — counts as already moved; anything
-/// else at the destination is refused and left untouched.
+/// A mod's archived copy that is itself a link is refused — Silo moves files, never links.
+fn refuse_link(src: &Path) -> Result<(), StepErr> {
+    match src.symlink_metadata() {
+        Ok(m) if m.file_type().is_symlink() => Err(StepErr::Failed(format!(
+            "move: {} is a link, not a file — Silo won't move links",
+            src.display()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// "Something else is at `at`" — said without guessing who put it there.
+fn occupied(at: &Path) -> StepErr {
+    StepErr::Failed(format!(
+        "move: a different copy is already at {} — Silo won't replace it; move or rename it, then retry",
+        at.display()
+    ))
+}
+
+/// One mod, `from` → `to`. Idempotent. The mod is recorded in `moved` before its copy starts
+/// (and un-recorded if the copy isn't placed), so a destination counts as Silo's only when it is
+/// recorded — and even then it must verify against the original. Anything else at the
+/// destination is refused and left untouched.
 fn forward_one(
     env: &Env,
     row: &OrganizedRow,
@@ -465,14 +486,13 @@ fn forward_one(
 ) -> Result<Step, StepErr> {
     let src = organize::archive_path(&marker.from, &row.category, &row.file_name);
     let dst = organize::archive_path(&marker.to, &row.category, &row.file_name);
-    let ours = marker.moved.iter().any(|t| t == &row.tech_name);
-    let not_ours = || {
-        StepErr::Failed(format!(
-            "move: {} is already at the new location, but Silo didn't put it there — move or rename it, then retry",
-            dst.display()
-        ))
-    };
-    match (exists(&src), exists(&dst)) {
+    let tech = row.tech_name.as_str();
+    let ours = marker.moved.iter().any(|t| t == tech);
+    let has_src = exists(&src);
+    if has_src {
+        refuse_link(&src)?;
+    }
+    match (has_src, exists(&dst)) {
         (false, false) => {
             return Err(StepErr::Failed(
                 "move: the archived copy is missing from both locations".into(),
@@ -480,26 +500,30 @@ fn forward_one(
         }
         (false, true) => {
             if !ours {
-                return Err(not_ours());
+                return Err(StepErr::Failed(format!(
+                    "move: the original is missing from the old location, and Silo won't adopt the copy at {} — check it, then retry",
+                    dst.display()
+                )));
             }
             repoint(row, env.mods, &src, &dst, policy).map_err(StepErr::Failed)?;
             return Ok(Step::AlreadyDone);
         }
         (true, true) => {
-            if !ours && row.kind == "dir" {
-                return Err(not_ours());
+            if !ours {
+                return Err(occupied(&dst));
             }
             if !verify(&src, &dst, &row.kind).map_err(StepErr::Failed)? {
-                return Err(StepErr::Failed(format!(
-                    "verify: a different copy is already at {} — move or rename it, then retry",
-                    dst.display()
-                )));
+                // Not a copy Silo can vouch for: stop claiming it, so a cancel leaves it alone.
+                env.unrecord(marker, tech)?;
+                return Err(occupied(&dst));
             }
-            env.record(marker, &row.tech_name)?;
         }
         (true, false) => {
-            copy_verify_place(&src, &dst, &row.kind, abort)?;
-            env.record(marker, &row.tech_name)?;
+            env.record(marker, tech)?;
+            if let Err(e) = copy_verify_place(&src, &dst, &row.kind, abort) {
+                env.unrecord(marker, tech)?;
+                return Err(e);
+            }
         }
     }
     if abort() {
@@ -523,7 +547,11 @@ fn back_one(
 ) -> Result<Step, StepErr> {
     let src = organize::archive_path(&marker.to, &row.category, &row.file_name);
     let home = organize::archive_path(&marker.from, &row.category, &row.file_name);
-    match (exists(&src), exists(&home)) {
+    let has_src = exists(&src);
+    if has_src {
+        refuse_link(&src)?;
+    }
+    match (has_src, exists(&home)) {
         (false, false) => {
             return Err(StepErr::Failed(
                 "move back: the archived copy is missing from both locations".into(),
@@ -536,10 +564,7 @@ fn back_one(
         }
         (true, true) => {
             if !verify(&src, &home, &row.kind).map_err(StepErr::Failed)? {
-                return Err(StepErr::Failed(format!(
-                    "verify: a different copy is already at {} — move or rename it, then retry",
-                    home.display()
-                )));
+                return Err(occupied(&home));
             }
         }
         (true, false) => copy_verify_place(&src, &home, &row.kind, abort)?,
@@ -577,8 +602,9 @@ fn clean_temps(archive: &Path) {
 }
 
 /// Mods (zips, or folders with a `modDesc.xml`) under `archive/<category>/` that have no
-/// organized row — a move would leave them behind.
-fn unknown_mods(archive: &Path, rows: &[OrganizedRow]) -> Vec<PathBuf> {
+/// organized row — a move would leave them behind. Preflight calls this before any marker is
+/// written; a forward run re-checks it at every start. Silo's own temp/old entries are ignored.
+pub fn unknown_mods(archive: &Path, rows: &[OrganizedRow]) -> Vec<PathBuf> {
     let windows = cfg!(windows);
     let key = |p: &Path| crate::modsroot::normalize_key(&p.to_string_lossy(), windows);
     let known: HashSet<String> = rows
@@ -718,11 +744,50 @@ fn failed(e: StepErr) -> String {
     }
 }
 
-/// Run (or resume / cancel) the move described by `marker` until it finishes or pauses.
-/// Returns the final marker (`None` when the move is finished and cleared). Only one move runs
-/// at a time; refuses to start while the game runs.
-pub fn run(ctx: &mut RunCtx, mut marker: MoveMarker) -> Result<Option<MoveMarker>, String> {
-    let _running = RunGuard::take()?;
+const ALREADY_UNFINISHED: &str =
+    "An archive move is already unfinished — resume or cancel it first.";
+
+/// Start a new move of the archive `from` → `to` and run it until it finishes or pauses.
+/// Refuses while another move is running or unfinished, or while the game runs (nothing is
+/// written then). Returns the paused marker, or `None` when the move finished.
+pub fn start(ctx: &mut RunCtx, from: PathBuf, to: PathBuf) -> Result<Option<MoveMarker>, String> {
+    let held = RunGuard::take()?;
+    if load_marker(ctx.conn, ctx.mods_key).is_some() {
+        return Err(ALREADY_UNFINISHED.into());
+    }
+    run_locked(ctx, &held, MoveMarker::new(from, to))
+}
+
+/// Resume the unfinished move (in whichever direction it was going).
+pub fn resume(ctx: &mut RunCtx) -> Result<Option<MoveMarker>, String> {
+    let held = RunGuard::take()?;
+    let mut marker = load_marker(ctx.conn, ctx.mods_key)
+        .ok_or_else(|| "There's no archive move to resume.".to_string())?;
+    marker.paused = false;
+    run_locked(ctx, &held, marker)
+}
+
+/// Cancel the unfinished move: move Silo's moved mods back home. If a move is running right
+/// now, this only asks it to turn around (`ctx.request`) and returns `Ok(None)` at once.
+pub fn cancel(ctx: &mut RunCtx) -> Result<Option<MoveMarker>, String> {
+    let Ok(held) = RunGuard::take() else {
+        ctx.request.store(CANCEL, Ordering::SeqCst);
+        return Ok(None);
+    };
+    let mut marker = load_marker(ctx.conn, ctx.mods_key)
+        .ok_or_else(|| "There's no archive move to cancel.".to_string())?;
+    marker.direction = Direction::Back;
+    marker.paused = false;
+    run_locked(ctx, &held, marker)
+}
+
+/// Run `marker` until it finishes or pauses. The caller holds the one-move guard (`_held`) and
+/// loaded the marker from the DB under it. Refuses while the game runs (before writing).
+fn run_locked(
+    ctx: &mut RunCtx,
+    _held: &RunGuard,
+    mut marker: MoveMarker,
+) -> Result<Option<MoveMarker>, String> {
     if (ctx.game_running)() {
         return Err(GAME_RUNNING.into());
     }
@@ -745,7 +810,7 @@ pub fn run(ctx: &mut RunCtx, mut marker: MoveMarker) -> Result<Option<MoveMarker
         let unknown = unknown_mods(&marker.from, &rows);
         if !unknown.is_empty() {
             marker.errors.push(format!(
-                "{} mods in your archive aren't in Silo's library yet — rescan, then retry",
+                "{} mods in your archive aren't in Silo's library yet — cancel the move, rescan, then start again",
                 unknown.len()
             ));
             return pause(&env, marker);
@@ -979,7 +1044,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// `run` holds a process-wide "one move at a time" flag, so tests that call it take turns.
+    /// A move holds a process-wide "one move at a time" flag, so tests that run one take turns.
     static RUN_LOCK: Mutex<()> = Mutex::new(());
 
     struct Fx {
@@ -1062,33 +1127,56 @@ mod tests {
         db::get_app_setting(&f.conn, &archive_setting_key(&f.key))
     }
 
-    /// Run with a request flag of our own; `on_progress` may set it.
-    fn run_full(
-        f: &Fx,
-        m: MoveMarker,
-        game: &dyn Fn() -> bool,
-        request: &AtomicU8,
-        on_progress: &mut dyn FnMut(&Progress),
-    ) -> Result<Option<MoveMarker>, String> {
-        let _turn = RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut ctx = RunCtx {
+    /// Which entry point a test drives.
+    enum Op {
+        /// `start(old → new)`
+        Start,
+        StartTo(PathBuf, PathBuf),
+        Resume,
+        Cancel,
+    }
+
+    fn ctx_for<'a>(
+        f: &'a Fx,
+        game: &'a dyn Fn() -> bool,
+        request: &'a AtomicU8,
+        progress: &'a mut dyn FnMut(&Progress),
+    ) -> RunCtx<'a> {
+        RunCtx {
             conn: &f.conn,
             mods: &f.mods,
             mods_key: &f.key,
             game_running: game,
             game_check_interval: Duration::ZERO,
             request,
-            progress: on_progress,
-        };
-        run(&mut ctx, m)
+            progress,
+        }
     }
 
-    fn run_with(
+    fn drive(ctx: &mut RunCtx, f: &Fx, op: Op) -> Result<Option<MoveMarker>, String> {
+        match op {
+            Op::Start => start(ctx, f.old.clone(), f.new.clone()),
+            Op::StartTo(from, to) => start(ctx, from, to),
+            Op::Resume => resume(ctx),
+            Op::Cancel => cancel(ctx),
+        }
+    }
+
+    /// Drive an entry point with a request flag of our own; `on_progress` may set it.
+    fn run_full(
         f: &Fx,
-        m: MoveMarker,
+        op: Op,
         game: &dyn Fn() -> bool,
+        request: &AtomicU8,
+        on_progress: &mut dyn FnMut(&Progress),
     ) -> Result<Option<MoveMarker>, String> {
-        run_full(f, m, game, &AtomicU8::new(0), &mut |_| {})
+        let _turn = RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ctx = ctx_for(f, game, request, on_progress);
+        drive(&mut ctx, f, op)
+    }
+
+    fn run_with(f: &Fx, op: Op, game: &dyn Fn() -> bool) -> Result<Option<MoveMarker>, String> {
+        run_full(f, op, game, &AtomicU8::new(0), &mut |_| {})
     }
 
     #[test]
@@ -1119,16 +1207,24 @@ mod tests {
             Err(StepErr::Failed(_))
         ));
         assert!(new_a.exists());
-        // both, identical (crash between placing and recording) → counted as ours
+        // both, identical, NOT ours → still refused: a destination Silo didn't record is never
+        // adopted (recording happens before the copy, so Silo's own is always recorded)
         std::fs::write(&old_a, b"PK\x03\x04 FS25_A").unwrap();
+        let refused = forward_one(&env(&f), &r, &mut m, &mut pol, &never);
+        assert!(
+            matches!(&refused, Err(StepErr::Failed(e)) if e.contains("won't replace it")),
+            "{refused:?}"
+        );
+        assert!(old_a.exists() && new_a.exists());
+        assert!(m.moved.is_empty());
+        // both, identical, ours (crash after placing, before deleting) → old copy removed
+        env(&f).record(&mut m, "FS25_A").unwrap();
         assert_eq!(
             forward_one(&env(&f), &r, &mut m, &mut pol, &never),
             Ok(Step::Moved)
         );
         assert!(!old_a.exists());
-        assert_eq!(m.moved, vec!["FS25_A".to_string()]);
-        // both, different → refused; neither file is touched
-        m.moved.clear();
+        // both, different, even if recorded → refused, un-recorded; neither file is touched
         std::fs::write(&old_a, b"PK\x03\x04 FS25_A").unwrap();
         std::fs::write(&new_a, b"someone else's build").unwrap();
         assert!(matches!(
@@ -1147,14 +1243,22 @@ mod tests {
         let r = add_zip(&f, "FS25_A", false);
         let layout = dest(&f);
         let mut m = marker(&f);
-        let out = forward_one(&env(&f), &r, &mut m, &mut LinkPolicy::new(&layout), &|| {
+        // The mod is recorded (and saved) before the copy starts…
+        let recorded_first = Cell::new(false);
+        let abort = || {
+            let saved = load_marker(&f.conn, &f.key);
+            recorded_first.set(saved.is_some_and(|s| s.moved.iter().any(|t| t == "FS25_A")));
             true
-        });
+        };
+        let out = forward_one(&env(&f), &r, &mut m, &mut LinkPolicy::new(&layout), &abort);
         assert_eq!(out, Err(StepErr::Interrupted));
+        assert!(recorded_first.get(), "recorded before the copy");
         assert!(zip_at(&f.old, "FS25_A").exists());
         assert!(!zip_at(&f.new, "FS25_A").exists());
         assert!(!f.new.join("Tools/FS25_A.zip.silo-move-tmp").exists());
+        // …and un-recorded when it isn't placed.
         assert!(m.moved.is_empty());
+        assert!(load_marker(&f.conn, &f.key).unwrap().moved.is_empty());
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
@@ -1163,7 +1267,7 @@ mod tests {
         let f = fx("full");
         add_zip(&f, "FS25_A", false);
         add_zip(&f, "FS25_B", false);
-        assert!(run_with(&f, marker(&f), &|| false).unwrap().is_none());
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
         assert!(zip_at(&f.new, "FS25_A").exists() && zip_at(&f.new, "FS25_B").exists());
         assert_eq!(
             setting(&f).as_deref(),
@@ -1178,12 +1282,12 @@ mod tests {
     fn moving_back_to_the_default_clears_the_setting_and_leaves_the_users_folder() {
         let f = fx("back");
         add_zip(&f, "FS25_A", false);
-        assert!(run_with(&f, marker(&f), &|| false).unwrap().is_none());
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
         std::fs::write(f.new.join("notes.txt"), b"mine").unwrap();
         // Spelled differently (trailing separator) — still the default, compared canonically.
         let to = PathBuf::from(format!("{}{}", f.old.display(), std::path::MAIN_SEPARATOR));
         std::fs::create_dir_all(&f.old).unwrap();
-        assert!(run_with(&f, MoveMarker::new(f.new.clone(), to), &|| false)
+        assert!(run_with(&f, Op::StartTo(f.new.clone(), to), &|| false)
             .unwrap()
             .is_none());
         assert!(zip_at(&f.old, "FS25_A").exists());
@@ -1203,8 +1307,9 @@ mod tests {
     fn refuses_to_start_while_the_game_runs() {
         let f = fx("game");
         add_zip(&f, "FS25_A", false);
-        assert!(run_with(&f, marker(&f), &|| true).is_err());
+        assert!(run_with(&f, Op::Start, &|| true).is_err());
         assert!(zip_at(&f.old, "FS25_A").exists(), "nothing moved");
+        assert!(load_marker(&f.conn, &f.key).is_none(), "nothing written");
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
@@ -1216,7 +1321,7 @@ mod tests {
         // The game "starts" the moment FS25_A lands in the new archive.
         let new_a = zip_at(&f.new, "FS25_A");
         let game = || new_a.exists();
-        let paused = run_with(&f, marker(&f), &game).unwrap().unwrap();
+        let paused = run_with(&f, Op::Start, &game).unwrap().unwrap();
         assert!(paused.paused);
         assert_eq!(paused.direction, Direction::Forward);
         assert!(paused.pause_reason.is_some());
@@ -1225,7 +1330,7 @@ mod tests {
         assert!(!zip_at(&f.new, "FS25_B").exists());
         assert_eq!(load_marker(&f.conn, &f.key), Some(paused.clone()));
         // Resume with the game closed.
-        assert!(run_with(&f, paused, &|| false).unwrap().is_none());
+        assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
         assert!(zip_at(&f.new, "FS25_B").exists());
         assert!(!zip_at(&f.old, "FS25_A").exists() && !zip_at(&f.old, "FS25_B").exists());
         let _ = std::fs::remove_dir_all(&f.base);
@@ -1242,7 +1347,7 @@ mod tests {
                 req.store(PAUSE, Ordering::SeqCst);
             }
         };
-        let paused = run_full(&f, marker(&f), &|| false, &req, &mut prog)
+        let paused = run_full(&f, Op::Start, &|| false, &req, &mut prog)
             .unwrap()
             .unwrap();
         assert!(paused.paused && paused.pause_reason.is_none());
@@ -1251,7 +1356,7 @@ mod tests {
         assert!(zip_at(&f.old, "FS25_B").exists() && !zip_at(&f.new, "FS25_B").exists());
         assert!(!f.new.join("Tools/FS25_B.zip.silo-move-tmp").exists());
         assert!(setting(&f).is_none());
-        assert!(run_with(&f, paused, &|| false).unwrap().is_none());
+        assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
         assert!(zip_at(&f.new, "FS25_B").exists());
         assert!(setting(&f).is_some());
         let _ = std::fs::remove_dir_all(&f.base);
@@ -1268,7 +1373,7 @@ mod tests {
                 req.store(CANCEL, Ordering::SeqCst);
             }
         };
-        assert!(run_full(&f, marker(&f), &|| false, &req, &mut prog)
+        assert!(run_full(&f, Op::Start, &|| false, &req, &mut prog)
             .unwrap()
             .is_none());
         assert!(zip_at(&f.old, "FS25_A").exists() && zip_at(&f.old, "FS25_B").exists());
@@ -1298,7 +1403,7 @@ mod tests {
                 req.store(CANCEL, Ordering::SeqCst);
             }
         };
-        assert!(run_full(&f, marker(&f), &|| false, &req, &mut prog)
+        assert!(run_full(&f, Op::Start, &|| false, &req, &mut prog)
             .unwrap()
             .is_none());
         assert!(again.get(), "the second cancel was sent");
@@ -1322,9 +1427,9 @@ mod tests {
             false
         })
         .unwrap();
-        m.direction = Direction::Back;
         m.paused = true;
-        assert!(run_with(&f, m, &|| false).unwrap().is_none());
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        assert!(run_with(&f, Op::Cancel, &|| false).unwrap().is_none());
         assert!(zip_at(&f.old, "FS25_A").exists() && zip_at(&f.old, "FS25_B").exists());
         assert!(!zip_at(&f.new, "FS25_A").exists());
         assert!(setting(&f).is_none(), "setting unchanged");
@@ -1337,7 +1442,7 @@ mod tests {
         add_zip(&f, "FS25_A", false);
         let ghost = row("FS25_Ghost", "FS25_Ghost.zip", "zip", false);
         db::upsert_organized(&f.conn, &f.key, &ghost).unwrap(); // no file anywhere
-        let out = run_with(&f, marker(&f), &|| false).unwrap().unwrap();
+        let out = run_with(&f, Op::Start, &|| false).unwrap().unwrap();
         assert!(out.paused);
         assert_eq!(out.errors.len(), 1);
         assert!(setting(&f).is_none());
@@ -1354,14 +1459,14 @@ mod tests {
         let b = row("FS25_B", "FS25_B.zip", "zip", false);
         db::upsert_organized(&f.conn, &f.key, &b).unwrap();
         std::fs::write(zip_at(&f.new, "FS25_B"), b"the user's own B").unwrap();
-        let mut out = run_with(&f, marker(&f), &|| false).unwrap().unwrap();
+        let out = run_with(&f, Op::Start, &|| false).unwrap().unwrap();
         assert!(out.paused);
         assert_eq!(out.errors.len(), 2, "{:?}", out.errors);
+        assert!(out.errors.iter().all(|e| !e.contains("didn't put")));
         assert!(out.moved.is_empty());
         assert!(setting(&f).is_none());
         // Cancel: nothing of Silo's to move back; the user's files stay exactly as they were.
-        out.direction = Direction::Back;
-        assert!(run_with(&f, out, &|| false).unwrap().is_none());
+        assert!(run_with(&f, Op::Cancel, &|| false).unwrap().is_none());
         assert_eq!(
             std::fs::read(zip_at(&f.new, "FS25_A")).unwrap(),
             b"the user's own A"
@@ -1383,10 +1488,15 @@ mod tests {
         let f = fx("unknown");
         add_zip(&f, "FS25_A", false);
         std::fs::write(zip_at(&f.old, "FS25_Stray"), b"PK").unwrap();
-        let out = run_with(&f, marker(&f), &|| false).unwrap().unwrap();
+        let out = run_with(&f, Op::Start, &|| false).unwrap().unwrap();
         assert!(out.paused);
         assert_eq!(out.errors.len(), 1);
         assert!(out.errors[0].contains("1 mods"), "{:?}", out.errors);
+        assert_eq!(
+            unknown_mods(&f.old, &db::load_organized(&f.conn, &f.key)),
+            vec![zip_at(&f.old, "FS25_Stray")],
+            "the same check preflight runs"
+        );
         assert!(zip_at(&f.old, "FS25_A").exists() && !zip_at(&f.new, "FS25_A").exists());
         let _ = std::fs::remove_dir_all(&f.base);
     }
@@ -1409,7 +1519,8 @@ mod tests {
         let old_name = f.old.join("Tools/FS25_A.zip.silo-move-old");
         std::fs::rename(zip_at(&f.old, "FS25_A"), &old_name).unwrap();
         m.paused = true;
-        assert!(run_with(&f, m, &|| false).unwrap().is_none());
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
         assert!(!old_name.exists(), "the leftover old copy is cleaned up");
         assert!(zip_at(&f.new, "FS25_A").exists() && zip_at(&f.new, "FS25_B").exists());
         assert_eq!(
@@ -1420,39 +1531,105 @@ mod tests {
     }
 
     #[test]
-    fn two_moves_at_once_are_refused() {
+    fn start_resume_or_another_start_during_a_run_is_refused() {
         let f = fx("twice");
         add_zip(&f, "FS25_A", false);
-        let second: Cell<Option<Result<Option<MoveMarker>, String>>> = Cell::new(None);
+        let resumed: Cell<Option<Result<Option<MoveMarker>, String>>> = Cell::new(None);
+        let started: Cell<Option<Result<Option<MoveMarker>, String>>> = Cell::new(None);
         let req = AtomicU8::new(0);
+        let no_game = || false;
         let mut prog = |_: &Progress| {
-            if !is_running() {
-                return;
-            }
             let other = AtomicU8::new(0);
             let mut quiet = |_: &Progress| {};
-            let mut ctx = RunCtx {
-                conn: &f.conn,
-                mods: &f.mods,
-                mods_key: &f.key,
-                game_running: &|| false,
-                game_check_interval: Duration::ZERO,
-                request: &other,
-                progress: &mut quiet,
-            };
-            second.set(Some(run(&mut ctx, marker(&f))));
+            let mut ctx = ctx_for(&f, &no_game, &other, &mut quiet);
+            resumed.set(Some(resume(&mut ctx)));
+            started.set(Some(start(&mut ctx, f.old.clone(), f.new.clone())));
         };
-        assert!(run_full(&f, marker(&f), &|| false, &req, &mut prog)
+        assert!(run_full(&f, Op::Start, &|| false, &req, &mut prog)
             .unwrap()
             .is_none());
-        assert_eq!(
-            second.take(),
-            Some(Err("An archive move is already running.".to_string()))
-        );
+        let busy = Some(Err("An archive move is already running.".to_string()));
+        assert_eq!(resumed.take(), busy);
+        assert_eq!(started.take(), busy);
         // Every run happens under RUN_LOCK, so while we hold it nothing else is running.
         let _turn = RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         assert!(!is_running(), "released when the first run ends");
         assert!(zip_at(&f.new, "FS25_A").exists());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn cancel_while_running_only_asks_the_run_to_turn_around() {
+        let f = fx("cancelrunning");
+        add_zip(&f, "FS25_A", false);
+        add_zip(&f, "FS25_B", false);
+        let req = AtomicU8::new(0);
+        let no_game = || false;
+        let sent = Cell::new(false);
+        let answer: Cell<Option<Result<Option<MoveMarker>, String>>> = Cell::new(None);
+        let mut prog = |p: &Progress| {
+            if !p.cancelling && p.current == "FS25_B" && !sent.get() {
+                sent.set(true);
+                // A second caller, sharing the running move's request flag.
+                let mut quiet = |_: &Progress| {};
+                let mut ctx = ctx_for(&f, &no_game, &req, &mut quiet);
+                answer.set(Some(cancel(&mut ctx)));
+            }
+        };
+        assert!(run_full(&f, Op::Start, &no_game, &req, &mut prog)
+            .unwrap()
+            .is_none());
+        assert_eq!(answer.take(), Some(Ok(None)), "returned at once");
+        assert!(zip_at(&f.old, "FS25_A").exists() && zip_at(&f.old, "FS25_B").exists());
+        assert!(!zip_at(&f.new, "FS25_A").exists());
+        assert!(
+            setting(&f).is_none(),
+            "the move was cancelled, not finished"
+        );
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn entry_points_check_for_an_unfinished_move() {
+        let f = fx("entries");
+        add_zip(&f, "FS25_A", false);
+        assert!(
+            run_with(&f, Op::Resume, &|| false).is_err(),
+            "nothing to resume"
+        );
+        assert!(
+            run_with(&f, Op::Cancel, &|| false).is_err(),
+            "nothing to cancel"
+        );
+        let mut m = marker(&f);
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        assert_eq!(
+            run_with(&f, Op::Start, &|| false),
+            Err(ALREADY_UNFINISHED.to_string())
+        );
+        assert!(zip_at(&f.old, "FS25_A").exists(), "nothing moved");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_linked_zip_source_is_refused_with_its_own_message() {
+        let f = fx("linksrc");
+        let real = f.base.join("real.zip");
+        std::fs::write(&real, b"PK").unwrap();
+        // File symlinks need Developer Mode on Windows; skip where they can't be made.
+        if organize::symlink_file(&real, &zip_at(&f.old, "FS25_L")).is_err() {
+            return;
+        }
+        db::upsert_organized(&f.conn, &f.key, &row("FS25_L", "FS25_L.zip", "zip", false)).unwrap();
+        let out = run_with(&f, Op::Start, &|| false).unwrap().unwrap();
+        assert!(out.paused);
+        assert!(
+            out.errors[0].contains("is a link, not a file"),
+            "{:?}",
+            out.errors
+        );
+        assert!(!zip_at(&f.new, "FS25_L").exists());
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
@@ -1462,7 +1639,7 @@ mod tests {
         add_zip(&f, "FS25_A", true);
         let flat = f.mods.join("FS25_A.zip");
         std::fs::hard_link(zip_at(&f.old, "FS25_A"), &flat).unwrap();
-        assert!(run_with(&f, marker(&f), &|| false).unwrap().is_none());
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
         assert_eq!(std::fs::read(&flat).unwrap(), b"PK\x03\x04 FS25_A");
         let _ = std::fs::remove_dir_all(&f.base);
     }
@@ -1471,7 +1648,7 @@ mod tests {
     fn an_active_mod_missing_from_the_mods_folder_is_linked_to_its_new_copy() {
         let f = fx("missinglink");
         add_zip(&f, "FS25_A", true);
-        assert!(run_with(&f, marker(&f), &|| false).unwrap().is_none());
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
         assert_eq!(
             std::fs::read(f.mods.join("FS25_A.zip")).unwrap(),
             b"PK\x03\x04 FS25_A"
@@ -1487,7 +1664,7 @@ mod tests {
         std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
         std::fs::write(src.join("xml/deep/a.xml"), b"<a/>").unwrap();
         db::upsert_organized(&f.conn, &f.key, &row("FS25_D", "FS25_D", "dir", false)).unwrap();
-        assert!(run_with(&f, marker(&f), &|| false).unwrap().is_none());
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
         let moved = f.new.join("Tools/FS25_D");
         assert_eq!(
             std::fs::read(moved.join("xml/deep/a.xml")).unwrap(),
@@ -1541,7 +1718,7 @@ mod tests {
         std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
         db::upsert_organized(&f.conn, &f.key, &row("FS25_D", "FS25_D", "dir", true)).unwrap();
         std::os::unix::fs::symlink(&src, f.mods.join("FS25_D")).unwrap();
-        assert!(run_with(&f, marker(&f), &|| false).unwrap().is_none());
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
         let link = f.mods.join("FS25_D");
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
         assert_eq!(
@@ -1558,7 +1735,7 @@ mod tests {
         add_zip(&f, "FS25_A", true);
         let link = f.mods.join("FS25_A.zip");
         std::os::unix::fs::symlink(zip_at(&f.old, "FS25_A"), &link).unwrap();
-        assert!(run_with(&f, marker(&f), &|| false).unwrap().is_none());
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
         // Re-linked to the new copy (a hardlink on the same volume, else a symlink).
         assert_eq!(
             same_file::Handle::from_path(&link).unwrap(),
@@ -1577,7 +1754,7 @@ mod tests {
         std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
         std::os::unix::fs::symlink("/etc", src.join("escape")).unwrap();
         db::upsert_organized(&f.conn, &f.key, &row("FS25_D", "FS25_D", "dir", false)).unwrap();
-        let out = run_with(&f, marker(&f), &|| false).unwrap().unwrap();
+        let out = run_with(&f, Op::Start, &|| false).unwrap().unwrap();
         assert!(
             out.paused && out.errors[0].contains("link"),
             "{:?}",
