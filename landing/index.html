@@ -22,7 +22,7 @@
 <meta name="twitter:image" content="https://silo.hllmr.com/og.png" />
 <link rel="canonical" href="https://silo.hllmr.com/" />
 <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
-<meta name="author" content="HLLMR" />
+<meta name="author" content="HLLMR Ventures LLC" />
 <meta name="theme-color" content="#4a7330" media="(prefers-color-scheme: light)" />
 <meta name="theme-color" content="#171a14" media="(prefers-color-scheme: dark)" />
 <link rel="icon" href="/favicon.ico" sizes="any" />
@@ -325,7 +325,7 @@
       "applicationCategory": "UtilitiesApplication",
       "applicationSubCategory": "Mod Manager",
       "operatingSystem": "Windows, macOS, Linux",
-      "description": "Silo is a free, open-source mod manager for Farming Simulator 25. It reads your mods and your game log, ranks the likely culprit when the game crashes, flags conflicts before launch, pulls ModHub and GitHub into one catalog, and checks an installed mod against the build its source published. Every move is previewed first, and Restore vanilla puts your mods folder back.",
+      "description": "Silo is a free, open-source mod manager for Farming Simulator 25. It reads your mods and your game log, ranks the likely culprit when the game crashes, flags conflicts before launch, pulls ModHub and GitHub into one catalog, and checks an installed mod against the build its source published. Every move is previewed first, and Restore vanilla layout puts your mods folder back.",
       "downloadUrl": "https://github.com/HLLMR/silo/releases",
       "softwareVersion": "beta",
       "releaseNotes": "https://github.com/HLLMR/silo/releases",
@@ -349,7 +349,7 @@
     },
     {
       "@type": "Organization",
-      "name": "HLLMR",
+      "name": "HLLMR Ventures LLC",
       "url": "https://github.com/HLLMR",
       "sameAs": ["https://github.com/HLLMR/silo"]
     },
@@ -358,7 +358,7 @@
       "mainEntity": [
         { "@type": "Question", "name": "Is Silo free?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Silo is free and open source (MIT), with no account to create, no ads, no paid tier and no telemetry. The desktop app's source is on GitHub to audit, fork or build yourself. The catalog it talks to is a separate hosted service." } },
         { "@type": "Question", "name": "What does Silo actually do?", "acceptedAnswer": { "@type": "Answer", "text": "It manages your Farming Simulator 25 mods. Silo organizes the library and reads log.txt to rank the likely culprit when the game crashes. It flags conflicts before launch, such as more than one active map and colliding filltypes, vehicle types or scripts. And it pulls ModHub and GitHub into one catalog that shows the latest version found across both." } },
-        { "@type": "Question", "name": "Does Silo move or modify my mod files?", "acceptedAnswer": { "@type": "Answer", "text": "It moves them, and it never edits inside a mod. Silo files your ZIPs into a local archive, then links only your active set into the game's mods folder at launch. Every move is previewed first, and Restore vanilla puts your mods folder back. It backs up before it overwrites anything or edits a savegame." } },
+        { "@type": "Question", "name": "Does Silo move or modify my mod files?", "acceptedAnswer": { "@type": "Answer", "text": "It moves them, and it never edits inside a mod. Silo files your ZIPs into a local archive, then links only your active set into the game's mods folder at launch. Every move is previewed first, and Restore vanilla layout puts your mods folder back. It backs up settings and savegames before editing them." } },
         { "@type": "Question", "name": "Which platforms does Silo support?", "acceptedAnswer": { "@type": "Answer", "text": "Windows is the tested, supported platform today. macOS (Intel and Apple Silicon) and Linux builds are a preview and largely untested, and we're actively seeking testers on those platforms. It's one native app with per-OS game discovery and no runtime to install." } },
         { "@type": "Question", "name": "Does Silo work with ModHub and GitHub?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Silo keeps one record per mod that pulls both together, so you see the latest version found across them. You can act on each through your own accounts: star on GitHub, rate on ModHub. Silo just opens the door; your credentials stay on your machine." } },
         { "@type": "Question", "name": "Does Silo collect any data about me?", "acceptedAnswer": { "@type": "Answer", "text": "No account, no ads, no telemetry. Silo contacts its catalog only when you ask: searching Browse, opening a mod's details, checking for updates, or verifying a mod. Each request carries what it needs, such as your search terms or the identifiers and versions of the mods being checked. Separately, Silo checks GitHub for its own app updates at launch, and that check sends no library data. Silo never uploads your saves, mod archives, notes or personal files." } }
@@ -448,7 +448,7 @@
       <div class="card">
         <div class="glyph">≋</div>
         <h3>Loadouts &amp; projection</h3>
-        <p>Build a profile for each playthrough. At launch, Silo links only the active set into the game folder. Your zips live in a local archive, every move is previewed first, and Restore vanilla puts your mods folder back.</p>
+        <p>Build a profile for each playthrough. At launch, Silo links only the active set into the game folder. Your zips live in a local archive, every move is previewed first, and Restore vanilla layout puts your mods folder back.</p>
       </div>
       <div class="card">
         <div class="glyph">⛓</div>
@@ -510,7 +510,7 @@
       <div class="ethos-grid">
         <div><p class="m">// open</p><h3>Open source</h3><p>The desktop app's source is on GitHub under the MIT license. Audit it, fork it, build it yourself. The catalog it talks to is a separate hosted service.</p></div>
         <div><p class="m">// quiet</p><h3>No account, no ads, no telemetry</h3><p>Silo contacts its catalog only when you search Browse, open a mod's details, check for updates or verify a mod. It also checks GitHub for its own app updates at launch, which sends no library data. Your saves, mod files and notes stay on your machine.</p></div>
-        <div><p class="m">// safe</p><h3>Previewed first</h3><p>Silo files your mods into a local archive and links the active set into the game. Every move is previewed first, and Restore vanilla puts your mods folder back. It only ever removes files it put there itself, and it backs up before it overwrites anything.</p></div>
+        <div><p class="m">// safe</p><h3>Previewed first</h3><p>Silo files your mods into a local archive and links the active set into the game. Every move is previewed first, and Restore vanilla layout puts your mods folder back. It only ever removes files it put there itself, and it backs up settings and savegames before editing them.</p></div>
         <div><p class="m">// everywhere</p><h3>Windows today · macOS and Linux preview</h3><p>One native app, per-OS game discovery, no runtime. Windows is tested; macOS and Linux are a preview and seeking testers.</p></div>
       </div>
     </div>
@@ -550,7 +550,7 @@
       </details>
       <details>
         <summary>Does Silo move or modify my mod files?</summary>
-        <p>It moves them, and it never edits inside a mod. Silo files your ZIPs into a local archive, then links only your active set into the game's mods folder at launch. Every move is previewed first, and Restore vanilla puts your mods folder back. It backs up before it overwrites anything or edits a savegame.</p>
+        <p>It moves them, and it never edits inside a mod. Silo files your ZIPs into a local archive, then links only your active set into the game's mods folder at launch. Every move is previewed first, and Restore vanilla layout puts your mods folder back. It backs up settings and savegames before editing them.</p>
       </details>
       <details>
         <summary>Which platforms does Silo support?</summary>

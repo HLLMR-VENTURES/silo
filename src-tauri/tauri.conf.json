@@ -27,6 +27,7 @@
   },
   "bundle": {
     "active": true,
+    "copyright": "© 2026 HLLMR Ventures LLC",
     "targets": "all",
     "createUpdaterArtifacts": true,
     "icon": [

@@ -106,8 +106,8 @@ npm run tauri:build   # produce an installer in src-tauri/target/release/bundle/
   data. Your saves, mod files and notes are never uploaded.
 - **Previewed first, and it owns what it touches** — it files your mods into a local archive
   and links the active set into the game; every move is previewed first, and *Restore
-  vanilla* puts your mods folder back. It only ever removes files it put there itself (your
-  own edits are left alone), and it backs up before any overwrite.
+  vanilla layout* puts your mods folder back. It only ever removes files it put there itself (your
+  own edits are left alone), and it backs up settings and savegames before editing them.
 - **Verifiable** — the integrity check compares an installed mod to the build its source
   published, byte for byte.
 
@@ -134,7 +134,7 @@ it, audit it, build it yourself.
 
 ## License
 
-[MIT](LICENSE) © HLLMR. Use it, fork it, ship it.
+[MIT](LICENSE) © HLLMR Ventures LLC (Texas, USA). Use it, fork it, ship it.
 
 ---
 

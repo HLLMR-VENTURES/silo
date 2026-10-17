@@ -39,7 +39,9 @@ good-faith compliance while review is pending).
   as processor, and the right to complain to a supervisory authority.
 - **ModHub content:** the catalog's handling of ModHub images and metadata is under
   discussion with GIANTS. Revisit the "doesn't host or mirror" wording once that's settled.
-- **Publisher identity:** align the copyright line, these documents and the code-signing
-  identity on one legal name.
+- **Publisher identity:** settled. HLLMR Ventures LLC (Texas) owns Silo; the copyright
+  line, these documents and the site use that name. Windows code signing stays under the
+  founder's personal certificate (David Hellmer) by choice, and `docs/VERIFY_DOWNLOAD.md`
+  explains that.
 - **Effective date:** set one date across all four documents when they're finalized, then
   remove the "DRAFT — NOT REVIEWED" banner from `landing/legal/*.html`.

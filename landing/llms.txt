@@ -3,7 +3,7 @@
 > Silo is a free, open-source mod manager for Farming Simulator 25 (FS25). More farming,
 > less fixing: it reads your mods and your game log, ranks the likely culprit when the game
 > crashes, flags conflicts before launch, and unifies ModHub and GitHub into one
-> cross-source catalog. Every move is previewed first, and Restore vanilla puts your mods
+> cross-source catalog. Every move is previewed first, and Restore vanilla layout puts your mods
 > folder back.
 
 Silo is a native desktop app for Windows, with macOS and Linux builds in preview. No account,
@@ -25,7 +25,7 @@ GitHub.
 ## Principles
 - Free and open source: the desktop app's source is on GitHub (MIT); the catalog server is a separate hosted service
 - No account, no ads, no telemetry. Silo contacts its catalog only when you search Browse, open a mod's details, check for updates or verify a mod; it also checks GitHub for its own app updates at launch, which sends no library data
-- Never edits inside a mod; every move is previewed first, and Restore vanilla puts your mods folder back; backs up before writing settings or saves
+- Never edits inside a mod; every move is previewed first, and Restore vanilla layout puts your mods folder back; backs up before writing settings or saves
 - Acts through your own GitHub / ModHub accounts
 
 ## Links
@@ -37,4 +37,4 @@ GitHub.
 
 ## Notes
 Not affiliated with GIANTS Software. Farming Simulator is a trademark of its respective
-owner. Made by HLLMR.
+owner. Silo is made by HLLMR Ventures LLC (Texas, USA).

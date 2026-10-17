@@ -59,7 +59,7 @@
     '<a href="/trust/">Trust</a><a href="/legal/">Legal</a>' +
     '<a href="https://github.com/HLLMR/silo" rel="noopener">Source</a>' +
     "</nav>" +
-    '<span class="silo-ftnote">Silo indexes and verifies — it doesn\'t host mods. Aggregated from public sources · not affiliated with GIANTS Software.</span>' +
+    '<span class="silo-ftnote">Silo indexes and verifies — it doesn\'t host mods. Aggregated from public sources · not affiliated with GIANTS Software. © HLLMR Ventures LLC.</span>' +
     "</div></footer>";
 
   function mount() {
