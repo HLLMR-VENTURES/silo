@@ -110,9 +110,9 @@
         <strong>The last run ended abnormally.</strong>
         The log stops mid-session with no clean-exit marker — that's what a crash looks like.
         {#if culprits.length > 0}
-          The mod{culprits.length === 1 ? "" : "s"} below logged errors right before it stopped.
+          The mod{culprits.length === 1 ? "" : "s"} below logged errors during that run, most errors first.
         {:else}
-          No mod logged an error before it stopped — the cause is likely an interaction the
+          No mod logged an error during that run. The cause is likely an interaction the
           log can't name. Guided bisection will find it.
         {/if}
       </div>

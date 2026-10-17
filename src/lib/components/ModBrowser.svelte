@@ -354,7 +354,7 @@
       <h2>Browse mods</h2>
       {#if stats}
         <span class="catalog-count">
-          {stats.mods.toLocaleString()} mods · {stats.sources.toLocaleString()} sources
+          {stats.mods.toLocaleString()} mods from {stats.sources.toLocaleString()} ModHub and GitHub listings
         </span>
       {/if}
     </div>

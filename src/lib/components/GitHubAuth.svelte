@@ -170,7 +170,11 @@
     {@render flowDisplay()}
   {:else if status.clientId}
     <div class="gha-row">
-      <div class="gha-hint">Connect your GitHub account for faster update checks (5,000/hr) and private repos.</div>
+      <div class="gha-hint">
+        Connect your GitHub account for faster update checks (5,000 requests per hour). This
+        grants <code>read:user</code> only. Star / Watch (<code>public_repo</code>) and sharing
+        Collections (<code>gist</code>) are separate, optional steps.
+      </div>
       <button class="gha-btn primary" onclick={() => connect()}>Connect GitHub</button>
     </div>
     {#if !status.builtin}
