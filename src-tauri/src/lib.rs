@@ -2074,38 +2074,46 @@ async fn set_mods_root(app: tauri::AppHandle, path: String) -> Result<ModsRootSt
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db::open(&db)?;
         let p = std::path::Path::new(&path);
-        let known: Vec<PathBuf> =
-            modsroot::parse_known(db::get_app_setting(&conn, modsroot::KNOWN_KEY).as_deref())
-                .into_iter()
-                .map(PathBuf::from)
-                .collect();
         let default = fsgame::user_dir().map(|d| d.join("mods"));
-        if !mods_root_choice_allowed(
-            p,
-            picked::allows(picked::Purpose::ModsFolder, p),
-            &known,
-            default.as_deref(),
-        ) {
-            return Err(picked::NOT_PICKED.into());
-        }
-        // Before the write probe: a folder sharing files with another layout's archive.
-        let all = known_mods_folders(&conn, default.as_deref());
-        if let Some(why) = mods_folder_check(&conn, p, &all)? {
-            return Err(why);
-        }
-        modsroot::validate_folder(p)?;
-        let known = modsroot::add_known(
-            db::get_app_setting(&conn, modsroot::KNOWN_KEY).as_deref(),
-            &path,
-        );
-        db::set_app_setting(&conn, modsroot::KNOWN_KEY, Some(&known))?;
-        db::set_app_setting(&conn, modsroot::CHOICE_KEY, Some(&path))?;
+        let picked = picked::allows(picked::Purpose::ModsFolder, p);
+        apply_mods_root_choice(&conn, &path, picked, default.as_deref())?;
         // Used: a later call can't replay it (the folder is in the known list now anyway).
         picked::forget(picked::Purpose::ModsFolder);
         Ok(compute_mods_root_status(&conn))
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// `set_mods_root` without the picker and the status: refuse a folder that wasn't picked and
+/// isn't known (or FS25's default), then one that shares files with another layout — both
+/// before the write probe — then remember `path` as known and chosen.
+fn apply_mods_root_choice(
+    conn: &rusqlite::Connection,
+    path: &str,
+    picked: bool,
+    default: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    let known: Vec<PathBuf> =
+        modsroot::parse_known(db::get_app_setting(conn, modsroot::KNOWN_KEY).as_deref())
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+    if !mods_root_choice_allowed(p, picked, &known, default) {
+        return Err(picked::NOT_PICKED.into());
+    }
+    let all = known_mods_folders(conn, default);
+    if let Some(why) = mods_folder_check(conn, p, &all)? {
+        return Err(why);
+    }
+    modsroot::validate_folder(p)?;
+    let known = modsroot::add_known(
+        db::get_app_setting(conn, modsroot::KNOWN_KEY).as_deref(),
+        path,
+    );
+    db::set_app_setting(conn, modsroot::KNOWN_KEY, Some(&known))?;
+    db::set_app_setting(conn, modsroot::CHOICE_KEY, Some(path))
 }
 
 /// Forget the user's choice and follow the folder FS25 reads.
@@ -4983,6 +4991,48 @@ mod tests {
         assert!(super::mods_folder_check(&conn, &mine, &known)
             .unwrap()
             .is_some_and(|w| w.contains("overlap another mods folder")));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn switching_back_to_a_known_folder_with_a_custom_archive_still_works() {
+        let base = temp_base("switchback");
+        let (a, b, lib) = (base.join("a"), base.join("b"), base.join("lib-a"));
+        for d in [&a, &b, &lib.join("Tools")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let default = base.join("mods");
+        let s = |p: &Path| p.to_string_lossy().into_owned();
+        let choose = |p: &Path, picked: bool| {
+            super::apply_mods_root_choice(&conn, &s(p), picked, Some(&default))
+        };
+        let choice = || crate::db::get_app_setting(&conn, crate::modsroot::CHOICE_KEY);
+        choose(&a, true).unwrap();
+        // A's archive moved to a folder of its own (what a finished move stores).
+        crate::db::set_app_setting(
+            &conn,
+            &crate::relocate::archive_setting_key(&crate::modsroot::canonical_key(&a)),
+            Some(&s(&lib)),
+        )
+        .unwrap();
+        choose(&b, true).unwrap();
+        assert_eq!(choice(), Some(s(&b)));
+        // Back to A from the known list (not picked again): its own archive is no obstacle.
+        choose(&a, false).unwrap();
+        assert_eq!(choice(), Some(s(&a)));
+        // A category folder inside A's archive is refused, and nothing changes.
+        assert_eq!(
+            choose(&lib.join("Tools"), true),
+            Err(super::OVERLAPS_AN_ARCHIVE.to_string())
+        );
+        assert_eq!(choice(), Some(s(&a)));
+        // An unknown folder that wasn't picked is refused.
+        assert_eq!(
+            choose(&base.join("c"), false),
+            Err(super::picked::NOT_PICKED.to_string())
+        );
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
     }
