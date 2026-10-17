@@ -59,7 +59,7 @@
     '<a href="/trust/">Trust</a><a href="/legal/">Legal</a>' +
     '<a href="https://github.com/HLLMR/silo" rel="noopener">Source</a>' +
     "</nav>" +
-    '<span class="silo-ftnote">Silo indexes and verifies — it doesn\'t host mods. Aggregated from public sources · not affiliated with GIANTS Software. © HLLMR Ventures LLC.</span>' +
+    '<span class="silo-ftnote">Mods for Farming Simulator. Silo is not affiliated with GIANTS Software. Silo indexes and verifies mods; it doesn\'t host them. © HLLMR Ventures LLC.</span>' +
     "</div></footer>";
 
   function mount() {

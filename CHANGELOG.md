@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **New look for the website and README.** "More farming. Less fixing." Copy now describes
   crash triage as ranking the likely culprit, and drops claims we couldn't back up.
 
+- **Honest copy everywhere.** The website, help and README now describe exactly what Silo does, the privacy policy lists every connection Silo makes, and the arbitrary "trust score" is gone.
+
 ### Fixed
 
 - **Folder mods: your edits are safe.** On Windows, folder mods are now linked as NTFS

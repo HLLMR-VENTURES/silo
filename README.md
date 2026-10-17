@@ -27,9 +27,11 @@ Windows (tested) · macOS and Linux (preview).**
   &nbsp;·&nbsp; <a href="#install">Build from source</a>
 </p>
 
-> **Status: public beta.** Windows installers are [code-signed](docs/VERIFY_DOWNLOAD.md) by a
-> verified publisher (SmartScreen may still prompt on new releases while reputation builds, but
-> shows the publisher, not "unknown"). macOS/Linux builds are OS-unsigned — Gatekeeper may warn.
+> **Status: public beta.** Windows installers are [code-signed](docs/VERIFY_DOWNLOAD.md) by
+> David Hellmer, Silo's developer. SmartScreen may still prompt on new releases while
+> reputation builds, but it shows the publisher instead of "unknown". macOS/Linux builds are
+> OS-unsigned, so macOS blocks the first launch until you click **Open Anyway** in System
+> Settings → Privacy & Security.
 >
 > **Platforms: Windows is the tested, supported platform.** macOS (Intel & Apple Silicon)
 > and Linux builds are **a preview and largely untested on real machines**. We'd love
@@ -47,7 +49,7 @@ and loadouts you can switch between playthroughs.
 ## What it does
 
 - **Crash & log triage** — parses `log.txt`, separates real errors from cosmetic noise,
-  and ranks the likely culprit.
+  and ranks mods by the errors they logged, so you can see the likely culprit.
 - **Conflict detection** — flags more than one active map before launch, plus colliding
   filltypes, vehicle types and scripts across your active set.
 - **Cross-source catalog** — one record per mod aggregating ModHub + GitHub,
@@ -55,26 +57,34 @@ and loadouts you can switch between playthroughs.
   [verified catalog page](https://silo.hllmr.com/trust/) or
   [browse it live](https://silo.hllmr.com/browse/); it's served by the public
   [SiloAPI](https://silo-api.hllmr.com) read API.
-- **Integrity check** — hashes an installed mod and compares it to the trusted build its
-  source published: a clean match, or the exact files that changed. Provenance, not
-  antivirus — it confirms what a mod is, not whether it means well. It works for mods
-  from both ModHub and GitHub.
+- **Integrity check** — hashes an installed mod on your computer and compares it to the
+  build its source published: a clean match, or the exact files that changed. Provenance, not
+  antivirus — it confirms what a mod is, not whether it means well. It covers mods from
+  GitHub, and ModHub mods the catalog has already hashed.
 - **Guided bisection** — when the log can't name the culprit, automates "disable half,
-  relaunch" to isolate it, and safely restores your active set afterward.
-- **Loadouts & projection** — curate profiles and project only the active set into the
-  game's flat folder at launch (hardlinks for zips, junctions/symlinks for folder mods, copies
-  where links aren't allowed). Organizing files your zips into a local archive; every move
-  is previewed first, and *Restore vanilla layout* puts your mods folder back.
+  relaunch" to isolate it, and safely restores your active set afterward. Maps stay on every
+  round.
+- **Loadouts** — curate profiles. Switching a mod on or off adds or removes its link in the
+  game's flat folder right away (hardlinks for zips, junctions/symlinks for folder mods, copies
+  where links aren't allowed, such as cloud-synced folders). Launch just starts the game.
+  Organize files your zips into a local archive and shows every move before it touches a
+  file; *Restore vanilla layout* puts every mod back in your mods folder, where the game
+  loads all of them again.
 - **Any mods folder** — follows FS25's own mods-folder override, or pick any folder in
   Settings; Silo can point the game at it too (backing up `gameSettings.xml`) and keeps each
   folder's organized library separately.
-- **Library archive on any drive** _(v0.9.0)_ — move your parked mods to a bigger drive
+- **Library archive on any drive** — move your parked mods to a bigger drive
   while the mods folder stays where the game reads it. Every mod is verified before the
   original is removed; the move can be paused to play, or cancelled to put everything back.
 - **Collections** — share a mod-set as a link (secret gist or public repo); others preview it
-  against their library before importing.
-- **Per-source actions** — star a repo on GitHub, rate on ModHub, all
-  through *your own* accounts. Silo just opens the door; your credentials stay yours.
+  against their library, then import it: Silo downloads the GitHub mods, checks them against
+  the pinned build and saves the set as a loadout.
+- **Installs and updates** — GitHub releases install in one click, checked against the
+  catalog's hash when it has one. Updates keep the previous version in `backups/` (newest
+  three per mod) and finish or roll back if Silo stops mid-update. ModHub mods download from
+  ModHub; Silo picks them up from your mods folder.
+- **Per-source actions** — star a repo on GitHub through *your own* account, or open the
+  ModHub page to rate a mod. Your GitHub token stays on your machine.
 - **Multiplayer sync**, a **filltype-compatibility bridge generator**, **savegame &
   graphics settings editing** (with `.bak` backups), a **mod-settings editor**, **savegame
   backup**, and a full **control-binding map**.
@@ -84,7 +94,9 @@ and loadouts you can switch between playthroughs.
 **Download:** grab the installer for your OS from
 [Releases](https://github.com/HLLMR/silo/releases). Windows builds are code-signed — you can
 [verify the signature, checksum, and build provenance](docs/VERIFY_DOWNLOAD.md). macOS/Linux
-builds are OS-unsigned, so Gatekeeper may warn on first launch.
+builds are OS-unsigned, so Gatekeeper may warn on first launch. On Windows, the setup `.exe`
+installs per user with no admin rights (recommended); the `.msi` installs for all users and
+needs admin rights. Linux ships as `.AppImage`, `.deb` and `.rpm`.
 
 **Build from source:** needs [Rust](https://rustup.rs) + [Node 20+](https://nodejs.org)
 and the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
@@ -101,15 +113,17 @@ npm run tauri:build   # produce an installer in src-tauri/target/release/bundle/
   yourself. The hosted catalog (SiloAPI) is a separate service.
 - **No account, no ads, no telemetry** — Silo contacts its catalog only when you ask:
   searching Browse, opening a mod's details, checking for updates, or verifying a mod. Each
-  request carries what it needs (search terms, or the IDs and versions of the mods being
-  checked). It also checks GitHub for its own app updates at launch, which sends no library
-  data. Your saves, mod files and notes are never uploaded.
-- **Previewed first, and it owns what it touches** — it files your mods into a local archive
-  and links the active set into the game; every move is previewed first, and *Restore
-  vanilla layout* puts your mods folder back. It only ever removes files it put there itself (your
-  own edits are left alone), and it backs up settings and savegames before editing them.
+  request carries what it needs (search terms, or the tech names of the mods being checked,
+  plus the version for an integrity check). It also checks GitHub for its own app updates at
+  launch, which sends no library data. Your saves, mod files and notes are never uploaded.
+  The [privacy policy](docs/legal/privacy-policy.md) lists every connection.
+- **Undoable, and it owns what it touches** — it files your mods into a local archive and
+  links the active set into the game. Organize shows every move before it touches a file;
+  *Restore vanilla layout* puts every mod back in your mods folder. It only ever removes files
+  it put there itself (a copied folder mod you edited goes to `backups/` instead), and it backs
+  up settings and savegames before editing them.
 - **Verifiable** — the integrity check compares an installed mod to the build its source
-  published, byte for byte.
+  published, file by file.
 
 ## Stack
 

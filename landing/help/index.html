@@ -111,7 +111,7 @@
   <div class="wrap">
     <p class="eyebrow">User guide</p>
     <h2>Everything Silo can do, explained.</h2>
-    <p>From your first scan to conflict triage, mod verification, savegame edits and multiplayer sync. Silo is free and open source. Every move is previewed first, and Restore vanilla layout puts your mods folder back.</p>
+    <p>From your first scan to conflict triage, mod verification, savegame edits and multiplayer sync. Silo is free and open source. Organize shows you every move before it touches a file, and Restore vanilla layout puts every mod back in your mods folder.</p>
   </div>
 </section>
 
@@ -148,16 +148,31 @@
 
 <p>Silo is a desktop app for managing your Farming Simulator 25 mods. It is <strong>not an in-game mod</strong> and you don't install it into the game — it's a standalone program that runs on your computer alongside FS25. It scans your existing mod library, organizes it, catches conflicts before you launch, triages crashes, and tracks updates.</p>
 
-<p>Silo never edits the game itself. It works with the files FS25 already keeps in <code>Documents\My Games\FarmingSimulator2025\</code>. Every move is previewed first, and Restore vanilla layout puts your mods folder back.</p>
+<p>Silo never edits the game itself. It works with the files FS25 already keeps in <code>Documents\My Games\FarmingSimulator2025\</code>. Organize shows you every move before it touches a file. Restore vanilla layout puts every mod back in your mods folder.</p>
 
 <h3>Installing on Windows</h3>
 
 <ol>
-<li>Download the latest installer from the <a href="https://github.com/HLLMR/silo/releases">Releases page</a> (also linked from <a href="https://silo.hllmr.com">silo.hllmr.com</a>). You'll find a setup <code>.exe</code> and an <code>.msi</code> — either works; the <code>.exe</code> is the usual choice.</li>
-<li>Run it. Silo installs for your user account and doesn't need administrator rights.</li>
+<li>Download the latest installer from the <a href="https://github.com/HLLMR/silo/releases">Releases page</a> (also linked from <a href="https://silo.hllmr.com">silo.hllmr.com</a>). You'll find a setup <code>.exe</code> and an <code>.msi</code>. We recommend the setup <code>.exe</code>.</li>
+<li>Run it. The setup <code>.exe</code> installs Silo for your user account and doesn't need administrator rights. The <code>.msi</code> installs it for all users of the PC and asks for administrator rights.</li>
 </ol>
 
-<blockquote class="note"><strong>A blue "Windows protected your PC" prompt can still appear on a brand-new release.</strong> Silo's Windows installer is digitally signed by a verified publisher (<strong>David Hellmer</strong>), so it shows that publisher rather than "unknown" — but SmartScreen builds reputation per release, so a very fresh build may still prompt. If it does, click <strong>More info</strong>, then <strong>Run anyway</strong>. You can <a href="https://github.com/HLLMR/silo/blob/main/docs/VERIFY_DOWNLOAD.md">verify the signature yourself</a> first.</blockquote>
+<blockquote class="note"><strong>A blue "Windows protected your PC" prompt can still appear on a brand-new release.</strong> Silo's Windows installers are digitally signed by Silo's developer, <strong>David Hellmer</strong>, so the prompt names that publisher instead of "unknown". SmartScreen builds reputation per release, so a very fresh build may still prompt. If it does, click <strong>More info</strong>, then <strong>Run anyway</strong>. You can <a href="https://github.com/HLLMR/silo/blob/main/docs/VERIFY_DOWNLOAD.md">verify the signature yourself</a> first.</blockquote>
+
+<h3>Installing on macOS (preview)</h3>
+
+<ol>
+<li>Download the <code>.dmg</code> for your Mac (Apple Silicon or Intel) from the <a href="https://github.com/HLLMR/silo/releases">Releases page</a>, open it and drag Silo to Applications.</li>
+<li>The macOS build isn't signed by Apple, so the first launch is blocked. Open Silo once, then go to <strong>System Settings → Privacy &amp; Security</strong>, scroll down and click <strong>Open Anyway</strong>.</li>
+</ol>
+
+<h3>Installing on Linux (preview)</h3>
+
+<ul>
+<li><strong>AppImage:</strong> make it executable (<code>chmod +x Silo_*.AppImage</code>) and run it.</li>
+<li><strong>Debian / Ubuntu:</strong> <code>sudo apt install ./Silo_*.deb</code></li>
+<li><strong>Fedora / openSUSE:</strong> install the <code>.rpm</code> with your package manager, for example <code>sudo dnf install ./Silo-*.rpm</code>.</li>
+</ul>
 
 <h3>What happens on first run</h3>
 
@@ -167,7 +182,7 @@
 
 <h3>Your files stay safe</h3>
 
-<p>Silo is built so it never changes your original mod files destructively. On first run it only reads and catalogs — it moves nothing until you ask. When you do organize or activate mods, Silo projects them into the game's <code>mods/</code> folder using links (hardlinks or junctions), so there's no duplication and your originals are untouched. The <strong>Restore vanilla layout</strong> button in Settings puts your mods folder back at any time, and your mods are never deleted.</p>
+<p>Silo is built so it never changes your original mod files destructively. On first run it only reads and catalogs. It moves nothing until you ask. When you organize or activate mods, Silo links them into the game's <code>mods/</code> folder (hardlinks for <code>.zip</code> mods, junctions or symlinks for folder mods), so there's no duplication and your originals are untouched. The <strong>Restore vanilla layout</strong> button in Settings puts every mod back in your mods folder at any time. Your mods are never deleted, but after a restore the game loads all of them again, including the ones you had parked.</p>
 
 <blockquote class="note"><strong>If your <code>Documents</code> folder is synced by a cloud service</strong> — OneDrive, Google Drive, or Proton Drive — that service presents files as on-demand placeholders and won't allow hardlinks. Silo detects this on first run and shows a one-time notice: it will project your active mods as <strong>file copies</strong> instead of links. Everything still works and nothing is lost, but the active set uses extra disk and bulk activate/deactivate is slower. Excluding <code>…\My Games\FarmingSimulator2025</code> from your cloud sync lets Silo use hardlinks again — see <a href="#settings-accounts">Library layout &amp; maintenance</a>.</blockquote>
 
@@ -184,13 +199,13 @@
 
 <h3>Organize</h3>
 <p>Reach for <strong>Organize</strong> when your <code>mods/</code> folder is a flat pile and you want it sorted. It moves each loose <code>.zip</code> into <code>mods/archive/&lt;Category&gt;/</code> — subfolders the game deliberately ignores, since it only reads the flat root. (If you've <a href="#library-archive">moved your library archive</a>, they go into the category folders there instead.) Your active mods stay loaded; nothing is duplicated. You'll find the button in the top bar (<em>Organize N</em>, showing how many loose mods it found) and under <strong>Settings → Library layout</strong>.</p>
-<p>Before it touches a file, Organize shows a read-only <strong>dry run</strong>: a preview grouped by destination category (for example "12 into Vehicles, 3 into Maps"), each file with its exact <code>archive/&lt;Category&gt;/…</code> target. Nothing has moved yet — you confirm with the <em>Organize N mods</em> button or <strong>Cancel</strong>. Power users can tick <em>Don't preview next time</em>, or turn on <strong>Auto-file new mods</strong> in Settings to file new downloads automatically.</p>
+<p>Before it touches a file, Organize shows a read-only <strong>dry run</strong>: a preview grouped by destination category (for example "12 into Vehicles, 3 into Maps"), each file with its exact <code>archive/&lt;Category&gt;/…</code> target. Nothing has moved yet — you confirm with the <em>Organize N mods</em> button or <strong>Cancel</strong>. Power users can tick <em>Don't preview next time</em>, or turn on <strong>Auto-file new mods</strong> in Settings to file new downloads automatically. Only Organize shows a preview. Auto-file (once you turn it on), activating or parking a mod, and adopting an update act straight away.</p>
 
-<h3>Projection at launch</h3>
-<p>Silo keeps the flat <code>mods/</code> folder holding exactly your active set by <strong>projecting</strong> the archived originals back into it — <code>.zip</code> mods as same-volume <strong>hardlinks</strong>, unpacked mod folders as directory symlinks/junctions. Hardlinks use no extra disk and need no admin rights or Developer Mode. (If your library archive is on another drive, Silo uses symlinks or copies instead — see <a href="#library-archive">Active mods across drives</a>.) When you hit <strong>▶ Launch</strong>, the game reads that folder and loads precisely the mods you marked active.</p>
+<h3>How active mods reach the game</h3>
+<p>Silo keeps the flat <code>mods/</code> folder holding exactly your active set by <strong>projecting</strong> the archived originals back into it: <code>.zip</code> mods as same-volume <strong>hardlinks</strong>, unpacked mod folders as directory links (a symlink, or on Windows without Developer Mode an NTFS <strong>junction</strong>). Hardlinks and junctions use no extra disk and need no admin rights or Developer Mode. (If your library archive is on another drive, Silo uses symlinks or copies instead. See <a href="#library-archive">Active mods across drives</a>.) The link changes the moment you switch a mod on or off. <strong>▶ Launch</strong> just starts the game, which reads that folder and loads the mods you marked active, however you start it.</p>
 <p>Where links aren't permitted — most commonly a <strong>cloud-synced</strong> <code>Documents</code> folder (OneDrive, Google Drive, Proton Drive), which blocks hardlinks — Silo falls back to <strong>copies</strong>. It works exactly the same, but each active mod's bytes are duplicated into the live folder, so activating a large set is slower and uses more disk. Silo records what it projected so it can still tell its own copy from a build you swapped in, and it warns you once when it detects a cloud folder. To get fast, no-duplication hardlink projection back, exclude the FS25 folder from your cloud sync.</p>
 
-<blockquote class="note"><strong>It never destroys your originals.</strong> Moves are instant same-volume renames (or a safe copy-then-swap across volumes) — the original is never lost mid-operation. <strong>Restore vanilla layout</strong> (Settings, shown once anything is organized) puts your mods folder back: it drops Silo's projections, moves the archived files back into a plain flat <code>mods/</code>, and removes only empty archive folders. It never deletes a file it doesn't recognize, never removes the only copy of a mod, and won't touch a file you swapped in yourself — you're always one step from stock.</blockquote>
+<blockquote class="note"><strong>It never destroys your originals.</strong> Moves are instant same-volume renames, or a safe copy-then-swap across volumes, so the original is never lost mid-operation. <strong>Restore vanilla layout</strong> (Settings, shown once anything is organized) puts every mod back in your mods folder: it drops Silo's projections, moves the archived files back into a plain flat <code>mods/</code>, and removes only empty archive folders. Every mod you had parked loads again after that. It never deletes a file it doesn't recognize, never removes the only copy of a mod, and won't touch a file you swapped in yourself. A copied folder mod you edited is moved to <code>backups/</code> instead of being deleted. The <code>backups/</code> folder itself stays where it is.</blockquote>
 </section>
 
 <section id="mods-folder"><h2 id="mods-folder-h">Choosing your mods folder</h2>
@@ -323,20 +338,26 @@
 <section id="collections"><h2 id="collections-h">Collections</h2>
 <p>A <strong>collection</strong> is a mod-set you share as a <em>link</em>. Where a loadout lives on your machine (or travels as a <code>.silo</code> file you hand over), a collection is published to the web so anyone can open it, preview exactly what's in it, and import it into their own library. It's the way to say "here's my co-op pack" or "the mods this server runs" and have someone reproduce it. Like loadouts, a collection stores the <em>list</em> of mods — never the mod files — so publishing one shares names and versions, not copyrighted archives.</p>
 
-<p>Click <strong>Collections</strong> in the top bar to open the panel. Sharing publishes through your GitHub account, so it needs GitHub connected with actions enabled (<code>public_repo</code>); the panel shows an <strong>Enable collection sharing</strong> prompt if it isn't yet. Opening and importing someone else's link needs nothing.</p>
+<p>Click <strong>Collections</strong> in the top bar to open the panel. Sharing publishes through your own GitHub account, so it needs GitHub connected with the right permission:</p>
+<ul>
+<li>A <strong>private</strong> (secret gist) collection needs <strong>Enable collection sharing</strong> in Settings → GitHub, which grants the <code>gist</code> permission.</li>
+<li>A <strong>public</strong> (repo) collection needs <strong>Enable actions</strong>, which grants <code>public_repo</code>.</li>
+</ul>
+<p>The panel tells you which one is missing. Opening and importing someone else's link needs no GitHub account.</p>
 
 <h3>Sharing a set as a link</h3>
 <p>Under <strong>Share as a link</strong>, publish your current active set as one of two kinds:</p>
 <ul>
-<li><strong>Private — secret gist</strong> — an unlisted GitHub gist. Anyone with the link can open it, but it isn't discoverable or forkable. Good for sending to friends.</li>
-<li><strong>Public — forkable repo</strong> — a public GitHub repository others can browse and fork. Good for a set you want to publish openly.</li>
+<li><strong>Private — secret gist</strong>: an unlisted GitHub gist. It isn't listed or searchable, but it isn't password-protected either. Anyone who has the link can open it. Share it only with your group.</li>
+<li><strong>Public — forkable repo</strong>: a public GitHub repository anyone can find, browse and fork. Good for a set you want to publish openly.</li>
 </ul>
-<p>Give it a name, publish, and use <strong>Copy link</strong> to share the URL. Your published collections are listed under <strong>Your collections</strong>, each tagged <em>Secret</em> or <em>Public</em>, with links to the gist/repo page.</p>
+<p>Give it a name, publish, and use <strong>Copy link</strong> to share the URL. A collection contains its name, your GitHub username, an optional description and the mod list (tech names, versions, sources and a hash of the build you have of each). Your published collections are listed under <strong>Your collections</strong>, each tagged <em>Secret</em> or <em>Public</em>, with links to the gist or repo page. <strong>Delete</strong> removes a secret gist from inside Silo; a public repo you delete on GitHub.</p>
 
 <h3>Opening a shared link</h3>
-<p>Paste a collection URL into <strong>Open a shared link</strong>. Silo fetches it and shows a <strong>preview</strong> before anything happens: the collection's name, author, description, and full mod list. Crucially, it cross-checks the list against what you already have and shows a <strong>Heads-up</strong> — any conflicts among the set, and any mods it names that you don't own yet (<em>needs … — not in the collection or your library</em>). Importing brings the set in as a new entry; you still need the actual mods in your library for each one to activate, so the heads-up tells you what to go install first.</p>
+<p>Paste a collection URL into <strong>Open a shared link</strong>. Silo fetches it and shows a <strong>preview</strong> before anything happens: the collection's name, author, description and full mod list, sorted into what Silo can install, what you need to get yourself (ModHub mods), version differences, mods that aren't in the catalog, and what you already have. A <strong>Heads-up</strong> lists any conflicts with the mods you already have and any dependencies nobody provides.</p>
+<p><strong>Import collection →</strong> saves the whole set as a loadout and downloads the mods Silo can install directly (GitHub releases), checking each download against the build the sharer pinned when the collection includes one. ModHub mods are listed in the loadout so you can get them from ModHub. Downloaded mods land in your mods folder like any other new download, so the game loads them. The rest of your active set doesn't change until you apply the loadout from the Loadouts panel.</p>
 
-<blockquote class="note">Collections never publish or import mod files, and importing one never changes your active set on its own — it's a list you choose to act on. Publishing uses your own GitHub account; you can delete a published gist or repo from GitHub at any time.</blockquote>
+<blockquote class="note">Publishing shares the list only, never mod files. Importing adds new <code>.zip</code> files to your mods folder and saves a loadout. It never removes or replaces a mod you already have.</blockquote>
 </section>
 
 <section id="health"><h2 id="health-h">Library health</h2>
@@ -344,10 +365,10 @@
 
 <h3>Opening it</h3>
 <p>In the status bar along the bottom, find the <strong>need attention</strong> button. The number on it is the total count of health issues; the button is highlighted whenever that count is above zero. Click it to open the <strong>Library health</strong> panel. If nothing is wrong you will see <em>"Everything looks healthy — no problems found."</em> Click the backdrop to close the panel.</p>
-<p>The panel is read-only. It only inspects and reports — it never moves, renames, deletes, or rewrites any file — so opening it and reading it is completely safe and there is nothing to undo. Fixing what it finds is always a separate, deliberate action you take yourself.</p>
+<p>Opening and reading the panel changes nothing. The only buttons that touch files are the <strong>Keep</strong> choices in the <em>Foreign files</em> section, which move one build to <code>backups/</code> when you click them. Everything else it finds you fix yourself.</p>
 
 <h3>What it reports</h3>
-<p>Issues are grouped into up to three sections, each with a count:</p>
+<p>Issues are grouped into up to four sections, each with a count:</p>
 <ul>
 <li><strong>Missing dependencies</strong> — a mod's <code>modDesc.xml</code> declares another mod it depends on, and that mod is not present anywhere in your library. Each row names the mod and the dependency it <em>needs</em>, marked <em>not in your library</em>. To fix, add the required mod (for example via the <strong>Browse</strong> tab's in-app install, or by dropping it into your library) and rescan. Note this checks whether the dependency <em>exists</em> in the library, not whether it is currently active.</li>
 <li><strong>Ignored by the game — name starts with a digit</strong> — Farming Simulator silently refuses to load any mod whose folder or file name begins with a number, so the mod appears installed but never runs. Each row shows the offending name. To fix, rename the mod so it starts with a letter.</li>
@@ -363,11 +384,11 @@
 
 <section id="browsing-installing"><h2 id="browsing-installing-h">Browsing &amp; installing mods</h2>
 
-<p>The <strong>Browse</strong> tab is where you find new mods without leaving Silo. It reads the SiloAPI catalog, a single index that merges the same mod across <strong>GitHub</strong> and <strong>ModHub</strong>, so you see one card per mod instead of scattered listings. The header shows how many mods and sources the catalog currently holds.</p>
+<p>The <strong>Browse</strong> tab is where you find new mods without leaving Silo. It reads the SiloAPI catalog, a single index that merges the same mod across <strong>GitHub</strong> and <strong>ModHub</strong>, so you see one card per mod instead of scattered listings. The header shows how many mods the catalog holds and how many ModHub and GitHub listings they come from.</p>
 
 <h3>Finding a mod</h3>
 <ul>
-<li><strong>Search</strong> — type in the <em>Search the catalog by title</em> box. Results refresh as you type (after a short pause).</li>
+<li><strong>Search</strong> — type in the <em>Search the catalog…</em> box. Results refresh as you type (after a short pause).</li>
 <li><strong>Category</strong> — the <em>All categories</em> dropdown filters by mod category, with a count next to each.</li>
 <li><strong>Sort</strong> — order by Popular, Most downloaded, Top rated, Newest, or Name (A–Z).</li>
 <li><strong>More results</strong> — the grid loads 60 at a time; use <em>Load more</em> at the bottom to page through.</li>
@@ -378,15 +399,15 @@
 <p>Each card carries one button per source the mod lives on — <code>GH</code>, <code>MH</code> — each labelled with <em>that source's own version</em>, because those versions drift apart. A download arrow (⬇) means Silo can install it for you; an up-right arrow (↗) means the button opens the source's page instead.</p>
 
 <h3>Installing from GitHub, in-app</h3>
-<p>GitHub release mods are directly installable. Click the GitHub button (or <strong>Install ⬇</strong> in the detail drawer) and Silo downloads the <code>.zip</code> straight into your mods folder, showing a live progress bar with the megabytes transferred. When it finishes you'll see <em>Installed …</em> and the library rescans automatically. You do not need to connect a GitHub account just to install — connecting is only for Star/Watch actions.</p>
+<p>GitHub release mods are directly installable. Click the GitHub button (or <strong>Install ⬇</strong> in the detail drawer) and Silo downloads the <code>.zip</code> straight into your mods folder, showing a live progress bar with the megabytes transferred. When it finishes you'll see <em>Installed …</em> and the library rescans automatically. When the catalog has the published build on file, Silo checks the download against it and refuses a file that doesn't match. You don't need to connect a GitHub account to install.</p>
 
-<blockquote class="note">Installing only adds a new <code>.zip</code> to your mods folder; it never edits or removes anything you already have. To undo an install, remove that mod from your library like any other.</blockquote>
+<blockquote class="note">Installing only adds a new <code>.zip</code> to your mods folder. It never edits or removes anything you already have, and it won't replace a file that's already there. To undo an install, delete the <code>.zip</code> from your mods folder (or from its archive folder if Silo filed it), then rescan.</blockquote>
 
 <h3>ModHub is index-only</h3>
 <p>Silo can list ModHub mods but doesn't download them for you. ModHub mods download from GIANTS' website, so the button reads <strong>Open page ↗</strong> and takes you to the source. Grab the <code>.zip</code> there, drop it in your mods folder, and Silo files a new mod automatically on the next scan. If you're <em>updating</em> a mod you already manage — dropping the newer <code>.zip</code> over Silo's copy — Silo notices the newer build and offers to adopt it; see <a href="#updates">Applying an update</a>.</p>
 
 <h3>The detail drawer</h3>
-<p>Click <strong>anywhere on a card</strong> to open a side drawer with the cover image, author, version, category, tech name, rating and downloads, and the full <em>Available from</em> source list. For a GitHub source it also shows live repo stats (stars, forks, watchers, issues) and, once you connect GitHub, Star and Watch buttons. Use <em>Read more →</em> to expand the full description.</p>
+<p>Click <strong>anywhere on a card</strong> to open a side drawer with the cover image, author, version, category, tech name, rating and downloads, and the full <em>Available from</em> source list. For a GitHub source it also shows live repo stats (stars, forks, watchers, issues) and, once you connect GitHub and turn on <strong>Enable actions</strong>, Star and Watch buttons. Use <em>Read more →</em> to expand the full description.</p>
 <p>The drawer is <strong>non-modal</strong>: the grid behind it stays live, so you can click another card to switch the drawer straight to that mod without closing it first. Close with the <code>✕</code> or the <strong>Escape</strong> key. If a mod is already in your library, its card and drawer offer <strong>⌕ Find in Library</strong>, which jumps to it on the Library tab (with its drawer open) — the mirror of the library's <strong>Find in Browse</strong> link, which goes the other way.</p>
 
 <h3>Browsing without the app</h3>
@@ -404,7 +425,7 @@
 <p>Two things happen behind the scenes:</p>
 
 <ol>
-<li>One request sends your whole library to the SiloAPI catalog, which answers with the latest version per mod across GitHub and ModHub.</li>
+<li>One request sends the tech names of your installed mods to the SiloAPI catalog, which answers with the latest version per mod across GitHub and ModHub. Silo compares that with your versions on your machine.</li>
 <li>Any mods you have personally linked to a GitHub repo are then checked directly, and that result takes precedence for those mods — your chosen source wins.</li>
 </ol>
 
@@ -426,9 +447,9 @@
 
 <h3>Applying an update</h3>
 
-<p>Where a downloadable asset exists, click <strong>Install</strong> in the Updates panel (or <strong>Download &amp; install</strong> in the drawer). Silo downloads the new archive, verifies it is a valid, complete <code>.zip</code>, backs up your current file, and only then writes the new version in place. Afterward it rescans so your library reflects the new version.</p>
+<p>Where a downloadable asset exists, click <strong>Install</strong> in the Updates panel (or <strong>Download &amp; install</strong> in the drawer). Silo downloads the new version next to the old one, checks that it's a complete mod archive, swaps it in, and keeps the previous version in <code>backups/</code> (the newest three per mod). Afterward it rescans so your library reflects the new version.</p>
 
-<blockquote class="note">Safety: Silo will not overwrite your file until the download is validated and a backup is made. If the write fails partway, it restores the original from that backup, so you're never left with a broken mod. Mods indexed as open-page only (typical for ModHub) have no direct-download asset — for those, update by drop-in, below.</blockquote>
+<blockquote class="note">Safety: if Silo stops mid-update, it finishes or rolls back the swap on the next scan and tells you what it did. Silo won't update a mod while Farming Simulator 25 is running, and it asks before you quit while it's still changing files. Updates download only from GitHub. Mods indexed as open-page only (typical for ModHub) have no direct-download asset. For those, update by drop-in, below.</blockquote>
 
 <h3>Updating a ModHub mod (drop-in)</h3>
 <p>ModHub doesn't allow direct download, so you update those the manual way: on the mod's page, download the new <code>.zip</code> and save it into your <code>mods/</code> folder, replacing the file that's there. Silo sees that the file no longer matches its managed copy and, rather than silently trusting or discarding it, surfaces it as something to reconcile.</p>
@@ -458,10 +479,12 @@
 <li><strong>Unverified</strong> — there's no hashed canonical build to compare against yet, so no conclusion can be drawn either way. You'll see why: the mod isn't in the catalog, or there's no hashed build for this exact version yet.</li>
 </ul>
 
-<p>After a Modified or Unverified result you can click <strong>Re-check</strong> to run it again. Verified and Modified verdicts also surface as a small badge on the mod's row so you can see them at a glance.</p>
+<p>After a Modified or Unverified result you can click <strong>Re-check</strong> to run it again. Verified and Modified verdicts also show as a small badge on the mod's row until you close Silo.</p>
 
-<h3>Coverage grows over time</h3>
-<p>Coverage is popular-first and GitHub-first, and it expands continually. Canonical builds are hashed from source, so mods distributed that way are covered first; others may report <strong>Unverified</strong> until a hashed build exists. An <strong>Unverified</strong> result is never a mark against a mod — it only means Silo has nothing trusted to compare it to yet.</p>
+<p>The hashing and the comparison happen on your computer. To fetch the published build's file list, Silo sends the catalog only the mod's tech name and version.</p>
+
+<h3>What it can check</h3>
+<p>Silo can check mods from GitHub, and ModHub mods whose build the catalog has already hashed. New hashed builds currently come from GitHub releases only, so a new ModHub version usually shows <strong>Unverified</strong>. An <strong>Unverified</strong> result is never a mark against a mod. It only means Silo has nothing on file to compare it to.</p>
 </section>
 
 <section id="conflicts"><h2 id="conflicts-h">Conflict detection</h2>
@@ -487,12 +510,12 @@
 <li>In the library, click the status toggle on the other mod's row to <strong>park</strong> it (an active mod reads <code>● Active — click to park</code>).</li>
 <li>Silo re-checks the active set automatically after any change, so the count updates on its own — no rescan needed.</li>
 </ol>
-<blockquote class="note">Parking never deletes a mod. It only removes the mod from the set Silo will project into the game's <code>mods/</code> folder at launch; the mod stays in your library, and one click reactivates it.</blockquote>
+<blockquote class="note">Parking never deletes a mod. It removes the mod's link from the game's <code>mods/</code> folder right away. The mod stays in your library, and one click reactivates it.</blockquote>
 </section>
 
 <section id="crash-triage"><h2 id="crash-triage-h">Crash &amp; log triage</h2>
 
-<p>When Farming Simulator 25 crashes or misbehaves, it leaves an explanation in a file called <code>log.txt</code> — but that file is thousands of lines of engine chatter, and most of it is harmless. Silo's <strong>diagnose</strong> feature reads that log for you, tells you whether the last run actually crashed, and ranks the mods that logged errors right before it stopped, so you can see the likely culprit. It separates the real breakage from the cosmetic noise that scares people for no reason.</p>
+<p>When Farming Simulator 25 crashes or misbehaves, it leaves an explanation in a file called <code>log.txt</code> — but that file is thousands of lines of engine chatter, and most of it is harmless. Silo's <strong>diagnose</strong> feature reads that log for you, tells you whether the last run actually crashed, and ranks the mods by the errors they logged during that run, most errors first, so you can see the likely culprit. It separates the real breakage from the cosmetic noise that scares people for no reason.</p>
 
 <p>The usual community advice is to manually disable half your mods and relaunch over and over. Silo starts by simply reading the name the engine already wrote next to each error.</p>
 
@@ -547,7 +570,7 @@
 <p>It ends one of two ways. <strong>Most likely culprit</strong> names a single mod — disable or update it, or report the pairing to its author if it only breaks alongside another mod. <strong>No single mod is at fault</strong> means every half came back clean, so the problem is a combination (or isn't mod-related). Silo reports this honestly rather than blaming an innocent mod.</p>
 
 <h3>Safety and reversibility</h3>
-<blockquote class="note">Bisection is crash-safe. Before it changes anything, Silo snapshots your exact active set. It's restored automatically when you reach a result, when you press <strong>Restore my mods &amp; finish</strong>, or when you cancel with the <strong>✕</strong> (Cancel &amp; restore). Maps and required mods stay on every round so your save still loads. If the app closes mid-run, the next time you open Silo a banner offers <strong>Restore my mod set</strong> — your originals are never lost.</blockquote>
+<blockquote class="note">Bisection is crash-safe. Before it changes anything, Silo snapshots your exact active set. It's restored automatically when you reach a result, when you press <strong>Restore my mods &amp; finish</strong>, or when you cancel with the <strong>✕</strong> (Cancel &amp; restore). Only your maps stay on every round, so your save still loads. Silo doesn't keep a mod's dependencies switched on with it yet, so if a round fails because a required mod was off, treat that round's result with care. If the app closes mid-run, the next time you open Silo a banner offers <strong>Restore my mod set</strong> — your originals are never lost.</blockquote>
 </section>
 
 <section id="savegames"><h2 id="savegames-h">Savegame & settings editing</h2>
@@ -674,7 +697,7 @@
 
 <section id="settings-accounts"><h2 id="settings-accounts-h">Settings & accounts</h2>
 
-<p>Open the <strong>Settings</strong> panel from the gear icon (<code>⚙</code>) in the top bar. It slides out on the right and covers appearance, your detected folders, account connections, diagnostics, and library layout. Nothing here changes your game files until you press a specific button, and the library-layout actions are previewed or confirmed first.</p>
+<p>Open the <strong>Settings</strong> panel from the gear icon (<code>⚙</code>) in the top bar. It slides out on the right and covers appearance, your detected folders, account connections, diagnostics, and library layout. Nothing here changes your game files until you press a specific button. Organize shows a preview first, and Restore vanilla layout asks you to confirm.</p>
 
 <h3>Appearance</h3>
 <p>Under <strong>Appearance</strong>, pick <strong>system</strong>, <strong>light</strong>, or <strong>dark</strong>. <em>System</em> follows your OS theme; the other two force that look. Your choice is saved and reapplied on the next launch.</p>
@@ -686,7 +709,7 @@
 <p><strong>Export report ↗</strong> writes a shareable Markdown file (<code>silo-report.md</code>) summarizing your environment, library counts by category, active set, detected conflicts, and health issues. Reach for it when asking for help or comparing setups. It only reads your library and saves a text file — it changes nothing.</p>
 
 <h3>Auto-file new mods</h3>
-<p>This toggle is <strong>off</strong> by default. When on, Silo moves newly-downloaded <code>.zip</code> mods into your library on load and keeps them active, so you skip the manual Organize step. Leave it off if you prefer to review new downloads first. The setting is remembered between sessions.</p>
+<p>This toggle is <strong>off</strong> by default. When on, Silo moves newly-downloaded <code>.zip</code> mods into your library after each scan and keeps them active, so you skip the manual Organize step. It files them without a preview. Leave it off if you prefer to review new downloads first. The setting is remembered between sessions.</p>
 
 <h3>Library layout &amp; maintenance</h3>
 <p>Under <strong>Library layout</strong>:</p>
@@ -694,12 +717,18 @@
 <li><strong>Organize</strong> sorts your <code>.zip</code> mods into <code>mods/archive/&lt;Category&gt;/</code> subfolders (which the game ignores), or into your library archive if you moved it, and projects the active set back via hardlinks — no duplication, with a preview first.</li>
 <li><strong>↻ Rebuild categories</strong> re-scans every mod from scratch. Use it after a Silo update improves categorization so existing mods pick up the better categories.</li>
 <li><strong>⛓ Optimize links</strong> appears when mods are organized on a normal (non-cloud) drive. It collapses any active mod that ended up projected as a full copy back into a hardlink — reclaiming the duplicated disk and making activate/deactivate faster. It only touches files byte-identical to the archived copy, never a build you swapped in. On a cloud-synced folder this is replaced by a short note explaining that copies are used because the drive can't do hardlinks. If your library archive is on another drive and Windows can't link across drives (no Developer Mode), it says so and changes nothing.</li>
-<li><strong>Restore vanilla layout</strong> appears only when mods are organized. It moves every mod back out of <code>archive/</code> and removes all links, returning you to a plain flat <code>mods/</code> folder. You'll confirm first.</li>
+<li><strong>Restore vanilla layout</strong> appears only when mods are organized. It moves every mod back out of <code>archive/</code> and removes all links, returning you to a plain flat <code>mods/</code> folder. You'll confirm first. Afterwards the game loads every mod in that folder, including the ones you had parked.</li>
 </ul>
-<blockquote class="note">Restore vanilla does <strong>not</strong> delete any mods — it only undoes Silo's organization. If some files can't be moved, Silo reports the errors rather than leaving things half-done.</blockquote>
+<blockquote class="note">Restore vanilla does <strong>not</strong> delete any mods. It only undoes Silo's organization. A copied folder mod you edited is moved to <code>backups/</code> instead of being deleted. If some files can't be moved, Silo reports the errors rather than leaving things half-done.</blockquote>
 
 <h3>Connecting GitHub</h3>
-<p>Under <strong>GitHub account</strong>, press <strong>Connect GitHub</strong>. A browser opens to <strong>github.com/login/device</strong>; enter the code Silo shows and authorize. Connecting gives faster update checks (5,000 requests/hour), access to private repos, and lets you publish <a href="#collections">collections</a>; in-app GitHub installs from the Browse tab work without it. By default the connection is read-only; use <strong>Enable actions</strong> to grant the <code>public_repo</code> scope so <em>Star</em> and <em>Watch</em> land on your account. You can <strong>Disconnect</strong> anytime, or use a Personal Access Token instead via the token option.</p>
+<p>Under <strong>GitHub account</strong>, press <strong>Connect GitHub</strong>. A browser opens to <strong>github.com/login/device</strong>; enter the code Silo shows and authorize. Silo asks GitHub only for the permissions a feature needs:</p>
+<ul>
+<li><strong>Connect GitHub</strong> grants <code>read:user</code> (your username). That gives faster update checks (5,000 requests per hour instead of 60).</li>
+<li><strong>Enable actions</strong> adds <code>public_repo</code>, so <em>Star</em> and <em>Watch</em> land on your account and you can publish a public collection.</li>
+<li><strong>Enable collection sharing</strong> adds <code>gist</code>, so you can publish a private (secret gist) <a href="#collections">collection</a>.</li>
+</ul>
+<p>In-app GitHub installs from the Browse tab work without connecting. You can <strong>Disconnect</strong> anytime, or use a Personal Access Token instead via the token option.</p>
 
 
 <p>The panel footer shows your installed Silo version.</p>
@@ -710,10 +739,10 @@
 <p><strong>Still stuck?</strong> Ask in <a href="https://github.com/HLLMR/silo/discussions/categories/help" rel="noopener">Silo Discussions</a>. Include your Silo version (bottom of Settings), the file from <strong>Settings &rarr; Export report</strong>, and for a crash your FS25 <code>log.txt</code>. Confirmed bugs go to <a href="https://github.com/HLLMR/silo/issues/new/choose" rel="noopener">GitHub issues</a>.</p>
 
 <h3>Windows SmartScreen (or macOS Gatekeeper) warns on first launch</h3>
-<p>Silo's <strong>Windows</strong> installer is digitally signed by a verified publisher (<strong>David Hellmer</strong>), so Windows can identify who published it. SmartScreen builds reputation per release, so a brand-new build may still prompt — but it shows the verified publisher, not "unknown," and eases over time. macOS and Linux builds are open source and OS-unsigned, so Gatekeeper may not recognize the publisher yet. Neither is a sign anything is wrong.</p>
+<p>Silo's <strong>Windows</strong> installers are digitally signed by Silo's developer, <strong>David Hellmer</strong>, so Windows can identify who published them. SmartScreen builds reputation per release, so a brand-new build may still prompt. When it does, it shows that publisher instead of "unknown". macOS and Linux builds are open source and not signed with an OS certificate, so Gatekeeper blocks the first launch on a Mac.</p>
 <ul>
 <li><strong>Windows:</strong> click <strong>More info</strong>, then <strong>Run anyway</strong>.</li>
-<li><strong>macOS:</strong> right-click the app and choose <strong>Open</strong> from the menu.</li>
+<li><strong>macOS:</strong> open Silo once, then go to <strong>System Settings → Privacy &amp; Security</strong> and click <strong>Open Anyway</strong>.</li>
 </ul>
 <p>You don't have to take our word for it — you can <a href="https://github.com/HLLMR/silo/blob/main/docs/VERIFY_DOWNLOAD.md">verify the signature, checksum, and build provenance</a>, or read and build the source yourself from the GitHub repository.</p>
 
@@ -721,22 +750,22 @@
 <p>Almost never. When you organize your library, Silo tucks each mod into a <code>mods/archive/&lt;Category&gt;/</code> subfolder (the game only reads the flat root, so it ignores these) and projects the active set back into the root:</p>
 <ul>
 <li><strong>Packed <code>.zip</code> mods project as hardlinks</strong> — same volume, no admin, no Developer Mode, and no second copy on disk.</li>
-<li><strong>Only unpacked folder-mods</strong> use a directory junction/symlink, and if that isn't available Silo falls back to a plain copy.</li>
+<li><strong>Only unpacked folder-mods</strong> use a directory link. On Windows that's a junction, which needs no admin rights. If no link is possible, Silo falls back to a plain copy.</li>
 </ul>
 <p>Since most mods are zips, most people never hit an elevation prompt. The one exception is a <a href="#library-archive">library archive on another drive</a>: hardlinks can't cross drives, so Silo would need file symlinks, which on Windows require Developer Mode. Without it, active mods are copied instead — that works, it just uses more disk.</p>
 
 <h3>Is my library safe? Can I undo this?</h3>
-<p>Yes. Every move is previewed first. Open <strong>Settings</strong> and use <strong>Restore vanilla layout</strong> to move every mod back into a plain flat <code>mods/</code> folder and clear Silo's bookkeeping.</p>
+<p>Yes. Organize shows you every move before it touches a file. To undo it all, open <strong>Settings</strong> and use <strong>Restore vanilla layout</strong> to move every mod back into a plain flat <code>mods/</code> folder and clear Silo's bookkeeping. The game then loads every mod in that folder, including the ones you had parked. Mod updates keep the previous version in <code>backups/</code>.</p>
 <blockquote class="note">Silo never deletes a file it doesn't recognize and never removes the only copy of a mod. If you swap your own build into the mods folder, Silo detects that it isn't the file it projected and leaves it untouched. Config edits are backed up to a <code>.bak</code> first.</blockquote>
 
 <h3>Where does Silo store its data?</h3>
-<p>Your mods stay in your game's mods folder — Silo only rearranges them — or in your library archive, if you moved it to another folder or drive. Silo's own database (<code>silo.db</code>: the library index and cache) lives in the app's per-user data directory. Any account tokens go into your OS credential store (Windows Credential Manager, macOS Keychain, Linux Secret Service), not in plain text.</p>
+<p>Your mods stay in your game's mods folder — Silo only rearranges them — or in your library archive, if you moved it to another folder or drive. Silo's own database (<code>silo.db</code>: the library index and cache) lives in the app's per-user data directory. Any account tokens go into your OS credential store (Windows Credential Manager, macOS Keychain, Linux Secret Service). On a Linux system without a keyring, Silo stores the token in its own database instead.</p>
 
 <h3>Why does a mod show "Unverified"?</h3>
-<p>The <strong>Integrity</strong> check in a mod's detail drawer compares your file against the trusted build SiloAPI hashed from its source. <strong>Unverified</strong> means there's no trusted build to compare against yet — usually because that mod isn't in the catalog. It is not a warning about the mod. Folder mods can't be verified at all (there's no archive to hash). This is a provenance check, not a virus scan.</p>
+<p>The <strong>Integrity</strong> check in a mod's detail drawer compares your file against the trusted build SiloAPI hashed from its source. <strong>Unverified</strong> means there's no hashed build to compare against: the mod isn't in the catalog, or the catalog hasn't hashed that version (new ModHub versions currently aren't hashed). It is not a warning about the mod. Folder mods can't be verified at all (there's no archive to hash). This is a provenance check, not a virus scan.</p>
 
 <h3>Connecting a GitHub account</h3>
-<p>Connecting GitHub is optional and lives in <strong>Settings → GitHub account → Connect GitHub</strong>: a browser opens to <code>github.com/login/device</code>; type in the code shown. This raises update-check limits to 5,000/hr, enables Star/Watch on mod pages, and lets you publish <a href="#collections">collections</a>. The token stays on your machine, and a <strong>Disconnect</strong> button removes it at any time.</p>
+<p>Connecting GitHub is optional and lives in <strong>Settings → GitHub account → Connect GitHub</strong>: a browser opens to <code>github.com/login/device</code>; type in the code shown. This raises update-check limits to 5,000 requests per hour. Star/Watch and publishing <a href="#collections">collections</a> each need one more permission, which Silo asks for when you turn them on (see <a href="#settings-accounts">Connecting GitHub</a>). Silo never asks for access to private repositories. The token stays on your machine, and a <strong>Disconnect</strong> button removes it at any time.</p>
 </section>
     </main>
   </div>

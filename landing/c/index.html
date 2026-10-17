@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Open a mod collection — Silo</title>
 <script src="/nav.js"></script>
-<meta name="description" content="Someone shared a Farming Simulator 25 mod collection with you. Open it in Silo to install and verify the exact set — or get Silo first." />
+<meta name="description" content="Someone shared a Farming Simulator 25 mod collection with you. Open it in Silo to preview it against your library and import it, or get Silo first." />
 <meta property="og:title" content="A shared FS25 mod collection — Silo" />
-<meta property="og:description" content="Open this Farming Simulator 25 mod collection in Silo to install and verify the exact set." />
+<meta property="og:description" content="Open this Farming Simulator 25 mod collection in Silo to preview it and import it." />
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="Silo" />
 <meta property="og:image" content="https://silo.hllmr.com/og.png" />
@@ -207,10 +207,13 @@
         <p class="hint" id="openHint"></p>
 
         <div class="note">
-          <b>What happens when you open it:</b> Silo shows what you already have, installs the
-          rest where it can, and verifies each mod against the exact build the sharer pinned —
-          before anything is added. No mod files are transferred through this page; it's just
-          the list. <a id="ghLink" href="#" target="_blank" rel="noopener">View the source on GitHub</a>.
+          <b>What happens when you open it:</b> Silo shows a preview first: what you already have,
+          what it can install, and what you need to get from ModHub yourself. When you import, it
+          downloads the mods it can install directly (GitHub releases), checks each download against
+          the build the sharer pinned when the collection includes one, and saves the set as a
+          loadout. Downloaded mods land in your mods folder like any new download; the rest of your
+          active set changes only when you apply that loadout. No mod files are
+          transferred through this page; it's just the list. <a id="ghLink" href="#" target="_blank" rel="noopener">View the source on GitHub</a>.
         </div>
       </div>
     </div>
