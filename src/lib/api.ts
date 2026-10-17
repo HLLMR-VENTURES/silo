@@ -95,6 +95,8 @@ export interface ModsRootStatus {
   canWriteGameSetting: boolean;
   gameSettingProblem: string | null;
   unresolvedOverride: string | null;
+  /** Why Silo won't change files in this folder (it shares files with another layout's archive). */
+  layoutProblem: string | null;
 }
 
 export function modsRootStatus(): Promise<ModsRootStatus> {

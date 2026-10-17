@@ -1477,7 +1477,8 @@
     const prev = roots[0] ?? null;
     modsStatus = st;
     await refreshArchive(); // the archive belongs to the mods folder
-    roots = st.available && st.path ? [st.path] : [];
+    // A blocked folder (it shares files with another layout) isn't scanned or written.
+    roots = st.available && st.path && !st.layoutProblem ? [st.path] : [];
     if ((roots[0] ?? null) === prev) return;
     result = null;
     mods = [];
@@ -2546,6 +2547,15 @@
       <button class="cn-act" onclick={retryModsFolder}>Retry</button>
       <button class="cn-act" onclick={changeModsFolder}>Choose another</button>
       <button class="cn-act" onclick={useGameFolder}>Use the game's folder</button>
+    </div>
+  {:else if modsStatus?.layoutProblem}
+    <div class="cloud-notice">
+      <span class="cn-ico">⚠</span>
+      <div class="cn-text">
+        <b>Silo won't change files in this mods folder:</b>
+        <span class="tnum">{modsStatus.path}</span>. {modsStatus.layoutProblem}
+      </div>
+      <button class="cn-act" onclick={changeModsFolder}>Choose another</button>
     </div>
   {:else if modsStatus?.modsFolderMissing}
     <div class="cloud-notice">

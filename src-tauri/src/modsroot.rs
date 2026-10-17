@@ -113,6 +113,33 @@ pub fn active() -> Option<Active> {
     ACTIVE.read().ok().and_then(|g| g.clone())
 }
 
+/// The folder FS25 reads (its override, or the default), as last resolved.
+static GAME_READS: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// Why the resolved mods folder has no writable layout (it shares files with another
+/// layout), as last resolved. `None` when nothing blocks it.
+static BLOCKED: RwLock<Option<String>> = RwLock::new(None);
+
+pub fn set_game_reads(p: Option<PathBuf>) {
+    if let Ok(mut g) = GAME_READS.write() {
+        *g = p;
+    }
+}
+
+pub fn game_reads() -> Option<PathBuf> {
+    GAME_READS.read().ok().and_then(|g| g.clone())
+}
+
+pub fn set_blocked(why: Option<String>) {
+    if let Ok(mut g) = BLOCKED.write() {
+        *g = why;
+    }
+}
+
+pub fn blocked() -> Option<String> {
+    BLOCKED.read().ok().and_then(|g| g.clone())
+}
+
 /// The known-folders list stored as a JSON array of path strings.
 pub fn parse_known(json: Option<&str>) -> Vec<String> {
     json.and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())

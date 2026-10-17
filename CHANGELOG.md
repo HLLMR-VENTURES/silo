@@ -61,8 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A mods folder can't share files with an archive.** Silo refuses a mods folder that is another
   mods folder's archive, sits inside one (a category folder), holds one, or whose own archive
-  would be one. Before, two layouts could share files and organizing one moved the other's mods.
-  (#PR)
+  would be one. The folder Farming Simulator's own setting points at counts too: if it shares files
+  with an archive, Silo says why and won't change files there until you choose another folder.
+  Before, two layouts could share files and organizing one moved the other's mods. (#PR)
 
 - **Optimize links handles an archive on a network share.** A drive Silo can't identify now
   counts as another drive everywhere, so Optimize links no longer tries a hardlink for each mod and
