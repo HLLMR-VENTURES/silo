@@ -219,7 +219,15 @@ fn check_once(db_path: &Path) {
         return;
     }
     checked.push(db_path.to_path_buf());
-    if !db_path.is_file() || !is_damaged(db_path) {
+    if !db_path.is_file() {
+        return;
+    }
+    // A newer Silo's file may use schema this SQLite can't parse, which reads as "malformed".
+    // That's not damage: leave it for `open` to refuse untouched.
+    if stamped_version(db_path).is_some_and(|v| v > SCHEMA_VERSION) {
+        return;
+    }
+    if !is_damaged(db_path) {
         return;
     }
     crate::notices::push(match recover(db_path, &snapshot_dir(db_path)) {
@@ -238,8 +246,33 @@ fn is_corruption(e: &rusqlite::Error) -> bool {
     )
 }
 
+/// A read-only connection: it never writes, and never checkpoints a -wal into the main file.
+fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
+    Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+}
+
+/// The version stamped in the file, without parsing its schema: `PRAGMA user_version` on a
+/// read-only connection (which also sees a stamp still in the -wal), else the header's bytes
+/// 60-63.
+fn stamped_version(path: &Path) -> Option<i64> {
+    let from_sqlite = open_read_only(path)
+        .ok()
+        .and_then(|c| schema_version(&c).ok());
+    from_sqlite.or_else(|| {
+        use std::io::Read;
+        let mut header = [0u8; 64];
+        std::fs::File::open(path)
+            .and_then(|mut f| f.read_exact(&mut header))
+            .ok()?;
+        let version = i32::from_be_bytes([header[60], header[61], header[62], header[63]]);
+        header
+            .starts_with(b"SQLite format 3\0")
+            .then_some(i64::from(version))
+    })
+}
+
 fn is_damaged(path: &Path) -> bool {
-    let Ok(c) = Connection::open(path) else {
+    let Ok(c) = open_read_only(path) else {
         return false;
     };
     match c.query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0)) {
@@ -1420,6 +1453,54 @@ mod tests {
         damage(&path);
         drop(open(&path).unwrap());
         assert_eq!(set_aside(&path).len(), 2, "both damaged files are kept");
+    }
+
+    #[test]
+    fn a_newer_silos_database_is_refused_not_set_aside() {
+        // A newer Silo's schema this SQLite can't parse reads as "malformed" (SQLITE_CORRUPT).
+        let path = temp_db("newer_unparseable");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(&format!(
+                "CREATE TABLE t (x); PRAGMA user_version = {};",
+                SCHEMA_VERSION + 1
+            ))
+            .unwrap();
+            c.execute_batch(
+                "PRAGMA writable_schema = ON;
+                 INSERT INTO sqlite_master VALUES
+                     ('table', 'f', 'f', 0, 'CREATE TABLE f (x) WITH SOME FUTURE SYNTAX');
+                 PRAGMA writable_schema = OFF;",
+            )
+            .unwrap();
+        }
+        assert!(is_damaged(&path), "the fixture really reads as damaged");
+        let before = std::fs::read(&path).unwrap();
+        let err = open(&path).unwrap_err();
+        assert!(err.contains("newer version of Silo"), "{err}");
+        assert!(set_aside(&path).is_empty());
+        assert!(std::fs::read(&path).unwrap() == before, "not modified");
+    }
+
+    #[test]
+    fn the_damage_check_never_writes_the_wal_into_the_file() {
+        let path = temp_db("check_readonly");
+        drop(open(&path).unwrap());
+        {
+            let mut c = Connection::open(&path).unwrap();
+            c.set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                true,
+            )
+            .unwrap();
+            c.execute_batch("PRAGMA wal_autocheckpoint = 0;").unwrap();
+            save_loadout(&mut c, None, "In the WAL", &[]).unwrap();
+        }
+        assert!(wal_shm(&path)[0].is_file(), "the change sits in the -wal");
+        let before = std::fs::read(&path).unwrap();
+        forget_checked(&path);
+        assert!(!is_damaged(&path));
+        assert!(std::fs::read(&path).unwrap() == before, "no checkpoint");
     }
 
     #[test]
