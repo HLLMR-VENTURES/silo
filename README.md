@@ -68,7 +68,7 @@ is the management layer the game left out.
 - **Any mods folder** — follows FS25's own mods-folder override, or pick any folder in
   Settings; Silo can point the game at it too (backing up `gameSettings.xml`) and keeps each
   folder's organized library separately.
-- **Library archive on any drive** _(after v0.8.0)_ — move your parked mods to a bigger drive
+- **Library archive on any drive** _(v0.9.0)_ — move your parked mods to a bigger drive
   while the mods folder stays where the game reads it. Every mod is verified before the
   original is removed; the move can be paused to play, or cancelled to put everything back.
 - **Collections** — share a mod-set as a link (secret gist or public repo); others preview it
