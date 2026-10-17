@@ -5097,8 +5097,9 @@ mod tests {
         let start = super::quiet_epoch(&L, &E);
         let (held_tx, held_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        // Held without moving the epoch on, so only the "held right now" check can refuse.
         let writer = std::thread::spawn(move || {
-            let _w = super::take_for_write(&L, &E).unwrap();
+            let _w = L.lock().unwrap();
             held_tx.send(()).unwrap();
             let _ = done_rx.recv_timeout(std::time::Duration::from_secs(5));
         });
