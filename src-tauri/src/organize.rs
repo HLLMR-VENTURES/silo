@@ -88,7 +88,7 @@ impl Layout {
 const SILO_MARKER: &str = ".silo-projection";
 
 /// A mod present in the flat root that could be organized.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModInput {
     pub tech_name: String,
@@ -1031,8 +1031,6 @@ fn mount_in(disks: &sysinfo::Disks, p: &Path) -> Option<(PathBuf, u64)> {
 }
 
 /// Mount point holding `p`, for same-drive checks and free space (one disk enumeration).
-// Only tests call it so far; moving the archive (a later task) uses it for free space.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn mount_of(p: &Path) -> Option<(PathBuf, u64)> {
     mount_in(&sysinfo::Disks::new_with_refreshed_list(), p)
 }
