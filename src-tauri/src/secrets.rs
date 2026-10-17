@@ -16,6 +16,9 @@ use rusqlite::Connection;
 
 const SERVICE: &str = "com.hllmr.silo";
 
+/// Every key stored through this module. Database snapshots drop these (`db::snapshot`).
+pub(crate) const SECRET_KEYS: &[&str] = &["gh_token"];
+
 fn entry(key: &str) -> Option<keyring::Entry> {
     keyring::Entry::new(SERVICE, key).ok()
 }

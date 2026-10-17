@@ -381,10 +381,31 @@ pub fn snapshot(
         .ok_or("no free snapshot name")?;
     conn.execute("VACUUM INTO ?1", [target.to_string_lossy().into_owned()])
         .map_err(|e| e.to_string())?;
+    if let Err(e) = scrub_secrets(&target) {
+        let _ = std::fs::remove_file(&target); // never keep a copy that still holds a token
+        return Err(e);
+    }
     for (_, old) in snapshots_newest_first(dir).into_iter().skip(keep) {
         let _ = std::fs::remove_file(old);
     }
     Ok(Some(target))
+}
+
+/// Drop secrets from a fresh snapshot, free pages included. A token is only in the database
+/// where there's no OS keychain (or as an older build's copy not yet moved); a backup must not
+/// keep it after the user logs out.
+fn scrub_secrets(snapshot: &Path) -> Result<(), String> {
+    let c = Connection::open(snapshot).map_err(|e| e.to_string())?;
+    let mut removed = 0;
+    for key in crate::secrets::SECRET_KEYS {
+        removed += c
+            .execute("DELETE FROM app_setting WHERE key = ?1", [key])
+            .map_err(|e| e.to_string())?;
+    }
+    if removed > 0 {
+        c.execute_batch("VACUUM").map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Every table as of schema version 1. Only `migrate_0_to_1` runs it.
@@ -1342,6 +1363,26 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "a recent snapshot is enough"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_never_keeps_a_token() {
+        let path = temp_db("snap_secret");
+        let c = open(&path).unwrap();
+        set_app_setting(&c, "gh_token", Some("ghp_secret_value")).unwrap();
+        set_app_setting(&c, "gh_write", Some("1")).unwrap();
+        let snap = snapshot(&c, &snapshot_dir(&path), 5, std::time::Duration::ZERO)
+            .unwrap()
+            .unwrap();
+        let copy = Connection::open(&snap).unwrap();
+        assert_eq!(get_app_setting(&copy, "gh_token"), None);
+        assert_eq!(get_app_setting(&copy, "gh_write").as_deref(), Some("1"));
+        drop(copy);
+        let bytes = std::fs::read(&snap).unwrap();
+        assert!(
+            !bytes.windows(16).any(|w| w == b"ghp_secret_value"),
+            "not even in free pages"
         );
     }
 
