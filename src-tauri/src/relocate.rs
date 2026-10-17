@@ -54,9 +54,11 @@ pub struct MoveMarker {
     #[serde(default)]
     pub moved: Vec<String>,
     /// Category folders Silo created in `to` (by name), saved before each is made. A cancel
-    /// removes those left empty — including ones made for a copy that was then abandoned.
-    #[serde(default)]
-    pub created: Vec<String>,
+    /// removes those left empty — including ones made for a copy that was then abandoned —
+    /// and no others. `None`: a marker from before Silo recorded them; a cancel then tidies
+    /// the moved mods' categories, as it did then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<Vec<String>>,
 }
 
 impl MoveMarker {
@@ -70,7 +72,7 @@ impl MoveMarker {
             pause_reason: None,
             errors: Vec::new(),
             moved: Vec::new(),
-            created: Vec::new(),
+            created: Some(Vec::new()),
         }
     }
 }
@@ -585,8 +587,10 @@ fn forward_one(
             // The copy makes the category folder when it's missing: note it as Silo's first
             // (saved with the record below), so a cancel can remove it if it's left empty.
             let new_category = dst.parent().is_some_and(|d| !exists(d));
-            if new_category && !marker.created.contains(&row.category) {
-                marker.created.push(row.category.clone());
+            if let Some(created) = marker.created.as_mut() {
+                if new_category && !created.contains(&row.category) {
+                    created.push(row.category.clone());
+                }
             }
             env.record(marker, tech)?;
             if let Err(e) = copy_verify_place(&src, &dst, &row.kind, abort) {
@@ -1358,12 +1362,14 @@ fn run_locked(
             // Silo's own folder: remove every empty directory, and the folder itself if empty.
             let _ = organize::cleanup_empty_archive(&src_root, true);
         } else {
-            // A folder the user chose: only the now-empty category folders Silo filed into —
-            // and, after a cancel, the ones it made there for copies it then abandoned.
-            let mut categories: HashSet<String> = rows.iter().map(|r| r.category.clone()).collect();
-            if back {
-                categories.extend(marker.created.iter().cloned());
-            }
+            // A folder the user chose: only now-empty category folders that are Silo's. After a
+            // cancel, the ones Silo made there (also for copies it then abandoned), never one
+            // that was already there. Otherwise (a finished move, or a cancel of a move started
+            // before Silo recorded them) the categories Silo filed into.
+            let categories: HashSet<String> = match (&marker.created, back) {
+                (Some(created), true) => created.iter().cloned().collect(),
+                _ => rows.iter().map(|r| r.category.clone()).collect(),
+            };
             organize::remove_empty_category_dirs(&src_root, &categories);
         }
         return Ok(None);
@@ -1926,6 +1932,53 @@ mod tests {
         assert!(!f.new.join("Maps").exists(), "an aborted copy's folder");
         assert!(f.new.join("Vehicles").is_dir(), "not Silo's: kept");
         assert!(f.new.join("Keep").is_dir(), "not Silo's: kept");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_cancel_keeps_a_category_folder_that_was_already_there() {
+        let f = fx("cancelprecat");
+        add_zip_in(&f, "FS25_A", "Tools", false);
+        add_zip_in(&f, "FS25_B", "Maps", false);
+        // The user's own empty folder, named like A's category: A is placed in it.
+        std::fs::create_dir_all(f.new.join("Tools")).unwrap();
+        let req = AtomicU8::new(0);
+        let mut prog = |p: &Progress| {
+            if !p.cancelling && p.current == "FS25_B" {
+                req.store(CANCEL, Ordering::SeqCst);
+            }
+        };
+        assert!(run_full(&f, Op::Start, &|| false, &req, &mut prog)
+            .unwrap()
+            .is_none());
+        assert!(zip_at(&f.old, "FS25_A").exists() && !zip_at(&f.new, "FS25_A").exists());
+        assert!(f.new.join("Tools").is_dir(), "not made by Silo: kept");
+        assert!(!f.new.join("Maps").exists(), "made by Silo: removed");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_cancel_of_a_move_from_before_folders_were_recorded_tidies_as_before() {
+        let f = fx("cancellegacy");
+        let a = add_zip_in(&f, "FS25_A", "Tools", false);
+        // Half a move by an older Silo: A placed, its marker without `created`.
+        let layout = dest(&f);
+        let mut m = marker(&f);
+        forward_one(&env(&f), &a, &mut m, &mut LinkPolicy::new(&layout), &|| {
+            false
+        })
+        .unwrap();
+        m.created = None;
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        let json = db::get_app_setting(&f.conn, &marker_key(&f.key)).unwrap();
+        assert!(!json.contains("created"), "{json}");
+        assert!(run_with(&f, Op::Cancel, &|| false).unwrap().is_none());
+        assert!(zip_at(&f.old, "FS25_A").exists());
+        assert!(
+            !f.new.join("Tools").exists(),
+            "the moved mod's emptied folder"
+        );
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
