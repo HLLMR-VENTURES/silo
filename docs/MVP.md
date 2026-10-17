@@ -98,6 +98,12 @@ action reversible.
 - ✅ **Theme toggle** (system/light/dark); ✅ **diagnostics report export**.
 
 ## Post-MVP — still open (need the user / network / infra)
+
+> _Status update (2026-10): the first three items below have since shipped — ModHub is
+> indexed by the SiloAPI catalog (update checks + browsing; downloads stay on ModHub's
+> site), `game.xml` graphics presets are editable with a `.bak` backup, and the app
+> self-updates from signed GitHub releases. Kept as written for history._
+
 - **ModHub integration** — update-checking + optional browsing/downloading. Fragile
   HTML scraping, ToS-gray; only if we deliberately take it on (not done autonomously).
 - **System/graphics "optimization"** (game.xml tuning) — risky config edits; validate
