@@ -68,6 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts as another drive everywhere, so Optimize links no longer tries a hardlink for each mod and
   fails, and the move dialog says the same as what the move does. (#PR)
 
+- **Cancelling an archive move leaves no empty folders behind.** Category folders Silo made in
+  the new location are removed when they're empty, also for mods whose copy was stopped partway.
+  Folders that were already there, or that hold anything, are kept. (#PR)
+
 ### Security
 
 - **Stricter file-name checks.** File names with a colon, a trailing dot or space, or a reserved

@@ -125,6 +125,8 @@ export interface MoveMarker {
   errors: string[];
   /** techNames placed in `to` and not yet moved back. */
   moved: string[];
+  /** Category folders Silo created in `to`; a cancel removes the ones left empty. */
+  created: string[];
 }
 
 export interface ArchiveStatus {
