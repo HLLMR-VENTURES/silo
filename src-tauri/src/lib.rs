@@ -2089,7 +2089,8 @@ async fn set_mods_root(app: tauri::AppHandle, path: String) -> Result<ModsRootSt
             return Err(picked::NOT_PICKED.into());
         }
         // Before the write probe: a folder sharing files with another layout's archive.
-        let archives = other_archive_keys(&conn, p, &known_mods_folders(&conn, default.as_deref()));
+        let archives =
+            other_archive_keys(&conn, p, &known_mods_folders(&conn, default.as_deref()))?;
         if let Some(why) =
             mods_folder_problem(&key_path(p), &key_path(&archive_of(&conn, p)), &archives)
         {
@@ -2366,15 +2367,16 @@ fn nests(a: &std::path::Path, b: &std::path::Path) -> bool {
 
 /// Every archive Silo knows of except `mods`' own, as identity keys: each stored archive
 /// choice (`archive_root:*`, whichever mods folder it belongs to) and each other known mods
-/// folder's archive (chosen, or its default `<X>/archive`).
+/// folder's archive (chosen, or its default `<X>/archive`). An unreadable setting list is an
+/// error: the check must never pass because it couldn't look.
 fn other_archive_keys(
     conn: &rusqlite::Connection,
     mods: &std::path::Path,
     known: &[PathBuf],
-) -> Vec<PathBuf> {
+) -> Result<Vec<PathBuf>, String> {
     let mine = modsroot::canonical_key(mods);
     let mut v: Vec<PathBuf> = Vec::new();
-    let stored = db::app_settings_with_prefix(conn, relocate::ARCHIVE_SETTING_PREFIX);
+    let stored = db::app_settings_with_prefix(conn, relocate::ARCHIVE_SETTING_PREFIX)?;
     for (k, archive) in stored {
         if k != relocate::archive_setting_key(&mine) {
             v.push(key_path(std::path::Path::new(&archive)));
@@ -2387,7 +2389,7 @@ fn other_archive_keys(
     }
     v.sort();
     v.dedup();
-    v
+    Ok(v)
 }
 
 /// Pure: why `mods` can't be a mods folder — it overlaps another folder's archive (it is one,
@@ -4963,6 +4965,7 @@ mod tests {
         let known = vec![mine.clone(), other.clone(), base.join("mods")];
         set(&base.join("mods"), &lib);
         let got: HashSet<PathBuf> = super::other_archive_keys(&conn, &mine, &known)
+            .unwrap()
             .into_iter()
             .collect();
         let want: HashSet<PathBuf> = [
