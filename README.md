@@ -12,7 +12,6 @@
   <a href="docs/VERIFY_DOWNLOAD.md"><img alt="Windows: code signed" src="https://img.shields.io/badge/Windows-code%20signed-4a7330"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4a7330"></a>
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-4a7330">
-  <a href="https://github.com/HLLMR/silo/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/HLLMR/silo/total?color=e3b23c&label=downloads"></a>
   <a href="https://silo.hllmr.com"><img alt="Website" src="https://img.shields.io/badge/web-silo.hllmr.com-4a90c2"></a>
 </p>
 

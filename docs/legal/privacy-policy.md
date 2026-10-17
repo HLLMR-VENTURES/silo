@@ -127,7 +127,7 @@ We may update this Privacy Policy from time to time. When we do, we will revise 
 
 ## Governing law
 
-This Privacy Policy is governed by the laws of the **Texas**, without regard to its conflict-of-laws rules, except where applicable data-protection law provides otherwise.
+This Privacy Policy is governed by the laws of the **State of Texas**, without regard to its conflict-of-laws rules, except where applicable data-protection law provides otherwise.
 
 ## Contact us
 

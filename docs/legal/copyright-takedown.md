@@ -100,7 +100,7 @@ We may update this Policy from time to time. When we do, we will revise the effe
 
 ## 12. Governing law
 
-This Policy is governed by the laws of the **Texas**, without regard to its conflict-of-laws principles, except where mandatory local law or applicable copyright law requires otherwise.
+This Policy is governed by the laws of the **State of Texas**, without regard to its conflict-of-laws principles, except where mandatory local law or applicable copyright law requires otherwise.
 
 ## 13. Contact
 
@@ -108,7 +108,7 @@ For any copyright or takedown matter under this Policy, contact **legal@hllmr.co
 
 ---
 
-_This document is a draft template prepared for review by a qualified attorney before use. Bracketed items are placeholders that must be completed before publication._
+_This document is a draft and has not yet been reviewed by an attorney._
 
 ---
 [← Legal index](./README.md)
