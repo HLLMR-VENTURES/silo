@@ -19,11 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Settings edits aren't lost to the game anymore.** Silo won't change gameSettings.xml or a
   mod's settings while Farming Simulator 25 is running, because the game writes its own copy
-  back when it exits. Close the game first. (#PR)
+  back when it exits. Close the game first. (#214)
 
 - **Silo stays responsive while it reads and saves.** Backing up a savegame, opening or saving
   settings, importing or exporting loadouts and similar actions now run in the background
-  instead of freezing the window. (#PR)
+  instead of freezing the window. (#214)
 
 ### Security
 
@@ -31,11 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Windows device name (such as `CON` or `NUL`) are refused. (#213)
 
 - **Savegame backups only copy real savegames.** Silo now checks the folder against the
-  savegames it found before copying anything. (#PR)
+  savegames it found before copying anything. (#214)
 
 - **The catalog address is fixed in release builds.** Silo always downloads catalog mods
   through its own catalog; the developer-only setting to change it no longer exists in the
-  release app. (#PR)
+  release app. (#214)
 
 ## [0.10.0] - 2026-10-17
 
