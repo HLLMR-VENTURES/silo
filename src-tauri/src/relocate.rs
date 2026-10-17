@@ -183,7 +183,7 @@ fn suffixed(p: &Path, suffix: &str) -> PathBuf {
 }
 
 /// Size of a mod on disk (file, or a folder recursively). Never follows links.
-fn size_of(p: &Path) -> u64 {
+pub(crate) fn size_of(p: &Path) -> u64 {
     match std::fs::symlink_metadata(p) {
         Ok(m) if m.is_dir() => std::fs::read_dir(p)
             .map(|rd| rd.flatten().map(|e| size_of(&e.path())).sum())
