@@ -723,14 +723,11 @@ async fn download_update(
         }
         let label = file_label(&dest);
         match &done.backup {
-            Some(b) => eprintln!(
-                "[silo] updated {label}; previous version kept at {}",
-                b.display()
-            ),
-            None => eprintln!("[silo] updated {label}; previous version not moved to backups"),
+            Some(b) => log::info!("updated {label}; previous version kept at {}", b.display()),
+            None => log::info!("updated {label}; previous version not moved to backups"),
         }
         for p in &done.problems {
-            eprintln!("[silo] {p}");
+            log::warn!("{p}");
         }
         Ok(UpdateOutcome {
             backup: done.backup.map(|b| b.to_string_lossy().into_owned()),
@@ -742,8 +739,11 @@ async fn download_update(
 }
 
 fn log_recovery(r: &update::Recovery) {
-    for n in r.notices.iter().chain(&r.problems) {
-        eprintln!("[silo] {n}");
+    for n in &r.notices {
+        log::info!("{n}");
+    }
+    for p in &r.problems {
+        log::warn!("{p}");
     }
 }
 
@@ -1840,8 +1840,8 @@ fn resolve_active(conn: &rusqlite::Connection, mods: &std::path::Path) -> modsro
     };
     let layout = match stored {
         Some(archive) => organize::Layout::new(mods.to_path_buf(), archive).unwrap_or_else(|e| {
-            eprintln!(
-                "[Silo] ignoring the library archive stored for {}: {e}",
+            log::warn!(
+                "ignoring the library archive stored for {}: {e}",
                 mods.display()
             );
             organize::Layout::default_for(mods)
@@ -1870,8 +1870,8 @@ fn rediscovered_archive_fits(
         .filter(|p| !p.as_os_str().is_empty());
     let problems = fence_problems(&layout, found, &fences(conn, &layout, app_data));
     if !problems.is_empty() {
-        eprintln!(
-            "[Silo] not using the archive {} named in {}: {}",
+        log::warn!(
+            "not using the archive {} named in {}: {}",
             found.display(),
             relocate::ARCHIVE_NOTE,
             problems.join(" ")
@@ -2457,10 +2457,10 @@ fn check_move(
     }
 }
 
-/// Pure: the `[Silo]` log line for a start / resume / cancel outcome.
+/// Pure: the log line for a start / resume / cancel outcome.
 fn move_outcome(what: &str, out: &Result<Option<relocate::MoveMarker>, String>) -> String {
     match out {
-        Ok(None) => format!("[Silo] archive move {what}: finished"),
+        Ok(None) => format!("archive move {what}: finished"),
         Ok(Some(m)) => {
             let reason = match (&m.pause_reason, m.errors.is_empty()) {
                 (Some(r), _) => r.as_str(),
@@ -2468,11 +2468,11 @@ fn move_outcome(what: &str, out: &Result<Option<relocate::MoveMarker>, String>) 
                 (None, true) => "on request",
             };
             format!(
-                "[Silo] archive move {what}: paused ({reason}; {} error(s))",
+                "archive move {what}: paused ({reason}; {} error(s))",
                 m.errors.len()
             )
         }
-        Err(e) => format!("[Silo] archive move {what}: refused — {e}"),
+        Err(e) => format!("archive move {what}: refused — {e}"),
     }
 }
 
@@ -2516,7 +2516,10 @@ fn with_move_ctx(
     // refusal.
     let handed_off = what == "cancel" && matches!(&out, Err(e) if cancel_falls_back(e));
     if !handed_off {
-        eprintln!("{}", move_outcome(what, &out));
+        match &out {
+            Ok(None) => log::info!("{}", move_outcome(what, &out)),
+            _ => log::warn!("{}", move_outcome(what, &out)),
+        }
     }
     out
 }
@@ -2551,8 +2554,8 @@ fn start_move(
         if !check.problems.is_empty() {
             return Err(check.problems.join("\n"));
         }
-        eprintln!(
-            "[Silo] moving the library archive {} -> {}",
+        log::info!(
+            "moving the library archive {} -> {}",
             layout.archive.display(),
             new.display()
         );
@@ -2714,7 +2717,7 @@ fn cancel_falls_back(err: &str) -> bool {
 
 fn request_turn_around() -> Option<relocate::MoveMarker> {
     relocate::request_cancel();
-    eprintln!("[Silo] archive move cancel: asked the running move to turn around");
+    log::info!("archive move cancel: asked the running move to turn around");
     None
 }
 
@@ -2809,8 +2812,8 @@ async fn archive_repoint(app: tauri::AppHandle, path: Option<String>) -> Result<
         if path.is_some() {
             picked::forget(picked::Purpose::Archive);
         }
-        eprintln!(
-            "[Silo] re-pointed the library archive {} -> {} (nothing moved)",
+        log::info!(
+            "re-pointed the library archive {} -> {} (nothing moved)",
             layout.archive.display(),
             new.display()
         );
@@ -2951,8 +2954,8 @@ async fn archive_adopt_apply(
                 "{n}: no longer a loose mod Silo can file in — left untouched"
             ));
         }
-        eprintln!(
-            "[Silo] adopted {} loose mod(s) into the library archive ({} skipped, {} errors)",
+        log::info!(
+            "adopted {} loose mod(s) into the library archive ({} skipped, {} errors)",
             report.changed,
             report.skipped,
             report.errors.len()
@@ -4240,6 +4243,32 @@ pub fn run() {
         }));
     }
 
+    // The log file: `app_log_dir()/silo.log` (Windows `%LOCALAPPDATA%\com.hllmr.silo\logs`,
+    // macOS `~/Library/Logs/com.hllmr.silo`, Linux `~/.local/share/com.hllmr.silo/logs`).
+    // Release builds have no console, so this is the only record of what Silo did. It holds
+    // full paths; "Copy diagnostics" removes the home folder and user name (`diagnostics`).
+    // Never log secrets (tokens, gist contents) through it.
+    builder = builder.plugin(
+        tauri_plugin_log::Builder::new()
+            .clear_targets()
+            .targets([
+                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                    file_name: Some("silo".into()),
+                }),
+                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stderr),
+            ])
+            .level(log::LevelFilter::Info)
+            .level_for("tao", log::LevelFilter::Warn)
+            .level_for("wry", log::LevelFilter::Warn)
+            .level_for("ureq", log::LevelFilter::Warn)
+            .level_for("rustls", log::LevelFilter::Warn)
+            .max_file_size(2_000_000)
+            // KeepSome(n) keeps n rotated files besides the live one: five files in all.
+            .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(4))
+            .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
+            .build(),
+    );
+
     builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
@@ -4247,6 +4276,11 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            log::info!(
+                "Silo {} starting on {}",
+                app.package_info().version,
+                std::env::consts::OS
+            );
             // Resolve and publish the active layout (mods folder, archive, any unfinished move)
             // before the UI asks, so the write guards never act on an unknown layout. Off the
             // main thread: it reads gameSettings.xml and the DB.
@@ -4263,17 +4297,17 @@ pub fn run() {
                                 std::time::Duration::from_secs(20 * 3600),
                             ) {
                                 Ok(Some(s)) => {
-                                    eprintln!("[Silo] database snapshot saved: {}", s.display())
+                                    log::info!("database snapshot saved: {}", s.display())
                                 }
                                 Ok(None) => {}
-                                Err(e) => eprintln!("[Silo] database snapshot failed: {e}"),
+                                Err(e) => log::warn!("database snapshot failed: {e}"),
                             }
                         }
                         let _ = compute_mods_root_status(&conn);
-                        eprintln!("[Silo] library layout resolved at startup");
+                        log::info!("library layout resolved at startup");
                     }
                     Err(e) => {
-                        eprintln!("[Silo] couldn't resolve the library layout at startup: {e}")
+                        log::warn!("couldn't resolve the library layout at startup: {e}")
                     }
                 }
                 // Icon thumbnails from the old (unstable) cache naming; `icons-v2` replaced it.
@@ -4623,7 +4657,7 @@ mod tests {
         let m = MoveMarker::new("/a".into(), "/b".into());
         assert_eq!(
             move_outcome("start", &Ok(None)),
-            "[Silo] archive move start: finished"
+            "archive move start: finished"
         );
         assert!(move_outcome("resume", &Ok(Some(m.clone())))
             .contains("paused (on request; 0 error(s))"));
@@ -4637,7 +4671,7 @@ mod tests {
         assert!(move_outcome("start", &Ok(Some(g))).contains("(Farming Simulator 25 started; 0"));
         assert_eq!(
             move_outcome("cancel", &Err("nope".into())),
-            "[Silo] archive move cancel: refused — nope"
+            "archive move cancel: refused — nope"
         );
     }
 

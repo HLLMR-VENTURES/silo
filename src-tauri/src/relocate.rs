@@ -683,8 +683,11 @@ fn settle_updates(mods: &Path, marker: &MoveMarker, direction: Direction) -> Opt
             &mut LinkPolicy::new(&layout),
             crate::update::Attempt::UserAsked,
         );
-        for n in r.notices.iter().chain(&r.problems) {
-            eprintln!("[silo] {n}");
+        for n in &r.notices {
+            log::info!("{n}");
+        }
+        for p in &r.problems {
+            log::warn!("{p}");
         }
         all.problems.extend(r.problems);
         all.leftovers.extend(r.leftovers);
@@ -806,10 +809,7 @@ pub(crate) fn note_archive(mods: &Path, archive: Option<&Path>) {
     let write = |dir: &Path, note: &ArchiveNote| {
         let path = dir.join(ARCHIVE_NOTE);
         if path.exists() && read_note(dir).is_none() {
-            eprintln!(
-                "[Silo] left {} alone: it isn't a note Silo wrote",
-                path.display()
-            );
+            log::warn!("left {} alone: it isn't a note Silo wrote", path.display());
             return;
         }
         let tmp = dir.join(format!("{ARCHIVE_NOTE}.tmp"));
@@ -817,11 +817,7 @@ pub(crate) fn note_archive(mods: &Path, archive: Option<&Path>) {
         let written = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path));
         if let Err(e) = written {
             let _ = std::fs::remove_file(&tmp);
-            eprintln!(
-                "[Silo] couldn't write {} in {}: {e}",
-                ARCHIVE_NOTE,
-                dir.display()
-            );
+            log::warn!("couldn't write {} in {}: {e}", ARCHIVE_NOTE, dir.display());
         }
     };
     match archive {

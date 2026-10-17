@@ -27,6 +27,10 @@ tauri-plugin-deep-link = "2"
 # Desktop-only self-update (GitHub Releases → signed latest.json). Silo targets
 # Windows/macOS/Linux only, so no mobile cfg-guard is needed.
 tauri-plugin-updater = "2"
+# A rotating log file in the app's log folder (release builds have no console), plus the
+# `log` facade every module writes through. See `run()` and `fslog.rs`.
+tauri-plugin-log = "2"
+log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 walkdir = "2"

@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folder, plus one copy taken just before an upgrade changes the database. Backups never
   include your GitHub token. (#216)
 
+- **Silo keeps a log.** Silo writes a log file in its app data folder (five files of 2 MB at most),
+  so problems can be traced after the fact. (#PR)
+
 ### Fixed
 
 - **Your original game settings are kept.** The first time Silo edits gameSettings.xml or a mod's
