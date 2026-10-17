@@ -8,7 +8,6 @@
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
-const UA: &str = "Silo-FS25-Mod-Manager";
 pub const DEFAULT_BASE: &str = "https://silo-api.hllmr.com";
 
 /// A catalog row as returned by `GET /mods`. Fields mirror the API (camelCase).
@@ -202,13 +201,10 @@ struct LookupResponse {
 }
 
 fn get(url: &str) -> Result<ureq::Response, String> {
-    ureq::get(url)
-        .set("User-Agent", UA)
-        .call()
-        .map_err(|e| match e {
-            ureq::Error::Status(code, _) => format!("SiloAPI returned {code}"),
-            other => format!("Could not reach SiloAPI: {other}"),
-        })
+    crate::net::api().get(url).call().map_err(|e| match e {
+        ureq::Error::Status(code, _) => format!("SiloAPI returned {code}"),
+        other => format!("Could not reach SiloAPI: {other}"),
+    })
 }
 
 /// Search/list the catalog. `query`/`category` are optional filters.
@@ -270,8 +266,8 @@ pub fn browse(
 
 /// Batch version lookup by tech name. One request covers the whole library.
 pub fn lookup(base: &str, tech_names: &[String]) -> Result<Vec<LookupResult>, String> {
-    let resp = ureq::post(&format!("{}/mods/lookup", base.trim_end_matches('/')))
-        .set("User-Agent", UA)
+    let resp = crate::net::api()
+        .post(&format!("{}/mods/lookup", base.trim_end_matches('/')))
         .set("Content-Type", "application/json")
         .send_json(ureq::json!({ "techNames": tech_names }))
         .map_err(|e| match e {
@@ -343,7 +339,7 @@ pub fn manifest(base: &str, id: &str, version: &str) -> Result<Option<CanonicalM
         id,
         urlencode(version)
     );
-    match ureq::get(&url).set("User-Agent", UA).call() {
+    match crate::net::api().get(&url).call() {
         Ok(resp) => resp.into_json().map(Some).map_err(|e| e.to_string()),
         Err(ureq::Error::Status(404, _)) => Ok(None),
         Err(ureq::Error::Status(code, _)) => Err(format!("SiloAPI manifest returned {code}")),
@@ -468,8 +464,8 @@ pub fn download_to<F: Fn(u64, Option<u64>)>(
     // SSRF guard: the URL is catalog/frontend-influenced. Downloads must be public https —
     // never a private/loopback host (no dev localhost exception for a mod download).
     crate::net::validate_outbound_url(url, false)?;
-    let resp = ureq::get(url)
-        .set("User-Agent", UA)
+    let resp = crate::net::download()
+        .get(url)
         .call()
         .map_err(|e| e.to_string())?;
     let total: Option<u64> = resp
@@ -589,8 +585,8 @@ pub fn fetch_image(url: &str) -> Result<String, String> {
     if !is_catalog_image_host(url) {
         return Err("not an allowed image host".to_string());
     }
-    let resp = ureq::get(url)
-        .set("User-Agent", UA)
+    let resp = crate::net::api()
+        .get(url)
         .call()
         .map_err(|e| e.to_string())?;
     let mime = resp

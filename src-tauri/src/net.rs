@@ -4,9 +4,57 @@
 //! and never a loopback / link-local / private / unspecified IP host. Blocks a compromised
 //! frontend or upstream from steering a native request at cloud metadata (169.254.169.254) or
 //! an internal service.
+//!
+//! Also home to the shared HTTP agents (`api()`, `download()`): every native request goes
+//! through one of them, so each has connect/read timeouts and Silo's User-Agent.
 
 use std::net::IpAddr;
+use std::sync::OnceLock;
+use std::time::Duration;
 use url::{Host, Url};
+
+/// The User-Agent every native request sends (GitHub rejects requests without one).
+pub const USER_AGENT: &str = concat!(
+    "Silo/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://silo.hllmr.com)"
+);
+
+/// Build an agent with connect / read / write timeouts and an optional overall cap, so a
+/// silent or stalled server makes the request fail instead of hanging forever.
+pub(crate) fn build_agent(
+    connect: Duration,
+    read: Duration,
+    overall: Option<Duration>,
+) -> ureq::Agent {
+    let mut b = ureq::AgentBuilder::new()
+        .timeout_connect(connect)
+        .timeout_read(read)
+        .timeout_write(read)
+        .user_agent(USER_AGENT);
+    if let Some(t) = overall {
+        b = b.timeout(t);
+    }
+    b.build()
+}
+
+/// For API calls: a request that hasn't finished in 60 s fails.
+pub fn api() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        build_agent(
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+            Some(Duration::from_secs(60)),
+        )
+    })
+}
+
+/// For file downloads: no overall cap (large mods), but a stalled read fails after 30 s.
+pub fn download() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| build_agent(Duration::from_secs(10), Duration::from_secs(30), None))
+}
 
 /// Validate a URL the native layer is about to fetch.
 ///
@@ -124,5 +172,26 @@ mod tests {
         // non-loopback private is still blocked even in dev mode
         assert!(validate_outbound_url("http://10.0.0.5/x", true).is_err());
         assert!(validate_outbound_url("https://192.168.0.2/x", true).is_err());
+    }
+
+    #[test]
+    fn a_silent_server_times_out_instead_of_hanging() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        // Accept and hold the connection open without ever answering.
+        let hold = std::thread::spawn(move || {
+            let (_s, _) = listener.accept().unwrap();
+            let _ = done_rx.recv_timeout(Duration::from_secs(10));
+        });
+        let agent = build_agent(Duration::from_millis(500), Duration::from_millis(500), None);
+        let start = std::time::Instant::now();
+        let res = agent.get(&format!("http://{addr}/")).call();
+        let took = start.elapsed();
+        let _ = done_tx.send(());
+        hold.join().unwrap();
+        assert!(res.is_err());
+        assert!(took < Duration::from_secs(5), "took {took:?}");
     }
 }
