@@ -2036,6 +2036,46 @@ fn mods_root_choice_allowed(
         || known.iter().any(|k| modsroot::same_folder(k, path))
 }
 
+const FOLDER_MISSING: &str = "That folder isn't there right now.";
+
+/// The folders Settings can open, named by the webview, resolved by Rust.
+#[derive(serde::Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+enum KnownFolder {
+    ModsFolder,
+    Archive,
+    GameInstall,
+}
+
+fn existing_dir(p: Option<PathBuf>) -> Result<PathBuf, String> {
+    p.filter(|p| p.is_dir())
+        .ok_or_else(|| FOLDER_MISSING.to_string())
+}
+
+fn known_folder_path(which: KnownFolder) -> Result<PathBuf, String> {
+    let active = modsroot::active();
+    existing_dir(match which {
+        KnownFolder::ModsFolder => active.map(|a| a.layout.mods),
+        KnownFolder::Archive => active.map(|a| a.layout.archive),
+        KnownFolder::GameInstall => gamelaunch::detect().map(|g| PathBuf::from(g.install_dir)),
+    })
+}
+
+/// Open one of Silo's folders in the file manager. Rust picks the path; the webview only names
+/// which folder, so it can't open (or run) anything else.
+#[tauri::command]
+async fn open_known_folder(app: tauri::AppHandle, which: KnownFolder) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    // Resolving the game folder reads Steam's files, and the shell call can stall: both off main.
+    off_main(move || {
+        let path = known_folder_path(which)?;
+        app.opener()
+            .open_path(path.to_string_lossy(), None::<&str>)
+            .map_err(|e| format!("Couldn't open {}: {e}", path.display()))
+    })
+    .await
+}
+
 // ── Library archive location (#166) ──
 
 #[derive(serde::Serialize)]
@@ -4159,6 +4199,7 @@ pub fn run() {
             create_mods_folder,
             folder_looks_empty,
             pick_folder,
+            open_known_folder,
             archive_status,
             archive_move_preflight,
             archive_move_start,
@@ -4751,6 +4792,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("mods")).unwrap();
         base
+    }
+
+    #[test]
+    fn only_known_folders_that_exist_can_be_opened() {
+        let base = temp_base("known_folder");
+        std::fs::create_dir_all(base.join("mods")).unwrap();
+        assert_eq!(
+            super::existing_dir(Some(base.join("mods"))).unwrap(),
+            base.join("mods")
+        );
+        assert_eq!(
+            super::existing_dir(Some(base.join("gone"))).unwrap_err(),
+            super::FOLDER_MISSING
+        );
+        assert_eq!(
+            super::existing_dir(None).unwrap_err(),
+            super::FOLDER_MISSING
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

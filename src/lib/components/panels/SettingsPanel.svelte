@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { GameInfo } from "../../types";
-  import { openFolder, secretStorageSecure } from "../../api";
+  import { openKnownFolder, secretStorageSecure } from "../../api";
   import type { ModsRootStatus, ArchiveStatus } from "../../api";
   import GitHubAuth from "../GitHubAuth.svelte";
 
@@ -86,6 +86,14 @@
   const lockTitle = $derived(moveUnfinished ? "Finish or cancel the archive move first" : undefined);
 
   const others = $derived((modsStatus?.known ?? []).filter((k) => !k.current));
+
+  type OpenTarget = "modsFolder" | "archive" | "gameInstall";
+  /** Why an Open ↗ link couldn't open its folder, shown under that link's row. */
+  let openErr = $state<{ which: OpenTarget; msg: string } | null>(null);
+  function openFolder(which: OpenTarget) {
+    openErr = null;
+    openKnownFolder(which).catch((e) => (openErr = { which, msg: String(e) }));
+  }
   function sourceLabel(s: ModsRootStatus["source"]): string {
     return s === "user"
       ? "Chosen in Silo"
@@ -115,7 +123,7 @@
     <div class="set-row">
       <div class="set-label">Mods folder</div>
       {#if roots.length}
-        <button class="set-link" onclick={() => openFolder(roots[0]).catch(() => {})}>
+        <button class="set-link" onclick={() => openFolder("modsFolder")}>
           Open ↗
         </button>
       {/if}
@@ -123,6 +131,7 @@
         Change…
       </button>
     </div>
+    {#if openErr?.which === "modsFolder"}<div class="set-hint">{openErr.msg}</div>{/if}
     {#if modsStatus?.path}
       <div class="set-path" class:muted={!modsStatus.available}>{modsStatus.path}</div>
       <div class="set-hint">
@@ -164,7 +173,7 @@
     <div class="set-row">
       <div class="set-label">Library archive</div>
       {#if archive?.path && archive.available}
-        <button class="set-link" onclick={() => archive?.path && openFolder(archive.path).catch(() => {})}>
+        <button class="set-link" onclick={() => openFolder("archive")}>
           Open ↗
         </button>
       {/if}
@@ -172,6 +181,7 @@
         Change…
       </button>
     </div>
+    {#if openErr?.which === "archive"}<div class="set-hint">{openErr.msg}</div>{/if}
     {#if archive?.path}
       <div class="set-path" class:muted={!archive.available}>{archive.path}</div>
       <div class="set-hint">
@@ -204,11 +214,12 @@
     <div class="set-row">
       <div class="set-label">Game</div>
       {#if gameInfo}
-        <button class="set-link" onclick={() => gameInfo && openFolder(gameInfo.installDir).catch(() => {})}>
+        <button class="set-link" onclick={() => openFolder("gameInstall")}>
           Open ↗
         </button>
       {/if}
     </div>
+    {#if openErr?.which === "gameInstall"}<div class="set-hint">{openErr.msg}</div>{/if}
     {#if gameInfo}
       <div class="set-path">{gameInfo.installDir}</div>
     {:else}

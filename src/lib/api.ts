@@ -4,7 +4,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save, open, confirm as pluginConfirm } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir, openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
 import { serial } from "./serial";
 export { serial } from "./serial";
 import type {
@@ -396,8 +396,9 @@ export function revealInFolder(path: string): Promise<void> {
   return revealItemInDir(path);
 }
 
-export function openFolder(path: string): Promise<void> {
-  return openPath(path);
+/** Open one of Silo's folders in the file manager. Rust resolves the path from the name. */
+export function openKnownFolder(which: "modsFolder" | "archive" | "gameInstall"): Promise<void> {
+  return invoke("open_known_folder", { which });
 }
 
 export function openExternal(url: string): Promise<void> {

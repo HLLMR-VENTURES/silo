@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   settings, importing or exporting loadouts and similar actions now run in the background
   instead of freezing the window. (#214)
 
+- **The open-folder links in Settings work.** They silently did nothing before. (#PR)
+
 ### Security
 
 - **Stricter file-name checks.** File names with a colon, a trailing dot or space, or a reserved
