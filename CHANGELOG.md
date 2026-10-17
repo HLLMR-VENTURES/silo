@@ -41,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folder picker Silo opens itself, and Silo only switches to a folder chosen there or one it
   already knows. (#PR)
 
+- **Updates only replace mods in your library.** An update can only swap a mod's zip in your
+  mods folder or library archive, never any other file there. (#PR)
+
 ## [0.10.0] - 2026-10-17
 
 ### Added

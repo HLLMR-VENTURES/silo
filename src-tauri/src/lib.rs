@@ -588,6 +588,24 @@ fn config_write_refusal(game_running: bool) -> Result<(), String> {
     }
 }
 
+const UPDATE_NOT_A_LIBRARY_MOD: &str = "Silo only updates mods in your library.";
+
+/// `download_update` may replace only a mod zip directly in the mods folder or filed in an
+/// archive category folder; never a backup or any other file under those folders.
+fn update_target_problem(dest: &std::path::Path, layout: &organize::Layout) -> Option<String> {
+    let is_zip = dest
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+    let Some(parent) = dest.parent() else {
+        return Some(UPDATE_NOT_A_LIBRARY_MOD.to_string());
+    };
+    let in_mods = modsroot::same_folder(parent, &layout.mods);
+    let in_category = parent
+        .parent()
+        .is_some_and(|a| modsroot::same_folder(a, &layout.archive));
+    (!(is_zip && (in_mods || in_category))).then(|| UPDATE_NOT_A_LIBRARY_MOD.to_string())
+}
+
 /// Update an installed mod from a GitHub release asset (`update` module): download beside it
 /// without the library lock, then swap it in under the lock, keeping the previous version in
 /// `backups/`. Refused while FS25 runs (its files may be open).
@@ -610,17 +628,26 @@ async fn download_update(
         // `no_traversal` alone would pass — is rejected here.
         paths::no_traversal(&dest)?;
         paths::ensure_write_under(&allowed_roots(), &dest)?;
+        // Only a mod zip in the library, never a backup or another file under its folders.
+        let layout = primary_layout(None)?;
+        if let Some(p) = update_target_problem(&dest, &layout) {
+            return Err(p);
+        }
         // Public release assets don't need auth, and a download must never carry the user's
         // GitHub credential — keep the token for explicit API actions only.
         let part = update::fetch(&asset_url, &dest)?;
         // A finished download waits out a busy spell instead of being thrown away.
         let _write = library_write_within(PLACE_WAIT)?;
-        // Things may have changed while downloading: check again under the lock.
+        // Things may have changed while downloading: check again under the lock, against the
+        // layout as it is now.
         paths::ensure_write_under(&allowed_roots(), &dest)?;
+        let layout = primary_layout(None)?;
+        if let Some(p) = update_target_problem(&dest, &layout) {
+            return Err(p);
+        }
         if gamelaunch::fs25_running() {
             return Err(UPDATE_GAME_RUNNING.into());
         }
-        let layout = primary_layout(None)?;
         let mut policy = organize::LinkPolicy::new(&layout);
         // Finish an earlier, interrupted update first (the user asked: every step is retried),
         // so it doesn't block this one; if it can't be finished, say exactly why.
@@ -4695,6 +4722,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("mods")).unwrap();
         base
+    }
+
+    #[test]
+    fn an_update_only_replaces_a_mod_zip_in_the_library() {
+        let base = temp_base("update_target");
+        let mods = base.join("mods");
+        let layout = Layout::default_for(&mods);
+        let cat = layout.archive.join("Vehicles");
+        for d in [&mods, &cat, &mods.join("backups"), &mods.join("sub")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let ok = [mods.join("FS25_A.zip"), cat.join("FS25_B.zip")];
+        let bad = [
+            mods.join("backups").join("FS25_A.zip"),
+            mods.join("FS25_A.txt"),
+            layout.archive.join("FS25_C.zip"),
+            mods.join("sub").join("FS25_D.zip"),
+        ];
+        for p in ok.iter().chain(&bad) {
+            std::fs::write(p, b"zip").unwrap();
+        }
+        for p in &ok {
+            assert_eq!(super::update_target_problem(p, &layout), None, "{p:?}");
+        }
+        for p in &bad {
+            assert!(super::update_target_problem(p, &layout).is_some(), "{p:?}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
