@@ -129,12 +129,16 @@ pub struct RelinkReport {
     pub already_linked: usize,
     /// Left untouched: no archived twin, cross-volume, or the user's own (different) file.
     pub skipped: usize,
-    /// Bytes reclaimed by collapsing duplicate copies into shared hardlinks.
+    /// Bytes reclaimed by collapsing duplicate copies into links to the archived file.
     pub reclaimed_bytes: u64,
-    /// No link kind is usable: hardlinks are rejected (a cloud-sync provider — OneDrive /
-    /// Google Drive / Proton Drive — or the archive is on another drive) and symlinks aren't
-    /// available either. Silo uses copies there; there's nothing to optimize.
+    /// The archive is on the mods folder's volume, but that filesystem rejects hardlinks (a
+    /// cloud-sync provider — OneDrive / Google Drive / Proton Drive). Silo uses copies there;
+    /// there's nothing to optimize.
     pub hardlinks_unsupported: bool,
+    /// The archive is on another drive (no hardlinks possible) and symlinks aren't available
+    /// (Windows without Developer Mode, a sandboxed Mac App Store install, or a filesystem that
+    /// refuses them). Active mods stay copies; nothing was done.
+    pub cross_drive_copies: bool,
     pub errors: Vec<String>,
 }
 
@@ -157,9 +161,10 @@ pub fn supports_hardlinks(root: &Path) -> bool {
 }
 
 /// Windows-invalid path chars → underscore (spaces and `&` are fine in folder names). A
-/// category that would name the archive itself or its parent (`""`, `"."`, `".."` — or any
-/// all-dots name, which Windows trims to one of those — after trimming whitespace) becomes
-/// `"_"`, so a category folder always sits strictly inside the archive.
+/// category that collapses to nothing once whitespace is trimmed and trailing dots/spaces are
+/// dropped (as Windows does) — `""`, `"."`, `".."`, `". ."` … — would name the archive itself
+/// or its parent, so it becomes `"_"`. Every other name is kept as-is, so existing archive
+/// folders keep their names.
 fn sanitize(category: &str) -> String {
     let s: String = category
         .chars()
@@ -168,7 +173,7 @@ fn sanitize(category: &str) -> String {
             _ => c,
         })
         .collect();
-    if s.trim().chars().all(|c| c == '.') {
+    if s.trim().trim_end_matches(['.', ' ']).is_empty() {
         "_".into()
     } else {
         s
@@ -301,7 +306,7 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
-    let allow_symlink = supports_symlinks(layout);
+    let mut policy = LinkPolicy::new(layout);
     for row in db::load_organized(conn, &key) {
         let link = root.join(&row.file_name);
         let src = archive_path(&layout.archive, &row.category, &row.file_name);
@@ -309,7 +314,7 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
         let linked = link.symlink_metadata().is_ok();
 
         if want && !linked {
-            match make_link(&src, &link, &row.kind, allow_symlink) {
+            match make_link(&src, &link, &row.kind, &mut policy) {
                 Ok(()) => {
                     // Record the projection's identity so a later deactivate can confirm it's
                     // ours (and skip the content hash). Zips only — dir projections are
@@ -411,20 +416,57 @@ fn matches_provenance(conn: &Connection, key: &str, link: &Path, file_name: &str
 pub fn relink_projections(
     conn: &Connection,
     layout: &Layout,
+    progress: impl FnMut(usize, usize),
+) -> RelinkReport {
+    // Same volume → hardlinks, unless the folder is cloud-synced (every attempt would error
+    // 396 — copies stay). Archive on another drive → symlinks, when the OS allows them.
+    let mode = if same_volume(&layout.mods, &layout.archive) {
+        if supports_hardlinks(&layout.mods) {
+            RelinkMode::Hardlink
+        } else {
+            RelinkMode::SameVolumeNoHardlinks
+        }
+    } else if symlinks_usable(layout) {
+        RelinkMode::Symlink
+    } else {
+        RelinkMode::CrossDriveNoSymlinks
+    };
+    relink_with(conn, layout, mode, progress)
+}
+
+/// How [`relink_projections`] may link — decided once up front, injectable for tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelinkMode {
+    Hardlink,
+    Symlink,
+    /// Same volume, but hardlinks are rejected (cloud-synced folder).
+    SameVolumeNoHardlinks,
+    /// Archive on another drive and symlinks unavailable.
+    CrossDriveNoSymlinks,
+}
+
+fn relink_with(
+    conn: &Connection,
+    layout: &Layout,
+    mode: RelinkMode,
     mut progress: impl FnMut(usize, usize),
 ) -> RelinkReport {
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut rep = RelinkReport::default();
-    // Same volume → hardlinks; archive on another drive → symlinks (when the OS allows). On a
-    // cloud-synced folder hardlinks are impossible — every attempt would error 396 — and with no
-    // symlink fallback either, report the situation cleanly instead of one failure per mod.
-    let hardlinks = supports_hardlinks(root) && same_volume(&layout.mods, &layout.archive);
-    let symlinks = !hardlinks && supports_symlinks(layout);
-    if !hardlinks && !symlinks {
-        rep.hardlinks_unsupported = true;
-        return rep;
-    }
+    // Nothing can be linked: report the situation cleanly instead of one failure per mod.
+    let hardlinks = match mode {
+        RelinkMode::Hardlink => true,
+        RelinkMode::Symlink => false,
+        RelinkMode::SameVolumeNoHardlinks => {
+            rep.hardlinks_unsupported = true;
+            return rep;
+        }
+        RelinkMode::CrossDriveNoSymlinks => {
+            rep.cross_drive_copies = true;
+            return rep;
+        }
+    };
     // Only active zips can be projected as a plain file; dir projections are marker-identified
     // and cheap already, so they never need repair.
     let rows: Vec<OrganizedRow> = db::load_organized(conn, &key)
@@ -468,6 +510,15 @@ pub fn relink_projections(
                 Ok(()) => {
                     rep.upgraded += 1;
                     rep.reclaimed_bytes += fmeta.len();
+                    // The copy's recorded (size, mtime) no longer describes the flat entry. A
+                    // hardlink gets its own fresh record (fast deactivate); a symlink is
+                    // identified structurally and keeps none.
+                    db::forget_projection(conn, &key, &row.file_name);
+                    if hardlinks {
+                        if let Some((size, mtime)) = file_stats(&flat) {
+                            db::record_projection(conn, &key, &row.file_name, size, mtime);
+                        }
+                    }
                 }
                 Err(e) => rep.errors.push(format!("{}: relink: {e}", row.tech_name)),
             },
@@ -527,14 +578,18 @@ pub fn adopt_foreign(conn: &Connection, layout: &Layout, file_name: &str) -> Res
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     crate::paths::safe_file_name(file_name).map_err(|e| e.to_string())?;
-    let allow_symlink = supports_symlinks(layout);
     let row = db::load_organized(conn, &key)
         .into_iter()
         .find(|r| r.file_name == file_name)
         .ok_or_else(|| "Not a Silo-managed mod".to_string())?;
     let flat = root.join(file_name);
-    if flat.symlink_metadata().is_err() {
+    let Ok(fmeta) = flat.symlink_metadata() else {
         return Err("No file in the mods folder to adopt".into());
+    };
+    // Promoting a link would file the link itself (not a mod) into the archive and back up the
+    // real archived copy out of the way. Refuse before touching anything.
+    if fmeta.file_type().is_symlink() {
+        return Err("The mods-folder entry is a link, not a file — use Restore instead".into());
     }
     let archive = archive_path(&layout.archive, &row.category, file_name);
     // Back up the old archived copy before replacing it.
@@ -547,7 +602,7 @@ pub fn adopt_foreign(conn: &Connection, layout: &Layout, file_name: &str) -> Res
     // Promote the swapped-in file into the archive, then re-project it back into the root.
     move_path(&flat, &archive).map_err(|e| format!("promote: {e}"))?;
     if row.active {
-        make_link(&archive, &flat, &row.kind, allow_symlink)
+        make_link(&archive, &flat, &row.kind, &mut LinkPolicy::new(layout))
             .map_err(|e| format!("re-project: {e}"))?;
     }
     Ok(())
@@ -564,7 +619,6 @@ pub fn restore_projection(
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     crate::paths::safe_file_name(file_name).map_err(|e| e.to_string())?;
-    let allow_symlink = supports_symlinks(layout);
     let row = db::load_organized(conn, &key)
         .into_iter()
         .find(|r| r.file_name == file_name)
@@ -580,7 +634,7 @@ pub fn restore_projection(
         move_path(&flat, &bak).map_err(|e| format!("backup: {e}"))?;
     }
     if row.active {
-        make_link(&archive, &flat, &row.kind, allow_symlink)
+        make_link(&archive, &flat, &row.kind, &mut LinkPolicy::new(layout))
             .map_err(|e| format!("re-project: {e}"))?;
     }
     Ok(())
@@ -781,13 +835,15 @@ fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// Project `src` into the flat root at `link`. Files → hardlink (no privilege, same volume, no
-/// disk duplication), then a symlink when `allow_symlink` (archive on another drive), then a
-/// copy; dirs → OS symlink, falling back to copy.
+/// disk duplication); if that fails, a symlink only when the archive is on **another drive**
+/// and symlinks work there (`policy`, decided lazily); otherwise a copy. A same-volume folder
+/// that rejects hardlinks (cloud-synced) keeps copies. Dirs → OS symlink, falling back to copy.
+/// Never overwrites an existing entry at `link`.
 pub(crate) fn make_link(
     src: &Path,
     link: &Path,
     kind: &str,
-    allow_symlink: bool,
+    policy: &mut LinkPolicy,
 ) -> std::io::Result<()> {
     if kind == "dir" {
         #[cfg(unix)]
@@ -799,11 +855,47 @@ pub(crate) fn make_link(
         link_zip(
             src,
             link,
-            allow_symlink,
+            || policy.allow_symlink(),
             |s, l| std::fs::hard_link(s, l),
             symlink_file,
         )
     }
+}
+
+/// Whether a zip projection may fall back to a symlink — decided lazily, at most once per
+/// engine call, and only after a hardlink attempt actually failed, so the common same-volume
+/// case never probes (or writes) anything.
+pub(crate) struct LinkPolicy<'a> {
+    layout: &'a Layout,
+    cached: Option<bool>,
+}
+
+impl<'a> LinkPolicy<'a> {
+    pub(crate) fn new(layout: &'a Layout) -> Self {
+        LinkPolicy {
+            layout,
+            cached: None,
+        }
+    }
+
+    /// Symlinks only for an archive on a different volume, outside a Mac App Store sandbox,
+    /// where a probe link actually works.
+    pub(crate) fn allow_symlink(&mut self) -> bool {
+        let layout = self.layout;
+        *self.cached.get_or_insert_with(|| {
+            !same_volume(&layout.mods, &layout.archive) && symlinks_usable(layout)
+        })
+    }
+}
+
+/// Symlinks from the mods folder into the archive can be created and the game will follow them.
+fn symlinks_usable(layout: &Layout) -> bool {
+    !in_mac_app_container(&layout.mods) && supports_symlinks(layout)
+}
+
+/// The Mac App Store FS25 is sandboxed: it can't follow a link out of its container.
+pub(crate) fn in_mac_app_container(mods: &Path) -> bool {
+    mods.to_string_lossy().contains("/Library/Containers/")
 }
 
 /// Create a file symlink at `link` pointing to `src` (Windows needs Developer Mode or admin).
@@ -818,32 +910,72 @@ pub(crate) fn symlink_file(src: &Path, link: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Zip projection: hardlink (same drive, no duplication) → symlink (other drive, when allowed)
-/// → byte copy. The link strategies are injected so the order is unit-testable.
+/// Zip projection: hardlink (same drive, no duplication) → symlink (when `allow_symlink()`
+/// says so; asked only after the hardlink failed) → byte copy. Never overwrites: an
+/// `AlreadyExists` from either link strategy is returned as-is, and the copy only ever creates
+/// a new file. The strategies are injected so the order is unit-testable.
 fn link_zip(
     src: &Path,
     link: &Path,
-    allow_symlink: bool,
+    allow_symlink: impl FnOnce() -> bool,
     hard: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
     soft: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    if hard(src, link).is_ok() {
-        return Ok(());
+    use std::io::ErrorKind::AlreadyExists;
+    match hard(src, link) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == AlreadyExists => return Err(e),
+        Err(_) => {}
     }
-    if allow_symlink && soft(src, link).is_ok() {
-        return Ok(());
+    if allow_symlink() {
+        match soft(src, link) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == AlreadyExists => return Err(e),
+            Err(_) => {}
+        }
     }
-    std::fs::copy(src, link).map(|_| ())
+    copy_new(src, link)
 }
 
+/// Copy `src` to a **new** file `dst`: refuses (AlreadyExists) rather than truncating an
+/// existing file, and removes the partial file if the copy fails — safe, since `create_new`
+/// proves we created it.
+fn copy_new(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let mut from = std::fs::File::open(src)?;
+    let mut to = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)?;
+    if let Err(e) = std::io::copy(&mut from, &mut to) {
+        drop(to);
+        let _ = std::fs::remove_file(dst);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Distinguishes concurrent symlink probes (within this process; the pid covers others).
+static SYMLINK_PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Whether a symlink from the mods folder into the archive works here (always on Linux/macOS
-/// for normal drives; on Windows only with Developer Mode). Cheap one-shot probe.
+/// for normal drives; on Windows only with Developer Mode). Cheap one-shot probe with unique
+/// names, cleaned up afterwards. Never creates a folder: a missing archive or mods folder → false.
 pub fn supports_symlinks(layout: &Layout) -> bool {
-    let target = layout.archive.join(".silo-symlink-probe");
-    let link = layout.mods.join(".silo-symlink-probe.link");
-    let _ = std::fs::remove_file(&link);
-    if std::fs::create_dir_all(&layout.archive).is_err()
-        || std::fs::write(&target, b"silo").is_err()
+    if !layout.archive.is_dir() || !layout.mods.is_dir() {
+        return false;
+    }
+    let tag = format!(
+        "{}-{}",
+        std::process::id(),
+        SYMLINK_PROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let target = layout.archive.join(format!(".silo-symlink-probe-{tag}"));
+    let link = layout.mods.join(format!(".silo-symlink-probe-{tag}.link"));
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .is_err()
     {
         return false;
     }
@@ -853,14 +985,13 @@ pub fn supports_symlinks(layout: &Layout) -> bool {
     ok
 }
 
-/// Mount point holding `p` (longest matching prefix), for same-drive checks and free space.
+/// Mount point holding `p` (longest matching prefix) among `disks`, with its free space.
 /// Compared as normalized keys: on Windows `canonicalize` yields `\\?\C:\…` while mount points
 /// are `C:\`, and `Path::starts_with` treats those prefixes as different.
-pub(crate) fn mount_of(p: &Path) -> Option<(PathBuf, u64)> {
+fn mount_in(disks: &sysinfo::Disks, p: &Path) -> Option<(PathBuf, u64)> {
     let c = std::fs::canonicalize(p).ok()?;
     let windows = cfg!(windows);
     let key = crate::modsroot::normalize_key(&c.to_string_lossy(), windows);
-    let disks = sysinfo::Disks::new_with_refreshed_list();
     disks
         .list()
         .iter()
@@ -872,10 +1003,18 @@ pub(crate) fn mount_of(p: &Path) -> Option<(PathBuf, u64)> {
         .map(|d| (d.mount_point().to_path_buf(), d.available_space()))
 }
 
-/// Whether `a` and `b` live on the same volume. Unknown → assume same (a hardlink attempt
-/// then falls back safely).
+/// Mount point holding `p`, for same-drive checks and free space (one disk enumeration).
+// Only tests call it so far; moving the archive (a later task) uses it for free space.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn mount_of(p: &Path) -> Option<(PathBuf, u64)> {
+    mount_in(&sysinfo::Disks::new_with_refreshed_list(), p)
+}
+
+/// Whether `a` and `b` live on the same volume (one disk enumeration for both). Unknown →
+/// assume same (a hardlink attempt then falls back safely to a copy).
 pub(crate) fn same_volume(a: &Path, b: &Path) -> bool {
-    match (mount_of(a), mount_of(b)) {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    match (mount_in(&disks, a), mount_in(&disks, b)) {
         (Some((ma, _)), Some((mb, _))) => ma == mb,
         _ => true,
     }
@@ -1500,6 +1639,12 @@ mod tests {
         // Now provably Silo's hardlink → cheap to identify, and content preserved.
         assert!(is_silo_projection(&flat, &cat.join("FS25_Foo.zip"), "zip"));
         assert_eq!(std::fs::read(&flat).unwrap(), bytes);
+        // The new hardlink's own (size, mtime) is recorded, so deactivate takes the fast path.
+        assert_eq!(
+            db::projection_stats(&conn, &key, "FS25_Foo.zip"),
+            file_stats(&flat)
+        );
+        assert!(matches_provenance(&conn, &key, &flat, "FS25_Foo.zip"));
 
         // Idempotent: a second pass finds it already linked, changes nothing.
         let rep2 = relink_projections(&conn, &Layout::default_for(&base), |_, _| {});
@@ -1924,15 +2069,22 @@ mod tests {
     #[test]
     fn a_category_never_resolves_to_or_escapes_the_archive() {
         let arch = std::env::temp_dir().join(format!("silo_catdots_{}", std::process::id()));
-        for cat in ["..", ".", "", "  ", " .. ", "..."] {
+        // Names that are empty once Windows drops trailing dots/spaces would name the archive.
+        for cat in ["..", ".", "", "  ", " .. ", "...", ". ."] {
             let dir = archive_dir(&arch, cat);
             assert_eq!(dir, arch.join("_"), "category {cat:?}");
             assert!(dir.starts_with(&arch) && dir != arch, "category {cat:?}");
         }
-        // Ordinary names (and dotted ones that aren't pure dots) are unchanged.
+        // Ordinary names (and dotted ones that aren't empty when collapsed) are unchanged, so
+        // existing archive folders keep their names.
         assert_eq!(archive_dir(&arch, "Vehicles"), arch.join("Vehicles"));
         assert_eq!(archive_dir(&arch, "a/b"), arch.join("a_b"));
         assert_eq!(archive_dir(&arch, "v1.0"), arch.join("v1.0"));
+        assert_eq!(archive_dir(&arch, "a. "), arch.join("a. "));
+    }
+
+    fn other_err(_: &Path, _: &Path) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Other.into())
     }
 
     #[test]
@@ -1943,29 +2095,26 @@ mod tests {
         let src = base.join("a.zip");
         std::fs::write(&src, b"PK\x03\x04 a").unwrap();
 
-        // Hardlink refused, symlink allowed → a symlink resolving to src.
-        let l1 = base.join("l1.zip");
+        // Hardlink works → the symlink policy is never even consulted.
+        let l0 = base.join("l0.zip");
         link_zip(
             &src,
-            &l1,
-            true,
-            |_, _| Err(std::io::ErrorKind::Other.into()),
-            symlink_file,
+            &l0,
+            || panic!("policy must not be consulted when the hardlink works"),
+            |s, l| std::fs::hard_link(s, l),
+            |_, _| panic!("symlink must not be attempted"),
         )
         .unwrap();
+
+        // Hardlink refused, symlink allowed → a symlink resolving to src.
+        let l1 = base.join("l1.zip");
+        link_zip(&src, &l1, || true, other_err, symlink_file).unwrap();
         assert!(l1.symlink_metadata().unwrap().file_type().is_symlink() || !cfg!(unix));
         assert!(is_silo_projection(&l1, &src, "zip"));
 
         // Hardlink and symlink refused → a byte copy.
         let l2 = base.join("l2.zip");
-        link_zip(
-            &src,
-            &l2,
-            true,
-            |_, _| Err(std::io::ErrorKind::Other.into()),
-            |_, _| Err(std::io::ErrorKind::Other.into()),
-        )
-        .unwrap();
+        link_zip(&src, &l2, || true, other_err, other_err).unwrap();
         assert_eq!(std::fs::read(&l2).unwrap(), b"PK\x03\x04 a");
 
         // Symlinks not allowed → never tried.
@@ -1973,12 +2122,118 @@ mod tests {
         link_zip(
             &src,
             &l3,
-            false,
-            |_, _| Err(std::io::ErrorKind::Other.into()),
+            || false,
+            other_err,
             |_, _| panic!("symlink must not be attempted"),
         )
         .unwrap();
+        assert_eq!(std::fs::read(&l3).unwrap(), b"PK\x03\x04 a");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn zip_projection_never_overwrites_an_existing_file() {
+        let base = std::env::temp_dir().join(format!("silo_znoclobber_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let src = base.join("a.zip");
+        std::fs::write(&src, b"PK\x03\x04 the archived build").unwrap();
+        let theirs = base.join("theirs.zip");
+        std::fs::write(&theirs, b"the user's own file").unwrap();
+
+        // Real strategies: the hardlink reports AlreadyExists → stop, nothing else is tried.
+        let e = link_zip(
+            &src,
+            &theirs,
+            || panic!("policy must not be consulted after AlreadyExists"),
+            |s, l| std::fs::hard_link(s, l),
+            |_, _| panic!("symlink must not be attempted after AlreadyExists"),
+        )
+        .unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&theirs).unwrap(), b"the user's own file");
+
+        // A symlink reporting AlreadyExists → no copy attempt either.
+        let e = link_zip(
+            &src,
+            &theirs,
+            || true,
+            other_err,
+            |_, _| Err(std::io::ErrorKind::AlreadyExists.into()),
+        )
+        .unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+
+        // Even if both link strategies fail for another reason, the copy fallback refuses to
+        // truncate or replace the existing file.
+        assert!(link_zip(&src, &theirs, || true, other_err, other_err).is_err());
+        assert_eq!(std::fs::read(&theirs).unwrap(), b"the user's own file");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn copy_fallback_leaves_nothing_behind_when_the_source_is_missing() {
+        let base = std::env::temp_dir().join(format!("silo_zcopyfail_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let dst = base.join("l.zip");
+        assert!(link_zip(
+            &base.join("missing.zip"),
+            &dst,
+            || true,
+            other_err,
+            other_err
+        )
+        .is_err());
+        assert!(
+            dst.symlink_metadata().is_err(),
+            "no partial file under the name"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn symlink_probe_never_creates_the_archive_and_cleans_up() {
+        let base = std::env::temp_dir().join(format!("silo_symprobe_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        let missing = Layout {
+            mods: mods.clone(),
+            archive: base.join("hdd"),
+        };
+        assert!(!supports_symlinks(&missing));
+        assert!(
+            !base.join("hdd").exists(),
+            "the probe must not create the archive"
+        );
+
+        std::fs::create_dir_all(base.join("hdd")).unwrap();
+        let _ = supports_symlinks(&missing);
+        assert_eq!(
+            std::fs::read_dir(&mods).unwrap().count(),
+            0,
+            "no probe left in mods"
+        );
+        assert_eq!(
+            std::fs::read_dir(base.join("hdd")).unwrap().count(),
+            0,
+            "no probe left in the archive"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn mac_app_store_containers_are_detected() {
+        assert!(in_mac_app_container(Path::new(
+            "/Users/me/Library/Containers/com.astragon.farmingsim25/Data/Library/Application Support/FarmingSimulator2025/mods"
+        )));
+        assert!(!in_mac_app_container(Path::new(
+            "/Users/me/Library/Application Support/FarmingSimulator2025/mods"
+        )));
+        assert!(!in_mac_app_container(Path::new(
+            r"C:\Users\me\Documents\My Games\FarmingSimulator2025\mods"
+        )));
     }
 
     #[test]
@@ -1996,7 +2251,7 @@ mod tests {
     }
 
     #[test]
-    fn a_foreign_file_is_never_mistaken_for_a_symlink_projection() {
+    fn a_foreign_file_or_link_is_never_mistaken_for_a_symlink_projection() {
         let base = std::env::temp_dir().join(format!("silo_zforeign_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
@@ -2005,6 +2260,164 @@ mod tests {
         let theirs = base.join("theirs.zip");
         std::fs::write(&theirs, b"PK\x03\x04 different").unwrap();
         assert!(!is_silo_projection(&theirs, &src, "zip"));
+
+        #[cfg(unix)]
+        {
+            // A dangling symlink is not ours.
+            let dangling = base.join("dangling.zip");
+            std::os::unix::fs::symlink(base.join("gone.zip"), &dangling).unwrap();
+            assert!(!is_silo_projection(&dangling, &src, "zip"));
+            // A symlink to a different file is not ours — even one with identical bytes.
+            let to_theirs = base.join("to_theirs.zip");
+            std::os::unix::fs::symlink(&theirs, &to_theirs).unwrap();
+            assert!(!is_silo_projection(&to_theirs, &src, "zip"));
+            let twin = base.join("twin.zip");
+            std::fs::write(&twin, b"PK\x03\x04 a").unwrap();
+            let to_twin = base.join("to_twin.zip");
+            std::os::unix::fs::symlink(&twin, &to_twin).unwrap();
+            assert!(!is_silo_projection(&to_twin, &src, "zip"));
+            // A symlink to the archived file is.
+            let ours = base.join("ours.zip");
+            std::os::unix::fs::symlink(&src, &ours).unwrap();
+            assert!(is_silo_projection(&ours, &src, "zip"));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A default-layout mods folder holding one organized zip `FS25_Foo.zip` in `Vehicles`.
+    #[cfg(unix)]
+    fn symlink_fixture(tag: &str, active: bool) -> (PathBuf, Connection, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("silo_sym_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
+        let cat = base.join(ARCHIVE).join("Vehicles");
+        std::fs::create_dir_all(&cat).unwrap();
+        let src = cat.join("FS25_Foo.zip");
+        std::fs::write(&src, b"PK\x03\x04 the archived build").unwrap();
+        db::upsert_organized(
+            &conn,
+            &key,
+            &OrganizedRow {
+                tech_name: "FS25_Foo".into(),
+                file_name: "FS25_Foo.zip".into(),
+                kind: "zip".into(),
+                category: "Vehicles".into(),
+                subcategory: None,
+                active,
+            },
+        )
+        .unwrap();
+        let flat = base.join("FS25_Foo.zip");
+        (base, conn, src, flat)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deactivate_removes_a_silo_symlink_and_keeps_the_target() {
+        let (base, conn, src, flat) = symlink_fixture("deact", true);
+        std::os::unix::fs::symlink(&src, &flat).unwrap();
+        let rep = set_active(&conn, &Layout::default_for(&base), &HashSet::new());
+        assert_eq!(rep.changed, 1, "errors: {:?}", rep.errors);
+        assert!(flat.symlink_metadata().is_err(), "the symlink is gone");
+        assert_eq!(
+            std::fs::read(&src).unwrap(),
+            b"PK\x03\x04 the archived build"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flatten_replaces_a_silo_symlink_with_the_archived_file() {
+        let (base, conn, src, flat) = symlink_fixture("flat", true);
+        std::os::unix::fs::symlink(&src, &flat).unwrap();
+        let rep = flatten(&conn, &Layout::default_for(&base));
+        assert_eq!(rep.changed, 1, "errors: {:?}", rep.errors);
+        let meta = flat.symlink_metadata().unwrap();
+        assert!(meta.file_type().is_file(), "a real file, not a link");
+        assert_eq!(
+            std::fs::read(&flat).unwrap(),
+            b"PK\x03\x04 the archived build"
+        );
+        assert!(!src.exists(), "moved back out of the archive");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relink_across_drives_upgrades_a_copy_to_a_symlink() {
+        let (base, conn, src, flat) = symlink_fixture("relink", true);
+        std::fs::copy(&src, &flat).unwrap();
+        let layout = Layout::default_for(&base);
+        let key = crate::modsroot::canonical_key(&base);
+        db::record_projection(&conn, &key, "FS25_Foo.zip", 1, 1);
+
+        let rep = relink_with(&conn, &layout, RelinkMode::Symlink, |_, _| {});
+        assert_eq!(rep.upgraded, 1, "errors: {:?}", rep.errors);
+        assert!(flat.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&flat).unwrap(), std::fs::read(&src).unwrap());
+        assert!(is_silo_projection(&flat, &src, "zip"));
+        assert!(
+            db::projection_stats(&conn, &key, "FS25_Foo.zip").is_none(),
+            "the stale copy's provenance is forgotten"
+        );
+
+        let rep2 = relink_with(&conn, &layout, RelinkMode::Symlink, |_, _| {});
+        assert_eq!(rep2.upgraded, 0);
+        assert_eq!(rep2.already_linked, 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relink_skips_a_foreign_symlink() {
+        let (base, conn, _src, flat) = symlink_fixture("relinkforeign", true);
+        let theirs = base.join("theirs.zip");
+        std::fs::write(&theirs, b"PK\x03\x04 the archived build").unwrap();
+        std::os::unix::fs::symlink(&theirs, &flat).unwrap();
+        let rep = relink_with(
+            &conn,
+            &Layout::default_for(&base),
+            RelinkMode::Symlink,
+            |_, _| {},
+        );
+        assert_eq!(rep.skipped, 1);
+        assert_eq!(rep.upgraded, 0);
+        assert_eq!(std::fs::read_link(&flat).unwrap(), theirs, "left untouched");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adopt_refuses_a_symlink_in_the_mods_folder() {
+        let (base, conn, src, flat) = symlink_fixture("adoptlink", true);
+        let theirs = base.join("theirs.zip");
+        std::fs::write(&theirs, b"PK\x03\x04 elsewhere").unwrap();
+        std::os::unix::fs::symlink(&theirs, &flat).unwrap();
+        let err = adopt_foreign(&conn, &Layout::default_for(&base), "FS25_Foo.zip").unwrap_err();
+        assert!(err.contains("link"), "{err}");
+        assert_eq!(std::fs::read_link(&flat).unwrap(), theirs, "link untouched");
+        assert_eq!(
+            std::fs::read(&src).unwrap(),
+            b"PK\x03\x04 the archived build"
+        );
+        assert!(!base.join("backups").exists(), "nothing backed up");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn relink_reports_why_it_cannot_link() {
+        let base = std::env::temp_dir().join(format!("silo_relinkwhy_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let layout = Layout::default_for(&base);
+        let cloud = relink_with(&conn, &layout, RelinkMode::SameVolumeNoHardlinks, |_, _| {});
+        assert!(cloud.hardlinks_unsupported && !cloud.cross_drive_copies);
+        let cross = relink_with(&conn, &layout, RelinkMode::CrossDriveNoSymlinks, |_, _| {});
+        assert!(cross.cross_drive_copies && !cross.hardlinks_unsupported);
         let _ = std::fs::remove_dir_all(&base);
     }
 }
