@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vanilla layout only deletes the copy if it's unchanged; otherwise it's moved to `backups/`
   and Silo tells you where. (#202)
 
+- **Guided bisection puts back exactly what you had.** Finishing a bisection now restores the
+  set saved when it started, even if Silo rescanned while you were testing in the game, and any
+  problems are shown instead of ignored. (#202)
+
 ### Security
 
 - **Stricter image-host check.** The image proxy now parses URLs properly before checking the

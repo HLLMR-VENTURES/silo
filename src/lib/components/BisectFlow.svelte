@@ -4,15 +4,17 @@
   // set changes + launch; the player provides the verdict each round (a crash is
   // auto-detected from the log). The player's real mod set is snapshotted first and
   // restored on finish/cancel — nothing here is destructive.
+  import { onDestroy } from "svelte";
   import {
     bisectPlan,
     bisectNarrow,
     bisectSnapshotSave,
+    bisectSnapshotGet,
     bisectSnapshotClear,
-    setActive,
     launchGame,
     scanLog,
   } from "../api";
+  import { bisectRestoreSet } from "../bisect";
   import type { BisectStep } from "../types";
 
   interface Props {
@@ -20,9 +22,14 @@
     pool: string[];
     /** Mods kept active every round (maps/required deps) so the save still loads. */
     alwaysOn: string[];
+    /** Make exactly these mods active. Shows any problems to the user and rejects if the
+     *  set couldn't be applied cleanly. */
+    onApply: (techNames: string[]) => Promise<void>;
+    /** Told when a bisection starts (snapshot saved) and when it ends. */
+    onBisecting: (active: boolean) => void;
     onExit: () => void;
   }
-  let { pool, alwaysOn, onExit }: Props = $props();
+  let { pool, alwaysOn, onApply, onBisecting, onExit }: Props = $props();
 
   type Phase =
     | "intro"
@@ -42,6 +49,8 @@
   let crashHint = $state<boolean | null>(null); // from the log after a round
   let culprit = $state<string | null>(null);
 
+  let started = $state(false); // true once the snapshot is saved; until then nothing changed
+
   const total = $derived(pool.length);
 
   async function begin() {
@@ -50,6 +59,8 @@
     try {
       // Snapshot the REAL set first (crash-safe restore lives in the DB).
       await bisectSnapshotSave([...alwaysOn, ...pool]);
+      started = true;
+      onBisecting(true);
       await advance([...pool]);
     } catch (e) {
       error = String(e);
@@ -71,7 +82,7 @@
       phase = "inconclusive";
     } else {
       working = `Applying ${s.test.length} of ${next.length} mods…`;
-      await setActive([...alwaysOn, ...s.test]);
+      await onApply([...alwaysOn, ...s.test]);
       working = null;
       round += 1;
       crashHint = null;
@@ -119,19 +130,41 @@
     }
   }
 
-  // Always restore the real set before leaving, however we leave.
+  // Always restore the real set before leaving, however we leave. The set comes from the
+  // snapshot saved at start, not the live props: a rescan mid-round would have turned
+  // `pool` into the test half. The snapshot is cleared only after a clean restore, so if
+  // this fails the startup recovery banner can offer it again.
   async function finish() {
+    if (!started) {
+      // Nothing was saved or changed yet (or saving failed): just leave.
+      exitUnchanged();
+      return;
+    }
     working = "Restoring your mods…";
     try {
-      await setActive([...alwaysOn, ...pool]);
+      const snapshot = await bisectSnapshotGet();
+      await onApply(bisectRestoreSet(snapshot, alwaysOn, pool));
       await bisectSnapshotClear();
     } catch (e) {
       error = String(e);
     } finally {
       working = null;
+      started = false;
+      onBisecting(false);
       onExit();
     }
   }
+
+  function exitUnchanged() {
+    onBisecting(false);
+    onExit();
+  }
+
+  // Closing the panel mid-run unmounts this flow without finishing. The snapshot stays
+  // (App then offers to restore it); just make sure App stops treating us as running.
+  onDestroy(() => {
+    if (started) onBisecting(false);
+  });
 
   const roundsLeft = $derived(step?.kind === "split" ? step.roundsLeft : 0);
 </script>
@@ -158,7 +191,7 @@
       saved now and restored when you finish.
     </p>
     <div class="actions">
-      <button class="btn ghost" onclick={onExit}>Not now</button>
+      <button class="btn ghost" onclick={exitUnchanged}>Not now</button>
       <button class="btn primary" onclick={begin} disabled={!!working}>Start</button>
     </div>
   {:else if phase === "await-launch"}

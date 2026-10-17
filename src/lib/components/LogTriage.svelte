@@ -12,8 +12,11 @@
     /** Current active tech names, and which of them are maps (kept on during bisection). */
     activeMods: string[];
     activeMaps: string[];
+    /** Passed through to guided bisection: apply a set, and report start/end. */
+    onApply: (techNames: string[]) => Promise<void>;
+    onBisecting: (active: boolean) => void;
   }
-  let { onClose, activeMods, activeMaps }: Props = $props();
+  let { onClose, activeMods, activeMaps, onApply, onBisecting }: Props = $props();
 
   let mode = $state<"report" | "bisect">("report");
   // Bisect the active non-map mods; maps stay on so the save still loads.
@@ -78,7 +81,13 @@
   </div>
 
   {#if mode === "bisect"}
-    <BisectFlow {pool} alwaysOn={activeMaps} onExit={() => (mode = "report")} />
+    <BisectFlow
+      {pool}
+      alwaysOn={activeMaps}
+      {onApply}
+      {onBisecting}
+      onExit={() => (mode = "report")}
+    />
   {:else if loading && !report}
     <div class="empty">Reading log.txt…</div>
   {:else if error}

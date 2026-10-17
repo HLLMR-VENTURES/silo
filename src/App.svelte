@@ -257,6 +257,9 @@
   // Set when a previous bisection didn't finish (app closed mid-run) — the user's mod
   // set may be partially applied, so offer to restore it.
   let bisectRecovery = $state<string[] | null>(null);
+  // True while a guided bisection is running (snapshot saved, test halves applied). The
+  // focus rescan holds off meanwhile so returning from FS25 can't rewrite the active set.
+  let bisecting = $state(false);
   // Top-level view: the local library, or the remote catalog browser.
   let view = $state<"library" | "browse">("library");
   // Measured so the fixed detail drawers can sit *below* the header instead of over it
@@ -630,6 +633,29 @@
     if (rep.errors.length) errorMsg = rep.errors.slice(0, 3).join("; ");
     if (rep.notices?.length) infoMsg = rep.notices.join(" ");
     return rep;
+  }
+
+  // Guided bisection applies its test halves and the final restore through here, so
+  // problems and notices reach the user. Rejects unless the set applied cleanly, so the
+  // flow stops (and keeps its snapshot) instead of carrying on with the wrong mods.
+  async function bisectApply(techNames: string[]) {
+    const rep = await applyActive(techNames).catch((e) => {
+      errorMsg = String(e);
+      throw e;
+    });
+    if (rep.errors.length) throw rep.errors.slice(0, 3).join("; ");
+  }
+
+  // When a bisection ends, a snapshot still on disk means the restore didn't finish (or
+  // the panel was closed mid-run): offer the restore banner now rather than next launch.
+  async function bisectingChanged(active: boolean) {
+    bisecting = active;
+    if (active) return;
+    try {
+      bisectRecovery = await bisectSnapshotGet();
+    } catch {
+      /* non-critical */
+    }
   }
 
   async function toggleActive(techName: string) {
@@ -1986,6 +2012,7 @@
             !scanning &&
             !busy &&
             !moveRunning &&
+            !bisecting &&
             roots.length &&
             Date.now() - lastScanAt > 4000
           ) {
@@ -2264,6 +2291,8 @@
         onClose={() => (logOpen = false)}
         activeMods={[...activeSet]}
         activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
+        onApply={bisectApply}
+        onBisecting={(v) => void bisectingChanged(v)}
       />
     </div>
   {/if}
