@@ -69,7 +69,7 @@ Rust core modules (`src-tauri/src/`): `scan` `moddesc` `category` `icons` `db` `
 `bisect` (guided bisection) · `bindings` (input map) · `mpsync` (MP manifest) · `bridge`
 (filltype companion generator) · `provenance` (integrity/manifest hashing) · `paths` `secrets`
 `xmltext` (safety/util). Each is pure logic behind thin `#[tauri::command]` wrappers with
-unit tests (219 Rust tests). Frontend panels in `src/lib/components/`.
+unit tests (224 Rust tests). Frontend panels in `src/lib/components/`.
 
 - **Tauri v2**: Rust core in `src-tauri/`, web frontend in `src/`.
 - **Frontend: Svelte 5 (runes) + Vite + TypeScript**, hand-authored CSS design
