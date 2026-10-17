@@ -83,6 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Silo uses them, GitHub API addresses are built safely, and mod updates download only from
   GitHub. (#202)
 
+- **Savegame backups only copy real savegames.** Silo now checks the folder against the
+  savegames it found before copying anything. (#PR)
+
 ## [0.9.0] - 2026-10-17
 
 ### Added

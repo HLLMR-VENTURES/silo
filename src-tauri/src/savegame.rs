@@ -6,7 +6,7 @@
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -150,13 +150,23 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The folder of savegame `folder`, if it's a plain name that `list_savegames` reports. A
+/// backup can then only ever copy a real savegame, never another folder a caller names.
+pub fn listed_folder(user_dir: &Path, folder: &str) -> Result<PathBuf, String> {
+    if crate::paths::safe_file_name(folder).is_err()
+        || !list_savegames(user_dir).iter().any(|s| s.folder == folder)
+    {
+        return Err(format!(
+            "Savegame \"{folder}\" wasn't found. Refresh the list and try again."
+        ));
+    }
+    Ok(user_dir.join(folder))
+}
+
 /// Back up a savegame folder to `SiloBackups/<folder>_<epoch>` (a plain copy —
 /// non-destructive; the original is untouched). Returns the backup path.
 pub fn backup(user_dir: &Path, folder: &str) -> Result<String, String> {
-    let src = user_dir.join(folder);
-    if !src.is_dir() {
-        return Err(format!("savegame '{folder}' not found"));
-    }
+    let src = listed_folder(user_dir, folder)?;
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -212,5 +222,35 @@ mod tests {
         // Original untouched.
         assert!(root.join("savegame1/careerSavegame.xml").is_file());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn backup_refuses_anything_but_a_listed_savegame() {
+        let root = std::env::temp_dir().join(format!("silo_sg_refuse_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("savegame1")).unwrap();
+        std::fs::write(root.join("savegame1/careerSavegame.xml"), SAMPLE).unwrap();
+        std::fs::create_dir_all(root.join("savegame2")).unwrap(); // no careerSavegame.xml: not listed
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        let outside = std::env::temp_dir().join(format!("silo_sg_outside_{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside_str = outside.to_string_lossy().into_owned();
+        for bad in [
+            "",
+            "..",
+            "../x",
+            "mods",
+            "savegame2",
+            "savegame1/..",
+            "savegame1\\..\\mods",
+            outside_str.as_str(),
+        ] {
+            assert!(backup(&root, bad).is_err(), "should refuse {bad:?}");
+        }
+        assert!(!root.join("SiloBackups").exists(), "nothing was copied");
+        let dst = backup(&root, "savegame1").unwrap();
+        assert!(Path::new(&dst).join("careerSavegame.xml").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }
