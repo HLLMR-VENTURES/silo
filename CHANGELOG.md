@@ -19,8 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   edits is recorded. (#PR)
 
 - **Copy diagnostics.** Settings → Diagnostics → Copy diagnostics copies your report and Silo's
-  recent log, with your user name removed, ready to paste into a bug report. Exported reports leave
-  out your user name too. (#PR)
+  recent log, with your user name removed, ready to paste into a bug report. If the clipboard can't
+  be used, Silo offers to save them to a file instead. Exported reports leave out your user name
+  too. (#PR)
 
 ### Fixed
 

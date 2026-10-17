@@ -782,6 +782,12 @@ export function diagnosticsBundle(report: string, includeLog: boolean): Promise<
   return invoke<string>("diagnostics_bundle", { report, includeLog });
 }
 
+/** Put `text` on the clipboard. Done in Rust: WebKit (macOS, Linux) refuses
+ *  navigator.clipboard after an awaited call, and older WebKitGTK has none. */
+export function copyText(text: string): Promise<void> {
+  return invoke("copy_text", { text });
+}
+
 // ── Mod settings form ──
 export function userDirPath(): Promise<string | null> {
   return invoke<string | null>("user_dir_path");

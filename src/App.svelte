@@ -47,6 +47,7 @@
     onCloseBlocked,
     saveTextFile,
     diagnosticsBundle,
+    copyText,
     userDirPath,
     bisectSnapshotGet,
     bisectSnapshotClear,
@@ -101,6 +102,7 @@
   } from "./lib/types";
   import { checkYourselfList, type CheckYourselfRow } from "./lib/sources";
   import { appendInfo } from "./lib/info";
+  import { copyOrSave } from "./lib/clipboard";
 
   const CATEGORIES = [
     "Maps",
@@ -550,8 +552,11 @@
 
   async function copyDiagnostics() {
     try {
-      await navigator.clipboard.writeText(await diagnosticsBundle(buildReport(), true));
-      infoMsg = "Diagnostics copied. Paste them into your bug report.";
+      const text = await diagnosticsBundle(buildReport(), true);
+      const out = await copyOrSave(text, "silo-diagnostics.md", copyText, saveTextFile);
+      if (out === "copied") infoMsg = "Diagnostics copied. Paste them into your bug report.";
+      else if (out === "saved")
+        infoMsg = "Silo couldn't use the clipboard, so it saved the diagnostics to a file instead.";
     } catch (e) {
       errorMsg = `Couldn't copy diagnostics: ${e}`;
     }

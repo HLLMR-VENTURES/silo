@@ -31,6 +31,9 @@ tauri-plugin-updater = "2"
 # `log` facade every module writes through. See `run()` and `fslog.rs`.
 tauri-plugin-log = "2"
 log = "0.4"
+# Copy to the clipboard from Rust: WebKit (macOS, Linux) refuses navigator.clipboard after an
+# awaited IPC call. The webview gets no clipboard permission; only commands write to it.
+tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 walkdir = "2"

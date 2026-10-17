@@ -3116,6 +3116,14 @@ async fn diagnostics_bundle(
     .await
 }
 
+/// Put `text` on the system clipboard. From Rust because WebKit (macOS, Linux) refuses the
+/// webview's clipboard after an awaited call; the webview itself has no clipboard permission.
+#[tauri::command]
+async fn copy_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    off_main(move || app.clipboard().write_text(text).map_err(|e| e.to_string())).await
+}
+
 /// Clear the scan cache so the next scan re-parses & re-categorizes every mod.
 #[tauri::command]
 async fn clear_scan_cache(app: tauri::AppHandle) -> Result<(), String> {
@@ -4314,6 +4322,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Used by `copy_text` only; no clipboard permission is granted to the webview.
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             // Started here, not on the builder: a plugin that fails on the builder stops the app,
             // and a log folder Silo can't write (or an old log another program holds open) must
@@ -4435,6 +4445,7 @@ pub fn run() {
             launch_game,
             save_text,
             diagnostics_bundle,
+            copy_text,
             user_dir_path,
             clear_scan_cache,
             scan_log,
