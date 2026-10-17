@@ -51,18 +51,25 @@ Beyond the MVP management layer above:
   state per folder (`root` key on `organized` / `projection`). `allowed_roots()` returns the
   resolved active root, so every write command follows the chosen folder. Linux/Proton prefix
   and Mac App Store discovery live in `fsgame::locate()`.
+- **Library archive location** (`relocate`, #166) — a mods folder's archive can live on any drive
+  (`archive_root:<mods key>`). Moving it is a resumable job with a DB marker: copy to a
+  `.silo-move-tmp`, verify, place without ever replacing an existing file, then delete the original
+  by rename-aside; Pause / Resume / Cancel (cancel moves back what was moved), refused — and
+  auto-paused — while FS25 runs (`gamelaunch::fs25_running`). Pointing at a folder that already
+  holds mods offers to adopt them via the Organize preview. Across drives, projection is
+  hardlink → symlink → copy (`organize::LinkPolicy`).
 
 Backend: **SiloAPI** (separate repo `HLLMR/silo-api`, live at `https://silo-api.hllmr.com`).
 
 ## Stack & structure
 
 Rust core modules (`src-tauri/src/`): `scan` `moddesc` `category` `icons` `db` `store`
-`fsgame` `modsroot` (mods-folder resolution) `organize` `savegame` `conflicts` `settings_form`
+`fsgame` `modsroot` (mods-folder resolution) `organize` `relocate` (archive move job) `savegame` `conflicts` `settings_form`
 `xmlconfig` `gamelaunch` `github` `siloapi` (catalog client) · `logscan` (crash triage) ·
 `bisect` (guided bisection) · `bindings` (input map) · `mpsync` (MP manifest) · `bridge`
 (filltype companion generator) · `provenance` (integrity/manifest hashing) · `paths` `secrets`
 `xmltext` (safety/util). Each is pure logic behind thin `#[tauri::command]` wrappers with
-unit tests (127 Rust tests). Frontend panels in `src/lib/components/`.
+unit tests (213 Rust tests). Frontend panels in `src/lib/components/`.
 
 - **Tauri v2**: Rust core in `src-tauri/`, web frontend in `src/`.
 - **Frontend: Svelte 5 (runes) + Vite + TypeScript**, hand-authored CSS design

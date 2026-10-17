@@ -2,7 +2,7 @@
 
 - **Date:** 2026-10-16
 - **Issue:** #166 (configurable library/archive location). Builds on mods-folder selection (#162, #176).
-- **Status:** approved design, not yet implemented
+- **Status:** implemented — see [Implementation notes](#implementation-notes) for where the build differs
 
 ## Problem
 
@@ -174,3 +174,16 @@ Manual (RC rules — never on the real library):
 2. **Off-thread:** the move runs on a blocking worker with progress events; all commands are `async` + `spawn_blocking`.
 3. **Tested against:** a disposable mods folder (never the real library) for destructive steps.
 4. **XML:** not involved.
+
+## Implementation notes
+
+Where the built feature differs from, or pins down, the design above:
+
+- **`Layout` lives in `organize`** (`organize::Layout { mods, archive }`), as designed. The move job itself is its own module, `relocate`, rather than `organize::relocate_archive`; its persisted marker (`relocate::MoveMarker`) records `from`, `to`, `direction` (`Forward` | `Back`), `paused`, `pause_reason`, `errors` and `moved` instead of the `state` string sketched above. Cancel flips `direction` and moves back only the mods listed in `moved`.
+- **The active-root seam in `modsroot` is `Active { layout, move_to }`**: the active layout plus the other archive of an unfinished move. There is no `move_running` field — whether a move is copying right now is `relocate::is_running()`.
+- **`LIBRARY_WRITE`** (a mutex in `lib.rs`) serializes every library write (organize, projections, installs, adopt, archive moves). A move only `try_lock`s it and holds it for the whole job, setting **`MOVE_HOLDS_LOCK`** so other writes refuse at once ("Finish or cancel the archive move first.") instead of waiting behind it.
+- **`sysinfo` 0.36** (locked 0.36.1, `rust-version` 1.75) fits Silo's `rust-version = "1.77"`; it is resolved by Cargo's MSRV-aware resolver. Features are limited to `system` and `disk`.
+- **Free space and same-drive detection** use `sysinfo`'s disk list (`organize::mount_of` / `same_volume`; longest matching mount point wins). `same_volume` assumes "same" when a mount can't be determined, so a hardlink attempt falls back safely to a copy; the preflight in `lib.rs` treats an unknown mount separately so its checks still run.
+- **`organize::LinkPolicy` is lazy**: it probes symlink support at most once per engine call, and only after a hardlink has already failed, so the common same-volume case never writes a probe file. Symlinks are allowed only for an archive on a different volume, outside a Mac App Store container, with a successful probe. Folder mods inside a Mac App Store container are always copied.
+- **Game check** runs through `gamelaunch::fs25_running()` in two passes (names, then command line and exe for candidates) and is throttled to once per 2 seconds during a move; once it has seen the game it stays true for that boundary.
+- **UI:** the move banner and its state handling currently live in `App.svelte`; extracting them is tracked in #187.
