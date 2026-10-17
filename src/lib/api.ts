@@ -63,10 +63,6 @@ export async function confirmDialog(
   return await pluginConfirm(message, { title: "Silo", kind: opts.kind ?? "warning", ...opts });
 }
 
-export function defaultModsPaths(): Promise<string[]> {
-  return invoke<string[]>("default_mods_paths");
-}
-
 export type ModsRootSource = "user" | "gameOverride" | "default";
 
 export interface KnownRoot {
