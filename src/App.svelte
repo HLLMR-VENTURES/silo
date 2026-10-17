@@ -99,6 +99,7 @@
     SourceRow,
   } from "./lib/types";
   import { checkYourselfList, type CheckYourselfRow } from "./lib/sources";
+  import { appendInfo } from "./lib/info";
 
   const CATEGORIES = [
     "Maps",
@@ -1973,8 +1974,9 @@
       result = r;
       mods = r.mods;
       activeSet = new Set(r.mods.filter((m) => m.active).map((m) => m.techName));
-      // Interrupted mod updates Silo finished or rolled back before scanning.
-      if (r.notices?.length) infoMsg = r.notices.join(" ");
+      // Interrupted mod updates Silo finished or rolled back before scanning. Added to the
+      // banner, so a startup notice (a database restored) isn't wiped by the first scan.
+      if (r.notices?.length) infoMsg = appendInfo(infoMsg, r.notices);
       if (r.problems?.length) errorMsg = r.problems.join(" ");
       // Filesystem-level check (Rust): files at a managed name that aren't Silo's projection.
       detectForeignFiles(roots[0])
@@ -2063,7 +2065,7 @@
       await loadArchive();
       try {
         const notes = await takeStartupNotices();
-        if (notes.length) infoMsg = notes.join(" ");
+        if (notes.length) infoMsg = appendInfo(infoMsg, notes);
       } catch {
         /* non-critical */
       }
