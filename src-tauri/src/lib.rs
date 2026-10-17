@@ -97,7 +97,6 @@ async fn scan_mods(
     };
     // The organize manifest is per folder; scope the reconcile to the folder being scanned.
     let scan_key = roots.first().map(|r| modsroot::canonical_key(r));
-    let active = modsroot::active();
 
     tauri::async_runtime::spawn_blocking(move || {
         // A mod update Silo was in the middle of when it stopped is finished or rolled back
@@ -105,6 +104,9 @@ async fn scan_mods(
         let recovered = recover_interrupted_updates();
         // Taken after this scan's own recovery, so only writes from here on count against it.
         let start = quiet_epoch(&LIBRARY_WRITE, &LIBRARY_EPOCH);
+        // Read after `start`: a change of archive (repoint, move) before this point is seen
+        // here, and one after it moves the epoch on, so the reconcile below is refused.
+        let active = modsroot::active();
         // Warm cache: parsed entries persist between launches, keyed by
         // path+mtime+size, so unchanged mods skip archive parsing entirely.
         let mut conn = db::open(&db_path(&app)?)?;
