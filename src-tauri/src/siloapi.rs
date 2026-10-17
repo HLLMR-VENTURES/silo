@@ -2,8 +2,9 @@
 //! This is the "Browse" tab's backend: search the catalog, read a mod's cross-source
 //! pointers, and install a browsed mod's .zip straight into the library.
 //!
-//! All network stays in Rust (the webview CSP blocks HTTP). The base URL is
-//! overridable via the `siloapi_base` app_setting so a self-hoster can repoint it.
+//! All network stays in Rust (the webview CSP blocks HTTP). In debug builds only, the base
+//! URL is overridable via the `siloapi_base` app_setting so a developer can point it at their
+//! own SiloAPI; release builds always use `DEFAULT_BASE` (see `effective_siloapi_base`).
 
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};

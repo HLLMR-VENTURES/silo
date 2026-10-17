@@ -61,9 +61,17 @@
 
   let showCosmetic = $state(false);
 
+  // Kept apart from `error` so a failed "Open log.txt" doesn't replace the report.
+  let revealError = $state<string | null>(null);
+
   async function reveal() {
-    const dir = await userDirPath();
-    if (dir) await revealInFolder(`${dir}/log.txt`);
+    revealError = null;
+    try {
+      const dir = await userDirPath();
+      if (dir) await revealInFolder(`${dir}/log.txt`);
+    } catch (e) {
+      revealError = String(e);
+    }
   }
 
   onMount(scan);
@@ -175,6 +183,9 @@
         {r.unattributed} finding{r.unattributed === 1 ? "" : "s"} couldn't be tied to a specific
         mod (engine or base-game). <button class="link" onclick={reveal}>Open log.txt</button>
       </p>
+      {#if revealError}
+        <div class="verdict bad">{revealError}</div>
+      {/if}
     {/if}
 
     {#if r.mods.length === 0 && r.unattributed === 0}

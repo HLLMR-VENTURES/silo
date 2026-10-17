@@ -68,13 +68,15 @@ fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Return the auto-detected default mod root(s) as strings for the UI.
-#[tauri::command]
-fn default_mods_paths() -> Vec<String> {
-    fsgame::default_mods_paths()
-        .into_iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect()
+/// Run a command's disk, database, keychain or process work on the blocking pool. A sync
+/// command runs on the main thread, so anything slower than a few microseconds there freezes
+/// the window. Every command that isn't pure goes through this.
+async fn off_main<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Scan the given roots (or the auto-detected default when omitted/empty).
@@ -223,26 +225,26 @@ async fn get_mod_icon(
 
 // ── Curation (favorite / hidden / broken) ──
 #[tauri::command]
-fn get_curation(app: tauri::AppHandle) -> Result<Vec<db::CurationRow>, String> {
-    let conn = db::open(&db_path(&app)?)?;
-    Ok(db::load_curation(&conn))
+async fn get_curation(app: tauri::AppHandle) -> Result<Vec<db::CurationRow>, String> {
+    let db = db_path(&app)?;
+    off_main(move || Ok(db::load_curation(&db::open(&db)?))).await
 }
 
 #[tauri::command]
-fn set_curation(app: tauri::AppHandle, row: db::CurationRow) -> Result<(), String> {
-    let conn = db::open(&db_path(&app)?)?;
-    db::set_curation(&conn, &row)
+async fn set_curation(app: tauri::AppHandle, row: db::CurationRow) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || db::set_curation(&db::open(&db)?, &row)).await
 }
 
 // ── GitHub update checking ──
 #[tauri::command]
-fn get_mod_repos(app: tauri::AppHandle) -> Result<Vec<db::RepoRow>, String> {
-    let conn = db::open(&db_path(&app)?)?;
-    Ok(db::load_repos(&conn))
+async fn get_mod_repos(app: tauri::AppHandle) -> Result<Vec<db::RepoRow>, String> {
+    let db = db_path(&app)?;
+    off_main(move || Ok(db::load_repos(&db::open(&db)?))).await
 }
 
 #[tauri::command]
-fn set_mod_repo(
+async fn set_mod_repo(
     app: tauri::AppHandle,
     tech_name: String,
     owner: String,
@@ -253,8 +255,8 @@ fn set_mod_repo(
     if !owner.trim().is_empty() && !repo.trim().is_empty() {
         github::check_repo(owner.trim(), repo.trim())?;
     }
-    let conn = db::open(&db_path(&app)?)?;
-    db::set_repo(&conn, &tech_name, &owner, &repo)
+    let db = db_path(&app)?;
+    off_main(move || db::set_repo(&db::open(&db)?, &tech_name, &owner, &repo)).await
 }
 
 // ── Source pages: where each mod came from (#196) ──
@@ -310,14 +312,20 @@ async fn mark_source_checked(app: tauri::AppHandle, tech_name: String) -> Result
 
 /// Scan a mod's modDesc.xml for a github.com/owner/repo reference.
 #[tauri::command]
-fn guess_repo(path: String, kind: String) -> Option<db::RepoRow> {
-    let xml = scan::read_moddesc_xml(std::path::Path::new(&path), &kind).ok()?;
-    let (owner, repo) = github::find_repo_in_text(&xml)?;
-    Some(db::RepoRow {
-        tech_name: String::new(),
-        owner,
-        repo,
+async fn guess_repo(path: String, kind: String) -> Result<Option<db::RepoRow>, String> {
+    off_main(move || {
+        let Ok(xml) = scan::read_moddesc_xml(std::path::Path::new(&path), &kind) else {
+            return Ok(None);
+        };
+        Ok(
+            github::find_repo_in_text(&xml).map(|(owner, repo)| db::RepoRow {
+                tech_name: String::new(),
+                owner,
+                repo,
+            }),
+        )
     })
+    .await
 }
 
 #[tauri::command]
@@ -362,39 +370,47 @@ fn scope_grants(scopes: &str, want: &str) -> bool {
 
 #[tauri::command]
 #[allow(clippy::const_is_empty)]
-fn gh_status(app: tauri::AppHandle) -> Result<GhStatus, String> {
-    let conn = db::open(&db_path(&app)?)?;
-    // Capability comes from the scopes GitHub actually granted. Older connections predate
-    // scope capture and only carry the coarse booleans — honour those until the next
-    // reconnect writes `gh_scopes`.
-    let (can_write, can_gist) = match db::get_app_setting(&conn, "gh_scopes") {
-        Some(s) => (
-            scope_grants(&s, "public_repo") || scope_grants(&s, "repo"),
-            scope_grants(&s, "gist"),
-        ),
-        None => (
-            db::get_app_setting(&conn, "gh_write").as_deref() == Some("1"),
-            db::get_app_setting(&conn, "gh_gist").as_deref() == Some("1"),
-        ),
-    };
-    Ok(GhStatus {
-        client_id: effective_client_id(&conn),
-        user: db::get_app_setting(&conn, "gh_user"),
-        builtin: !SILO_GH_CLIENT_ID.is_empty(),
-        can_write,
-        can_gist,
+async fn gh_status(app: tauri::AppHandle) -> Result<GhStatus, String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let conn = db::open(&db)?;
+        // Capability comes from the scopes GitHub actually granted. Older connections predate
+        // scope capture and only carry the coarse booleans — honour those until the next
+        // reconnect writes `gh_scopes`.
+        let (can_write, can_gist) = match db::get_app_setting(&conn, "gh_scopes") {
+            Some(s) => (
+                scope_grants(&s, "public_repo") || scope_grants(&s, "repo"),
+                scope_grants(&s, "gist"),
+            ),
+            None => (
+                db::get_app_setting(&conn, "gh_write").as_deref() == Some("1"),
+                db::get_app_setting(&conn, "gh_gist").as_deref() == Some("1"),
+            ),
+        };
+        Ok(GhStatus {
+            client_id: effective_client_id(&conn),
+            user: db::get_app_setting(&conn, "gh_user"),
+            builtin: !SILO_GH_CLIENT_ID.is_empty(),
+            can_write,
+            can_gist,
+        })
     })
+    .await
 }
 
 #[tauri::command]
-fn gh_set_client_id(app: tauri::AppHandle, client_id: String) -> Result<(), String> {
-    let conn = db::open(&db_path(&app)?)?;
-    let v = client_id.trim();
-    db::set_app_setting(
-        &conn,
-        "gh_client_id",
-        if v.is_empty() { None } else { Some(v) },
-    )
+async fn gh_set_client_id(app: tauri::AppHandle, client_id: String) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let conn = db::open(&db)?;
+        let v = client_id.trim();
+        db::set_app_setting(
+            &conn,
+            "gh_client_id",
+            if v.is_empty() { None } else { Some(v) },
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -558,6 +574,19 @@ struct UpdateOutcome {
 
 const UPDATE_GAME_RUNNING: &str = "Close Farming Simulator 25 first, then update.";
 
+/// FS25 writes gameSettings.xml (and mods their settings) back when the game exits, so a change
+/// made while it runs is silently undone.
+const CONFIG_GAME_RUNNING: &str = "Close Farming Simulator 25 first. The game saves its own \
+     settings when it exits, so a change made now would be lost.";
+
+fn config_write_refusal(game_running: bool) -> Result<(), String> {
+    if game_running {
+        Err(CONFIG_GAME_RUNNING.into())
+    } else {
+        Ok(())
+    }
+}
+
 /// Update an installed mod from a GitHub release asset (`update` module): download beside it
 /// without the library lock, then swap it in under the lock, keeping the previous version in
 /// `backups/`. Refused while FS25 runs (its files may be open).
@@ -693,32 +722,57 @@ fn settle_updates_locked() -> Result<(), String> {
 
 // ── SiloAPI (mod browser / discovery) ──
 
+/// The catalog address: the built-in one, or, in a debug build only, one a developer stored with
+/// `siloapi_set_base`. Release builds ignore any stored value.
+fn effective_siloapi_base(stored: Option<String>, debug: bool) -> String {
+    stored
+        .filter(|s| debug && !s.trim().is_empty())
+        .unwrap_or_else(|| siloapi::DEFAULT_BASE.to_string())
+}
+
 fn siloapi_base(app: &tauri::AppHandle) -> Result<String, String> {
     let conn = db::open(&db_path(app)?)?;
-    Ok(db::get_app_setting(&conn, "siloapi_base")
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| siloapi::DEFAULT_BASE.to_string()))
+    Ok(effective_siloapi_base(
+        db::get_app_setting(&conn, "siloapi_base"),
+        cfg!(debug_assertions),
+    ))
 }
 
 #[tauri::command]
-fn siloapi_status(app: tauri::AppHandle) -> Result<String, String> {
-    siloapi_base(&app)
+async fn siloapi_status(app: tauri::AppHandle) -> Result<String, String> {
+    off_main(move || siloapi_base(&app)).await
 }
 
+/// Developer-only: point the catalog at another address (e.g. a local SiloAPI). Debug builds
+/// only; the catalog decides where Browse and Collections installs download from.
+#[cfg(debug_assertions)]
 #[tauri::command]
-fn siloapi_set_base(app: tauri::AppHandle, base: String) -> Result<(), String> {
-    let conn = db::open(&db_path(&app)?)?;
-    let v = base.trim().trim_end_matches('/');
-    // SSRF guard: a custom base drives every catalog request, so validate it before storing.
-    // Allow localhost so a self-hoster/dev can point at their own endpoint; block private IPs.
-    if !v.is_empty() {
-        net::validate_outbound_url(v, true)?;
-    }
-    db::set_app_setting(
-        &conn,
-        "siloapi_base",
-        if v.is_empty() { None } else { Some(v) },
-    )
+async fn siloapi_set_base(app: tauri::AppHandle, base: String) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let conn = db::open(&db)?;
+        let v = base.trim().trim_end_matches('/');
+        // SSRF guard: a custom base drives every catalog request, so validate it before storing.
+        // Allow localhost so a developer can point at their own endpoint; block private IPs.
+        if !v.is_empty() {
+            net::validate_outbound_url(v, true)?;
+        }
+        db::set_app_setting(
+            &conn,
+            "siloapi_base",
+            if v.is_empty() { None } else { Some(v) },
+        )
+    })
+    .await
+}
+
+/// Release builds always use the built-in catalog; same signature so `generate_handler!` stays
+/// one list (the argument names are the IPC keys, so they keep their names).
+#[cfg(not(debug_assertions))]
+#[tauri::command]
+async fn siloapi_set_base(app: tauri::AppHandle, base: String) -> Result<(), String> {
+    let _ = (app, base);
+    Err("Not available in this build.".into())
 }
 
 // Mirrors siloapi::browse's filter set; flat args keep the invoke() call shape simple.
@@ -1165,41 +1219,53 @@ async fn verify_mod(
 }
 
 #[tauri::command]
-fn gh_logout(app: tauri::AppHandle) -> Result<(), String> {
-    let conn = db::open(&db_path(&app)?)?;
-    secrets::set(&conn, "gh_token", None)?;
-    db::set_app_setting(&conn, "gh_user", None)?;
-    db::set_app_setting(&conn, "gh_scopes", None)?;
-    // Legacy flags from before scope capture — clear them too so nothing lingers.
-    db::set_app_setting(&conn, "gh_write", None)?;
-    db::set_app_setting(&conn, "gh_gist", None)?;
-    Ok(())
+async fn gh_logout(app: tauri::AppHandle) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let conn = db::open(&db)?;
+        secrets::set(&conn, "gh_token", None)?;
+        db::set_app_setting(&conn, "gh_user", None)?;
+        db::set_app_setting(&conn, "gh_scopes", None)?;
+        // Legacy flags from before scope capture — clear them too so nothing lingers.
+        db::set_app_setting(&conn, "gh_write", None)?;
+        db::set_app_setting(&conn, "gh_gist", None)?;
+        Ok(())
+    })
+    .await
 }
 
 // ── Tags ──
 #[tauri::command]
-fn get_tags(app: tauri::AppHandle) -> Result<Vec<db::TagRow>, String> {
-    let conn = db::open(&db_path(&app)?)?;
-    Ok(db::load_tags(&conn))
+async fn get_tags(app: tauri::AppHandle) -> Result<Vec<db::TagRow>, String> {
+    let db = db_path(&app)?;
+    off_main(move || Ok(db::load_tags(&db::open(&db)?))).await
 }
 
 #[tauri::command]
-fn set_tags(app: tauri::AppHandle, tech_name: String, tags: Vec<String>) -> Result<(), String> {
-    let mut conn = db::open(&db_path(&app)?)?;
-    db::set_tags(&mut conn, &tech_name, &tags)
+async fn set_tags(
+    app: tauri::AppHandle,
+    tech_name: String,
+    tags: Vec<String>,
+) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let mut conn = db::open(&db)?;
+        db::set_tags(&mut conn, &tech_name, &tags)
+    })
+    .await
 }
 
 // ── Manual category overrides ──
 #[tauri::command]
-fn get_overrides(app: tauri::AppHandle) -> Result<Vec<db::CategoryOverride>, String> {
-    let conn = db::open(&db_path(&app)?)?;
-    Ok(db::load_overrides(&conn))
+async fn get_overrides(app: tauri::AppHandle) -> Result<Vec<db::CategoryOverride>, String> {
+    let db = db_path(&app)?;
+    off_main(move || Ok(db::load_overrides(&db::open(&db)?))).await
 }
 
 #[tauri::command]
-fn set_override(app: tauri::AppHandle, row: db::CategoryOverride) -> Result<(), String> {
-    let conn = db::open(&db_path(&app)?)?;
-    db::set_override(&conn, &row)
+async fn set_override(app: tauri::AppHandle, row: db::CategoryOverride) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || db::set_override(&db::open(&db)?, &row)).await
 }
 
 // ── Organize / projection engine (writes to the game folder) ──
@@ -1623,16 +1689,6 @@ async fn flatten(app: tauri::AppHandle, root: Option<String>) -> Result<organize
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-fn get_organized(app: tauri::AppHandle) -> Result<Vec<db::OrganizedRow>, String> {
-    let conn = db::open(&db_path(&app)?)?;
-    let key = mods_roots()
-        .first()
-        .map(|r| modsroot::canonical_key(r))
-        .unwrap_or_default();
-    Ok(db::load_organized(&conn, &key))
-}
-
 // ── Mods folder selection (#162) ──
 
 #[derive(serde::Serialize)]
@@ -1852,6 +1908,7 @@ async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
+        config_write_refusal(gamelaunch::fs25_running())?;
         let folder = modsroot::active()
             .map(|a| a.layout.mods)
             .ok_or_else(|| "No mods folder selected".to_string())?;
@@ -2682,26 +2739,34 @@ async fn archive_adopt_apply(
 
 // ── Loadouts (named active-mod sets) ──
 #[tauri::command]
-fn get_loadouts(app: tauri::AppHandle) -> Result<Vec<db::Loadout>, String> {
-    let conn = db::open(&db_path(&app)?)?;
-    Ok(db::load_loadouts(&conn))
+async fn get_loadouts(app: tauri::AppHandle) -> Result<Vec<db::Loadout>, String> {
+    let db = db_path(&app)?;
+    off_main(move || Ok(db::load_loadouts(&db::open(&db)?))).await
 }
 
 #[tauri::command]
-fn save_loadout(
+async fn save_loadout(
     app: tauri::AppHandle,
     id: Option<i64>,
     name: String,
     mods: Vec<String>,
 ) -> Result<i64, String> {
-    let mut conn = db::open(&db_path(&app)?)?;
-    db::save_loadout(&mut conn, id, &name, &mods)
+    let db = db_path(&app)?;
+    off_main(move || {
+        let mut conn = db::open(&db)?;
+        db::save_loadout(&mut conn, id, &name, &mods)
+    })
+    .await
 }
 
 #[tauri::command]
-fn delete_loadout(app: tauri::AppHandle, id: i64) -> Result<(), String> {
-    let mut conn = db::open(&db_path(&app)?)?;
-    db::delete_loadout(&mut conn, id)
+async fn delete_loadout(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let mut conn = db::open(&db)?;
+        db::delete_loadout(&mut conn, id)
+    })
+    .await
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -2712,29 +2777,37 @@ struct LoadoutFile {
 }
 
 #[tauri::command]
-fn export_loadout(app: tauri::AppHandle, id: i64, path: String) -> Result<(), String> {
-    let conn = db::open(&db_path(&app)?)?;
-    let lo = db::load_loadouts(&conn)
-        .into_iter()
-        .find(|l| l.id == id)
-        .ok_or_else(|| "Loadout not found".to_string())?;
-    let file = LoadoutFile {
-        silo: 1,
-        name: lo.name,
-        mods: lo.mods,
-    };
-    let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
-    paths::safe_outbound(std::path::Path::new(&path), &["silo"])?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+async fn export_loadout(app: tauri::AppHandle, id: i64, path: String) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let conn = db::open(&db)?;
+        let lo = db::load_loadouts(&conn)
+            .into_iter()
+            .find(|l| l.id == id)
+            .ok_or_else(|| "Loadout not found".to_string())?;
+        let file = LoadoutFile {
+            silo: 1,
+            name: lo.name,
+            mods: lo.mods,
+        };
+        let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
+        paths::safe_outbound(std::path::Path::new(&path), &["silo"])?;
+        std::fs::write(&path, json).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-fn import_loadout(app: tauri::AppHandle, path: String) -> Result<i64, String> {
-    paths::safe_inbound(std::path::Path::new(&path), &["silo", "json"])?;
-    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let file: LoadoutFile = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    let mut conn = db::open(&db_path(&app)?)?;
-    db::save_loadout(&mut conn, None, &file.name, &file.mods)
+async fn import_loadout(app: tauri::AppHandle, path: String) -> Result<i64, String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        paths::safe_inbound(std::path::Path::new(&path), &["silo", "json"])?;
+        let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let file: LoadoutFile = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+        let mut conn = db::open(&db)?;
+        db::save_loadout(&mut conn, None, &file.name, &file.mods)
+    })
+    .await
 }
 
 // ── Conflict detection (over the active set) ──
@@ -2770,23 +2843,29 @@ async fn launch_game() -> Result<(), String> {
 /// Write text to a user-chosen path (used by the diagnostics report export). Confined to a
 /// report file type with no traversal, so it can't be turned into an arbitrary-file write.
 #[tauri::command]
-fn save_text(path: String, content: String) -> Result<(), String> {
-    paths::safe_outbound(std::path::Path::new(&path), &["md", "txt"])?;
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+async fn save_text(path: String, content: String) -> Result<(), String> {
+    off_main(move || {
+        paths::safe_outbound(std::path::Path::new(&path), &["md", "txt"])?;
+        std::fs::write(&path, content).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Clear the scan cache so the next scan re-parses & re-categorizes every mod.
 #[tauri::command]
-fn clear_scan_cache(app: tauri::AppHandle) -> Result<(), String> {
-    let conn = db::open(&db_path(&app)?)?;
-    db::clear_cache(&conn);
-    Ok(())
+async fn clear_scan_cache(app: tauri::AppHandle) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        db::clear_cache(&db::open(&db)?);
+        Ok(())
+    })
+    .await
 }
 
 /// The FS25 user data dir (parent of mods/, savegameN/, game.xml).
 #[tauri::command]
-fn user_dir_path() -> Option<String> {
-    fsgame::user_dir().map(|p| p.to_string_lossy().into_owned())
+async fn user_dir_path() -> Result<Option<String>, String> {
+    off_main(|| Ok(fsgame::user_dir().map(|p| p.to_string_lossy().into_owned()))).await
 }
 
 /// Generate a filltype-compatibility bridge companion mod into the library root.
@@ -3698,103 +3777,136 @@ fn bisect_narrow(test: Vec<String>, rest: Vec<String>, still_broken: bool) -> Ve
 /// Persist the user's real active set before bisection perturbs it, so even an app
 /// crash mid-diagnosis can restore it (reversibility is non-negotiable — CLAUDE.md).
 #[tauri::command]
-fn bisect_snapshot_save(app: tauri::AppHandle, active: Vec<String>) -> Result<(), String> {
-    let conn = db::open(&db_path(&app)?)?;
-    let json = serde_json::to_string(&active).map_err(|e| e.to_string())?;
-    db::set_app_setting(&conn, "bisect_snapshot", Some(&json))
+async fn bisect_snapshot_save(app: tauri::AppHandle, active: Vec<String>) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let conn = db::open(&db)?;
+        let json = serde_json::to_string(&active).map_err(|e| e.to_string())?;
+        db::set_app_setting(&conn, "bisect_snapshot", Some(&json))
+    })
+    .await
 }
 
 /// The saved pre-bisection active set, if a bisection is (or was) in progress.
 #[tauri::command]
-fn bisect_snapshot_get(app: tauri::AppHandle) -> Result<Option<Vec<String>>, String> {
-    let conn = db::open(&db_path(&app)?)?;
-    match db::get_app_setting(&conn, "bisect_snapshot") {
-        Some(json) => Ok(Some(
-            serde_json::from_str(&json).map_err(|e| e.to_string())?,
-        )),
-        None => Ok(None),
-    }
+async fn bisect_snapshot_get(app: tauri::AppHandle) -> Result<Option<Vec<String>>, String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let conn = db::open(&db)?;
+        match db::get_app_setting(&conn, "bisect_snapshot") {
+            Some(json) => Ok(Some(
+                serde_json::from_str(&json).map_err(|e| e.to_string())?,
+            )),
+            None => Ok(None),
+        }
+    })
+    .await
 }
 
 /// Clear the snapshot once the original set has been restored.
 #[tauri::command]
-fn bisect_snapshot_clear(app: tauri::AppHandle) -> Result<(), String> {
-    let conn = db::open(&db_path(&app)?)?;
-    db::set_app_setting(&conn, "bisect_snapshot", None)
+async fn bisect_snapshot_clear(app: tauri::AppHandle) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || db::set_app_setting(&db::open(&db)?, "bisect_snapshot", None)).await
 }
 
 /// Read specific values from a config XML by path.
 #[tauri::command]
-fn get_config(
+async fn get_config(
     path: String,
     paths: Vec<String>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
-    let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
-    let xml = crate::paths::guarded_xml_read(&[user], std::path::Path::new(&path))?;
-    Ok(xmlconfig::get_values(&xml, &paths))
+    off_main(move || {
+        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let xml = crate::paths::guarded_xml_read(&[user], std::path::Path::new(&path))?;
+        Ok(xmlconfig::get_values(&xml, &paths))
+    })
+    .await
 }
 
 /// Apply value edits to a config XML. The write is confined to the FS25 user dir, backs up
 /// the original first (required), and swaps the new file in atomically (see
 /// `paths::guarded_xml_write`).
 #[tauri::command]
-fn set_config(path: String, edits: Vec<xmlconfig::Edit>) -> Result<(), String> {
-    let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
-    let roots = [user];
-    let p = std::path::Path::new(&path);
-    let xml = paths::guarded_xml_read(&roots, p)?;
-    let out = xmlconfig::set_values(&xml, &edits)?;
-    paths::guarded_xml_write(&roots, p, &out)
+async fn set_config(path: String, edits: Vec<xmlconfig::Edit>) -> Result<(), String> {
+    off_main(move || {
+        config_write_refusal(gamelaunch::fs25_running())?;
+        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let roots = [user];
+        let p = std::path::Path::new(&path);
+        let xml = paths::guarded_xml_read(&roots, p)?;
+        let out = xmlconfig::set_values(&xml, &edits)?;
+        paths::guarded_xml_write(&roots, p, &out)
+    })
+    .await
 }
 
 // ── Mod settings form ──
 #[tauri::command]
-fn mods_with_settings() -> Vec<String> {
-    match fsgame::user_dir() {
-        Some(dir) => settings_form::mods_with_settings(&dir),
-        None => Vec::new(),
-    }
+async fn mods_with_settings() -> Result<Vec<String>, String> {
+    off_main(|| {
+        Ok(fsgame::user_dir()
+            .map(|d| settings_form::mods_with_settings(&d))
+            .unwrap_or_default())
+    })
+    .await
 }
 
 #[tauri::command]
-fn get_mod_settings(mod_name: String) -> Result<Vec<settings_form::SettingsFile>, String> {
-    let dir = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
-    let mut files = Vec::new();
-    for path in settings_form::find_files(&dir, &mod_name) {
-        files.push(settings_form::load_file(&path)?);
-    }
-    Ok(files)
+async fn get_mod_settings(mod_name: String) -> Result<Vec<settings_form::SettingsFile>, String> {
+    off_main(move || {
+        let dir = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let mut files = Vec::new();
+        for path in settings_form::find_files(&dir, &mod_name) {
+            files.push(settings_form::load_file(&path)?);
+        }
+        Ok(files)
+    })
+    .await
 }
 
 #[tauri::command]
-fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Result<(), String> {
-    let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
-    let roots = [user];
-    let p = std::path::Path::new(&path);
-    let raw = paths::guarded_xml_read(&roots, p)?;
-    let updated = settings_form::apply_edits(&raw, &edits)?;
-    paths::guarded_xml_write(&roots, p, &updated)
+async fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Result<(), String> {
+    off_main(move || {
+        config_write_refusal(gamelaunch::fs25_running())?;
+        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let roots = [user];
+        let p = std::path::Path::new(&path);
+        let raw = paths::guarded_xml_read(&roots, p)?;
+        let updated = settings_form::apply_edits(&raw, &edits)?;
+        paths::guarded_xml_write(&roots, p, &updated)
+    })
+    .await
 }
 
 #[tauri::command]
-fn save_mod_settings_raw(path: String, content: String) -> Result<(), String> {
-    let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
-    paths::guarded_xml_write(&[user], std::path::Path::new(&path), &content)
+async fn save_mod_settings_raw(path: String, content: String) -> Result<(), String> {
+    off_main(move || {
+        config_write_refusal(gamelaunch::fs25_running())?;
+        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        paths::guarded_xml_write(&[user], std::path::Path::new(&path), &content)
+    })
+    .await
 }
 
 // ── Savegames ──
 #[tauri::command]
-fn get_savegames() -> Result<Vec<savegame::Savegame>, String> {
-    match fsgame::user_dir() {
-        Some(dir) => Ok(savegame::list_savegames(&dir)),
-        None => Ok(Vec::new()),
-    }
+async fn get_savegames() -> Result<Vec<savegame::Savegame>, String> {
+    off_main(|| {
+        Ok(fsgame::user_dir()
+            .map(|dir| savegame::list_savegames(&dir))
+            .unwrap_or_default())
+    })
+    .await
 }
 
 #[tauri::command]
-fn backup_savegame(folder: String) -> Result<String, String> {
-    let dir = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
-    savegame::backup(&dir, &folder)
+async fn backup_savegame(folder: String) -> Result<String, String> {
+    off_main(move || {
+        let dir = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        savegame::backup(&dir, &folder)
+    })
+    .await
 }
 
 /// The app version from Cargo/tauri.conf package info — the single source of truth
@@ -3807,8 +3919,8 @@ fn app_version(app: tauri::AppHandle) -> String {
 /// True when this machine can store account tokens in the OS keychain. When false, the UI
 /// warns that a connected token would be kept in the local DB unencrypted.
 #[tauri::command]
-fn secret_storage_secure() -> bool {
-    secrets::keychain_available()
+async fn secret_storage_secure() -> Result<bool, String> {
+    off_main(|| Ok(secrets::keychain_available())).await
 }
 
 /// Files in the flat mods root that occupy an organized mod's name but aren't Silo's projection
@@ -3880,7 +3992,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            default_mods_paths,
             scan_mods,
             get_mod_icon,
             get_curation,
@@ -3922,7 +4033,6 @@ pub fn run() {
             apply_organize,
             set_active,
             flatten,
-            get_organized,
             mods_root_status,
             set_mods_root,
             clear_mods_root,
@@ -4049,6 +4159,7 @@ mod tests {
     use crate::{
         organize::{Layout, ModInput},
         relocate::MoveMarker,
+        siloapi,
     };
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
@@ -4715,5 +4826,72 @@ mod tests {
         // Fine-grained PATs report no scopes; "*" means assume capable.
         assert!(scope_grants("*", "gist"));
         assert!(scope_grants("*", "public_repo"));
+    }
+
+    #[test]
+    fn a_stored_catalog_address_is_ignored_in_release_builds() {
+        assert_eq!(
+            super::effective_siloapi_base(Some("https://evil.example".into()), false),
+            siloapi::DEFAULT_BASE
+        );
+        assert_eq!(
+            super::effective_siloapi_base(Some("http://localhost:3000".into()), true),
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            super::effective_siloapi_base(None, true),
+            siloapi::DEFAULT_BASE
+        );
+    }
+
+    #[test]
+    fn fs25_settings_writes_wait_for_the_game_to_close() {
+        assert_eq!(
+            super::config_write_refusal(true).unwrap_err(),
+            super::CONFIG_GAME_RUNNING
+        );
+        assert!(super::config_write_refusal(false).is_ok());
+    }
+
+    #[test]
+    fn only_pure_commands_run_on_the_main_thread() {
+        // A sync #[tauri::command] runs on the main thread: disk, DB, keychain or process-list
+        // work there freezes the window ("Not Responding"). Only these touch nothing.
+        const PURE: &[&str] = &[
+            "bisect_plan",
+            "bisect_narrow",
+            "app_busy",
+            "force_quit",
+            "set_self_updating",
+            "archive_move_pause",
+            "app_version",
+        ];
+        let src = include_str!("lib.rs");
+        let mut sync = Vec::new();
+        let mut lines = src.lines();
+        while let Some(line) = lines.next() {
+            if line.trim() != "#[tauri::command]" {
+                continue;
+            }
+            for next in lines.by_ref() {
+                let t = next.trim();
+                if t.starts_with("#[") {
+                    continue; // another attribute
+                }
+                let t = t.strip_prefix("pub ").unwrap_or(t);
+                if let Some(rest) = t.strip_prefix("fn ") {
+                    sync.push(rest.split(['(', '<']).next().unwrap_or("").to_string());
+                }
+                break;
+            }
+        }
+        let unexpected: Vec<&String> = sync
+            .iter()
+            .filter(|n| !PURE.contains(&n.as_str()))
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "make these async and run their work with off_main: {unexpected:?}"
+        );
     }
 }

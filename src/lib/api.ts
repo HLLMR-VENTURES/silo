@@ -5,6 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save, open, confirm as pluginConfirm } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir, openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { serial } from "./serial";
+export { serial } from "./serial";
 import type {
   ScanResult,
   UpdateOutcome,
@@ -61,10 +63,6 @@ export async function confirmDialog(
   opts: { okLabel?: string; cancelLabel?: string; kind?: "info" | "warning" | "error" } = {},
 ): Promise<boolean> {
   return await pluginConfirm(message, { title: "Silo", kind: opts.kind ?? "warning", ...opts });
-}
-
-export function defaultModsPaths(): Promise<string[]> {
-  return invoke<string[]>("default_mods_paths");
 }
 
 export type ModsRootSource = "user" | "gameOverride" | "default";
@@ -294,8 +292,11 @@ export function getCuration(): Promise<CurationRow[]> {
   return invoke<CurationRow[]>("get_curation");
 }
 
+// Whole-row writes: queued per mod so a quick second click can't be overtaken by the first
+// (commands run on a worker pool). The value is copied now, so it's the one sent later.
 export function setCuration(row: CurationRow): Promise<void> {
-  return invoke("set_curation", { row });
+  const snapshot = { ...row };
+  return serial(`curation:${row.techName}`, () => invoke<void>("set_curation", { row: snapshot }));
 }
 
 export function getTags(): Promise<TagRow[]> {
@@ -303,7 +304,8 @@ export function getTags(): Promise<TagRow[]> {
 }
 
 export function setTags(techName: string, tags: string[]): Promise<void> {
-  return invoke("set_tags", { techName, tags });
+  const snapshot = [...tags];
+  return serial(`tags:${techName}`, () => invoke<void>("set_tags", { techName, tags: snapshot }));
 }
 
 export function getOverrides(): Promise<CategoryOverride[]> {
@@ -503,10 +505,6 @@ export function onCloseBlocked(cb: () => void): Promise<UnlistenFn> {
 // ── SiloAPI (mod browser / discovery) ──
 export function siloapiStatus(): Promise<string> {
   return invoke<string>("siloapi_status");
-}
-
-export function siloapiSetBase(base: string): Promise<void> {
-  return invoke("siloapi_set_base", { base });
 }
 
 export function browseMods(opts: {
