@@ -111,7 +111,7 @@ pub fn open(db_path: &Path) -> Result<Connection, String> {
     if let Some(dir) = db_path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    check_once(db_path);
+    check_once(db_path)?;
     let mut conn = Connection::open(db_path).map_err(|e| e.to_string())?;
     match schema_version(&conn)? {
         v if v == SCHEMA_VERSION => Ok(conn),
@@ -199,44 +199,69 @@ pub fn snapshot_dir(db_path: &Path) -> PathBuf {
     db_path.with_file_name("db-snapshots")
 }
 
-/// Database files checked this run (`check_once`).
-static CHECKED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+/// Database files checked this run (`check_once`), each with its refusal: `Some(why)` when the
+/// file was judged damaged but couldn't be set aside, so it must not be opened this run.
+type Checked = Vec<(PathBuf, Option<String>)>;
+static CHECKED: std::sync::Mutex<Checked> = std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
 fn forget_checked(path: &Path) {
     CHECKED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .retain(|p| p != path);
+        .retain(|(p, _)| p != path);
 }
 
-/// Once per run per file, before first use: if SQLite reports the file damaged, set it aside,
-/// put back the newest good snapshot (or let `open` start a new database), and leave a notice.
-/// A database that is busy, locked or unreadable for any other reason is never touched.
-fn check_once(db_path: &Path) {
+/// Once per run per file, before first use (`examine`). Every later open of a file that was
+/// judged damaged but couldn't be set aside gets the same refusal instead of opening it.
+fn check_once(db_path: &Path) -> Result<(), String> {
     let mut checked = CHECKED.lock().unwrap_or_else(|e| e.into_inner());
-    if checked.iter().any(|p| p == db_path) {
-        return;
-    }
-    checked.push(db_path.to_path_buf());
+    let refusal = match checked.iter().find(|(p, _)| p == db_path) {
+        Some((_, refusal)) => refusal.clone(),
+        None => {
+            let refusal = examine(db_path);
+            checked.push((db_path.to_path_buf(), refusal.clone()));
+            refusal
+        }
+    };
+    refusal.map_or(Ok(()), Err)
+}
+
+/// If SQLite reports the file damaged, set it aside, put back the newest good snapshot (or let
+/// `open` start a new database), and leave a notice. A database that is busy, locked or
+/// unreadable for any other reason is never touched. Returns a refusal only when the damaged
+/// file is still in place.
+fn examine(db_path: &Path) -> Option<String> {
     if !db_path.is_file() {
-        return;
+        return None;
     }
     // A newer Silo's file may use schema this SQLite can't parse, which reads as "malformed".
     // That's not damage: leave it for `open` to refuse untouched.
     if stamped_version(db_path).is_some_and(|v| v > SCHEMA_VERSION) {
-        return;
+        return None;
     }
     if !is_damaged(db_path) {
-        return;
+        return None;
     }
-    crate::notices::push(match recover(db_path, &snapshot_dir(db_path)) {
-        Ok(notice) => notice,
-        Err(e) => format!(
-            "Silo's library database is damaged and couldn't be set aside ({e}). Close any other \
-             copy of Silo and start it again."
-        ),
-    });
+    match recover(db_path, &snapshot_dir(db_path)) {
+        Ok(notice) => {
+            crate::notices::push(notice);
+            None
+        }
+        Err(refusal) => {
+            crate::notices::push(refusal.clone());
+            Some(refusal)
+        }
+    }
+}
+
+/// `std::fs::rename`, with failures injectable in tests.
+fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if tests::rename_fails(from) {
+        return Err(std::io::Error::other("injected rename failure"));
+    }
+    std::fs::rename(from, to)
 }
 
 fn is_corruption(e: &rusqlite::Error) -> bool {
@@ -289,7 +314,8 @@ fn unix_now() -> std::time::Duration {
 
 /// `silo.db` (and its -wal / -shm) renamed to `silo.db.damaged-<unix secs>`, never over an
 /// earlier damaged file; the main file's new path is returned. The -wal goes first: left
-/// beside a restored database, SQLite would replay it into that database.
+/// beside a restored database, SQLite would replay it into that database. If any rename fails,
+/// the ones already done are undone, so the file and its journal stay together.
 fn set_db_aside(path: &Path) -> std::io::Result<PathBuf> {
     let name = path
         .file_name()
@@ -308,15 +334,26 @@ fn set_db_aside(path: &Path) -> std::io::Result<PathBuf> {
         })
         .find(|stem| !taken(stem))
         .unwrap_or_else(|| format!("{name}.damaged-{secs}"));
-    for suffix in ["-wal", "-shm"] {
-        let from = path.with_file_name(format!("{name}{suffix}"));
-        if from.exists() {
-            std::fs::rename(&from, path.with_file_name(format!("{stem}{suffix}")))?;
+    let mut moves: Vec<(PathBuf, PathBuf)> = ["-wal", "-shm"]
+        .iter()
+        .map(|s| {
+            (
+                path.with_file_name(format!("{name}{s}")),
+                path.with_file_name(format!("{stem}{s}")),
+            )
+        })
+        .filter(|(from, _)| from.exists())
+        .collect();
+    moves.push((path.to_path_buf(), path.with_file_name(&stem)));
+    for (i, (from, to)) in moves.iter().enumerate() {
+        if let Err(e) = rename(from, to) {
+            for (back_to, back_from) in moves[..i].iter().rev() {
+                let _ = rename(back_from, back_to);
+            }
+            return Err(e);
         }
     }
-    let kept = path.with_file_name(&stem);
-    std::fs::rename(path, &kept)?;
-    Ok(kept)
+    Ok(path.with_file_name(&stem))
 }
 
 fn now_ms() -> u64 {
@@ -443,23 +480,33 @@ fn remove_stale_tmps(dir: &Path) {
     }
 }
 
+/// Set the damaged file aside and put a snapshot in its place. `Err` (a refusal) only when the
+/// damaged file couldn't be moved; every other outcome is a notice.
 fn recover(db_path: &Path, snapshots: &Path) -> Result<String, String> {
-    let kept = set_db_aside(db_path).map_err(|e| e.to_string())?;
+    let kept = set_db_aside(db_path).map_err(|e| {
+        format!(
+            "Silo's library database ({}) is damaged and couldn't be set aside ({e}). Close any \
+             other copy of Silo and start it again.",
+            db_path.display()
+        )
+    })?;
     match newest_good_snapshot(snapshots) {
-        Some(snap) => {
-            std::fs::copy(&snap, db_path).map_err(|e| e.to_string())?;
-            // A snapshot isn't in WAL mode, and an up-to-date database never migrates again.
-            if let Ok(c) = Connection::open(db_path) {
-                let _ = enable_wal(&c);
-            }
-            Ok(format!(
+        Some(snap) => match restore(&snap, db_path) {
+            Ok(()) => Ok(format!(
                 "Silo's library database was damaged, so Silo restored its latest automatic backup \
                  ({}). Tags, notes or loadouts changed after that backup may be missing. The \
                  damaged file was kept at {}.",
                 snap.file_name().unwrap_or_default().to_string_lossy(),
                 kept.display()
-            ))
-        }
+            )),
+            Err(e) => Ok(format!(
+                "Silo's library database was damaged and Silo couldn't put back its latest \
+                 automatic backup ({e}), so it started a new one. The damaged file was kept at {}, \
+                 and the backups are in {}.",
+                kept.display(),
+                snapshots.display()
+            )),
+        },
         None => Ok(format!(
             "Silo's library database was damaged and no backup copy could be used, so Silo \
              started a new one. Your mods are untouched and the next scan finds them again; tags, \
@@ -467,6 +514,26 @@ fn recover(db_path: &Path, snapshots: &Path) -> Result<String, String> {
             kept.display()
         )),
     }
+}
+
+/// Copy `snap` to `<db>.restore-tmp`, then rename it into place, so `db_path` is never a
+/// half-written copy. A leftover scratch file is removed.
+fn restore(snap: &Path, db_path: &Path) -> Result<(), String> {
+    let name = db_path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = db_path.with_file_name(format!("{name}.restore-tmp"));
+    let _ = std::fs::remove_file(&tmp);
+    let done = std::fs::copy(snap, &tmp)
+        .and_then(|_| rename(&tmp, db_path))
+        .map_err(|e| e.to_string());
+    if done.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    done?;
+    // A snapshot isn't in WAL mode, and an up-to-date database never migrates again.
+    if let Ok(c) = Connection::open(db_path) {
+        let _ = enable_wal(&c);
+    }
+    Ok(())
 }
 
 /// Copy the database to `dir/silo-<unix_ms>.db` (`write_copy`: consistent even while Silo runs,
@@ -1223,6 +1290,24 @@ mod tests {
         }
     }
 
+    /// Renames that fail on purpose, by source path.
+    static FAILING_RENAMES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn rename_fails(from: &Path) -> bool {
+        FAILING_RENAMES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|p| p == from)
+    }
+
+    fn fail_renames_from(from: &Path) {
+        FAILING_RENAMES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(from.to_path_buf());
+    }
+
     fn sqlite_path(path: &Path) -> String {
         let opened = Connection::open(path).unwrap();
         opened.path().unwrap_or_default().to_string()
@@ -1453,6 +1538,53 @@ mod tests {
         damage(&path);
         drop(open(&path).unwrap());
         assert_eq!(set_aside(&path).len(), 2, "both damaged files are kept");
+    }
+
+    #[test]
+    fn a_damaged_database_that_cant_be_set_aside_is_left_whole_and_not_opened() {
+        let path = temp_db("aside_fails");
+        drop(open(&path).unwrap());
+        damage(&path);
+        let wal = wal_shm(&path)[0].clone();
+        std::fs::write(&wal, b"the damaged file's journal").unwrap();
+        fail_renames_from(&path); // the main file can't be moved (another program has it open)
+        for _ in 0..2 {
+            let err = open(&path).unwrap_err();
+            assert!(err.contains("couldn't be set aside"), "{err}");
+        }
+        assert!(
+            set_aside(&path).is_empty(),
+            "the -wal was put back beside its file"
+        );
+        assert_eq!(std::fs::read(&wal).unwrap(), b"the damaged file's journal");
+        assert!(std::fs::read(&path)
+            .unwrap()
+            .starts_with(b"this is not a database"));
+        let notices = notices_for(&path);
+        assert!(notices.iter().any(|n| n.contains("couldn't be set aside")));
+    }
+
+    #[test]
+    fn a_backup_that_cant_be_put_back_says_so_and_starts_fresh() {
+        let path = temp_db("restore_fails");
+        let dir = snapshot_dir(&path);
+        {
+            let mut c = open(&path).unwrap();
+            save_loadout(&mut c, None, "Backed up", &[]).unwrap();
+            snapshot(&c, &dir, 5, std::time::Duration::ZERO).unwrap();
+        }
+        damage(&path);
+        let tmp = path.with_file_name("silo.db.restore-tmp");
+        fail_renames_from(&tmp);
+        let conn = open(&path).unwrap();
+        assert!(load_loadouts(&conn).is_empty(), "a new database");
+        assert!(!tmp.exists(), "the half-restored copy is cleaned up");
+        assert_eq!(set_aside(&path).len(), 1);
+        let notices = notices_for(&path);
+        assert!(
+            notices.iter().any(|n| n.contains("couldn't put back")),
+            "{notices:?}"
+        );
     }
 
     #[test]
