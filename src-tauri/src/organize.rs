@@ -869,7 +869,8 @@ fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Project `src` into the flat root at `link`. Files → hardlink (no privilege, same volume, no
 /// disk duplication); if that fails, a symlink only when the archive is on **another drive**
 /// and symlinks work there (`policy`, decided lazily); otherwise a copy. A same-volume folder
-/// that rejects hardlinks (cloud-synced) keeps copies. Dirs → OS symlink, falling back to copy;
+/// that rejects hardlinks (cloud-synced) keeps copies. Dirs → OS symlink (on Windows, an NTFS
+/// junction when symlinks need Developer Mode), falling back to copy;
 /// inside a Mac App Store container always a marked copy (the sandboxed game can't follow a
 /// link out). Never overwrites an existing entry at `link`, and never links to a missing `src`
 /// (a dangling link would look active but load nothing, and cleanup couldn't prove it ours).
@@ -888,11 +889,7 @@ pub(crate) fn make_link(
             }
             return copy_dir_projection(src, link);
         }
-        #[cfg(unix)]
-        let symlink = |s: &Path, l: &Path| std::os::unix::fs::symlink(s, l);
-        #[cfg(windows)]
-        let symlink = |s: &Path, l: &Path| std::os::windows::fs::symlink_dir(s, l);
-        link_dir_or_copy(src, link, symlink)
+        link_dir_or_copy(src, link, link_dir_native)
     } else {
         link_zip(
             src,
@@ -1106,8 +1103,8 @@ pub(crate) fn same_volume(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Dir projection: `symlink`, or a marked copy when the filesystem refuses links (exFAT/FAT
-/// drives, no symlink privilege). Never falls back when `link` already exists — copying into
+/// Dir projection: `symlink` (a symlink or junction, see [`link_dir_native`]), or a marked copy
+/// when the filesystem refuses links (exFAT/FAT drives). Never falls back when `link` already exists — copying into
 /// a folder that's already there would merge into it and stamp it as ours.
 fn link_dir_or_copy(
     src: &Path,
@@ -1118,6 +1115,40 @@ fn link_dir_or_copy(
         Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => copy_dir_projection(src, link),
         other => other,
     }
+}
+
+/// Create a directory link at `link` pointing at `src`. Windows tries a symlink first
+/// (Developer Mode), then an NTFS junction, which needs no privilege. Unix uses a symlink.
+/// Errors bubble up so the caller can fall back to a marked copy.
+#[cfg(windows)]
+pub(crate) fn link_dir_native(src: &Path, link: &Path) -> std::io::Result<()> {
+    match std::os::windows::fs::symlink_dir(src, link) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+        Err(_) => junction_to(src, link),
+    }
+}
+
+/// An NTFS junction at `link` to `src`. Never replaces anything already at `link`; if the
+/// junction can't be made (not NTFS, a network target), the empty folder the crate created
+/// for it is removed again (`remove_dir` only ever removes an empty folder or a link).
+#[cfg(windows)]
+pub(crate) fn junction_to(src: &Path, link: &Path) -> std::io::Result<()> {
+    if link.symlink_metadata().is_ok() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
+    // Junction targets must be absolute; the crate strips the `\\?\` verbatim prefix itself.
+    let target = std::fs::canonicalize(src)?;
+    junction::create(&target, link).inspect_err(|e| {
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            let _ = std::fs::remove_dir(link);
+        }
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn link_dir_native(src: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(src, link)
 }
 
 /// Copy a directory as a projection and drop the ownership marker, so a later flatten /
@@ -2602,6 +2633,80 @@ mod tests {
             cat.join("FS25_Map/modDesc.xml").is_file(),
             "the archived mod is untouched"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_mod_is_projected_as_a_link_not_a_copy_on_windows() {
+        // Junctions need no privilege on NTFS, so this must never fall back to a copy.
+        let base = std::env::temp_dir().join(format!("silo_junction_proj_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        let archive_mod = mods.join(ARCHIVE).join("Misc").join("FS25_Dir");
+        std::fs::create_dir_all(&archive_mod).unwrap();
+        std::fs::write(archive_mod.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        let link = mods.join("FS25_Dir");
+        let layout = Layout::default_for(&mods);
+
+        make_link(&archive_mod, &link, "dir", &mut LinkPolicy::new(&layout)).unwrap();
+
+        let ft = link.symlink_metadata().unwrap().file_type();
+        assert!(
+            ft.is_symlink(),
+            "expected a junction or symlink, got a real folder"
+        );
+        assert!(
+            !link.join(SILO_MARKER).exists(),
+            "must not be a marked copy"
+        );
+        assert!(is_silo_projection(&link, &archive_mod, "dir"));
+        // An edit made through the link lands in the archived mod.
+        std::fs::write(link.join("edit.txt"), b"hello").unwrap();
+        assert!(archive_mod.join("edit.txt").is_file());
+        // Removing the link never touches the archived mod.
+        remove_link(&link).unwrap();
+        assert!(link.symlink_metadata().is_err());
+        assert!(archive_mod.join("modDesc.xml").is_file());
+        assert!(archive_mod.join("edit.txt").is_file());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The junction branch on its own: this machine may have Developer Mode (so `symlink_dir`
+    /// wins in `make_link`), but users and the CI runner usually don't.
+    #[cfg(windows)]
+    #[test]
+    fn junction_to_links_a_folder_without_privilege() {
+        let base = std::env::temp_dir().join(format!("silo_junction_to_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let target = base.join(ARCHIVE).join("Misc").join("FS25_Dir");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        let link = base.join("FS25_Dir");
+
+        junction_to(&target, &link).unwrap();
+
+        assert!(junction::exists(&link).unwrap(), "a real NTFS junction");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(is_silo_projection(&link, &target, "dir"));
+        assert_eq!(
+            std::fs::read(link.join("modDesc.xml")).unwrap(),
+            b"<modDesc/>"
+        );
+        remove_link(&link).unwrap();
+        assert!(link.symlink_metadata().is_err());
+        assert!(
+            target.join("modDesc.xml").is_file(),
+            "the target is untouched"
+        );
+
+        // Never replaces or merges into something already at the link path.
+        let theirs = base.join("FS25_Theirs");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("mine.txt"), b"keep").unwrap();
+        let err = junction_to(&target, &theirs).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(theirs.join("mine.txt")).unwrap(), b"keep");
         let _ = std::fs::remove_dir_all(&base);
     }
 
