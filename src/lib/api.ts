@@ -136,6 +136,9 @@ export interface ArchivePreflight {
   symlinksAvailable: boolean;
   looseMods: number;
   problems: string[];
+  /** The current archive holds no mods and the folder passes every path check, so it can be
+   *  used as the archive as it is (`archiveRepoint`, moves nothing) even if a move is refused. */
+  canRepoint: boolean;
 }
 
 export interface MoveProgress {
@@ -169,7 +172,8 @@ export const archiveMovePause = () => invoke<void>("archive_move_pause");
 export const archiveMoveCancel = () => invoke<MoveMarker | null>("archive_move_cancel");
 export const archiveUseDefault = () => invoke<MoveMarker | null>("archive_use_default");
 /** Point Silo at another archive folder (null = the default) WITHOUT moving anything. Only
- *  while the current archive is unavailable and no move is unfinished; rescan afterwards. */
+ *  while the current archive is unavailable or holds no mods, and no move is unfinished;
+ *  rescan afterwards. */
 export const archiveRepoint = (path: string | null) =>
   invoke<void>("archive_repoint", { path });
 export const archiveAdoptPreview = () => invoke<AdoptPreview>("archive_adopt_preview");
