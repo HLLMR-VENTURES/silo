@@ -668,7 +668,7 @@ pub fn adopt_foreign(conn: &Connection, layout: &Layout, file_name: &str) -> Res
     // Back up the old archived copy before replacing it.
     if archive.exists() {
         let bak = backup_path(root, file_name)?;
-        move_path(&archive, &bak).map_err(|e| format!("backup: {e}"))?;
+        move_path_as(&archive, &bak, "backup").map_err(|e| format!("backup: {e}"))?;
     } else if let Some(parent) = archive.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -704,7 +704,7 @@ pub fn restore_projection(
     // Back up the user's file, then free the slot.
     if flat.symlink_metadata().is_ok() {
         let bak = backup_path(root, file_name)?;
-        move_path(&flat, &bak).map_err(|e| format!("backup: {e}"))?;
+        move_path_as(&flat, &bak, "backup").map_err(|e| format!("backup: {e}"))?;
     }
     if row.active {
         make_link(&archive, &flat, &row.kind, &mut LinkPolicy::new(layout))
@@ -946,11 +946,17 @@ fn remove_path(p: &Path) -> std::io::Result<()> {
 /// partial copy never leaves a half-written file at `to`, and `from` is never lost until
 /// the destination is complete.
 pub(crate) fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
+    move_path_as(from, to, "move")
+}
+
+/// [`move_path`], logged as `action` (`backup` for an update's previous version), so each move
+/// is one log line that says what it was for.
+pub(crate) fn move_path_as(from: &Path, to: &Path, action: &str) -> std::io::Result<()> {
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
     if std::fs::rename(from, to).is_ok() {
-        crate::fslog::moved("move", from, to);
+        crate::fslog::moved(action, from, to);
         return Ok(());
     }
 
@@ -974,7 +980,7 @@ pub(crate) fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
     } else {
         std::fs::remove_file(from)
     }?;
-    crate::fslog::moved("move", from, to);
+    crate::fslog::moved(action, from, to);
     Ok(())
 }
 

@@ -220,8 +220,7 @@ fn undo_swap(dest: &Path, part: &Path, old: &Path, name: &str, e: &std::io::Erro
 /// Move the set-aside `old` into `<mods_root>/backups/` and prune that mod's older backups.
 fn keep_backup(old: &Path, mods_root: &Path, name: &str) -> std::io::Result<PathBuf> {
     let bak = organize::update_backup_path(mods_root, name)?;
-    organize::move_path(old, &bak)?;
-    crate::fslog::moved("backup", old, &bak);
+    organize::move_path_as(old, &bak, "backup")?;
     prune_backups(&mods_root.join("backups"), name, KEEP_BACKUPS);
     Ok(bak)
 }
