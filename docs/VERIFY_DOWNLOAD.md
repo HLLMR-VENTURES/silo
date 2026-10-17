@@ -6,6 +6,10 @@ Trusted/Artifact Signing). The signature proves two things:
 - **Who published the files** — a verified identity, not an anonymous upload.
 - **That they haven't been altered** since they were signed.
 
+Silo is published by **HLLMR Ventures LLC** (Texas, USA). The Windows code-signing
+certificate is held personally by the company's founder, so Windows shows that personal
+name as the publisher.
+
 The publisher shown by Windows is:
 
 ```

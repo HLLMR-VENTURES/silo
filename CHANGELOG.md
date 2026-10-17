@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hosted on GitHub. ModHub thumbnails come from Silo's catalog cache as before; the occasional
   brand-new mod that isn't cached yet shows a placeholder until the next catalog refresh.
 
+- **New look for the website and README.** "More farming. Less fixing." Copy now describes
+  crash triage as ranking the likely culprit, and drops claims we couldn't back up.
+
 ### Security
 
 - **Stricter image-host check.** The image proxy now parses URLs properly before checking the

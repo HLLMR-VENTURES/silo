@@ -69,9 +69,9 @@
     {:else}
       <p class="lead">
         This files your loose mod zips into <code>mods/archive/&lt;Category&gt;/</code>.
-        Active mods stay loaded (projected back as same-volume hardlinks — no copies, no
-        disk used), nothing leaves your machine, and it's fully reversible with
-        <b>Restore vanilla</b>. Nothing has moved yet.
+        Active mods stay loaded: Silo links them back into your mods folder, so in most
+        setups they take no extra disk space. Nothing has moved yet, and
+        <b>Restore vanilla layout</b> in Settings puts every mod back.
       </p>
 
       <div class="groups">

@@ -278,8 +278,8 @@
     <div class="set-label">Library layout</div>
     <div class="set-hint">
       Organize sorts your <code>.zip</code> mods into <code>mods/archive/&lt;Category&gt;/</code>
-      (subfolders the game ignores) and projects the active set via hardlinks — no
-      duplication, fully reversible. {#if organizedCount > 0}{organizedCount} mod(s) currently organized.{/if}
+      (subfolders the game ignores) and links the active set back into your mods folder.
+      <b>Restore vanilla layout</b> puts every mod back. {#if organizedCount > 0}{organizedCount} mod(s) currently organized.{/if}
     </div>
     <div class="set-btnrow">
       <button class="set-btn" onclick={onOrganize} disabled={locked} title={lockTitle}>
