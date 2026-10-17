@@ -27,6 +27,12 @@ describe("toAppError", () => {
     expect(toAppError(e)).toBe(e);
     expect(errorCode(e)).toBe("LIBRARY_BUSY");
   });
+  it("is named AppError but still reads as just its message", () => {
+    const e = new AppError("LIBRARY_BUSY", "busy");
+    expect(e.name).toBe("AppError");
+    expect(e).toBeInstanceOf(Error);
+    expect(String(e)).toBe("busy");
+  });
 });
 
 describe("the invoke wrapper", () => {

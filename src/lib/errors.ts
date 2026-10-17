@@ -6,6 +6,7 @@ export class AppError extends Error {
     message: string,
   ) {
     super(message);
+    this.name = "AppError";
   }
   override toString(): string {
     return this.message;
