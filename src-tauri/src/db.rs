@@ -232,6 +232,18 @@ fn check_once(db_path: &Path) -> Result<(), String> {
 /// unreadable for any other reason is never touched. Returns a refusal only when the damaged
 /// file is still in place.
 fn examine(db_path: &Path) -> Option<String> {
+    let snapshots = snapshot_dir(db_path);
+    if !db_path.exists() {
+        // Gone, not damaged: maybe on purpose. Say where the backups are; don't restore one.
+        if newest_good_snapshot(&snapshots).is_some() {
+            crate::notices::push(format!(
+                "Silo's library database wasn't found, so Silo started a new one. Automatic \
+                 backups of the old one are in {}; Silo didn't put one back on its own.",
+                snapshots.display()
+            ));
+        }
+        return None;
+    }
     if !db_path.is_file() {
         return None;
     }
@@ -240,10 +252,17 @@ fn examine(db_path: &Path) -> Option<String> {
     if stamped_version(db_path).is_some_and(|v| v > SCHEMA_VERSION) {
         return None;
     }
-    if !is_damaged(db_path) {
+    // An emptied file (0 bytes, or no tables at all) is as good as damaged when a backup holds
+    // the library; with no backup it's simply a new database.
+    let damaged = if is_empty_db(db_path) {
+        newest_good_snapshot(&snapshots).is_some()
+    } else {
+        is_damaged(db_path)
+    };
+    if !damaged {
         return None;
     }
-    match recover(db_path, &snapshot_dir(db_path)) {
+    match recover(db_path, &snapshots) {
         Ok(notice) => {
             crate::notices::push(notice);
             None
@@ -294,6 +313,17 @@ fn stamped_version(path: &Path) -> Option<i64> {
             .starts_with(b"SQLite format 3\0")
             .then_some(i64::from(version))
     })
+}
+
+/// 0 bytes, or a readable pre-versioning file with no tables: nothing of the library in it.
+fn is_empty_db(path: &Path) -> bool {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() == 0) {
+        return true;
+    }
+    let Ok(c) = open_read_only(path) else {
+        return false;
+    };
+    schema_version(&c).is_ok_and(|v| v == 0) && has_tables(&c).is_ok_and(|t| !t)
 }
 
 fn is_damaged(path: &Path) -> bool {
@@ -1585,6 +1615,75 @@ mod tests {
             notices.iter().any(|n| n.contains("couldn't put back")),
             "{notices:?}"
         );
+    }
+
+    /// Replace the database with an empty one: 0 bytes, or a valid file with no tables.
+    fn empty_out(path: &Path, zero_bytes: bool) {
+        forget_checked(path);
+        for p in wal_shm(path) {
+            let _ = std::fs::remove_file(p);
+        }
+        std::fs::remove_file(path).unwrap();
+        if zero_bytes {
+            std::fs::write(path, b"").unwrap();
+        } else {
+            let c = Connection::open(path).unwrap();
+            c.execute_batch("CREATE TABLE x (a); DROP TABLE x;")
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn an_emptied_database_is_restored_from_a_snapshot() {
+        for zero_bytes in [true, false] {
+            let path = temp_db(&format!("emptied_{zero_bytes}"));
+            {
+                let mut c = open(&path).unwrap();
+                save_loadout(&mut c, None, "Kept", &[]).unwrap();
+                snapshot(&c, &snapshot_dir(&path), 5, std::time::Duration::ZERO).unwrap();
+            }
+            empty_out(&path, zero_bytes);
+            let conn = open(&path).unwrap();
+            assert_eq!(
+                load_loadouts(&conn)[0].name,
+                "Kept",
+                "zero bytes: {zero_bytes}"
+            );
+            assert_eq!(set_aside(&path).len(), 1, "the empty file is kept too");
+            assert!(notices_for(&path).iter().any(|n| n.contains("restored")));
+        }
+    }
+
+    #[test]
+    fn an_empty_database_without_a_snapshot_is_just_opened() {
+        let path = temp_db("empty_no_snap");
+        drop(open(&path).unwrap());
+        empty_out(&path, true);
+        let conn = open(&path).unwrap();
+        assert!(load_loadouts(&conn).is_empty());
+        assert!(set_aside(&path).is_empty());
+        assert!(notices_for(&path).is_empty());
+    }
+
+    #[test]
+    fn a_missing_database_with_snapshots_is_not_restored_on_its_own() {
+        let path = temp_db("missing_with_snaps");
+        let dir = snapshot_dir(&path);
+        {
+            let mut c = open(&path).unwrap();
+            save_loadout(&mut c, None, "Old", &[]).unwrap();
+            snapshot(&c, &dir, 5, std::time::Duration::ZERO).unwrap();
+        }
+        forget_checked(&path);
+        for p in wal_shm(&path) {
+            let _ = std::fs::remove_file(p);
+        }
+        std::fs::remove_file(&path).unwrap();
+        let conn = open(&path).unwrap();
+        assert!(load_loadouts(&conn).is_empty(), "a new database");
+        let notices = notices_for(&path);
+        let dir = dir.display().to_string();
+        assert!(notices.iter().any(|n| n.contains(&dir)), "{notices:?}");
     }
 
     #[test]
