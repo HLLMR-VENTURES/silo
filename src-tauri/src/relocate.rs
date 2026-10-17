@@ -392,8 +392,9 @@ fn delete_source(src: &Path) -> Result<(), String> {
 /// Keep an active mod's mods-folder entry valid as its archived copy moves from `src` to `dst`:
 /// a missing entry gets a fresh link to `dst`; a symlink into `src` is re-pointed (zips by an
 /// atomic replace; folder links are removed and re-made, restoring the old link if that fails);
-/// a zip hardlinked to `src` is atomically replaced by a link to `dst` — otherwise it would keep
-/// the old copy's bytes alive after that copy is deleted, and the move would free nothing.
+/// a zip hardlinked to `src` is atomically replaced by a hardlink or symlink to `dst` —
+/// otherwise it would keep the old copy's bytes alive after that copy is deleted, and the move
+/// would free nothing (where only a copy is possible it's kept as the standalone copy instead).
 /// Copied zips, marker-copied folders and the user's own files are standalone and left alone;
 /// a link to anything else is not ours to change.
 fn repoint(
@@ -413,8 +414,11 @@ fn repoint(
         return Ok(());
     };
     if !meta.file_type().is_symlink() {
-        // Only a hardlink of the very file being moved — provably Silo's projection.
-        if row.kind != "dir" && meta.is_file() && same_file(&link, src) {
+        // Only a hardlink of the very file being moved — provably Silo's projection. Where the
+        // new link could only be a full copy (another drive, no symlinks), keep it: once the
+        // old copy is deleted it simply becomes the mod's standalone copy, with no second copy
+        // made (and its date kept).
+        if row.kind != "dir" && meta.is_file() && same_file(&link, src) && !policy.can_only_copy() {
             return replace_zip_link(env, row, &link, dst, policy);
         }
         return Ok(());
@@ -651,6 +655,19 @@ fn clean_temps(archive: &Path) {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Delete a stale `RELINK_SUFFIX` temp left by a crash mid-relink next to each library zip's
+/// mods-folder name (only those names — never anything else in the mods folder). The temp is a
+/// link or copy Silo made; the real entry was never replaced by it. Folders are left alone (a
+/// relink temp is only ever a file or a link).
+fn clean_relink_temps(mods: &Path, rows: &[OrganizedRow]) {
+    for r in rows.iter().filter(|r| r.kind != "dir") {
+        let tmp = suffixed(&mods.join(&r.file_name), RELINK_SUFFIX);
+        if tmp.symlink_metadata().is_ok_and(|m| !m.is_dir()) {
+            let _ = std::fs::remove_file(&tmp);
         }
     }
 }
@@ -924,6 +941,7 @@ fn run_locked(
     save_marker(env.conn, env.mods_key, &marker)?;
     clean_temps(&marker.from);
     clean_temps(&marker.to);
+    clean_relink_temps(env.mods, &db::load_organized(env.conn, env.mods_key));
 
     if marker.direction == Direction::Forward {
         let rows = db::load_organized(env.conn, env.mods_key);
@@ -1092,6 +1110,10 @@ pub struct Preflight {
     pub symlinks_available: bool,
     pub loose_mods: usize,
     pub problems: Vec<String>,
+    /// The current archive holds no mods and the folder passes every path/overlap fence, so
+    /// Silo can use it as the archive as it is (`archive_repoint`, moves nothing) — the way to
+    /// adopt a folder that already has mods filed in subfolders, which a move refuses.
+    pub can_repoint: bool,
 }
 
 /// Path sanity for a new archive location: anything `Layout::new` rejects, plus "already
@@ -1142,16 +1164,6 @@ fn short_of(bytes: u64, free: Option<u64>) -> Option<String> {
 /// Space problem, if the target drive can't hold `bytes` plus a 1 GB margin.
 pub fn space_problem(bytes: u64, free: Option<u64>) -> Option<String> {
     short_of(bytes, free).map(|s| format!("Not enough free space: {s}."))
-}
-
-/// Space problem on the mods folder's drive, for an active mod whose link may have to become a
-/// copy there while its old copy still exists.
-pub fn mods_drive_space_problem(bytes: u64, free: Option<u64>) -> Option<String> {
-    short_of(bytes, free).map(|s| {
-        format!(
-            "Not enough free space on your mods folder's drive to keep active mods linked: {s}."
-        )
-    })
 }
 
 /// Loose mods (zips / mod folders) at the top level of an archive folder — candidates to adopt.
@@ -1908,6 +1920,43 @@ mod tests {
         assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
         assert!(same_file(&flat, &zip_at(&f.new, "FS25_A")));
         assert!(!zip_at(&f.old, "FS25_A").exists());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_hardlink_is_left_standalone_when_the_new_copy_could_only_be_copied() {
+        let f = fx("copyonly");
+        let flat = add_hardlinked(&f, "FS25_A");
+        let r = db::load_organized(&f.conn, &f.key).remove(0);
+        let before = same_file::Handle::from_path(&flat).unwrap();
+        let layout = dest(&f);
+        // Another drive and no symlinks: re-linking would just copy the mod again.
+        let mut pol = LinkPolicy::copy_only_for_tests(&layout);
+        let mut m = marker(&f);
+        assert_eq!(
+            forward_one(&env(&f), &r, &mut m, &mut pol, &|| false),
+            Ok(Step::Moved)
+        );
+        assert!(!zip_at(&f.old, "FS25_A").exists());
+        // The same file as before — now the only link to the old bytes, still readable.
+        assert_eq!(same_file::Handle::from_path(&flat).unwrap(), before);
+        assert!(!same_file(&flat, &zip_at(&f.new, "FS25_A")));
+        assert_eq!(std::fs::read(&flat).unwrap(), b"PK\x03\x04 FS25_A");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_stale_relink_temp_in_the_mods_folder_is_cleaned_at_start() {
+        let f = fx("relinktmp");
+        add_zip(&f, "FS25_A", false); // parked: its step never touches the mods folder
+        let tmp = f.mods.join("FS25_A.zip.silo-relink-tmp");
+        std::fs::write(&tmp, b"PK\x03\x04 FS25_A").unwrap();
+        // Not one of the library's names: left alone.
+        let other = f.mods.join("FS25_Other.zip.silo-relink-tmp");
+        std::fs::write(&other, b"?").unwrap();
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
+        assert!(!tmp.exists());
+        assert!(other.exists());
         let _ = std::fs::remove_dir_all(&f.base);
     }
 

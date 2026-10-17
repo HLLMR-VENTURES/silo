@@ -1666,13 +1666,6 @@ struct Space {
     largest: u64,
     /// Free on the new archive's drive (unknown never blocks).
     free: Option<u64>,
-    /// The largest active zip whose mods-folder entry is a hardlink to its archived copy, when
-    /// the new archive is on another drive than the mods folder (else 0): re-linking it may fall
-    /// back to a copy on the mods folder's drive, which needs that much room there until the
-    /// old copy is deleted.
-    relink_copy: u64,
-    /// Free on the mods folder's drive.
-    mods_free: Option<u64>,
 }
 
 /// Pure inputs to `move_problems`.
@@ -1701,8 +1694,9 @@ fn missing_mods_problem(n: usize) -> String {
 /// from the archive (each would stop the move), names already at the destination, then free
 /// space. On one drive each mod's old copy is deleted before the next is copied — and an active
 /// mod's hardlink is re-linked to the new copy first, so the delete really frees it — so only the
-/// largest mod needs room at a time; across drives the whole archive must fit, plus room on the
-/// mods folder's drive for a re-link that falls back to a copy.
+/// largest mod needs room at a time; across drives the whole archive must fit. The mods folder's
+/// drive needs nothing extra: across drives an active mod's hardlink becomes a symlink, or —
+/// where only a copy could be made — is left as the mod's standalone copy (`relocate::repoint`).
 fn move_problems(f: MoveFacts) -> Vec<String> {
     let mut v = f.target;
     v.extend(f.unknown);
@@ -1718,12 +1712,6 @@ fn move_problems(f: MoveFacts) -> Vec<String> {
     };
     if needed > 0 {
         v.extend(relocate::space_problem(needed, s.free));
-    }
-    if s.relink_copy > 0 {
-        v.extend(relocate::mods_drive_space_problem(
-            s.relink_copy,
-            s.mods_free,
-        ));
     }
     v
 }
@@ -1765,25 +1753,9 @@ fn check_move(
         .filter(|r| archived(r).symlink_metadata().is_err())
         .count();
     let new_mount = organize::mount_of(new);
-    let mods_mount = organize::mount_of(&layout.mods);
     let free = new_mount.as_ref().map(|(_, f)| *f);
-    let same_drive = known_same_mount(&mods_mount, &new_mount);
+    let same_drive = known_same_mount(&organize::mount_of(&layout.mods), &new_mount);
     let archive_same_drive = known_same_mount(&organize::mount_of(&layout.archive), &new_mount);
-    // Only a hardlink can't follow its copy to another drive (a symlink re-points for free).
-    let relink_copy = if same_drive {
-        0
-    } else {
-        rows.iter()
-            .zip(&sizes)
-            .filter(|(r, _)| {
-                r.active
-                    && r.kind != "dir"
-                    && relocate::same_file(&layout.mods.join(&r.file_name), &archived(r))
-            })
-            .map(|(_, s)| *s)
-            .max()
-            .unwrap_or(0)
-    };
     let unknown = relocate::unknown_mods(&layout.archive, &rows);
     let problems = move_problems(MoveFacts {
         target,
@@ -1800,8 +1772,6 @@ fn check_move(
             bytes,
             largest: sizes.iter().copied().max().unwrap_or(0),
             free,
-            relink_copy,
-            mods_free: mods_mount.as_ref().map(|(_, f)| *f),
         },
     });
     MoveCheck {
@@ -1973,6 +1943,11 @@ async fn archive_move_preflight(
                     false
                 }
             };
+        // Refused as a move but fine as a re-point: an archive holding no mods (nothing to
+        // move or orphan) and a folder clear of every fence — its own filed mods are welcome.
+        let can_repoint = !archive_holds_mods(&layout)
+            && fence_problems(&layout, &new, &fences(&conn, &layout, app_data.as_deref()))
+                .is_empty();
         let check = check_move(&conn, &layout, &key, &new, target);
         let symlinks_available = probed
             && organize::supports_symlinks(&organize::Layout {
@@ -1987,6 +1962,7 @@ async fn archive_move_preflight(
             symlinks_available,
             loose_mods: relocate::loose_mods(&new).len(),
             problems: check.problems,
+            can_repoint,
         })
     })
     .await
@@ -2083,23 +2059,36 @@ async fn archive_use_default(
     .map_err(|e| e.to_string())?
 }
 
+/// Any mod (zip, or folder with a `modDesc.xml`) filed in one of the archive's category
+/// folders — the same candidates a move would carry (Silo's own temps don't count). A missing
+/// folder holds none.
+fn archive_holds_mods(layout: &organize::Layout) -> bool {
+    !relocate::unknown_mods(&layout.archive, &[]).is_empty()
+}
+
 /// Pure: why the archive can't be re-pointed right now, if it can't. Re-pointing (changing
-/// where Silo looks, moving nothing) is only for a custom archive that isn't there; an
-/// available one is moved instead, and never while a move is unfinished.
-fn repoint_refusal(layout: &organize::Layout, unfinished_move: bool) -> Option<String> {
+/// where Silo looks, moving nothing) is for a custom archive that isn't there, or an archive
+/// that holds no mods (nothing can be orphaned — e.g. the way back after starting fresh with
+/// the default). An archive holding mods is moved instead, and never while a move is unfinished.
+fn repoint_refusal(
+    layout: &organize::Layout,
+    unfinished_move: bool,
+    holds_mods: bool,
+) -> Option<String> {
     if unfinished_move {
         return Some("Finish or cancel the archive move first.".into());
     }
-    if !layout.archive_missing() {
-        return Some("Your library archive is available — use Change… to move it instead.".into());
+    if !layout.archive_missing() && holds_mods {
+        return Some("Your library archive holds mods — use Change… to move them instead.".into());
     }
     None
 }
 
 /// Point Silo at another archive folder (`None` = the default `<mods>/archive`) WITHOUT moving
-/// anything — for a custom archive that has gone missing: the user moved or restored it
-/// elsewhere, or starts fresh with the default (whatever is on the old drive stays there,
-/// untouched). The same path/overlap fences as a move apply, but mods already filed in the
+/// anything — for a custom archive that has gone missing (the user moved or restored it
+/// elsewhere, or starts fresh with the default; whatever is on the old drive stays there,
+/// untouched), or an archive that holds no mods (e.g. back to a restored archive after
+/// starting fresh). The same path/overlap fences as a move apply, but mods already filed in the
 /// folder are welcome — adopting them is the point. Republishes the layout; the frontend then
 /// rescans so the library reconciles against the new archive.
 #[tauri::command]
@@ -2112,7 +2101,7 @@ async fn archive_repoint(app: tauri::AppHandle, path: Option<String>) -> Result<
         let (layout, key) = active_layout()?;
         let conn = db::open(&db)?;
         let unfinished = relocate::load_marker(&conn, &key).is_some();
-        if let Some(why) = repoint_refusal(&layout, unfinished) {
+        if let Some(why) = repoint_refusal(&layout, unfinished, archive_holds_mods(&layout)) {
             return Err(why);
         }
         let new = match &path {
@@ -3481,9 +3470,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_gh_scope, cancel_falls_back, fence_problems, foreign_mods_problem, known_same_mount,
-        move_outcome, move_problems, overlap_problems, repoint_refusal, scan_archives,
-        scope_grants, select_adopt, split_adopt, Fences, MoveFacts, Space,
+        archive_holds_mods, build_gh_scope, cancel_falls_back, fence_problems,
+        foreign_mods_problem, known_same_mount, move_outcome, move_problems, overlap_problems,
+        repoint_refusal, scan_archives, scope_grants, select_adopt, split_adopt, Fences, MoveFacts,
+        Space,
     };
     use crate::{
         organize::{Layout, ModInput},
@@ -3706,8 +3696,6 @@ mod tests {
             bytes: 10 << 30,
             largest: 2 << 30,
             free,
-            relink_copy: 0,
-            mods_free: None,
         }
     }
 
@@ -3762,20 +3750,6 @@ mod tests {
         // Unknown free space never blocks.
         assert!(move_problems(facts(space(false, None))).is_empty());
         assert!(move_problems(facts(space(true, None))).is_empty());
-    }
-
-    #[test]
-    fn move_problems_count_a_relink_copy_on_the_mods_drive() {
-        let mut s = space(false, Some(100 << 30));
-        s.relink_copy = 3 << 30;
-        s.mods_free = Some(1 << 30);
-        let p = move_problems(facts(s));
-        assert_eq!(p.len(), 1, "{p:?}");
-        assert!(p[0].contains("mods folder's drive"), "{p:?}");
-        let mut ok = space(false, Some(100 << 30));
-        ok.relink_copy = 3 << 30;
-        ok.mods_free = Some(10 << 30);
-        assert!(move_problems(facts(ok)).is_empty());
     }
 
     #[test]
@@ -3872,27 +3846,54 @@ mod tests {
     }
 
     #[test]
-    fn repoint_is_only_for_a_missing_archive_with_no_move() {
+    fn repoint_is_for_a_missing_or_empty_archive_with_no_move() {
         let base = temp_base("repointgate");
         let mods = base.join("mods");
         let gone = Layout {
             mods: mods.clone(),
             archive: base.join("unplugged"),
         };
-        assert_eq!(repoint_refusal(&gone, false), None);
+        assert_eq!(repoint_refusal(&gone, false, false), None);
         assert!(
-            repoint_refusal(&gone, true).is_some(),
+            repoint_refusal(&gone, true, false).is_some(),
             "a move is unfinished"
         );
         let here = Layout {
             mods: mods.clone(),
-            archive: base.clone(),
+            archive: base.join("hdd"),
         };
+        std::fs::create_dir_all(&here.archive).unwrap();
         assert!(
-            repoint_refusal(&here, false).is_some(),
-            "an available archive is moved, not re-pointed"
+            repoint_refusal(&here, false, true).is_some(),
+            "an archive holding mods is moved, not re-pointed"
         );
-        assert!(repoint_refusal(&Layout::default_for(&mods), false).is_some());
+        // Holding no mods, nothing can be orphaned: re-pointing is fine (the way back after
+        // starting fresh with the default).
+        assert_eq!(repoint_refusal(&here, false, false), None);
+        assert_eq!(
+            repoint_refusal(&Layout::default_for(&mods), false, false),
+            None
+        );
+        assert!(repoint_refusal(&here, true, false).is_some());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_archive_holds_mods_only_when_a_category_has_one() {
+        let base = temp_base("holdsmods");
+        let layout = Layout::default_for(&base.join("mods"));
+        assert!(!archive_holds_mods(&layout), "not created yet");
+        let tools = layout.archive.join("Tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        std::fs::write(tools.join(".FS25_A.zip.silo-tmp"), b"PK").unwrap();
+        std::fs::write(tools.join("FS25_B.zip.silo-move-tmp"), b"PK").unwrap();
+        std::fs::write(tools.join("notes.txt"), b"mine").unwrap();
+        assert!(
+            !archive_holds_mods(&layout),
+            "Silo temps and other files don't count"
+        );
+        std::fs::write(tools.join("FS25_C.zip"), b"PK").unwrap();
+        assert!(archive_holds_mods(&layout));
         let _ = std::fs::remove_dir_all(&base);
     }
 

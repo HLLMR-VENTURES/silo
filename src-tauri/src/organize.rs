@@ -317,6 +317,26 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
         let link = root.join(&row.file_name);
         let src = archive_path(&layout.archive, &row.category, &row.file_name);
         let want = active.contains(&row.tech_name);
+        // A link into a folder that's gone (a re-pointed archive's old drive) would otherwise
+        // count as "already linked" and the mod could never be activated or parked again.
+        let stale = match remove_dangling_link(&link) {
+            Ok(removed) => removed,
+            Err(e) => {
+                rep.errors
+                    .push(format!("{}: remove stale link: {e}", row.tech_name));
+                continue;
+            }
+        };
+        if stale {
+            db::forget_projection(conn, &key, &row.file_name);
+            if !want {
+                if let Err(e) = db::set_organized_active(conn, &key, &row.tech_name, false) {
+                    rep.errors.push(format!("{}: manifest: {e}", row.tech_name));
+                }
+                rep.changed += 1;
+                continue;
+            }
+        }
         let linked = link.symlink_metadata().is_ok();
 
         if want && !linked {
@@ -671,6 +691,12 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
         let src = archive_path(&layout.archive, &row.category, &row.file_name);
 
         if src.exists() {
+            // A stale link (its target gone) holds nothing: drop it, then restore as usual.
+            if let Err(e) = remove_dangling_link(&link) {
+                rep.errors
+                    .push(format!("{}: remove stale link: {e}", row.tech_name));
+                continue;
+            }
             let occupied = link.symlink_metadata().is_ok();
             // If a file occupies the root slot but it isn't Silo's projection (the user swapped
             // their own build in), don't remove it and don't overwrite it with the archived
@@ -884,6 +910,7 @@ pub(crate) fn make_link(
 pub(crate) struct LinkPolicy<'a> {
     layout: &'a Layout,
     cached: Option<bool>,
+    cross_volume: Option<bool>,
 }
 
 impl<'a> LinkPolicy<'a> {
@@ -891,16 +918,44 @@ impl<'a> LinkPolicy<'a> {
         LinkPolicy {
             layout,
             cached: None,
+            cross_volume: None,
         }
+    }
+
+    /// A policy that decided the archive is on another drive with no symlinks (copies only).
+    #[cfg(test)]
+    pub(crate) fn copy_only_for_tests(layout: &'a Layout) -> Self {
+        LinkPolicy {
+            layout,
+            cached: Some(false),
+            cross_volume: Some(true),
+        }
+    }
+
+    /// The archive is on another volume than the mods folder (unknown ⇒ same, see
+    /// `same_volume`). Asked at most once.
+    fn cross_volume(&mut self) -> bool {
+        let layout = self.layout;
+        *self
+            .cross_volume
+            .get_or_insert_with(|| !same_volume(&layout.mods, &layout.archive))
     }
 
     /// Symlinks only for an archive on a different volume, outside a Mac App Store sandbox,
     /// where a probe link actually works.
     pub(crate) fn allow_symlink(&mut self) -> bool {
-        let layout = self.layout;
-        *self.cached.get_or_insert_with(|| {
-            !same_volume(&layout.mods, &layout.archive) && symlinks_usable(layout)
-        })
+        if let Some(c) = self.cached {
+            return c;
+        }
+        let allow = self.cross_volume() && symlinks_usable(self.layout);
+        self.cached = Some(allow);
+        allow
+    }
+
+    /// A zip link into this archive can only be a full copy: it's on another drive (no
+    /// hardlink) and symlinks aren't allowed.
+    pub(crate) fn can_only_copy(&mut self) -> bool {
+        self.cross_volume() && !self.allow_symlink()
     }
 
     /// The mods folder is inside a Mac App Store sandbox, so the game can't follow any link
@@ -1211,6 +1266,23 @@ pub fn detect_foreign_projections(conn: &Connection, layout: &Layout) -> Vec<For
         });
     }
     out
+}
+
+/// Remove a symlink or junction at `link` whose target is gone (e.g. into an archive on a drive
+/// that's no longer there, after a re-point). At an organized mod's mods-folder name that's
+/// Silo's stale projection, and a link holds no data. Returns whether it removed one; never
+/// touches a regular file, a folder, a working link, or a missing path.
+pub(crate) fn remove_dangling_link(link: &Path) -> std::io::Result<bool> {
+    let Ok(meta) = link.symlink_metadata() else {
+        return Ok(false);
+    };
+    if !meta.file_type().is_symlink() || link.metadata().is_ok() {
+        return Ok(false);
+    }
+    // A dangling dir link can't report itself as a dir on Windows: `remove_file` refuses it,
+    // and `remove_dir` then removes the link itself (never a folder's contents).
+    std::fs::remove_file(link).or_else(|_| std::fs::remove_dir(link))?;
+    Ok(true)
 }
 
 /// Remove a projected entry (hardlink, symlink, junction, or copy) without
@@ -2419,8 +2491,135 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A symlink at `flat` into a drive that's gone. `None` where file symlinks can't be made
+    /// (Windows without Developer Mode) — the test is skipped there.
+    fn dangling_link(base: &Path, flat: &Path) -> Option<()> {
+        symlink_file(&base.join("unplugged").join("FS25_Foo.zip"), flat).ok()
+    }
+
+    #[test]
+    fn a_dangling_link_at_a_mods_name_is_stale_and_never_blocks_activation() {
+        let (base, conn, src, flat) = symlink_fixture("dangle", false);
+        let layout = Layout::default_for(&base);
+        let key = crate::modsroot::canonical_key(&base);
+        let foo: HashSet<String> = ["FS25_Foo".to_string()].into_iter().collect();
+        if dangling_link(&base, &flat).is_none() {
+            return;
+        }
+        // Activate: the stale link is removed and a working projection made.
+        let rep = set_active(&conn, &layout, &foo);
+        assert_eq!(rep.changed, 1, "errors: {:?}", rep.errors);
+        assert_eq!(
+            std::fs::read(&flat).unwrap(),
+            b"PK\x03\x04 the archived build"
+        );
+        assert!(db::load_organized(&conn, &key)[0].active);
+        // Deactivate over a dangling link: removed, and the manifest says inactive.
+        std::fs::remove_file(&flat).unwrap();
+        dangling_link(&base, &flat).unwrap();
+        let rep = set_active(&conn, &layout, &HashSet::new());
+        assert_eq!(rep.changed, 1, "errors: {:?}", rep.errors);
+        assert!(flat.symlink_metadata().is_err());
+        assert!(!db::load_organized(&conn, &key)[0].active);
+        // Flatten over a dangling link: the archived file comes home.
+        dangling_link(&base, &flat).unwrap();
+        let rep = flatten(&conn, &layout);
+        assert_eq!(rep.changed, 1, "errors: {:?}", rep.errors);
+        assert!(flat.symlink_metadata().unwrap().file_type().is_file());
+        assert!(!src.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A dangling dir junction (no privilege needed, unlike symlinks): link, then delete the
+    /// target. False if `mklink` failed.
+    #[cfg(windows)]
+    fn dangling_junction(link: &Path, gone: &Path) -> bool {
+        std::fs::create_dir_all(gone).unwrap();
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(gone)
+            .output();
+        std::fs::remove_dir_all(gone).unwrap();
+        match out {
+            Ok(o) if o.status.success() => true,
+            Ok(o) => {
+                eprintln!(
+                    "mklink: {}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+                false
+            }
+            Err(e) => {
+                eprintln!("mklink: {e}");
+                false
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_dangling_junction_at_a_folder_mods_name_never_blocks_activation() {
+        let base = std::env::temp_dir().join(format!("silo_junction_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let cat = base.join(ARCHIVE).join("Maps");
+        std::fs::create_dir_all(cat.join("FS25_Map")).unwrap();
+        std::fs::write(cat.join("FS25_Map/modDesc.xml"), b"<modDesc/>").unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
+        db::upsert_organized(
+            &conn,
+            &key,
+            &OrganizedRow {
+                tech_name: "FS25_Map".into(),
+                file_name: "FS25_Map".into(),
+                kind: "dir".into(),
+                category: "Maps".into(),
+                subcategory: None,
+                active: true,
+            },
+        )
+        .unwrap();
+        let flat = base.join("FS25_Map");
+        // Junctions need no privilege on NTFS, so this always runs on Windows.
+        let gone = base.join("unplugged").join("FS25_Map");
+        assert!(dangling_junction(&flat, &gone), "mklink /J failed");
+        let layout = Layout::default_for(&base);
+        // Park: the stale junction goes, the manifest says parked.
+        let rep = set_active(&conn, &layout, &HashSet::new());
+        assert_eq!(rep.changed, 1, "errors: {:?}", rep.errors);
+        assert!(flat.symlink_metadata().is_err());
+        assert!(!db::load_organized(&conn, &key)[0].active);
+        // Activate over another stale junction: a working projection replaces it.
+        assert!(dangling_junction(&flat, &gone));
+        let want: HashSet<String> = ["FS25_Map".to_string()].into_iter().collect();
+        let rep = set_active(&conn, &layout, &want);
+        assert_eq!(rep.changed, 1, "errors: {:?}", rep.errors);
+        assert!(flat.join("modDesc.xml").is_file());
+        assert!(
+            cat.join("FS25_Map/modDesc.xml").is_file(),
+            "the archived mod is untouched"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn remove_dangling_link_never_touches_a_file_or_a_working_link() {
+        let (base, _conn, src, flat) = symlink_fixture("notdangle", true);
+        std::fs::write(&flat, b"the user's own build").unwrap();
+        assert!(!remove_dangling_link(&flat).unwrap());
+        assert_eq!(std::fs::read(&flat).unwrap(), b"the user's own build");
+        std::fs::remove_file(&flat).unwrap();
+        if symlink_file(&src, &flat).is_ok() {
+            assert!(!remove_dangling_link(&flat).unwrap());
+            assert!(flat.exists(), "a working link stays");
+        }
+        assert!(!remove_dangling_link(&base.join("nothing-here")).unwrap());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// A default-layout mods folder holding one organized zip `FS25_Foo.zip` in `Vehicles`.
-    #[cfg(unix)]
     fn symlink_fixture(tag: &str, active: bool) -> (PathBuf, Connection, PathBuf, PathBuf) {
         let base = std::env::temp_dir().join(format!("silo_sym_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
