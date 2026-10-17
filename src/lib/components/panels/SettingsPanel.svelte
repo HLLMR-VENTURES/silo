@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import type { GameInfo } from "../../types";
   import { openFolder, secretStorageSecure } from "../../api";
-  import type { ModsRootStatus } from "../../api";
+  import type { ModsRootStatus, ArchiveStatus } from "../../api";
   import GitHubAuth from "../GitHubAuth.svelte";
 
   // When the OS keychain is unavailable, connecting an account falls back to storing the
@@ -41,6 +41,10 @@
     onChangeModsFolder,
     onUseGameFolder,
     onSwitchModsFolder,
+    archive,
+    moveUnfinished,
+    onChangeArchive,
+    onArchiveDefault,
   }: {
     theme: "system" | "light" | "dark";
     roots: string[];
@@ -66,7 +70,15 @@
     onChangeModsFolder: () => void;
     onUseGameFolder: () => void;
     onSwitchModsFolder: (path: string) => void;
+    archive: ArchiveStatus | null;
+    /** An archive move is running or paused — library writes are refused until it's done. */
+    moveUnfinished: boolean;
+    onChangeArchive: () => void;
+    onArchiveDefault: () => void;
   } = $props();
+
+  // Folder- and library-changing controls are off while busy, scanning, or mid-move.
+  const locked = $derived(!!busy || scanning || moveUnfinished);
 
   const others = $derived((modsStatus?.known ?? []).filter((k) => !k.current));
   function sourceLabel(s: ModsRootStatus["source"]): string {
@@ -102,7 +114,7 @@
           Open ↗
         </button>
       {/if}
-      <button class="set-link" disabled={!!busy || scanning} onclick={onChangeModsFolder}>
+      <button class="set-link" disabled={locked} onclick={onChangeModsFolder}>
         Change…
       </button>
     </div>
@@ -112,7 +124,7 @@
         {sourceLabel(modsStatus.source)}{modsStatus.available ? "" : " · not available"}
       </div>
       {#if modsStatus.source === "user"}
-        <button class="set-link" disabled={!!busy || scanning} onclick={onUseGameFolder}>
+        <button class="set-link" disabled={locked} onclick={onUseGameFolder}>
           Use the game's folder
         </button>
       {/if}
@@ -133,12 +145,39 @@
       {#each others as k (k.path)}
         <button
           class="set-link known"
-          disabled={!!busy || scanning}
+          disabled={locked}
           onclick={() => onSwitchModsFolder(k.path)}
         >
           {k.path} · {k.modCount} mods
         </button>
       {/each}
+    {/if}
+  </div>
+
+  <div class="set-section">
+    <div class="set-row">
+      <div class="set-label">Library archive</div>
+      {#if archive?.path && archive.available}
+        <button class="set-link" onclick={() => archive?.path && openFolder(archive.path).catch(() => {})}>
+          Open ↗
+        </button>
+      {/if}
+      <button class="set-link" disabled={locked || !archive?.path} onclick={onChangeArchive}>
+        Change…
+      </button>
+    </div>
+    {#if archive?.path}
+      <div class="set-path" class:muted={!archive.available}>{archive.path}</div>
+      <div class="set-hint">
+        {archive.isDefault ? "Inside your mods folder (default)" : "Custom location"}{archive.available
+          ? ""
+          : " · not available"}{moveUnfinished ? " · move in progress" : ""}
+      </div>
+      {#if !archive.isDefault}
+        <button class="set-link" disabled={locked} onclick={onArchiveDefault}>Use default</button>
+      {/if}
+    {:else}
+      <div class="set-path muted">{archive ? "No mods folder selected." : "Loading…"}</div>
     {/if}
   </div>
 
@@ -224,7 +263,7 @@
       duplication, fully reversible. {#if organizedCount > 0}{organizedCount} mod(s) currently organized.{/if}
     </div>
     <div class="set-btnrow">
-      <button class="set-btn" onclick={onOrganize} disabled={!!busy || scanning}>
+      <button class="set-btn" onclick={onOrganize} disabled={locked}>
         Organize {unorganizedCount > 0 ? unorganizedCount : "library"}
       </button>
       <button class="set-btn" onclick={onRebuild} disabled={!!busy || scanning}>
@@ -247,7 +286,7 @@
         class="set-btn"
         style="margin-top:10px;width:100%"
         onclick={onOptimizeLinks}
-        disabled={!!busy || scanning}
+        disabled={locked}
       >
         ⛓ Optimize links (reclaim space)
       </button>
@@ -262,7 +301,7 @@
         class="set-danger"
         style="margin-top:10px"
         onclick={onRestoreVanilla}
-        disabled={!!busy || scanning}
+        disabled={locked}
       >
         Restore vanilla layout
       </button>

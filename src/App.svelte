@@ -52,6 +52,18 @@
     hardlinkSupport,
     type ForeignFile,
     confirmDialog,
+    archiveStatus,
+    archiveMovePreflight,
+    archiveMoveStart,
+    archiveMoveResume,
+    archiveMovePause,
+    archiveMoveCancel,
+    archiveUseDefault,
+    archiveAdoptPreview,
+    archiveAdoptApply,
+    onMoveProgress,
+    type ArchiveStatus,
+    type MoveProgress,
   } from "./lib/api";
   import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
   import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -735,6 +747,8 @@
     plan: PlannedMove[];
     loading: boolean;
     applying: boolean;
+    /** Filing loose mods already in the library archive (#166), not organizing mods/. */
+    adopt?: { path: string | null; note: string | null };
   } | null>(null);
 
   const PREVIEW_SKIP_KEY = "silo.organizePreviewSkip";
@@ -759,6 +773,21 @@
 
   async function confirmOrganize(skipNext: boolean) {
     if (!organizePreview) return;
+    if (organizePreview.adopt) {
+      const fileNames = organizePreview.inputs.map((m) => m.fileName);
+      organizePreview = { ...organizePreview, applying: true };
+      let problem: string | null = null;
+      try {
+        const rep = await archiveAdoptApply(fileNames);
+        if (rep.errors.length) problem = rep.errors.slice(0, 3).join("; ");
+      } catch (e) {
+        problem = String(e);
+      }
+      organizePreview = null;
+      await runScan(false);
+      if (problem) errorMsg = problem; // runScan clears errorMsg
+      return;
+    }
     if (skipNext) localStorage.setItem(PREVIEW_SKIP_KEY, "true");
     const { inputs, techNames } = organizePreview;
     organizePreview = { ...organizePreview, applying: true };
@@ -1307,7 +1336,10 @@
       });
       busy = "Optimizing links…";
       const rep = await relinkProjections();
-      if (rep.hardlinksUnsupported) {
+      if (rep.crossDriveCopies) {
+        done =
+          "Your library archive is on another drive and Windows can't link across drives without Developer Mode — active mods stay as copies.";
+      } else if (rep.hardlinksUnsupported) {
         cloudSynced = true;
         done = "Mods folder is cloud-synced — hardlinks aren't available, so there's nothing to optimize";
       } else {
@@ -1329,7 +1361,8 @@
     if (problem) errorMsg = problem;
     if (done) {
       busy = done;
-      setTimeout(() => (busy = null), 2600);
+      // Long enough to read: the cross-drive explanation is a full sentence.
+      setTimeout(() => (busy = null), Math.max(2600, done.length * 50));
     } else {
       busy = null;
     }
@@ -1355,6 +1388,7 @@
 
   /** Why switching folders isn't safe right now, or null. */
   async function switchBlockReason(): Promise<string | null> {
+    if (moveUnfinished) return "Finish or cancel the archive move first.";
     if (scanning) return "Wait for the scan to finish.";
     if (busy) return `Wait for “${busy}” to finish.`;
     const snap = await bisectSnapshotGet().catch(() => null);
@@ -1366,6 +1400,7 @@
   async function applyModsStatus(st: ModsRootStatus) {
     const prev = roots[0] ?? null;
     modsStatus = st;
+    await refreshArchive(); // the archive belongs to the mods folder
     roots = st.available && st.path ? [st.path] : [];
     if ((roots[0] ?? null) === prev) return;
     result = null;
@@ -1464,6 +1499,230 @@
     }
   }
 
+  // ── Library archive location (#166) ──────────────────────────────────────────
+  // A move can run for hours: its invoke stays pending the whole time, so the UI is driven by
+  // `archive_status` (polled while running) and `archive-move-progress` events, not the return.
+  let archive = $state<ArchiveStatus | null>(null);
+  let moveProgress = $state<MoveProgress | null>(null);
+  /** Move invokes (start / resume / cancel / use default) this window is still waiting on. */
+  let movesInFlight = $state(0);
+  /** A move is copying right now — Pause applies, Launch is blocked. */
+  const moveRunning = $derived(!!archive?.running || movesInFlight > 0);
+  /** A move is running or paused — library writes are refused until it finishes. */
+  const moveUnfinished = $derived(moveRunning || !!archive?.moving);
+  const moveCancelling = $derived(
+    archive?.moving?.direction === "back" || (moveRunning && !!moveProgress?.cancelling),
+  );
+  // Lost-cancel detection: Cancel was clicked on a running move, but it may finish first.
+  let cancelRequested = false;
+  /** The archive path when Cancel was clicked (during a move that's where it started). */
+  let cancelHome: string | null = null;
+  let sawTurnAround = false;
+  let lastProgressCancelling = false;
+  let settlingMove = false;
+
+  const isStillLoading = (e: unknown) => /still loading/i.test(String(e));
+
+  /** Re-read the archive status; keeps the last one on error ("still loading" is expected
+   *  until the layout resolves at startup). */
+  async function refreshArchive(): Promise<boolean> {
+    try {
+      const st = await archiveStatus();
+      archive = st;
+      if (st.moving?.direction === "back") sawTurnAround = true;
+      return true;
+    } catch (e) {
+      if (!isStillLoading(e)) console.warn("[Silo] archive_status:", e);
+      return false;
+    }
+  }
+
+  /** Startup: retry while the backend is still resolving the layout. */
+  async function loadArchive() {
+    for (let i = 0; i < 60; i++) {
+      try {
+        archive = await archiveStatus();
+        return;
+      } catch (e) {
+        if (!isStillLoading(e)) return;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+  }
+
+  // While a move runs, poll so Pause → paused and the turn-around show even if an event is missed.
+  $effect(() => {
+    if (!moveRunning) return;
+    const t = setInterval(() => void pollArchive(), 2000);
+    return () => clearInterval(t);
+  });
+
+  async function pollArchive() {
+    const wasRunning = !!archive?.running;
+    if (!(await refreshArchive())) return;
+    // A move this window isn't waiting on (e.g. after a webview reload) stopped: settle it here.
+    if (wasRunning && !archive?.running && movesInFlight === 0) await settleMove(null);
+  }
+
+  /** After a move stops (finished, paused, or back home): refresh everything that depends on
+   *  where the library lives, explain a lost cancel, and offer to file in loose mods. */
+  async function settleMove(problem: string | null) {
+    if (settlingMove) return;
+    settlingMove = true;
+    try {
+      moveProgress = null;
+      await refreshArchive();
+      modsStatus = await modsRootStatus().catch(() => modsStatus);
+      let lost: string | null = null;
+      if (cancelRequested && !archive?.moving && !archive?.running) {
+        const landedElsewhere = !cancelHome || archive?.path !== cancelHome;
+        if (!lastProgressCancelling && !sawTurnAround && landedElsewhere)
+          lost =
+            `The move finished before it could be cancelled — your library is now in ${archive?.path ?? "its new folder"}. ` +
+            "Use 'Use default' or Change… to move it back.";
+        cancelRequested = false;
+        cancelHome = null;
+        sawTurnAround = false;
+      }
+      await runScan();
+      // runScan clears errorMsg — show what the move said afterwards.
+      if (problem || lost) errorMsg = [problem, lost].filter(Boolean).join(" ");
+      if (!archive?.moving && !archive?.running && !problem) await offerAdopt();
+    } finally {
+      settlingMove = false;
+    }
+  }
+
+  /** Run a move-ish invoke (pending until the move finishes or pauses), then settle. */
+  async function driveMove(call: () => Promise<unknown>) {
+    movesInFlight++;
+    let problem: string | null = null;
+    try {
+      await call();
+    } catch (e) {
+      problem = String(e);
+    } finally {
+      movesInFlight--;
+    }
+    if (movesInFlight === 0) await settleMove(problem);
+    else if (problem) errorMsg = problem;
+  }
+
+  /** Fresh move: forget the previous one's progress and cancel bookkeeping. */
+  function startTracking() {
+    moveProgress = null;
+    lastProgressCancelling = false;
+    cancelRequested = false;
+    cancelHome = null;
+    sawTurnAround = false;
+  }
+
+  async function changeArchive() {
+    const why = await switchBlockReason();
+    if (why) {
+      errorMsg = why;
+      return;
+    }
+    const path = await pickFolder();
+    if (!path) return;
+    try {
+      const pf = await archiveMovePreflight(path);
+      if (pf.problems.length) {
+        errorMsg = pf.problems.join(" ");
+        return;
+      }
+      let msg =
+        `Move your library (${pf.modCount} mods, ${fmtSize(pf.bytes)}) to ${path}?\n\n` +
+        "Active mods stay playable — Silo links them into your mods folder" +
+        (pf.sameDrive ? "." : " (or copies them if links aren't available).");
+      if (!pf.sameDrive && pf.freeBytes != null)
+        msg += `\n\n${fmtSize(pf.freeBytes)} free on that drive.`;
+      if (!pf.sameDrive && !pf.symlinksAvailable)
+        msg += "\n\nTurn on Windows Developer Mode to link active mods instead of copying them.";
+      if (pf.looseMods > 0)
+        msg += `\n\nThat folder already holds ${pf.looseMods} loose mod(s) — Silo will offer to file them in afterwards.`;
+      msg += "\n\nClose Farming Simulator 25 first. You can pause the move to play and resume later.";
+      if (!(await confirmDialog(msg, { okLabel: "Move library", cancelLabel: "Cancel" }))) return;
+      settingsOpen = false;
+      startTracking();
+      await driveMove(() => archiveMoveStart(path));
+    } catch (e) {
+      errorMsg = String(e);
+    }
+  }
+
+  async function archiveDefault() {
+    const why = await switchBlockReason();
+    if (why) {
+      errorMsg = why;
+      return;
+    }
+    if (
+      !(await confirmDialog("Move your library back into your mods folder?", {
+        okLabel: "Move library",
+        cancelLabel: "Cancel",
+      }))
+    )
+      return;
+    settingsOpen = false;
+    startTracking();
+    await driveMove(() => archiveUseDefault());
+  }
+
+  async function pauseMove() {
+    try {
+      await archiveMovePause();
+    } catch (e) {
+      errorMsg = String(e);
+    }
+    void refreshArchive();
+  }
+
+  async function resumeMove() {
+    startTracking();
+    await driveMove(() => archiveMoveResume());
+  }
+
+  async function cancelMove() {
+    if (
+      !(await confirmDialog("Cancel the move? Mods already moved go back to where they were.", {
+        okLabel: "Cancel move",
+        cancelLabel: "Keep going",
+      }))
+    )
+      return;
+    // Only a running move can finish before it sees the cancel; a paused one is run home here.
+    if (moveRunning) {
+      cancelRequested = true;
+      cancelHome = archive?.path ?? null;
+    }
+    // A running move is asked to turn around (resolves at once; the original invoke settles
+    // when it lands); a paused one stays pending until it's back home.
+    await driveMove(() => archiveMoveCancel());
+    void refreshArchive();
+  }
+
+  /** After a move, if the archive folder holds loose mods, offer to file them in. */
+  async function offerAdopt() {
+    const pv = await archiveAdoptPreview().catch(() => null);
+    if (!pv) return;
+    const dupNote = pv.duplicates.length
+      ? `${pv.duplicates.length} mod(s) in that folder are already in your library and were left untouched: ${pv.duplicates.join(", ")}.`
+      : null;
+    if (pv.inputs.length === 0) {
+      if (dupNote) errorMsg = dupNote;
+      return;
+    }
+    organizePreview = {
+      inputs: pv.inputs,
+      techNames: pv.inputs.map((m) => m.techName),
+      plan: pv.plan,
+      loading: false,
+      applying: false,
+      adopt: { path: archive?.path ?? null, note: dupNote },
+    };
+  }
+
   function dismissOverrideNotice() {
     overrideNoticeOpen = false;
     localStorage.setItem("silo.overrideNoticeShown", "1");
@@ -1511,6 +1770,7 @@
     let unlisten: (() => void) | undefined;
     let dlUnlisten: (() => void) | undefined;
     let focusUnlisten: (() => void) | undefined;
+    let moveUnlisten: (() => void) | undefined;
     // Suppress the WebView's built-in right-click menu (reload/inspect junk) app-wide,
     // but keep the native cut/copy/paste menu inside editable fields. Our own row menu
     // (ModRow → ContextMenu) still opens; it sets its own handler on the row.
@@ -1522,6 +1782,10 @@
     window.addEventListener("contextmenu", onCtx);
     (async () => {
       unlisten = await onScanProgress((p) => (progress = p));
+      moveUnlisten = await onMoveProgress((p) => {
+        moveProgress = p;
+        lastProgressCancelling = p.cancelling;
+      });
       try {
         const rows = await getCuration();
         curationMap = Object.fromEntries(rows.map((r) => [r.techName, r]));
@@ -1554,6 +1818,8 @@
       } catch (e) {
         errorMsg = String(e);
       }
+      // Where the library archive lives, and any unfinished move (paused before a restart).
+      void loadArchive();
       if (roots.length) runScan();
       // Detect a cloud-synced mods folder (OneDrive / Google Drive / Proton Drive): those reject
       // hardlinks, so Silo projects the active set as copies. Warn once so the extra disk use and
@@ -1605,6 +1871,7 @@
       unlisten?.();
       dlUnlisten?.();
       focusUnlisten?.();
+      moveUnlisten?.();
       window.removeEventListener("contextmenu", onCtx);
     };
   });
@@ -1647,6 +1914,8 @@
     {updateChecking}
     {scanning}
     {busy}
+    launchBlocked={moveRunning}
+    organizeBlocked={moveUnfinished}
     hasGame={!!gameInfo}
     activeCount={activeSet.size}
     {settingsOpen}
@@ -1745,6 +2014,10 @@
       onChangeModsFolder={changeModsFolder}
       onUseGameFolder={useGameFolder}
       onSwitchModsFolder={switchModsFolder}
+      {archive}
+      {moveUnfinished}
+      onChangeArchive={changeArchive}
+      onArchiveDefault={archiveDefault}
     />
   {/if}
 
@@ -1921,6 +2194,7 @@
       plan={organizePreview.plan}
       loading={organizePreview.loading}
       applying={organizePreview.applying}
+      adopt={organizePreview.adopt ?? null}
       onConfirm={confirmOrganize}
       onCancel={() => (organizePreview = null)}
     />
@@ -1978,6 +2252,63 @@
         <button class="cn-act" onclick={pointGameHere}>Point FS25 here</button>
       {/if}
       <button class="cn-act" onclick={useGameFolder}>Switch Silo to the game's folder</button>
+    </div>
+  {/if}
+
+  {#if moveUnfinished}
+    <div class="cloud-notice">
+      <span class="cn-ico">⇄</span>
+      <div class="cn-text">
+        {#if moveRunning}
+          <b>{moveCancelling ? "Moving your library back" : "Moving your library"}</b>
+          {#if archive?.moving}
+            to <span class="tnum">{moveCancelling ? archive.moving.from : archive.moving.to}</span>
+          {/if}
+          —
+          {#if moveProgress && moveProgress.total > 0}
+            <span class="tnum">
+              {moveProgress.done}/{moveProgress.total} mods · {fmtSize(moveProgress.bytesDone)} of
+              {fmtSize(moveProgress.bytesTotal)}
+            </span>
+          {:else}
+            starting…
+          {/if}
+          Launch is blocked until it pauses or finishes.
+        {:else if archive?.moving?.errors.length}
+          <b>{archive.moving.errors.length} mod(s) couldn't be moved.</b>
+          {archive.moving.errors.join("; ")}
+        {:else if archive?.moving}
+          <b>{moveCancelling ? "Moving your library back is paused." : "Archive move paused."}</b>
+          {archive.moving.pauseReason ? `${archive.moving.pauseReason}. ` : ""}You can play — resume
+          when you're done.
+        {/if}
+      </div>
+      {#if moveRunning}
+        <button class="cn-act" onclick={pauseMove}>Pause</button>
+      {:else if archive?.moving}
+        <button class="cn-act" onclick={resumeMove}>
+          {archive.moving.errors.length ? "Retry" : "Resume"}
+        </button>
+      {/if}
+      {#if !moveCancelling}
+        <button class="cn-act" onclick={cancelMove}>Cancel move</button>
+      {/if}
+    </div>
+  {:else if archive?.path && !archive.available}
+    <div class="cloud-notice">
+      <span class="cn-ico">⚠</span>
+      <div class="cn-text">
+        <b>Your library archive isn't available:</b> <span class="tnum">{archive.path}</span>. Parked
+        mods are hidden until it's back; active mods linked from it won't load in-game.
+      </div>
+      <button
+        class="cn-act"
+        onclick={async () => {
+          await refreshArchive();
+          await runScan();
+        }}>Retry</button
+      >
+      <button class="cn-act" onclick={changeArchive}>Choose another</button>
     </div>
   {/if}
 
