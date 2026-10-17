@@ -312,14 +312,20 @@ async fn mark_source_checked(app: tauri::AppHandle, tech_name: String) -> Result
 
 /// Scan a mod's modDesc.xml for a github.com/owner/repo reference.
 #[tauri::command]
-fn guess_repo(path: String, kind: String) -> Option<db::RepoRow> {
-    let xml = scan::read_moddesc_xml(std::path::Path::new(&path), &kind).ok()?;
-    let (owner, repo) = github::find_repo_in_text(&xml)?;
-    Some(db::RepoRow {
-        tech_name: String::new(),
-        owner,
-        repo,
+async fn guess_repo(path: String, kind: String) -> Result<Option<db::RepoRow>, String> {
+    off_main(move || {
+        let Ok(xml) = scan::read_moddesc_xml(std::path::Path::new(&path), &kind) else {
+            return Ok(None);
+        };
+        Ok(
+            github::find_repo_in_text(&xml).map(|(owner, repo)| db::RepoRow {
+                tech_name: String::new(),
+                owner,
+                repo,
+            }),
+        )
     })
+    .await
 }
 
 #[tauri::command]
@@ -1175,15 +1181,19 @@ async fn verify_mod(
 }
 
 #[tauri::command]
-fn gh_logout(app: tauri::AppHandle) -> Result<(), String> {
-    let conn = db::open(&db_path(&app)?)?;
-    secrets::set(&conn, "gh_token", None)?;
-    db::set_app_setting(&conn, "gh_user", None)?;
-    db::set_app_setting(&conn, "gh_scopes", None)?;
-    // Legacy flags from before scope capture — clear them too so nothing lingers.
-    db::set_app_setting(&conn, "gh_write", None)?;
-    db::set_app_setting(&conn, "gh_gist", None)?;
-    Ok(())
+async fn gh_logout(app: tauri::AppHandle) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let conn = db::open(&db)?;
+        secrets::set(&conn, "gh_token", None)?;
+        db::set_app_setting(&conn, "gh_user", None)?;
+        db::set_app_setting(&conn, "gh_scopes", None)?;
+        // Legacy flags from before scope capture — clear them too so nothing lingers.
+        db::set_app_setting(&conn, "gh_write", None)?;
+        db::set_app_setting(&conn, "gh_gist", None)?;
+        Ok(())
+    })
+    .await
 }
 
 // ── Tags ──
@@ -2728,29 +2738,37 @@ struct LoadoutFile {
 }
 
 #[tauri::command]
-fn export_loadout(app: tauri::AppHandle, id: i64, path: String) -> Result<(), String> {
-    let conn = db::open(&db_path(&app)?)?;
-    let lo = db::load_loadouts(&conn)
-        .into_iter()
-        .find(|l| l.id == id)
-        .ok_or_else(|| "Loadout not found".to_string())?;
-    let file = LoadoutFile {
-        silo: 1,
-        name: lo.name,
-        mods: lo.mods,
-    };
-    let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
-    paths::safe_outbound(std::path::Path::new(&path), &["silo"])?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+async fn export_loadout(app: tauri::AppHandle, id: i64, path: String) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let conn = db::open(&db)?;
+        let lo = db::load_loadouts(&conn)
+            .into_iter()
+            .find(|l| l.id == id)
+            .ok_or_else(|| "Loadout not found".to_string())?;
+        let file = LoadoutFile {
+            silo: 1,
+            name: lo.name,
+            mods: lo.mods,
+        };
+        let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
+        paths::safe_outbound(std::path::Path::new(&path), &["silo"])?;
+        std::fs::write(&path, json).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-fn import_loadout(app: tauri::AppHandle, path: String) -> Result<i64, String> {
-    paths::safe_inbound(std::path::Path::new(&path), &["silo", "json"])?;
-    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let file: LoadoutFile = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    let mut conn = db::open(&db_path(&app)?)?;
-    db::save_loadout(&mut conn, None, &file.name, &file.mods)
+async fn import_loadout(app: tauri::AppHandle, path: String) -> Result<i64, String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        paths::safe_inbound(std::path::Path::new(&path), &["silo", "json"])?;
+        let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let file: LoadoutFile = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+        let mut conn = db::open(&db)?;
+        db::save_loadout(&mut conn, None, &file.name, &file.mods)
+    })
+    .await
 }
 
 // ── Conflict detection (over the active set) ──
@@ -2786,9 +2804,12 @@ async fn launch_game() -> Result<(), String> {
 /// Write text to a user-chosen path (used by the diagnostics report export). Confined to a
 /// report file type with no traversal, so it can't be turned into an arbitrary-file write.
 #[tauri::command]
-fn save_text(path: String, content: String) -> Result<(), String> {
-    paths::safe_outbound(std::path::Path::new(&path), &["md", "txt"])?;
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+async fn save_text(path: String, content: String) -> Result<(), String> {
+    off_main(move || {
+        paths::safe_outbound(std::path::Path::new(&path), &["md", "txt"])?;
+        std::fs::write(&path, content).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Clear the scan cache so the next scan re-parses & re-categorizes every mod.
@@ -2804,8 +2825,8 @@ async fn clear_scan_cache(app: tauri::AppHandle) -> Result<(), String> {
 
 /// The FS25 user data dir (parent of mods/, savegameN/, game.xml).
 #[tauri::command]
-fn user_dir_path() -> Option<String> {
-    fsgame::user_dir().map(|p| p.to_string_lossy().into_owned())
+async fn user_dir_path() -> Result<Option<String>, String> {
+    off_main(|| Ok(fsgame::user_dir().map(|p| p.to_string_lossy().into_owned()))).await
 }
 
 /// Generate a filltype-compatibility bridge companion mod into the library root.
@@ -3752,76 +3773,98 @@ async fn bisect_snapshot_clear(app: tauri::AppHandle) -> Result<(), String> {
 
 /// Read specific values from a config XML by path.
 #[tauri::command]
-fn get_config(
+async fn get_config(
     path: String,
     paths: Vec<String>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
-    let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
-    let xml = crate::paths::guarded_xml_read(&[user], std::path::Path::new(&path))?;
-    Ok(xmlconfig::get_values(&xml, &paths))
+    off_main(move || {
+        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let xml = crate::paths::guarded_xml_read(&[user], std::path::Path::new(&path))?;
+        Ok(xmlconfig::get_values(&xml, &paths))
+    })
+    .await
 }
 
 /// Apply value edits to a config XML. The write is confined to the FS25 user dir, backs up
 /// the original first (required), and swaps the new file in atomically (see
 /// `paths::guarded_xml_write`).
 #[tauri::command]
-fn set_config(path: String, edits: Vec<xmlconfig::Edit>) -> Result<(), String> {
-    let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
-    let roots = [user];
-    let p = std::path::Path::new(&path);
-    let xml = paths::guarded_xml_read(&roots, p)?;
-    let out = xmlconfig::set_values(&xml, &edits)?;
-    paths::guarded_xml_write(&roots, p, &out)
+async fn set_config(path: String, edits: Vec<xmlconfig::Edit>) -> Result<(), String> {
+    off_main(move || {
+        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let roots = [user];
+        let p = std::path::Path::new(&path);
+        let xml = paths::guarded_xml_read(&roots, p)?;
+        let out = xmlconfig::set_values(&xml, &edits)?;
+        paths::guarded_xml_write(&roots, p, &out)
+    })
+    .await
 }
 
 // ── Mod settings form ──
 #[tauri::command]
-fn mods_with_settings() -> Vec<String> {
-    match fsgame::user_dir() {
-        Some(dir) => settings_form::mods_with_settings(&dir),
-        None => Vec::new(),
-    }
+async fn mods_with_settings() -> Result<Vec<String>, String> {
+    off_main(|| {
+        Ok(fsgame::user_dir()
+            .map(|d| settings_form::mods_with_settings(&d))
+            .unwrap_or_default())
+    })
+    .await
 }
 
 #[tauri::command]
-fn get_mod_settings(mod_name: String) -> Result<Vec<settings_form::SettingsFile>, String> {
-    let dir = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
-    let mut files = Vec::new();
-    for path in settings_form::find_files(&dir, &mod_name) {
-        files.push(settings_form::load_file(&path)?);
-    }
-    Ok(files)
+async fn get_mod_settings(mod_name: String) -> Result<Vec<settings_form::SettingsFile>, String> {
+    off_main(move || {
+        let dir = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let mut files = Vec::new();
+        for path in settings_form::find_files(&dir, &mod_name) {
+            files.push(settings_form::load_file(&path)?);
+        }
+        Ok(files)
+    })
+    .await
 }
 
 #[tauri::command]
-fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Result<(), String> {
-    let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
-    let roots = [user];
-    let p = std::path::Path::new(&path);
-    let raw = paths::guarded_xml_read(&roots, p)?;
-    let updated = settings_form::apply_edits(&raw, &edits)?;
-    paths::guarded_xml_write(&roots, p, &updated)
+async fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Result<(), String> {
+    off_main(move || {
+        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let roots = [user];
+        let p = std::path::Path::new(&path);
+        let raw = paths::guarded_xml_read(&roots, p)?;
+        let updated = settings_form::apply_edits(&raw, &edits)?;
+        paths::guarded_xml_write(&roots, p, &updated)
+    })
+    .await
 }
 
 #[tauri::command]
-fn save_mod_settings_raw(path: String, content: String) -> Result<(), String> {
-    let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
-    paths::guarded_xml_write(&[user], std::path::Path::new(&path), &content)
+async fn save_mod_settings_raw(path: String, content: String) -> Result<(), String> {
+    off_main(move || {
+        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        paths::guarded_xml_write(&[user], std::path::Path::new(&path), &content)
+    })
+    .await
 }
 
 // ── Savegames ──
 #[tauri::command]
-fn get_savegames() -> Result<Vec<savegame::Savegame>, String> {
-    match fsgame::user_dir() {
-        Some(dir) => Ok(savegame::list_savegames(&dir)),
-        None => Ok(Vec::new()),
-    }
+async fn get_savegames() -> Result<Vec<savegame::Savegame>, String> {
+    off_main(|| {
+        Ok(fsgame::user_dir()
+            .map(|dir| savegame::list_savegames(&dir))
+            .unwrap_or_default())
+    })
+    .await
 }
 
 #[tauri::command]
-fn backup_savegame(folder: String) -> Result<String, String> {
-    let dir = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
-    savegame::backup(&dir, &folder)
+async fn backup_savegame(folder: String) -> Result<String, String> {
+    off_main(move || {
+        let dir = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        savegame::backup(&dir, &folder)
+    })
+    .await
 }
 
 /// The app version from Cargo/tauri.conf package info — the single source of truth
@@ -3834,8 +3877,8 @@ fn app_version(app: tauri::AppHandle) -> String {
 /// True when this machine can store account tokens in the OS keychain. When false, the UI
 /// warns that a connected token would be kept in the local DB unencrypted.
 #[tauri::command]
-fn secret_storage_secure() -> bool {
-    secrets::keychain_available()
+async fn secret_storage_secure() -> Result<bool, String> {
+    off_main(|| Ok(secrets::keychain_available())).await
 }
 
 /// Files in the flat mods root that occupy an organized mod's name but aren't Silo's projection
