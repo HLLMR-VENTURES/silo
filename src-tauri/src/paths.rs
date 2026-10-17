@@ -159,12 +159,19 @@ pub fn guarded_xml_write(
 /// Previous versions kept beside an edited config: `.bak`, `.bak.2`, `.bak.3`.
 const CONFIG_BACKUPS: usize = 3;
 
+/// `dest`'s file name with `suffix` appended, built on the raw `OsString` so a name that isn't
+/// valid UTF-8 (possible on Linux) keeps its exact bytes.
+fn with_suffix(dest: &Path, suffix: &str) -> PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    dest.with_file_name(name)
+}
+
 fn backup_slot(dest: &Path, n: usize) -> PathBuf {
-    let name = dest.file_name().unwrap_or_default().to_string_lossy();
     if n == 1 {
-        dest.with_file_name(format!("{name}.bak"))
+        with_suffix(dest, ".bak")
     } else {
-        dest.with_file_name(format!("{name}.bak.{n}"))
+        with_suffix(dest, &format!(".bak.{n}"))
     }
 }
 
@@ -174,8 +181,7 @@ fn backup_slot(dest: &Path, n: usize) -> PathBuf {
 /// oldest drops) and copy `dest` to `.bak`. Any failure aborts before `dest` is touched.
 fn back_up_config(dest: &Path) -> Result<(), String> {
     let abort = |e: std::io::Error| format!("aborted — couldn't back up the file first: {e}");
-    let name = dest.file_name().unwrap_or_default().to_string_lossy();
-    let original = dest.with_file_name(format!("{name}.silo-original.bak"));
+    let original = with_suffix(dest, ".silo-original.bak");
     if !original.exists() {
         let source = if backup_slot(dest, 1).is_file() {
             backup_slot(dest, 1)
@@ -413,6 +419,31 @@ mod tests {
         assert_eq!(read("gameSettings.xml.silo-original.bak"), "<v0/>");
         assert_eq!(read("gameSettings.xml.bak"), "<v1/>");
         assert_eq!(read("gameSettings.xml.bak.2"), "<v0/>");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Linux only: macOS (APFS) refuses file names that aren't valid UTF-8.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn backups_keep_a_non_utf8_file_name() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::env::temp_dir().join(format!("silo_cfg_bytes_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let named = |b: &[u8]| root.join(OsStr::from_bytes(b));
+        let dest = named(b"caf\xe9.xml");
+        std::fs::write(&dest, "<v1/>").unwrap();
+        std::fs::write(named(b"caf\xe9.xml.bak"), "<v0/>").unwrap();
+        guarded_xml_write(std::slice::from_ref(&root), &dest, "<v2/>").unwrap();
+        let read = |b: &[u8]| std::fs::read_to_string(named(b)).unwrap();
+        assert_eq!(
+            read(b"caf\xe9.xml.silo-original.bak"),
+            "<v0/>",
+            "older .bak found"
+        );
+        assert_eq!(read(b"caf\xe9.xml.bak"), "<v1/>");
+        assert_eq!(read(b"caf\xe9.xml.bak.2"), "<v0/>");
         let _ = std::fs::remove_dir_all(&root);
     }
 
