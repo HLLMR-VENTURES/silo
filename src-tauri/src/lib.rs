@@ -84,19 +84,19 @@ async fn off_main<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
-/// Scan the given roots (or the auto-detected default when omitted/empty).
+/// Scan the given roots (or the auto-detected default when omitted/empty) — only those that
+/// are trusted mods folders, so nothing at all while the folder is blocked.
 /// Runs on a blocking thread so the async runtime / UI never stalls.
 #[tauri::command]
 async fn scan_mods(
     app: tauri::AppHandle,
     roots: Option<Vec<String>>,
 ) -> Result<scan::ScanResult, String> {
-    let roots: Vec<PathBuf> = match roots {
-        Some(v) if !v.is_empty() => v.into_iter().map(PathBuf::from).collect(),
-        _ => mods_roots(),
-    };
-    // The organize manifest is per folder; scope the reconcile to the folder being scanned.
-    let scan_key = roots.first().map(|r| modsroot::canonical_key(r));
+    let supplied: Vec<PathBuf> = roots
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
 
     tauri::async_runtime::spawn_blocking(move || {
         // A mod update Silo was in the middle of when it stopped is finished or rolled back
@@ -107,10 +107,91 @@ async fn scan_mods(
         // Read after `start`: a change of archive (repoint, move) before this point is seen
         // here, and one after it moves the epoch on, so the reconcile below is refused.
         let active = modsroot::active();
+        let trusted = trusted_roots(active.clone(), modsroot::blocked().as_deref(), false);
+        let plan = scan_plan(supplied, &trusted, active.as_ref());
+        let mut conn = db::open(&db_path(&app)?)?;
+        let emitter = app.clone();
+        let mut result = scan_library(
+            &mut conn,
+            &plan,
+            active.as_ref(),
+            &LIBRARY_WRITE,
+            &LIBRARY_EPOCH,
+            start,
+            move |done, total| {
+                let _ = emitter.emit("scan:progress", Progress { done, total });
+            },
+        );
+        result.notices = recovered.notices;
+        result.problems = recovered.problems;
+        Ok::<_, String>(result)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What a scan reads, and the one folder whose `organized` manifest it may rewrite.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ScanPlan {
+    roots: Vec<PathBuf>,
+    reconcile_key: Option<String>,
+}
+
+/// The supplied roots that are trusted mods folders (all of `trusted` when none are supplied;
+/// `trusted` is empty while the folder is blocked), and the first one's key only when it is the
+/// active layout's mods folder — a scan never rewrites the manifest of any other folder.
+fn scan_plan(
+    supplied: Vec<PathBuf>,
+    trusted: &[PathBuf],
+    active: Option<&modsroot::Active>,
+) -> ScanPlan {
+    let roots: Vec<PathBuf> = if supplied.is_empty() {
+        trusted.to_vec()
+    } else {
+        supplied
+            .into_iter()
+            .filter_map(|s| {
+                trusted
+                    .iter()
+                    .find(|t| modsroot::same_folder(t, &s))
+                    .cloned()
+            })
+            .collect()
+    };
+    let reconcile_key = roots
+        .first()
+        .filter(|r| active.is_some_and(|a| modsroot::same_folder(&a.layout.mods, r)))
+        .map(|r| modsroot::canonical_key(r));
+    ScanPlan {
+        roots,
+        reconcile_key,
+    }
+}
+
+/// Scan `plan.roots` with their archives, persist the parse cache, and — only for
+/// `plan.reconcile_key`, on a quiet library (`start`, `lock`, `epoch`) — rewrite that folder's
+/// `organized` manifest from what's in its archive.
+#[allow(clippy::too_many_arguments)]
+fn scan_library(
+    conn: &mut rusqlite::Connection,
+    plan: &ScanPlan,
+    active: Option<&modsroot::Active>,
+    lock: &'static std::sync::Mutex<()>,
+    epoch: &std::sync::atomic::AtomicU64,
+    start: Option<u64>,
+    progress: impl Fn(usize, usize) + Sync + Send,
+) -> scan::ScanResult {
+    // Nothing to read (a blocked folder): leave the cache and every manifest as they are —
+    // pruning against an empty scan would forget every cached mod.
+    if plan.roots.is_empty() {
+        return scan::ScanResult::default();
+    }
+    {
+        let roots = &plan.roots;
+        let scan_key = plan.reconcile_key.clone();
         // Warm cache: parsed entries persist between launches, keyed by
         // path+mtime+size, so unchanged mods skip archive parsing entirely.
-        let mut conn = db::open(&db_path(&app)?)?;
-        let cache = db::load_cache(&conn);
+        let cache = db::load_cache(conn);
 
         // Each mods folder with its archive(s), and whether the scanned folder's manifest may
         // be rewritten from what's found (see `scan_archives`).
@@ -119,7 +200,7 @@ async fn scan_mods(
             .iter()
             .enumerate()
             .map(|(i, r)| {
-                let (archives, ok) = scan_archives(&conn, r, active.as_ref());
+                let (archives, ok) = scan_archives(conn, r, active);
                 if i == 0 {
                     may_reconcile = ok;
                 }
@@ -127,10 +208,7 @@ async fn scan_mods(
             })
             .collect();
 
-        let emitter = app.clone();
-        let out = scan::scan_layouts(layouts, &cache, move |done, total| {
-            let _ = emitter.emit("scan:progress", Progress { done, total });
-        });
+        let out = scan::scan_layouts(layouts, &cache, progress);
 
         // Persist freshly-parsed rows; prune mods that vanished from disk.
         let fresh_rows: Vec<(String, u64, u64, String)> = out
@@ -144,10 +222,10 @@ async fn scan_mods(
                     .map(|json| (m.path.clone(), m.mtime_ms, m.size, json))
             })
             .collect();
-        let _ = db::upsert_many(&mut conn, &fresh_rows);
+        let _ = db::upsert_many(conn, &fresh_rows);
 
         let present: HashSet<String> = out.result.mods.iter().map(|m| m.path.clone()).collect();
-        let _ = db::prune_missing(&mut conn, &present);
+        let _ = db::prune_missing(conn, &present);
 
         // Keep the `organized` manifest in step with what's physically in `archive/`, so an
         // archived mod is always activatable even if the DB drifted from disk (e.g. a fresh
@@ -175,26 +253,13 @@ async fn scan_mods(
         // Only on a quiet library: a scan's snapshot of the archive may predate, or overlap, an
         // organize, activate, install or move, and rewriting the manifest from it would undo it.
         if let Some(key) = scan_key.as_deref().filter(|_| may_reconcile) {
-            let quiet = reconcile_if_quiet(
-                &LIBRARY_WRITE,
-                &LIBRARY_EPOCH,
-                start,
-                &mut conn,
-                key,
-                &organized_rows,
-            );
+            let quiet = reconcile_if_quiet(lock, epoch, start, conn, key, &organized_rows);
             if !quiet {
                 log::info!("scan: library changed while scanning; manifest left for the next scan");
             }
         }
-
-        let mut result = out.result;
-        result.notices = recovered.notices;
-        result.problems = recovered.problems;
-        Ok::<_, String>(result)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+        out.result
+    }
 }
 
 /// The archive(s) a scan of mods folder `root` reads, and whether that scan may rewrite the
@@ -5168,6 +5233,69 @@ mod tests {
         std::fs::create_dir_all(&clear).unwrap();
         let a = super::resolve_layout(&conn, &clear, std::slice::from_ref(&mods)).unwrap();
         assert_eq!(a.layout, Layout::default_for(&clear));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A zip mod with a minimal modDesc at `path`.
+    fn mod_zip(path: &Path) {
+        use std::io::Write;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zw.start_file("modDesc.xml", opts).unwrap();
+        zw.write_all(b"<modDesc descVersion=\"100\"><title><en>A</en></title></modDesc>")
+            .unwrap();
+        zw.finish().unwrap();
+    }
+
+    #[test]
+    fn a_scan_of_a_blocked_folder_writes_no_organized_rows() {
+        static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static E: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let base = temp_base("scanblocked");
+        let mods = base.join("mods");
+        mod_zip(&mods.join("archive/Tools/FS25_A.zip"));
+        let key = crate::modsroot::canonical_key(&mods);
+        let mut conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let organized = |c: &rusqlite::Connection| crate::db::load_organized(c, &key);
+        let scan = |conn: &mut rusqlite::Connection, plan: &super::ScanPlan| {
+            let start = super::quiet_epoch(&L, &E);
+            super::scan_library(conn, plan, None, &L, &E, start, |_, _| {})
+        };
+
+        // Blocked: no trusted roots, so the folder the webview names is neither read nor
+        // reconciled.
+        let plan = super::scan_plan(vec![mods.clone()], &[], None);
+        assert_eq!(plan, super::ScanPlan::default());
+        scan(&mut conn, &plan);
+        assert!(organized(&conn).is_empty());
+
+        // A trusted root that isn't the active layout's folder is read, never reconciled.
+        let other = crate::modsroot::Active {
+            layout: Layout::default_for(&base.join("other")),
+            move_to: None,
+        };
+        let plan = super::scan_plan(
+            vec![mods.clone()],
+            std::slice::from_ref(&mods),
+            Some(&other),
+        );
+        assert_eq!(plan.reconcile_key, None);
+        let found = scan(&mut conn, &plan);
+        assert_eq!(found.mods.len(), 1);
+        assert!(organized(&conn).is_empty());
+
+        // Control: the active folder's manifest follows its archive.
+        let active = crate::modsroot::Active {
+            layout: Layout::default_for(&mods),
+            move_to: None,
+        };
+        let plan = super::scan_plan(Vec::new(), std::slice::from_ref(&mods), Some(&active));
+        assert_eq!(plan.reconcile_key.as_deref(), Some(key.as_str()));
+        scan(&mut conn, &plan);
+        assert_eq!(organized(&conn).len(), 1);
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
     }

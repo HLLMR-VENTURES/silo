@@ -82,7 +82,7 @@ pub enum SettingsSource {
     Runtime,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanResult {
     pub mods: Vec<ModEntry>,

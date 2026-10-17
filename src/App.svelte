@@ -149,6 +149,7 @@
   import LibraryToolbar from "./lib/components/panels/LibraryToolbar.svelte";
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
   import { fmtSize } from "./lib/format";
+  import { rootsFor } from "./lib/modsStatus";
 
   let roots = $state<string[]>([]);
   let modsStatus = $state<ModsRootStatus | null>(null);
@@ -1477,8 +1478,7 @@
     const prev = roots[0] ?? null;
     modsStatus = st;
     await refreshArchive(); // the archive belongs to the mods folder
-    // A blocked folder (it shares files with another layout) isn't scanned or written.
-    roots = st.available && st.path && !st.layoutProblem ? [st.path] : [];
+    roots = rootsFor(st);
     if ((roots[0] ?? null) === prev) return;
     result = null;
     mods = [];
@@ -2067,7 +2067,7 @@
       }
       try {
         modsStatus = await modsRootStatus();
-        roots = modsStatus.available && modsStatus.path ? [modsStatus.path] : [];
+        roots = rootsFor(modsStatus);
         if (
           modsStatus.source === "gameOverride" &&
           localStorage.getItem("silo.overrideNoticeShown") !== "1"
