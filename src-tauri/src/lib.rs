@@ -1097,7 +1097,11 @@ fn remove_unclaimed_part(path: &std::path::Path) -> bool {
     if held.contains(&same_file_key(path)) {
         return false;
     }
-    std::fs::remove_file(path).is_ok()
+    let removed = std::fs::remove_file(path).is_ok();
+    if removed {
+        fslog::changed("remove", path);
+    }
+    removed
 }
 
 /// Anything at `p`, including a broken link (which `Path::exists` would call absent).

@@ -220,13 +220,16 @@ fn keep_original(source: &Path, original: &Path) -> std::io::Result<()> {
     }
     copy_new(source, &tmp)?;
     let placed = match std::fs::hard_link(&tmp, original) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(true),
         // Another edit kept the original first; it is never replaced.
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
-        Err(_) => copy_new(source, original),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
+        Err(_) => copy_new(source, original).map(|()| true),
     };
     let _ = std::fs::remove_file(&tmp);
-    placed
+    if placed? {
+        crate::fslog::moved("keep-original", source, original);
+    }
+    Ok(())
 }
 
 /// Copy `source` to a new file `to` (never replacing one) and flush it. A partial copy is

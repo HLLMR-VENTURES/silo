@@ -4,7 +4,8 @@
 //! finds the home folder in them.
 //!
 //! Actions: move, link, copy, unlink, remove, keep-edited-copy, update, backup, prune,
-//! restore, place, delete-moved, write-config, backup-config, backup-save, install, generate.
+//! restore, place, delete-moved, write-config, backup-config, keep-original, backup-save,
+//! install, generate, write-note, remove-note.
 //! The calls sit in the lowest primitive that makes the change (an archive move's re-point,
 //! for example, shows as the `unlink` / `link` / `move` lines of the links it remakes).
 //!

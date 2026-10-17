@@ -440,8 +440,13 @@ fn repoint(
     if row.kind == "dir" {
         // A dangling dir link can't report itself as a dir on Windows, so `remove_link` may pick
         // `remove_file`; `remove_dir` then removes the link itself (it is a link, never a folder).
+        // `remove_link` logs its own success; only the fallback needs a line here.
         organize::remove_link(&link)
-            .or_else(|_| std::fs::remove_dir(&link))
+            .or_else(|_| {
+                std::fs::remove_dir(&link)?;
+                crate::fslog::changed("unlink", &link);
+                Ok::<(), std::io::Error>(())
+            })
             .map_err(|e| format!("relink: {e}"))?;
         if let Err(e) = organize::make_link(dst, &link, &row.kind, policy) {
             if src.exists() {
@@ -820,9 +825,12 @@ pub(crate) fn note_archive(mods: &Path, archive: Option<&Path>) {
         let tmp = dir.join(format!("{ARCHIVE_NOTE}.tmp"));
         let json = serde_json::to_string_pretty(note).unwrap_or_default();
         let written = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path));
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&tmp);
-            log::warn!("couldn't write {} in {}: {e}", ARCHIVE_NOTE, dir.display());
+        match written {
+            Ok(()) => crate::fslog::changed("write-note", &path),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                log::warn!("couldn't write {} in {}: {e}", ARCHIVE_NOTE, dir.display());
+            }
         }
     };
     match archive {
@@ -845,8 +853,9 @@ pub(crate) fn note_archive(mods: &Path, archive: Option<&Path>) {
             );
         }
         None => {
-            if read_note(mods).is_some() {
-                let _ = std::fs::remove_file(mods.join(ARCHIVE_NOTE));
+            let note = mods.join(ARCHIVE_NOTE);
+            if read_note(mods).is_some() && std::fs::remove_file(&note).is_ok() {
+                crate::fslog::changed("remove-note", &note);
             }
         }
     }
