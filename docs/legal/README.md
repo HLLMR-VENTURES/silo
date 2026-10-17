@@ -38,9 +38,10 @@ good-faith compliance while review is pending).
 - **Hosting provider:** the website and API run on a rented virtual server. Confirm whether
   the provider and server region should be named in the privacy policy (as a processor and
   for international transfers).
-- **ModHub content:** the catalog's handling of ModHub images and metadata is under
-  discussion with GIANTS. The site now says plainly that the catalog server keeps cached cover
-  images and the hashes it computed; revisit once that's settled.
+- **ModHub content:** decided (owner, 2026-10-17): keep the existing ModHub image and hash
+  cache, openly, to demonstrate the full platform should GIANTS allow a feed. New fetches from
+  GIANTS' CDN stay paused. The Trust page says so; purge on GIANTS' request. Revisit once GIANTS
+  replies.
 - **Publisher identity:** settled. HLLMR Ventures LLC (Texas) owns Silo; the copyright
   line, these documents and the site use that name. Windows code signing stays under the
   founder's personal certificate (David Hellmer) by choice, and `docs/VERIFY_DOWNLOAD.md`
