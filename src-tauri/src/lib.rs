@@ -851,6 +851,10 @@ fn recover_interrupted_updates() -> update::Recovery {
     let Some(_write) = take_for_write(&LIBRARY_WRITE, &LIBRARY_EPOCH) else {
         return update::Recovery::default();
     };
+    // Link probes a crash left behind (a probe running right now is younger than this).
+    for dir in [&active.layout.mods, &active.layout.archive] {
+        organize::sweep_link_probes(dir, std::time::Duration::from_secs(600));
+    }
     let r = settle_layout(&active.layout);
     log_recovery(&r);
     r
@@ -3160,7 +3164,9 @@ async fn archive_move_preflight(
         // sandbox. The space check above keeps "unknown = another drive".
         let same_drive =
             organize::same_volume_or_probe(organize::volume_relation(&layout.mods, &new), || {
-                probed && organize::hardlinks_between(&layout.mods, &new)
+                probed
+                    .then(|| organize::hardlinks_between(&layout.mods, &new))
+                    .flatten()
             });
         let symlinks_available = probed
             && organize::symlinks_usable(&organize::Layout {
