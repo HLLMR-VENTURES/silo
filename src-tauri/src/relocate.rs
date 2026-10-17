@@ -799,11 +799,24 @@ fn read_note(dir: &Path) -> Option<ArchiveNote> {
 }
 
 /// Write the pair for a custom `archive`, or remove the mods folder's note for the default
-/// (`None`). Best effort: a missing note only costs rediscovery, never the change itself.
+/// (`None`). Best effort: a missing note only costs rediscovery, never the change itself. A
+/// file by that name that isn't a Silo note is the user's, and is never replaced or removed.
+/// Each note is written to a scratch file and renamed into place, so it's never half-written.
 pub(crate) fn note_archive(mods: &Path, archive: Option<&Path>) {
     let write = |dir: &Path, note: &ArchiveNote| {
+        let path = dir.join(ARCHIVE_NOTE);
+        if path.exists() && read_note(dir).is_none() {
+            eprintln!(
+                "[Silo] left {} alone: it isn't a note Silo wrote",
+                path.display()
+            );
+            return;
+        }
+        let tmp = dir.join(format!("{ARCHIVE_NOTE}.tmp"));
         let json = serde_json::to_string_pretty(note).unwrap_or_default();
-        if let Err(e) = std::fs::write(dir.join(ARCHIVE_NOTE), json) {
+        let written = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, &path));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
             eprintln!(
                 "[Silo] couldn't write {} in {}: {e}",
                 ARCHIVE_NOTE,
@@ -831,7 +844,9 @@ pub(crate) fn note_archive(mods: &Path, archive: Option<&Path>) {
             );
         }
         None => {
-            let _ = std::fs::remove_file(mods.join(ARCHIVE_NOTE));
+            if read_note(mods).is_some() {
+                let _ = std::fs::remove_file(mods.join(ARCHIVE_NOTE));
+            }
         }
     }
 }
@@ -2468,6 +2483,39 @@ mod tests {
         std::fs::create_dir_all(&cat).unwrap();
         std::fs::write(cat.join("FS25_A.zip"), b"zip").unwrap();
         assert_eq!(rediscover_archive(&mods), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_file_by_that_name_silo_didnt_write_is_never_replaced_or_removed() {
+        let (base, mods, hdd) = note_fixture("foreign_note");
+        std::fs::write(mods.join(ARCHIVE_NOTE), b"my own notes").unwrap();
+        note_archive(&mods, Some(&hdd));
+        assert_eq!(
+            std::fs::read(mods.join(ARCHIVE_NOTE)).unwrap(),
+            b"my own notes"
+        );
+        assert!(
+            read_note(&hdd).is_some(),
+            "the archive's note is still written"
+        );
+        note_archive(&mods, None);
+        assert_eq!(
+            std::fs::read(mods.join(ARCHIVE_NOTE)).unwrap(),
+            b"my own notes"
+        );
+        for dir in [&mods, &hdd] {
+            let scratch: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+                .collect();
+            assert!(
+                scratch.is_empty(),
+                "no scratch file left in {}",
+                dir.display()
+            );
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 
