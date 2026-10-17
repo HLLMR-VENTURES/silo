@@ -1,0 +1,20 @@
+# cargo-audit configuration (CI runs `cargo audit` from src-tauri/).
+#
+# Keep this list EMPTY unless an advisory is provably unreachable AND has no upstream fix we
+# can take yet. Every entry needs: the dependency path, why it's unreachable, and the issue
+# that tracks removing it.
+
+[advisories]
+ignore = [
+    # zip `extract()` advisories (#182). Silo's own `zip` is on 9.x (patched). The remaining
+    # copy is zip 4.6.1, pulled in only by tauri-plugin-updater 2.13/2.14 (latest; no release on
+    # zip >= 9 yet). Unreachable in practice: the updater calls ZipArchive::extract only in its
+    # Windows-only `extract_zip` path, and only AFTER `verify_signature` has checked the download
+    # against Silo's pinned minisign public key (updater.rs: download() verifies, install() then
+    # extracts). A malicious archive would need our private signing key. The advisories concern
+    # Unix permission bits and symlink targets during extraction.
+    # REMOVE when tauri-plugin-updater depends on zip >= 9 (`cargo tree -i zip` shows one version).
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+]

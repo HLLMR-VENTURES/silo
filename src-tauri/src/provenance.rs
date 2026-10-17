@@ -131,7 +131,7 @@ pub fn manifest_from_zip(zip_path: &Path) -> Result<LocalManifest, String> {
         if f.is_dir() {
             continue;
         }
-        let path = canon_path(f.name());
+        let path = canon_path(&f.name().map_err(|e| e.to_string())?);
         if path.is_empty() {
             continue;
         }
