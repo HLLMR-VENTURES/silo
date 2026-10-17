@@ -796,8 +796,10 @@ fn run_locked(
         mods: ctx.mods,
         mods_key: ctx.mods_key,
     };
+    // Not reset here: a pause/cancel sent after the caller took its lock (before this point)
+    // must be honored at the first boundary. The command layer clears stale requests when it
+    // takes the library lock for a move.
     let request = ctx.request;
-    request.store(0, Ordering::SeqCst);
     marker.paused = false;
     marker.pause_reason = None;
     marker.errors.clear();
@@ -1384,6 +1386,46 @@ mod tests {
             f.new.is_dir(),
             "the user's chosen folder itself is never removed"
         );
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_cancel_requested_before_start_turns_around_at_once() {
+        let f = fx("earlycancel");
+        add_zip(&f, "FS25_A", false);
+        add_zip(&f, "FS25_B", false);
+        let req = AtomicU8::new(CANCEL);
+        assert!(run_full(&f, Op::Start, &|| false, &req, &mut |_| {})
+            .unwrap()
+            .is_none());
+        for t in ["FS25_A", "FS25_B"] {
+            assert!(zip_at(&f.old, t).exists(), "{t} never left");
+            assert!(!zip_at(&f.new, t).exists());
+        }
+        assert!(setting(&f).is_none(), "setting unchanged");
+        assert!(load_marker(&f.conn, &f.key).is_none(), "marker cleared");
+        assert_eq!(req.load(Ordering::SeqCst), 0, "request consumed");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_pause_requested_before_start_pauses_at_the_first_boundary() {
+        let f = fx("earlypause");
+        add_zip(&f, "FS25_A", false);
+        let req = AtomicU8::new(PAUSE);
+        let paused = run_full(&f, Op::Start, &|| false, &req, &mut |_| {})
+            .unwrap()
+            .unwrap();
+        assert!(paused.paused && paused.moved.is_empty());
+        assert_eq!(paused.direction, Direction::Forward);
+        assert!(zip_at(&f.old, "FS25_A").exists() && !zip_at(&f.new, "FS25_A").exists());
+        assert_eq!(load_marker(&f.conn, &f.key), Some(paused));
+        assert!(setting(&f).is_none());
+        // Resume (the request was consumed) finishes the move.
+        assert!(run_full(&f, Op::Resume, &|| false, &req, &mut |_| {})
+            .unwrap()
+            .is_none());
+        assert!(zip_at(&f.new, "FS25_A").exists());
         let _ = std::fs::remove_dir_all(&f.base);
     }
 

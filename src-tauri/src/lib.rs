@@ -938,7 +938,9 @@ static LIBRARY_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const LIBRARY_BUSY: &str = "Silo is busy updating your library — try again when it finishes.";
 
-const MOVE_RUNNING: &str = "An archive move is already running.";
+/// `try_move_lock`'s refusal while another move holds the library lock. Its own text (not
+/// relocate's "already running") so `cancel_falls_back` matches this case and nothing else.
+const MOVE_LOCK_HELD: &str = "An archive move is already under way.";
 
 /// Set while an archive move holds the library write lock — including the checks before
 /// relocate's own guard flips `is_running()` — so writes refuse at once instead of waiting.
@@ -992,10 +994,14 @@ fn library_write() -> Result<std::sync::MutexGuard<'static, ()>, String> {
 fn try_move_lock() -> Result<MoveLock, String> {
     match lock_result(LIBRARY_WRITE.try_lock()) {
         Some(g) => {
+            // Order matters: clear requests left from before (a pause or cancel nothing was
+            // running to receive) only once the lock is ours, and only then announce the move —
+            // a cancel that sees the flag from here on is sent to this move and kept.
+            relocate::requests().store(0, std::sync::atomic::Ordering::SeqCst);
             MOVE_HOLDS_LOCK.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(MoveLock { _guard: g })
         }
-        None if move_in_progress() => Err(MOVE_RUNNING.into()),
+        None if move_in_progress() => Err(MOVE_LOCK_HELD.into()),
         None => Err(LIBRARY_BUSY.into()),
     }
 }
@@ -1761,7 +1767,12 @@ fn with_move_ctx(
         out
     };
     let out = run();
-    eprintln!("{}", move_outcome(what, &out));
+    // A cancel that finds a move holding the lock becomes a request (logged there), not a
+    // refusal.
+    let handed_off = what == "cancel" && matches!(&out, Err(e) if cancel_falls_back(e));
+    if !handed_off {
+        eprintln!("{}", move_outcome(what, &out));
+    }
     out
 }
 
@@ -1936,7 +1947,7 @@ async fn archive_move_cancel(
 /// Pure: a cancel refused because a move holds the library lock becomes a request to that move.
 /// (An ordinary write holding it stays an error, so the cancel isn't silently dropped.)
 fn cancel_falls_back(err: &str) -> bool {
-    err == MOVE_RUNNING
+    err == MOVE_LOCK_HELD
 }
 
 fn request_turn_around() -> Option<relocate::MoveMarker> {
@@ -3433,7 +3444,9 @@ mod tests {
 
     #[test]
     fn cancel_falls_back_only_when_a_move_holds_the_lock() {
-        assert!(cancel_falls_back(super::MOVE_RUNNING));
+        assert!(cancel_falls_back(super::MOVE_LOCK_HELD));
+        // relocate's own guard refusal is a different case.
+        assert!(!cancel_falls_back("An archive move is already running."));
         assert!(!cancel_falls_back(super::LIBRARY_BUSY));
         assert!(!cancel_falls_back("There's no archive move to cancel."));
     }
