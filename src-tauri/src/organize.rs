@@ -118,11 +118,12 @@ pub struct Report {
     pub errors: Vec<String>,
 }
 
-/// Result of the link-repair pass — how many copy-projections were deduped into hardlinks.
+/// Result of the link-repair pass — how many copy-projections were deduped into links
+/// (hardlinks on the archive's volume, symlinks when the archive is on another drive).
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelinkReport {
-    /// Copy-projections converted to hardlinks.
+    /// Copy-projections converted to hardlinks (same volume) or symlinks (other drive).
     pub upgraded: usize,
     /// Already a hardlink/symlink to the archive — nothing to do.
     pub already_linked: usize,
@@ -130,8 +131,9 @@ pub struct RelinkReport {
     pub skipped: usize,
     /// Bytes reclaimed by collapsing duplicate copies into shared hardlinks.
     pub reclaimed_bytes: u64,
-    /// The mods folder's filesystem rejects hardlinks (a cloud-sync provider — OneDrive /
-    /// Google Drive / Proton Drive). Silo uses copies there; there's nothing to optimize.
+    /// No link kind is usable: hardlinks are rejected (a cloud-sync provider — OneDrive /
+    /// Google Drive / Proton Drive — or the archive is on another drive) and symlinks aren't
+    /// available either. Silo uses copies there; there's nothing to optimize.
     pub hardlinks_unsupported: bool,
     pub errors: Vec<String>,
 }
@@ -154,15 +156,23 @@ pub fn supports_hardlinks(root: &Path) -> bool {
     ok
 }
 
-/// Windows-invalid path chars → underscore (spaces and `&` are fine in folder names).
+/// Windows-invalid path chars → underscore (spaces and `&` are fine in folder names). A
+/// category that would name the archive itself or its parent (`""`, `"."`, `".."` — or any
+/// all-dots name, which Windows trims to one of those — after trimming whitespace) becomes
+/// `"_"`, so a category folder always sits strictly inside the archive.
 fn sanitize(category: &str) -> String {
-    category
+    let s: String = category
         .chars()
         .map(|c| match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
             _ => c,
         })
-        .collect()
+        .collect();
+    if s.trim().chars().all(|c| c == '.') {
+        "_".into()
+    } else {
+        s
+    }
 }
 
 pub(crate) fn archive_dir(archive: &Path, category: &str) -> PathBuf {
@@ -234,6 +244,7 @@ pub fn apply_organize(
                 "{}: {} would be filed inside itself — left it untouched",
                 m.tech_name, m.file_name
             ));
+            rep.skipped += 1;
             continue;
         }
         // Never overwrite: a rename replaces an existing destination, and whatever sits there
@@ -290,6 +301,7 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
+    let allow_symlink = supports_symlinks(layout);
     for row in db::load_organized(conn, &key) {
         let link = root.join(&row.file_name);
         let src = archive_path(&layout.archive, &row.category, &row.file_name);
@@ -297,7 +309,7 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
         let linked = link.symlink_metadata().is_ok();
 
         if want && !linked {
-            match make_link(&src, &link, &row.kind) {
+            match make_link(&src, &link, &row.kind, allow_symlink) {
                 Ok(()) => {
                     // Record the projection's identity so a later deactivate can confirm it's
                     // ours (and skip the content hash). Zips only — dir projections are
@@ -388,8 +400,11 @@ fn matches_provenance(conn: &Connection, key: &str, link: &Path, file_name: &str
 /// to `sha256` the whole file to prove it's Silo's. Collapsing each such copy into a hardlink
 /// to its archived twin reclaims the space and makes identity checks O(1) forever after.
 ///
-/// Only ever touches a flat file that is **byte-identical** to the archive copy on the same
-/// volume — never the user's own replacement build. Crash-safe: hardlink to a temp sibling,
+/// When the archive is on another drive (no hardlinks possible), copies are upgraded to
+/// symlinks instead, where the OS allows them.
+///
+/// Only ever touches a flat file that is **byte-identical** to the archive copy — never the
+/// user's own replacement build. Crash-safe: hardlink (or symlink) to a temp sibling,
 /// then atomically rename over the flat file (both the old copy and the new hardlink hold the
 /// same bytes, so an interruption at any point leaves a valid file). `progress(done, total)`
 /// is called once per active zip examined so a long pass can show a bar instead of a freeze.
@@ -401,9 +416,12 @@ pub fn relink_projections(
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut rep = RelinkReport::default();
-    // On a cloud-synced folder hardlinks are impossible — every attempt would error 396. Report
-    // the situation cleanly instead of grinding out one failure per mod.
-    if !supports_hardlinks(root) {
+    // Same volume → hardlinks; archive on another drive → symlinks (when the OS allows). On a
+    // cloud-synced folder hardlinks are impossible — every attempt would error 396 — and with no
+    // symlink fallback either, report the situation cleanly instead of one failure per mod.
+    let hardlinks = supports_hardlinks(root) && same_volume(&layout.mods, &layout.archive);
+    let symlinks = !hardlinks && supports_symlinks(layout);
+    if !hardlinks && !symlinks {
         rep.hardlinks_unsupported = true;
         return rep;
     }
@@ -422,8 +440,17 @@ pub fn relink_projections(
             rep.skipped += 1;
             continue;
         };
-        if fmeta.file_type().is_symlink() || !src.exists() {
+        if !src.exists() {
             rep.skipped += 1;
+            continue;
+        }
+        // A symlink resolving to the archive is already a link (a symlink pass across drives).
+        if fmeta.file_type().is_symlink() {
+            if is_silo_projection(&flat, &src, "zip") {
+                rep.already_linked += 1;
+            } else {
+                rep.skipped += 1;
+            }
             continue;
         }
         // Already sharing the archive's file id → a hardlink, nothing to reclaim.
@@ -437,7 +464,7 @@ pub fn relink_projections(
             }
         }
         match same_bytes(&flat, &src) {
-            Ok(true) => match relink_over(&src, &flat) {
+            Ok(true) => match relink_over(&src, &flat, hardlinks) {
                 Ok(()) => {
                     rep.upgraded += 1;
                     rep.reclaimed_bytes += fmeta.len();
@@ -470,15 +497,19 @@ fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
     )
 }
 
-/// Atomically replace `flat` with a hardlink to `src`. Hardlink to a temp sibling in the same
-/// directory (fails on a different volume, leaving `flat` untouched), then rename over `flat`.
-fn relink_over(src: &Path, flat: &Path) -> std::io::Result<()> {
+/// Atomically replace `flat` with a hardlink (`hard`) or symlink to `src`. Link a temp sibling
+/// in the same directory (a failure leaves `flat` untouched), then rename over `flat`.
+fn relink_over(src: &Path, flat: &Path, hard: bool) -> std::io::Result<()> {
     let tmp = flat.with_file_name(format!(
         "{}.silo-relink-tmp",
         flat.file_name().and_then(|n| n.to_str()).unwrap_or("mod")
     ));
     let _ = std::fs::remove_file(&tmp);
-    std::fs::hard_link(src, &tmp)?;
+    if hard {
+        std::fs::hard_link(src, &tmp)?;
+    } else {
+        symlink_file(src, &tmp)?;
+    }
     match std::fs::rename(&tmp, flat) {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -496,6 +527,7 @@ pub fn adopt_foreign(conn: &Connection, layout: &Layout, file_name: &str) -> Res
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     crate::paths::safe_file_name(file_name).map_err(|e| e.to_string())?;
+    let allow_symlink = supports_symlinks(layout);
     let row = db::load_organized(conn, &key)
         .into_iter()
         .find(|r| r.file_name == file_name)
@@ -515,7 +547,8 @@ pub fn adopt_foreign(conn: &Connection, layout: &Layout, file_name: &str) -> Res
     // Promote the swapped-in file into the archive, then re-project it back into the root.
     move_path(&flat, &archive).map_err(|e| format!("promote: {e}"))?;
     if row.active {
-        make_link(&archive, &flat, &row.kind).map_err(|e| format!("re-project: {e}"))?;
+        make_link(&archive, &flat, &row.kind, allow_symlink)
+            .map_err(|e| format!("re-project: {e}"))?;
     }
     Ok(())
 }
@@ -531,6 +564,7 @@ pub fn restore_projection(
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     crate::paths::safe_file_name(file_name).map_err(|e| e.to_string())?;
+    let allow_symlink = supports_symlinks(layout);
     let row = db::load_organized(conn, &key)
         .into_iter()
         .find(|r| r.file_name == file_name)
@@ -546,7 +580,8 @@ pub fn restore_projection(
         move_path(&flat, &bak).map_err(|e| format!("backup: {e}"))?;
     }
     if row.active {
-        make_link(&archive, &flat, &row.kind).map_err(|e| format!("re-project: {e}"))?;
+        make_link(&archive, &flat, &row.kind, allow_symlink)
+            .map_err(|e| format!("re-project: {e}"))?;
     }
     Ok(())
 }
@@ -745,9 +780,15 @@ fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Project `src` into the flat root at `link`. Files → hardlink (no privilege,
-/// same volume, no disk duplication); dirs → OS symlink, falling back to copy.
-fn make_link(src: &Path, link: &Path, kind: &str) -> std::io::Result<()> {
+/// Project `src` into the flat root at `link`. Files → hardlink (no privilege, same volume, no
+/// disk duplication), then a symlink when `allow_symlink` (archive on another drive), then a
+/// copy; dirs → OS symlink, falling back to copy.
+pub(crate) fn make_link(
+    src: &Path,
+    link: &Path,
+    kind: &str,
+    allow_symlink: bool,
+) -> std::io::Result<()> {
     if kind == "dir" {
         #[cfg(unix)]
         let symlink = |s: &Path, l: &Path| std::os::unix::fs::symlink(s, l);
@@ -755,7 +796,88 @@ fn make_link(src: &Path, link: &Path, kind: &str) -> std::io::Result<()> {
         let symlink = |s: &Path, l: &Path| std::os::windows::fs::symlink_dir(s, l);
         link_dir_or_copy(src, link, symlink)
     } else {
-        std::fs::hard_link(src, link).or_else(|_| std::fs::copy(src, link).map(|_| ()))
+        link_zip(
+            src,
+            link,
+            allow_symlink,
+            |s, l| std::fs::hard_link(s, l),
+            symlink_file,
+        )
+    }
+}
+
+/// Create a file symlink at `link` pointing to `src` (Windows needs Developer Mode or admin).
+pub(crate) fn symlink_file(src: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(src, link)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(src, link)
+    }
+}
+
+/// Zip projection: hardlink (same drive, no duplication) → symlink (other drive, when allowed)
+/// → byte copy. The link strategies are injected so the order is unit-testable.
+fn link_zip(
+    src: &Path,
+    link: &Path,
+    allow_symlink: bool,
+    hard: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    soft: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    if hard(src, link).is_ok() {
+        return Ok(());
+    }
+    if allow_symlink && soft(src, link).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(src, link).map(|_| ())
+}
+
+/// Whether a symlink from the mods folder into the archive works here (always on Linux/macOS
+/// for normal drives; on Windows only with Developer Mode). Cheap one-shot probe.
+pub fn supports_symlinks(layout: &Layout) -> bool {
+    let target = layout.archive.join(".silo-symlink-probe");
+    let link = layout.mods.join(".silo-symlink-probe.link");
+    let _ = std::fs::remove_file(&link);
+    if std::fs::create_dir_all(&layout.archive).is_err()
+        || std::fs::write(&target, b"silo").is_err()
+    {
+        return false;
+    }
+    let ok = symlink_file(&target, &link).is_ok();
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_file(&target);
+    ok
+}
+
+/// Mount point holding `p` (longest matching prefix), for same-drive checks and free space.
+/// Compared as normalized keys: on Windows `canonicalize` yields `\\?\C:\…` while mount points
+/// are `C:\`, and `Path::starts_with` treats those prefixes as different.
+pub(crate) fn mount_of(p: &Path) -> Option<(PathBuf, u64)> {
+    let c = std::fs::canonicalize(p).ok()?;
+    let windows = cfg!(windows);
+    let key = crate::modsroot::normalize_key(&c.to_string_lossy(), windows);
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .filter(|d| {
+            let mount = crate::modsroot::normalize_key(&d.mount_point().to_string_lossy(), windows);
+            Path::new(&key).starts_with(Path::new(&mount))
+        })
+        .max_by_key(|d| d.mount_point().components().count())
+        .map(|d| (d.mount_point().to_path_buf(), d.available_space()))
+}
+
+/// Whether `a` and `b` live on the same volume. Unknown → assume same (a hardlink attempt
+/// then falls back safely).
+pub(crate) fn same_volume(a: &Path, b: &Path) -> bool {
+    match (mount_of(a), mount_of(b)) {
+        (Some((ma, _)), Some((mb, _))) => ma == mb,
+        _ => true,
     }
 }
 
@@ -923,7 +1045,7 @@ pub fn detect_foreign_projections(conn: &Connection, layout: &Layout) -> Vec<For
 
 /// Remove a projected entry (hardlink, symlink, junction, or copy) without
 /// touching the archived original.
-fn remove_link(link: &Path) -> std::io::Result<()> {
+pub(crate) fn remove_link(link: &Path) -> std::io::Result<()> {
     let meta = link.symlink_metadata()?;
     let ft = meta.file_type();
     if ft.is_symlink() {
@@ -1645,6 +1767,7 @@ mod tests {
         let rep = apply_organize(&conn, &layout, &arch, std::slice::from_ref(&input));
 
         assert_eq!(rep.changed, 0);
+        assert_eq!(rep.skipped, 1, "counted as skipped");
         assert_eq!(rep.errors.len(), 1, "reported: {:?}", rep.errors);
         assert!(arch.join("Tools/modDesc.xml").exists(), "left in place");
         assert!(!arch.join("Tools/Tools").exists(), "not nested into itself");
@@ -1795,6 +1918,93 @@ mod tests {
             !mods.join("FS25_Loose.zip").exists(),
             "adopted mods arrive parked"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_category_never_resolves_to_or_escapes_the_archive() {
+        let arch = std::env::temp_dir().join(format!("silo_catdots_{}", std::process::id()));
+        for cat in ["..", ".", "", "  ", " .. ", "..."] {
+            let dir = archive_dir(&arch, cat);
+            assert_eq!(dir, arch.join("_"), "category {cat:?}");
+            assert!(dir.starts_with(&arch) && dir != arch, "category {cat:?}");
+        }
+        // Ordinary names (and dotted ones that aren't pure dots) are unchanged.
+        assert_eq!(archive_dir(&arch, "Vehicles"), arch.join("Vehicles"));
+        assert_eq!(archive_dir(&arch, "a/b"), arch.join("a_b"));
+        assert_eq!(archive_dir(&arch, "v1.0"), arch.join("v1.0"));
+    }
+
+    #[test]
+    fn zip_projection_falls_back_hardlink_then_symlink_then_copy() {
+        let base = std::env::temp_dir().join(format!("silo_zlink_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let src = base.join("a.zip");
+        std::fs::write(&src, b"PK\x03\x04 a").unwrap();
+
+        // Hardlink refused, symlink allowed → a symlink resolving to src.
+        let l1 = base.join("l1.zip");
+        link_zip(
+            &src,
+            &l1,
+            true,
+            |_, _| Err(std::io::ErrorKind::Other.into()),
+            symlink_file,
+        )
+        .unwrap();
+        assert!(l1.symlink_metadata().unwrap().file_type().is_symlink() || !cfg!(unix));
+        assert!(is_silo_projection(&l1, &src, "zip"));
+
+        // Hardlink and symlink refused → a byte copy.
+        let l2 = base.join("l2.zip");
+        link_zip(
+            &src,
+            &l2,
+            true,
+            |_, _| Err(std::io::ErrorKind::Other.into()),
+            |_, _| Err(std::io::ErrorKind::Other.into()),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&l2).unwrap(), b"PK\x03\x04 a");
+
+        // Symlinks not allowed → never tried.
+        let l3 = base.join("l3.zip");
+        link_zip(
+            &src,
+            &l3,
+            false,
+            |_, _| Err(std::io::ErrorKind::Other.into()),
+            |_, _| panic!("symlink must not be attempted"),
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn mount_of_finds_the_volume_of_an_existing_folder() {
+        let base = std::env::temp_dir().join(format!("silo_mount_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("sub")).unwrap();
+        // Regression: Windows' canonical `\\?\C:\…` form must still match the `C:\` mount.
+        let (mount, _free) = mount_of(&base).expect("the temp dir sits on a known volume");
+        assert!(crate::modsroot::canonical_key(&base).starts_with(
+            &crate::modsroot::normalize_key(&mount.to_string_lossy(), cfg!(windows))
+        ));
+        assert!(same_volume(&base, &base.join("sub")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_foreign_file_is_never_mistaken_for_a_symlink_projection() {
+        let base = std::env::temp_dir().join(format!("silo_zforeign_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let src = base.join("a.zip");
+        std::fs::write(&src, b"PK\x03\x04 a").unwrap();
+        let theirs = base.join("theirs.zip");
+        std::fs::write(&theirs, b"PK\x03\x04 different").unwrap();
+        assert!(!is_silo_projection(&theirs, &src, "zip"));
         let _ = std::fs::remove_dir_all(&base);
     }
 }
