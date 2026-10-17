@@ -65,7 +65,7 @@
 
   async function installUpdate() {
     if (!update?.release.assetUrl) return;
-    if (!(await confirmDialog(`Download and install ${update.release.tag}? The current file is backed up to .bak.`)))
+    if (!(await confirmDialog(`Download and install ${update.release.tag}? The current version is kept in your mods folder's backups.`)))
       return;
     installing = true;
     ghError = null;

@@ -462,9 +462,13 @@ export function ghWatch(owner: string, repo: string, on: boolean): Promise<boole
   return invoke<boolean>("gh_watch", { owner, repo, on });
 }
 
-/** Download a release .zip and install it in place (backs up the old file). */
-export function downloadUpdate(path: string, assetUrl: string): Promise<void> {
-  return invoke("download_update", { path, assetUrl });
+/**
+ * Download a release .zip beside the mod and swap it in, keeping the previous version in the
+ * mods folder's backups. Resolves to a line for the user (where the backup is, or what went
+ * wrong after the update landed), or null.
+ */
+export function downloadUpdate(path: string, assetUrl: string): Promise<string | null> {
+  return invoke<string | null>("download_update", { path, assetUrl });
 }
 
 // ── SiloAPI (mod browser / discovery) ──

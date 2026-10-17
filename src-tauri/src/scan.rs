@@ -139,13 +139,16 @@ fn candidate_from(path: PathBuf, name: &str, ft: std::fs::FileType) -> Option<Ca
 }
 
 /// True for the scratch entries Silo leaves mid-operation (an archive move's in-flight copy or
-/// the old copy it is deleting, relink, or organize's `.{name}.silo-tmp`). They can hold a full
-/// copy of a mod and must never be scanned as one.
+/// the old copy it is deleting, relink, organize's `.{name}.silo-tmp`, or a mod update's
+/// download and set-aside old version). They can hold a full copy of a mod and must never be
+/// scanned as one.
 pub(crate) fn is_silo_temp(name: &str) -> bool {
     let l = name.to_lowercase();
     l.ends_with(".silo-move-tmp")
         || l.ends_with(".silo-move-old")
         || l.ends_with(".silo-relink-tmp")
+        || l.ends_with(crate::update::PART_SUFFIX)
+        || l.ends_with(crate::update::OLD_SUFFIX)
         || (l.starts_with('.') && l.ends_with(".silo-tmp"))
 }
 
@@ -929,6 +932,8 @@ mod layout_tests {
         assert!(is_silo_temp("FS25_X.SILO-MOVE-OLD"));
         assert!(is_silo_temp("FS25_X.SILO-RELINK-TMP"));
         assert!(is_silo_temp(".FS25_X.silo-tmp"));
+        assert!(is_silo_temp("FS25_X.zip.silo-update.part"));
+        assert!(is_silo_temp("FS25_X.zip.SILO-UPDATE-OLD"));
         assert!(!is_silo_temp("FS25_X.silo-tmp")); // only the dot-prefixed form is organize's
         assert!(!is_silo_temp("FS25_X.zip"));
         assert!(!is_silo_temp("FS25_X"));

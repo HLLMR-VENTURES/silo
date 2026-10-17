@@ -1081,7 +1081,8 @@
     if (!row.assetUrl) return;
     busy = `Installing ${row.title}…`;
     try {
-      await downloadUpdate(row.path, row.assetUrl);
+      const note = await downloadUpdate(row.path, row.assetUrl);
+      if (note) infoMsg = note;
       updateResults = updateResults.map((r) =>
         r.techName === row.techName ? { ...r, hasUpdate: false, current: r.latest } : r,
       );

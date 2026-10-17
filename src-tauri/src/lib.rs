@@ -27,6 +27,7 @@ pub mod secrets;
 pub mod settings_form;
 pub mod siloapi;
 pub mod store;
+pub mod update;
 pub mod xmlconfig;
 pub mod xmltext;
 
@@ -91,6 +92,9 @@ async fn scan_mods(
     let active = modsroot::active();
 
     tauri::async_runtime::spawn_blocking(move || {
+        // A mod update Silo was in the middle of when it stopped is finished or rolled back
+        // first, so the scan sees the library as it should be.
+        recover_interrupted_updates();
         // Warm cache: parsed entries persist between launches, keyed by
         // path+mtime+size, so unchanged mods skip archive parsing entirely.
         let mut conn = db::open(&db_path(&app)?)?;
@@ -488,29 +492,108 @@ async fn gh_watch(
     .map_err(|e| e.to_string())?
 }
 
+/// Update an installed mod from a GitHub release asset (`update` module): download beside it
+/// without the library lock, then swap it in under the lock, keeping the previous version in
+/// `backups/`. Returns a line for the user saying where that backup is (or what went wrong after
+/// the new version was in place).
 #[tauri::command]
 async fn download_update(
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
     path: String,
     asset_url: String,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     ensure_no_move()?;
-    // No DB/token needed: a public release asset is downloaded unauthenticated.
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let _write = library_write()?;
-        let dest = std::path::Path::new(&path);
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
+        let dest = PathBuf::from(&path);
         // Defence against a compromised webview naming an arbitrary write target: the path
         // must contain no `..` AND its parent must resolve inside a real mods root (the flat
         // root or its archive, wherever that lives). An absolute path outside them — which
         // `no_traversal` alone would pass — is rejected here.
-        paths::no_traversal(dest)?;
-        paths::ensure_write_under(&allowed_roots(), dest)?;
+        paths::no_traversal(&dest)?;
+        paths::ensure_write_under(&allowed_roots(), &dest)?;
         // Public release assets don't need auth, and a download must never carry the user's
         // GitHub credential — keep the token for explicit API actions only.
-        github::download_zip(&asset_url, None, dest)
+        let part = update::fetch(&asset_url, &dest)?;
+        // A finished download waits out a busy spell instead of being thrown away.
+        let _write = library_write_within(PLACE_WAIT)?;
+        // The folders may have changed while downloading: check again under the lock.
+        paths::ensure_write_under(&allowed_roots(), &dest)?;
+        let layout = primary_layout(None)?;
+        let done = update::swap(
+            &dest,
+            part.path(),
+            &layout.mods,
+            &mut organize::LinkPolicy::new(&layout),
+        )?;
+        if let Some(flat) = &done.relinked {
+            if let (Ok(conn), Some(name)) = (db::open(&db), flat.file_name()) {
+                let key = modsroot::canonical_key(&layout.mods);
+                organize::note_zip_projection(&conn, &key, &name.to_string_lossy(), flat);
+            }
+        }
+        let label = file_label(&dest);
+        match &done.backup {
+            Some(b) => eprintln!(
+                "[silo] updated {label}; previous version kept at {}",
+                b.display()
+            ),
+            None => eprintln!("[silo] updated {label}; previous version not moved to backups"),
+        }
+        for p in &done.problems {
+            eprintln!("[silo] {p}");
+        }
+        Ok(update_notice(&label, &done))
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// What the user is told after an update: any problem, else where the old version is kept.
+fn update_notice(label: &str, done: &update::Swapped) -> Option<String> {
+    if !done.problems.is_empty() {
+        return Some(done.problems.join(" "));
+    }
+    done.backup.as_ref().map(|b| {
+        format!(
+            "Updated {label}. The previous version is kept in {}.",
+            b.display()
+        )
+    })
+}
+
+/// Finish or roll back mod updates a crash interrupted (`update::recover_interrupted`), in the
+/// active mods folder and each archive category folder. Only when the library lock is free right
+/// now (a scan never waits for it) and no archive move is unfinished (its files are in flux).
+fn recover_interrupted_updates() {
+    if move_in_progress() {
+        return;
+    }
+    let Some(active) = modsroot::active() else {
+        return;
+    };
+    if active.move_to.is_some() {
+        return;
+    }
+    let Some(_write) = lock_result(LIBRARY_WRITE.try_lock()) else {
+        return;
+    };
+    let layout = &active.layout;
+    let mut dirs = vec![layout.mods.clone()];
+    if let Ok(entries) = std::fs::read_dir(&layout.archive) {
+        dirs.extend(
+            entries
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|e| e.path()),
+        );
+    }
+    let mut policy = organize::LinkPolicy::new(layout);
+    for dir in dirs {
+        for note in update::recover_interrupted(&dir, &layout.mods, &mut policy) {
+            eprintln!("[silo] {note}");
+        }
+    }
 }
 
 // ── SiloAPI (mod browser / discovery) ──
@@ -723,15 +806,15 @@ async fn install_remote_mod(
 /// library lock, so two at once for the same file must not share (and corrupt) one part file.
 static PARTS_IN_FLIGHT: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
-/// A download's claim on its `.zip.part` file. Dropping it removes whatever part is left
+/// A download's claim on its part file. Dropping it removes whatever part is left
 /// (a failed or abandoned download) and frees the name.
-struct PartClaim {
+pub struct PartClaim {
     path: PathBuf,
     key: PathBuf,
 }
 
 impl PartClaim {
-    fn path(&self) -> &std::path::Path {
+    pub fn path(&self) -> &std::path::Path {
         &self.path
     }
 }
@@ -763,7 +846,11 @@ fn same_file_key(p: &std::path::Path) -> PathBuf {
 /// Claim the part file a download of `dest` streams into, refusing while another download
 /// of the same file is running.
 fn claim_part(dest: &std::path::Path) -> Result<PartClaim, String> {
-    let path = dest.with_extension("zip.part");
+    claim_part_at(dest, dest.with_extension("zip.part"))
+}
+
+/// Claim `path` as the part file a download of `dest` streams into (see [`claim_part`]).
+fn claim_part_at(dest: &std::path::Path, path: PathBuf) -> Result<PartClaim, String> {
     let key = same_file_key(&path);
     let mut held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
     if held.contains(&key) {
@@ -771,6 +858,17 @@ fn claim_part(dest: &std::path::Path) -> Result<PartClaim, String> {
     }
     held.push(key.clone());
     Ok(PartClaim { path, key })
+}
+
+/// Remove a part file left by an earlier run, unless a download in this run has claimed it.
+/// The claim list stays locked across the check and the removal, so a download can't claim it
+/// in between. Returns whether a file was removed.
+fn remove_unclaimed_part(path: &std::path::Path) -> bool {
+    let held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+    if held.contains(&same_file_key(path)) {
+        return false;
+    }
+    std::fs::remove_file(path).is_ok()
 }
 
 /// Anything at `p`, including a broken link (which `Path::exists` would call absent).

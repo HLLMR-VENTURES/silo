@@ -21,9 +21,9 @@ const TMP_SUFFIX: &str = ".silo-move-tmp";
 /// Suffix of an old copy being deleted (renamed first, so a half-deleted folder never keeps the
 /// mod's real name). `scan` skips it too.
 const OLD_SUFFIX: &str = ".silo-move-old";
-/// Temp sibling for an atomic link replacement in the mods folder (shared with organize's relink,
-/// already skipped by `scan`).
-const RELINK_SUFFIX: &str = ".silo-relink-tmp";
+/// Temp sibling for an atomic link replacement in the mods folder (organize's, already skipped
+/// by `scan`).
+const RELINK_SUFFIX: &str = organize::RELINK_SUFFIX;
 
 const GAME_RUNNING: &str =
     "Close Farming Simulator 25 first — Silo won't move mods while the game is using them.";
@@ -449,10 +449,8 @@ fn repoint(
     replace_zip_link(env, row, &link, dst, policy)
 }
 
-/// Atomically swap a zip's mods-folder entry `link` for a new link to `dst` (hardlink →
-/// symlink → copy, per `policy`): make the link at a `RELINK_SUFFIX` temp sibling, then rename
-/// it over `link`. At every point `link` is either the old working entry or the new one; a crash
-/// leaves at most the temp, which the next attempt replaces (and `scan` skips).
+/// Atomically swap a zip's mods-folder entry `link` for a new link to `dst`
+/// (`organize::replace_zip_link`), then refresh its projection record.
 fn replace_zip_link(
     env: &Env,
     row: &OrganizedRow,
@@ -460,13 +458,7 @@ fn replace_zip_link(
     dst: &Path,
     policy: &mut LinkPolicy,
 ) -> Result<(), String> {
-    let tmp = suffixed(link, RELINK_SUFFIX);
-    let _ = remove_any(&tmp);
-    organize::make_link(dst, &tmp, &row.kind, policy).map_err(|e| format!("relink: {e}"))?;
-    std::fs::rename(&tmp, link).map_err(|e| {
-        let _ = remove_any(&tmp);
-        format!("relink: {e}")
-    })?;
+    organize::replace_zip_link(link, dst, policy).map_err(|e| format!("relink: {e}"))?;
     env.note_projection(row, link);
     Ok(())
 }
@@ -503,10 +495,7 @@ impl Env<'_> {
         if row.kind == "dir" {
             return;
         }
-        db::forget_projection(self.conn, self.mods_key, &row.file_name);
-        if let Some((size, mtime)) = organize::file_stats(link) {
-            db::record_projection(self.conn, self.mods_key, &row.file_name, size, mtime);
-        }
+        organize::note_zip_projection(self.conn, self.mods_key, &row.file_name, link);
     }
 }
 

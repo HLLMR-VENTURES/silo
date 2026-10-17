@@ -583,10 +583,7 @@ fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
 /// Atomically replace `flat` with a hardlink (`hard`) or symlink to `src`. Link a temp sibling
 /// in the same directory (a failure leaves `flat` untouched), then rename over `flat`.
 fn relink_over(src: &Path, flat: &Path, hard: bool) -> std::io::Result<()> {
-    let tmp = flat.with_file_name(format!(
-        "{}.silo-relink-tmp",
-        flat.file_name().and_then(|n| n.to_str()).unwrap_or("mod")
-    ));
+    let tmp = relink_tmp(flat);
     let _ = std::fs::remove_file(&tmp);
     if hard {
         std::fs::hard_link(src, &tmp)?;
@@ -599,6 +596,45 @@ fn relink_over(src: &Path, flat: &Path, hard: bool) -> std::io::Result<()> {
             let _ = std::fs::remove_file(&tmp);
             Err(e)
         }
+    }
+}
+
+/// Temp sibling for an atomic link replacement in the mods folder. `scan` skips it, and an
+/// archive move clears stale ones.
+pub(crate) const RELINK_SUFFIX: &str = ".silo-relink-tmp";
+
+fn relink_tmp(link: &Path) -> PathBuf {
+    let name = link
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "mod".into());
+    link.with_file_name(format!("{name}{RELINK_SUFFIX}"))
+}
+
+/// Atomically swap a zip's mods-folder entry `link` for a new link to `dst` (hardlink →
+/// symlink → copy, per `policy`): make the link at a `RELINK_SUFFIX` temp sibling, then rename
+/// it over `link`. At every point `link` is either the old working entry or the new one; a crash
+/// leaves at most the temp, which the next attempt replaces (and `scan` skips).
+pub(crate) fn replace_zip_link(
+    link: &Path,
+    dst: &Path,
+    policy: &mut LinkPolicy,
+) -> std::io::Result<()> {
+    let tmp = relink_tmp(link);
+    let _ = remove_path(&tmp);
+    make_link(dst, &tmp, "zip", policy)?;
+    std::fs::rename(&tmp, link).inspect_err(|_| {
+        let _ = remove_path(&tmp);
+    })
+}
+
+/// A zip's mods-folder entry `link` was just (re)made by Silo: refresh its projection record so
+/// later deactivates prove it's Silo's without hashing. A symlink is identified structurally and
+/// keeps none.
+pub(crate) fn note_zip_projection(conn: &Connection, key: &str, file_name: &str, link: &Path) {
+    db::forget_projection(conn, key, file_name);
+    if let Some((size, mtime)) = file_stats(link) {
+        db::record_projection(conn, key, file_name, size, mtime);
     }
 }
 
@@ -672,35 +708,42 @@ pub fn restore_projection(
     Ok(())
 }
 
-/// A timestamped, non-clobbering location under `backups/` for a file we're about to replace.
+/// A free `<root>/backups/<file_name>.<unix_secs>.bak` for a file we're about to replace.
 fn backup_path(root: &Path, file_name: &str) -> Result<PathBuf, String> {
-    let dir = root.join("backups");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    Ok(dir.join(format!("{file_name}.{secs}.bak")))
+    free_backup_path(root, file_name, ".bak").map_err(|e| e.to_string())
+}
+
+/// Suffix of the previous version an update keeps in `backups/`. Its own suffix so pruning old
+/// update backups can never touch a file the user's adopt/restore kept there.
+pub(crate) const UPDATE_BACKUP_SUFFIX: &str = ".update.bak";
+
+/// A free `<root>/backups/<file_name>.<unix_secs>.update.bak` for the version an update replaced.
+pub(crate) fn update_backup_path(root: &Path, file_name: &str) -> std::io::Result<PathBuf> {
+    free_backup_path(root, file_name, UPDATE_BACKUP_SUFFIX)
 }
 
 /// A free `<root>/backups/<name>.<unix_secs>` folder path for a folder copy we're keeping
 /// (`-2`, `-3`, … appended if that name is taken, so an earlier backup is never replaced).
 fn backup_dir_path(root: &Path, name: &str) -> std::io::Result<PathBuf> {
+    free_backup_path(root, name, "")
+}
+
+fn free_backup_path(root: &Path, name: &str, suffix: &str) -> std::io::Result<PathBuf> {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    backup_dir_path_at(root, name, secs)
+    backup_path_at(root, name, secs, suffix)
 }
 
-/// [`backup_dir_path`] for a given timestamp (creates `<root>/backups/`, not the folder).
-fn backup_dir_path_at(root: &Path, name: &str, secs: u64) -> std::io::Result<PathBuf> {
+/// A free `<root>/backups/<name>.<secs>[-n]<suffix>` (creates `<root>/backups/`, not the entry).
+fn backup_path_at(root: &Path, name: &str, secs: u64, suffix: &str) -> std::io::Result<PathBuf> {
     let dir = root.join("backups");
     std::fs::create_dir_all(&dir)?;
-    let mut candidate = dir.join(format!("{name}.{secs}"));
+    let mut candidate = dir.join(format!("{name}.{secs}{suffix}"));
     let mut n = 2;
     while candidate.symlink_metadata().is_ok() {
-        candidate = dir.join(format!("{name}.{secs}-{n}"));
+        candidate = dir.join(format!("{name}.{secs}-{n}{suffix}"));
         n += 1;
     }
     Ok(candidate)
@@ -891,7 +934,7 @@ fn remove_path(p: &Path) -> std::io::Result<()> {
 /// destination, rename that into place, and only then remove the source — so a failed or
 /// partial copy never leaves a half-written file at `to`, and `from` is never lost until
 /// the destination is complete.
-fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1405,7 +1448,7 @@ fn clear_projection(link: &Path, src: &Path, mods_root: &Path) -> std::io::Resul
 /// `src` — so removing it can't destroy a file the user put there themselves. Symlink /
 /// junction resolves to `src`; a zip hardlink shares `src`'s file id; a cross-volume copy is
 /// byte-identical to `src`; a copied dir carries our marker. Anything else is NOT ours.
-fn is_silo_projection(link: &Path, src: &Path, kind: &str) -> bool {
+pub(crate) fn is_silo_projection(link: &Path, src: &Path, kind: &str) -> bool {
     let Ok(meta) = link.symlink_metadata() else {
         return false;
     };
@@ -3391,15 +3434,31 @@ mod tests {
     #[test]
     fn backup_folder_names_never_collide() {
         let base = temp_dir_for("backup_names");
-        let first = backup_dir_path_at(&base, "FS25_Dir", 100).unwrap();
+        let first = backup_path_at(&base, "FS25_Dir", 100, "").unwrap();
         assert_eq!(first, base.join("backups").join("FS25_Dir.100"));
         std::fs::create_dir_all(&first).unwrap();
-        let second = backup_dir_path_at(&base, "FS25_Dir", 100).unwrap();
+        let second = backup_path_at(&base, "FS25_Dir", 100, "").unwrap();
         assert_eq!(second, base.join("backups").join("FS25_Dir.100-2"));
         std::fs::create_dir_all(&second).unwrap();
         assert_eq!(
-            backup_dir_path_at(&base, "FS25_Dir", 100).unwrap(),
+            backup_path_at(&base, "FS25_Dir", 100, "").unwrap(),
             base.join("backups").join("FS25_Dir.100-3")
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn file_backup_names_never_collide() {
+        let base = temp_dir_for("backup_file_names");
+        let first = backup_path_at(&base, "FS25_A.zip", 100, UPDATE_BACKUP_SUFFIX).unwrap();
+        assert_eq!(
+            first,
+            base.join("backups").join("FS25_A.zip.100.update.bak")
+        );
+        std::fs::write(&first, b"v1").unwrap();
+        assert_eq!(
+            backup_path_at(&base, "FS25_A.zip", 100, UPDATE_BACKUP_SUFFIX).unwrap(),
+            base.join("backups").join("FS25_A.zip.100-2.update.bak")
         );
         let _ = std::fs::remove_dir_all(&base);
     }
