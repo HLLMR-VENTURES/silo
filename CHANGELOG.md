@@ -12,15 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Your original game settings are kept.** The first time Silo edits gameSettings.xml or a mod's
   settings file, it keeps the untouched original (or the oldest backup an earlier Silo left)
   beside it (`.silo-original.bak`), plus the three versions before each edit (`.bak`, `.bak.2`,
-  `.bak.3`). Before, every edit replaced the only backup. (#PR)
+  `.bak.3`). Before, every edit replaced the only backup. (#213)
 
 - **Mod icons stay cached across Silo updates.** The icon cache uses stable names, so icons
-  aren't decoded again after every update. (#PR)
+  aren't decoded again after every update. (#213)
 
 ### Security
 
 - **Stricter file-name checks.** File names with a colon, a trailing dot or space, or a reserved
-  Windows device name (such as `CON` or `NUL`) are refused. (#PR)
+  Windows device name (such as `CON` or `NUL`) are refused. (#213)
 
 ## [0.10.0] - 2026-10-17
 
