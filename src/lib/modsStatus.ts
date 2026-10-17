@@ -8,6 +8,14 @@ export function rootsFor(st: ModsRootStatus): string[] {
   return st.available && st.path && !st.layoutProblem ? [st.path] : [];
 }
 
+/**
+ * Whether to say, once, that Silo now follows FS25's own folder — not while that folder is
+ * blocked: its banner explains what's wrong instead.
+ */
+export function showOverrideNotice(st: ModsRootStatus, alreadyShown: boolean): boolean {
+  return st.source === "gameOverride" && !alreadyShown && !st.layoutProblem;
+}
+
 /** What switching mods folders has to wait for. */
 export interface SwitchState {
   moveUnfinished: boolean;

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { rootsFor, switchBlockReason, type SwitchState } from "./modsStatus";
+import {
+  rootsFor,
+  showOverrideNotice,
+  switchBlockReason,
+  type SwitchState,
+} from "./modsStatus";
 import type { ModsRootStatus } from "./api";
 
 function status(over: Partial<ModsRootStatus> = {}): ModsRootStatus {
@@ -54,6 +59,20 @@ describe("switchBlockReason", () => {
     expect(await switchBlockReason({ ...idle, blocked: true, moveUnfinished: true }, snap)).toBe(
       "Finish or cancel the archive move first.",
     );
+  });
+});
+
+describe("showOverrideNotice", () => {
+  it("tells once that Silo follows FS25's folder", () => {
+    expect(showOverrideNotice(status({ source: "gameOverride" }), false)).toBe(true);
+    expect(showOverrideNotice(status({ source: "gameOverride" }), true)).toBe(false);
+    expect(showOverrideNotice(status({ source: "user" }), false)).toBe(false);
+  });
+
+  it("stays quiet while that folder is blocked (its own banner explains)", () => {
+    expect(
+      showOverrideNotice(status({ source: "gameOverride", layoutProblem: "overlaps" }), false),
+    ).toBe(false);
   });
 });
 

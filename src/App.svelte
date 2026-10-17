@@ -149,7 +149,11 @@
   import LibraryToolbar from "./lib/components/panels/LibraryToolbar.svelte";
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
   import { fmtSize } from "./lib/format";
-  import { rootsFor, switchBlockReason as switchGate } from "./lib/modsStatus";
+  import {
+    rootsFor,
+    showOverrideNotice,
+    switchBlockReason as switchGate,
+  } from "./lib/modsStatus";
 
   let roots = $state<string[]>([]);
   let modsStatus = $state<ModsRootStatus | null>(null);
@@ -2067,8 +2071,7 @@
         modsStatus = await modsRootStatus();
         roots = rootsFor(modsStatus);
         if (
-          modsStatus.source === "gameOverride" &&
-          localStorage.getItem("silo.overrideNoticeShown") !== "1"
+          showOverrideNotice(modsStatus, localStorage.getItem("silo.overrideNoticeShown") === "1")
         ) {
           overrideNoticeOpen = true;
         }
@@ -2664,7 +2667,7 @@
     </div>
   {/if}
 
-  {#if overrideNoticeOpen && modsStatus?.path}
+  {#if overrideNoticeOpen && modsStatus?.path && !modsStatus.layoutProblem}
     <div class="cloud-notice">
       <span class="cn-ico">ⓘ</span>
       <div class="cn-text">
