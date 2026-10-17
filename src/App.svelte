@@ -1542,6 +1542,10 @@
   const isStillLoading = (e: unknown) => /still loading/i.test(String(e));
   const joinProblems = (...ps: (string | null | undefined)[]) =>
     ps.filter(Boolean).join(" ") || null;
+  /** Drop a trailing period (and spaces) so joined messages don't end up with "..". */
+  const unDot = (s: string) => s.replace(/[.\s]+$/, "");
+  /** End a message with exactly one period. */
+  const sentence = (s: string) => unDot(s) + ".";
   /** "a, b, c +N more" */
   const capList = (xs: string[], n = 3, sep = ", ") =>
     xs.slice(0, n).join(sep) + (xs.length > n ? ` +${xs.length - n} more` : "");
@@ -1617,11 +1621,13 @@
     }
     settlingMove = true;
     try {
-      let next = problem;
+      // Messages accumulate across passes: each pass's runScan clears errorMsg, so every pass
+      // re-shows everything said so far.
+      let said: { problem: string | null; lost: string | null } = { problem, lost: null };
       for (;;) {
-        await settleOnce(next);
+        said = await settleOnce(said.problem, said.lost);
         if (!resettle) break;
-        next = resettle.problem;
+        said = { problem: joinProblems(said.problem, resettle.problem), lost: said.lost };
         resettle = null;
       }
     } finally {
@@ -1629,13 +1635,16 @@
     }
   }
 
-  async function settleOnce(problem: string | null) {
+  /** One settle pass. Returns the messages it showed, for the next pass to carry. */
+  async function settleOnce(
+    problem: string | null,
+    lost: string | null,
+  ): Promise<{ problem: string | null; lost: string | null }> {
     moveProgress = null;
     pauseRequested = false;
     cancelInFlight = false;
     await refreshArchive();
     modsStatus = await modsRootStatus().catch(() => modsStatus);
-    let lost: string | null = null;
     if (cancelRequested && !archive?.moving && !archive?.running) {
       const landedElsewhere = !cancelHome || archive?.path !== cancelHome;
       if (!lastProgressCancelling && !sawTurnAround && landedElsewhere) {
@@ -1652,7 +1661,9 @@
     await runScan();
     // runScan clears errorMsg — show what the move said afterwards.
     if (problem || lost) errorMsg = joinProblems(problem, lost);
-    if (!archive?.moving && !archive?.running && !problem) await offerAdopt();
+    // One adopt offer at a time (a second pass mustn't replace an open preview).
+    if (!archive?.moving && !archive?.running && !problem && !organizePreview) await offerAdopt();
+    return { problem, lost };
   }
 
   function lostCancelMessage(): string {
@@ -1675,6 +1686,8 @@
       // knows whether the cancel was lost.
       if (isCancel && cancelRequested) cancelProblem = String(e);
       else problem = String(e);
+      // A rejected cancel didn't turn anything around.
+      if (isCancel) cancelInFlight = false;
     } finally {
       movesInFlight--;
     }
@@ -1682,8 +1695,8 @@
       if (problem) errorMsg = problem;
       return;
     }
-    await refreshArchive();
-    if (archive?.running) {
+    const fresh = await refreshArchive();
+    if (fresh && archive?.running) {
       // Not this window's move to settle (e.g. after a webview reload) — pollArchive will.
       if (problem) errorMsg = problem;
       return;
@@ -1803,6 +1816,8 @@
       cancelHomeDefault = homeDefault;
     }
     cancelInFlight = true;
+    // The backend's cancel replaces a pending pause — don't leave "Pausing…" up for the trip home.
+    pauseRequested = false;
     // A running move is asked to turn around (resolves at once; the original invoke settles
     // when it lands); a paused one stays pending until it's back home.
     await driveMove(() => archiveMoveCancel(), true);
@@ -1927,7 +1942,8 @@
         errorMsg = String(e);
       }
       // Where the library archive lives, and any unfinished move (paused before a restart).
-      void loadArchive();
+      // Awaited so the first scan's auto-file guard sees a move left paused before a restart.
+      await loadArchive();
       if (roots.length) runScan();
       // Detect a cloud-synced mods folder (OneDrive / Google Drive / Proton Drive): those reject
       // hardlinks, so Silo projects the active set as copies. Warn once so the extra disk use and
@@ -2400,13 +2416,13 @@
           Launch is blocked until it pauses or finishes.
         {:else if archive?.moving?.errors.length}
           <b>{archive.moving.errors.length} mod(s) couldn't be moved:</b>
-          {capList(archive.moving.errors, 3, "; ")}.
-          {archive.moving.pauseReason ? `${archive.moving.pauseReason}. ` : ""}The move is paused —
-          Retry tries them again, or Cancel moves everything back.
+          {sentence(capList(archive.moving.errors.map(unDot), 3, "; "))}
+          {archive.moving.pauseReason ? `${sentence(archive.moving.pauseReason)} ` : ""}The move is
+          paused — Retry tries them again{moveCancelling ? "." : ", or Cancel moves everything back."}
         {:else if archive?.moving}
           <b>{moveCancelling ? "Moving your library back is paused." : "Archive move paused."}</b>
-          {archive.moving.pauseReason ? `${archive.moving.pauseReason}. ` : ""}You can play — resume
-          when you're done.
+          {archive.moving.pauseReason ? `${sentence(archive.moving.pauseReason)} ` : ""}You can play —
+          resume when you're done.
         {/if}
       </div>
       {#if moveRunning}

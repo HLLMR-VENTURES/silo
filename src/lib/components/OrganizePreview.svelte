@@ -50,7 +50,7 @@
   aria-label={adopt ? "File mods into your library" : "Organize preview"}
 >
   <div class="modal-head">
-    <h3>{adopt ? "File in" : "Organize"} {noun(plan.length)}</h3>
+    <h3>{adopt ? `File ${noun(plan.length)} into your library` : `Organize ${noun(plan.length)}`}</h3>
     <button class="drawer-x" title="Close" onclick={onCancel}>✕</button>
   </div>
 
