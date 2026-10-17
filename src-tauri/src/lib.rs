@@ -9,6 +9,7 @@ pub mod collection;
 pub mod conflicts;
 pub mod db;
 mod diagnostics;
+pub mod error;
 pub mod fsgame;
 mod fslog;
 pub mod gamelaunch;
@@ -2579,12 +2580,15 @@ fn start_move(
 }
 
 #[tauri::command]
-async fn archive_status(app: tauri::AppHandle) -> Result<ArchiveStatus, String> {
+async fn archive_status(app: tauri::AppHandle) -> Result<ArchiveStatus, error::AppError> {
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let running = relocate::is_running();
         if !modsroot::resolved() {
-            return Err(STILL_LOADING.to_string());
+            return Err(error::AppError::new(
+                error::code::STILL_LOADING,
+                STILL_LOADING,
+            ));
         }
         let Some(a) = modsroot::active() else {
             return Ok(ArchiveStatus {
@@ -2607,7 +2611,7 @@ async fn archive_status(app: tauri::AppHandle) -> Result<ArchiveStatus, String> 
         })
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| error::AppError::from(e.to_string()))?
 }
 
 /// What moving the archive to `path` involves, and anything that blocks it. Read-only apart
