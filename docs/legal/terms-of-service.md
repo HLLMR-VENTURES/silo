@@ -4,11 +4,11 @@
 
 # Terms of Service
 
-_Effective date: 2026-08-01_
+_Effective date: 2026-10-17_
 
 These Terms of Service ("Terms") govern your access to and use of the Silo desktop application (the "App"), the website at silo.hllmr.com (including the marketing pages, the catalog browser at /browse, and the help documentation at /help) (the "Website"), and the public read API at silo-api.hllmr.com (the "API"). The App, the Website, and the API are together referred to as the "Services."
 
-The Services are provided by **HLLMR Ventures LLC** ("HLLMR," "we," "us," or "our"). By downloading, installing, accessing, or using any of the Services, you agree to be bound by these Terms. If you do not agree to these Terms, do not use the Services.
+The Services are provided by **HLLMR Ventures LLC**, a Texas limited liability company, USA ("HLLMR," "we," "us," or "our"). By downloading, installing, accessing, or using any of the Services, you agree to be bound by these Terms. If you do not agree to these Terms, do not use the Services.
 
 ## 1. About Silo
 
@@ -32,29 +32,28 @@ We designed the Services to collect as little as possible about you. This Sectio
 
 ### 3.1 The App
 
-The App has no telemetry, no analytics, no advertising, and no user account. It stores data only locally on your computer — a local SQLite cache, plus your operating system's keychain for any GitHub access tokens you choose to connect.
+The App has no telemetry, no analytics, no advertising, and no user account. It stores data locally on your computer: a local database, plus your operating system's credential store for a GitHub token if you choose to connect one.
 
-The App communicates only with the following, and only as described:
+The App checks GitHub for its own updates when it starts. Otherwise it goes online only when you use a feature that needs it:
 
-- **The API (silo-api.hllmr.com)** — to read the mod catalog. For lookups, the App sends mod technical names and file hashes. It does not send personal data.
-- **The GitHub API** — optional and user-initiated. If you choose to sign in using GitHub's device-flow login, the resulting token is used only for explicit actions you take, such as starring or watching a repository. The token is never attached to mod downloads.
-- **Mod source content delivery networks** (ModHub, GitHub) — to fetch images and, when you choose to, to download a mod.
+- **The API (silo-api.hllmr.com)**, to read the mod catalog when you browse, open a mod's details, check for updates, verify a mod, install from Browse or use Collections. For lookups, the App sends mod technical names, and for an integrity check the mod's version. File hashes are computed and compared on your computer and are not sent.
+- **GitHub**, to check mods linked to a GitHub repository for updates, show repository stats, download GitHub releases you install, and read shared collections. If you choose to sign in with GitHub's device-flow login, the token is used for those requests and for actions you take, such as starring or watching a repository or publishing a collection to your own GitHub account. The token is never attached to mod downloads.
 
-Mod integrity and provenance hashing is performed locally on your computer.
+The [Privacy Policy](./privacy-policy.md) lists every connection in one table. Mod integrity and provenance hashing is performed locally on your computer.
 
 ### 3.2 The Website
 
-The Website's static pages (the landing pages and /help) set no cookies and run no analytics. The only client-side storage is a "theme" preference kept in your browser's localStorage. The /browse page fetches catalog data from the public API from within your browser.
+The Website sets no cookies and runs no analytics scripts. The only client-side storage is a "theme" preference kept in your browser's localStorage. The /browse, /trust and /c/ pages load data from the API and from GitHub's API within your browser.
 
-### 3.3 The API
+### 3.3 The API and Website servers
 
-To prevent abuse, the API applies per-IP rate limiting and keeps standard server logs. As a result, it processes IP addresses and request metadata on a transient basis. The API is (or will be) fronted by a content delivery network (Cloudflare), which also processes traffic for security and caching. The API has no accounts and sets no tracking cookies.
+The API and the Website run on our own server. To keep them secure and to prevent abuse, the server applies per-IP rate limiting and keeps standard access logs (IP address, time, path and user agent) for 30 days. We publish aggregate counts from those logs on the Trust page. The API has no accounts and sets no tracking cookies.
 
 ## 4. The Catalog
 
 The catalog aggregates publicly available mod metadata — such as names, images, descriptions, versions, and ratings — from ModHub and GitHub. This information is deduplicated into a single record per mod, and each record links back to its original source.
 
-**Silo does not host, mirror, or redistribute mod files.** The catalog is an index of publicly available data with links back to the original sources. When you download a mod, the download comes from the original source, not from us.
+**Silo does not host, mirror, or redistribute mod files.** The catalog is an index of publicly available data with links back to the original sources. Our catalog server keeps cached copies of cover images and the file hashes it computed for integrity checks. When the App installs a mod, the file downloads from the mod's GitHub release, not from us. For ModHub mods, the App opens the ModHub page in your browser.
 
 Catalog content — including mod names, artwork, descriptions, and other metadata — belongs to its respective authors and platforms. We make no claim of ownership over it and provide it only as an index and reference.
 
@@ -77,7 +76,7 @@ The App modifies files in your own FS25 game folder in order to manage your mods
 
 You are solely responsible for the mods you choose to install and use. Mods are created and distributed by third parties, and we do not create, host, review, endorse, or guarantee them.
 
-**Provenance and any "Verified" status the App displays is an integrity and origin signal — not a security guarantee and not a virus scan.** It confirms whether a given build matches the source it claims to come from. It does not vouch for the safety, quality, or behavior of a mod, and it is not a substitute for your own judgment or your own security tools.
+**Provenance and any "Verified" status the App displays is an integrity and origin signal — not a security guarantee and not a virus scan.** It confirms whether a given build matches the build its source published, when the catalog has that build on file. It does not vouch for the safety, quality, or behavior of a mod, and it is not a substitute for your own judgment or your own security tools.
 
 ## 7. Third-Party Sources and Services
 
@@ -129,7 +128,7 @@ If any provision of these Terms is held to be unenforceable or invalid, that pro
 
 ## 16. Contact
 
-Questions or notices regarding these Terms may be sent to **legal@hllmr.com**.
+Questions or notices regarding these Terms may be sent to HLLMR Ventures LLC at **legal@hllmr.com**.
 
 ---
 

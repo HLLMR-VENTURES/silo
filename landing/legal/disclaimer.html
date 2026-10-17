@@ -69,8 +69,8 @@
 <div class="draft-banner"><div class="wrap"><strong>⚠ DRAFT — NOT REVIEWED.</strong> These terms are an early draft, published in good faith and <strong>not yet reviewed by an attorney</strong>. They may change. Nothing here is legal advice. Questions: <a href="mailto:legal@hllmr.com">legal@hllmr.com</a>.</div></div>
 <div class="legalnav"><div class="wrap"><a href="./privacy-policy.html">Privacy</a><a href="./terms-of-service.html">Terms</a><a href="./disclaimer.html" aria-current="page" class="on">Disclaimer</a><a href="./copyright-takedown.html">Copyright</a></div></div>
 <main><div class="wrap"><article class="doc"><h1>Disclaimer &amp; Trademarks</h1>
-<p><em>Effective date: 2026-08-01</em></p>
-<p>This page explains what Silo is and is not, who owns the names and content you see in it, and the limits of what Silo promises. Silo is a free, open-source desktop application that manages Farming Simulator 25 (FS25) mods. Its source code is MIT-licensed and available at github.com/HLLMR/silo(<a href="https://github.com/HLLMR/silo">https://github.com/HLLMR/silo</a>). Silo is published by <strong>HLLMR Ventures LLC</strong> (&quot;HLLMR&quot;, &quot;we&quot;, &quot;us&quot;).</p>
+<p><em>Effective date: 2026-10-17</em></p>
+<p>This page explains what Silo is and is not, who owns the names and content you see in it, and the limits of what Silo promises. Silo is a free, open-source desktop application that manages Farming Simulator 25 (FS25) mods. Its source code is MIT-licensed and available at <a href="https://github.com/HLLMR/silo">github.com/HLLMR/silo</a>. Silo is published by <strong>HLLMR Ventures LLC</strong>, a Texas limited liability company, USA (&quot;HLLMR&quot;, &quot;we&quot;, &quot;us&quot;).</p>
 <h2>No affiliation or endorsement</h2>
 <p>Silo is an independent project. <strong>HLLMR Ventures LLC is not affiliated with, endorsed by, sponsored by, or in any way officially connected to GIANTS Software or the Farming Simulator brand.</strong></p>
 <p>References to Farming Simulator, FS25, and related names, marks, and imagery are used only to describe the software Silo works alongside. They do not imply any partnership, approval, or relationship between HLLMR Ventures LLC and GIANTS Software or the owners of the Farming Simulator brand.</p>
@@ -85,19 +85,20 @@
 </ul>
 <p>Use of these names and marks does not imply any endorsement of Silo by, or affiliation of Silo with, their owners.</p>
 <h2>Catalog content belongs to its owners</h2>
-<p>Silo&#39;s catalog (browsable at silo.hllmr.com/browse(<a href="https://silo.hllmr.com/browse">https://silo.hllmr.com/browse</a>) and served by the public read API at silo-api.hllmr.com(<a href="https://silo-api.hllmr.com">https://silo-api.hllmr.com</a>)) aggregates <strong>publicly available mod metadata</strong> — such as names, images, descriptions, versions, and ratings — from ModHub and GitHub. This metadata is deduplicated into one record per mod, and each record links back to its original source.</p>
+<p>Silo&#39;s catalog (browsable at <a href="https://silo.hllmr.com/browse">silo.hllmr.com/browse</a> and served by the public read API at <a href="https://silo-api.hllmr.com">silo-api.hllmr.com</a>) aggregates <strong>publicly available mod metadata</strong> — such as names, images, descriptions, versions, and ratings — from ModHub and GitHub. This metadata is deduplicated into one record per mod, and each record links back to its original source.</p>
 <p>Ownership of that content stays with the people and platforms it came from:</p>
 <ul>
 <li><strong>Mod content — including files, descriptions, images, and other materials — belongs to its respective authors and to the platforms that host it.</strong> HLLMR Ventures LLC claims no ownership of it.</li>
-<li><strong>Silo does not host, mirror, or redistribute mod files.</strong> When you download a mod, the download goes to the original source (ModHub or GitHub). Silo links back to that source rather than serving files itself.</li>
-<li>Mod integrity and provenance hashing performed by Silo happens locally on your own machine.</li>
+<li><strong>Silo does not host, mirror, or redistribute mod files.</strong> Silo indexes mods and links back to their source. When the app installs a mod, the file downloads from the mod&#39;s GitHub release; ModHub mods are downloaded from ModHub in your browser.</li>
+<li>Our catalog server keeps cached copies of cover images and the file hashes it computed for integrity checks.</li>
+<li>Comparing an installed mod with those hashes happens locally on your own machine.</li>
 </ul>
 <p>If you are a rights holder and believe your content is represented incorrectly in the catalog, please contact us at <strong><a href="mailto:legal@hllmr.com">legal@hllmr.com</a></strong>.</p>
 <h2>Provided &quot;AS IS&quot; — no warranty</h2>
 <p><strong>Silo is provided &quot;AS IS&quot; and &quot;AS AVAILABLE&quot;, without warranty of any kind, to the fullest extent permitted by law.</strong> To the extent permitted by applicable law, HLLMR Ventures LLC disclaims all warranties, whether express, implied, or statutory, including but not limited to any implied warranties of merchantability, fitness for a particular purpose, title, and non-infringement.</p>
 <p>We do not warrant that Silo will be uninterrupted, error-free, or free of harmful components, or that any defect will be corrected. Silo is a free, open-source project — you are welcome to read, audit, fork, and build the source yourself.</p>
 <h2>File changes: reversible by design, but at your own risk</h2>
-<p>Silo modifies files in your own game folder — for example, by organizing your mods and projecting only your active set into the game&#39;s <code>mods/</code> folder, and by editing savegames when you choose to. <strong>These changes are designed to be reversible, but you use Silo at your own risk.</strong></p>
+<p>Silo modifies files in your own game folder — for example, by organizing your mods into an archive, linking your active set into the game&#39;s <code>mods/</code> folder, updating mods, and editing savegames when you choose to. <strong>These changes are designed to be reversible, but you use Silo at your own risk.</strong></p>
 <ul>
 <li>Silo is built to record what it changes so that its actions can be undone, and to back up files before overwriting them. This is a design goal, not a guarantee against every possible outcome.</li>
 <li>You are responsible for maintaining your own backups of your game files and savegames.</li>
@@ -105,16 +106,16 @@
 </ul>
 <h2>Provenance and &quot;Verified&quot; are an integrity signal — not a safety guarantee</h2>
 <p>This is important, so read it carefully.</p>
-<p>Silo can hash an installed mod locally and compare it against the canonical build that Silo&#39;s API hashed from that mod&#39;s source, reporting a status such as <strong>Verified</strong>, <strong>Modified</strong>, or <strong>Unverified</strong>.</p>
+<p>Silo can hash an installed mod locally and compare it against the published build that Silo&#39;s catalog hashed, when it has one on file, reporting a status such as <strong>Verified</strong>, <strong>Modified</strong>, or <strong>Unverified</strong>.</p>
 <p><strong>Provenance and the &quot;Verified&quot; status are an integrity and origin signal only. They are NOT a security guarantee, a safety rating, an endorsement, or an antivirus/malware scan.</strong></p>
 <ul>
-<li>A <strong>&quot;Verified&quot;</strong> result means only that the build you have <strong>matches the build published by its source</strong> — that its contents correspond, byte for byte, to what that source distributed.</li>
+<li>A <strong>&quot;Verified&quot;</strong> result means only that the build you have <strong>matches the build published by its source</strong> — either the same archive, or a repacked archive whose files are each identical to what that source distributed.</li>
 <li>It does <strong>not</strong> mean the mod is safe, trustworthy, free of malware, bug-free, or suitable for any particular purpose.</li>
 <li>A mod can match its source exactly and still be harmful, broken, or undesirable. Conversely, a <strong>&quot;Modified&quot;</strong> or <strong>&quot;Unverified&quot;</strong> result does not by itself mean a mod is malicious — only that Silo could not match it to a known canonical build.</li>
 </ul>
 <p>Provenance answers &quot;<strong>is this the build the source published?</strong>&quot; It does not answer &quot;<strong>is this mod safe?</strong>&quot; You remain responsible for deciding which mods to install and run.</p>
 <h2>Third-party sources and services</h2>
-<p>Silo helps you interact with third-party platforms — including ModHub and GitHub — and can fetch images from and, at your direction, download mods from those sources&#39; content delivery networks. Those platforms and the mods they host are outside HLLMR Ventures LLC&#39;s control. Your use of them is governed by their own terms and policies, and we are not responsible for their content, availability, or conduct.</p>
+<p>Silo helps you interact with third-party platforms, including ModHub and GitHub. It can fetch GitHub-hosted images and, at your direction, download mods from GitHub releases, and it opens ModHub pages in your browser. Those platforms and the mods they host are outside HLLMR Ventures LLC&#39;s control. Your use of them is governed by their own terms and policies, and we are not responsible for their content, availability, or conduct.</p>
 <h2>Limitation of liability</h2>
 <p>To the fullest extent permitted by applicable law, HLLMR Ventures LLC and its contributors will not be liable for any indirect, incidental, special, consequential, or exemplary damages, or for any loss of data, profits, or goodwill, arising out of or relating to your use of or inability to use Silo, even if advised of the possibility of such damages. Nothing in this disclaimer excludes or limits any liability that cannot be excluded or limited under applicable law.</p>
 <h2>Changes to this disclaimer</h2>

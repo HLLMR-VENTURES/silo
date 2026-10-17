@@ -69,9 +69,9 @@
 <div class="draft-banner"><div class="wrap"><strong>⚠ DRAFT — NOT REVIEWED.</strong> These terms are an early draft, published in good faith and <strong>not yet reviewed by an attorney</strong>. They may change. Nothing here is legal advice. Questions: <a href="mailto:legal@hllmr.com">legal@hllmr.com</a>.</div></div>
 <div class="legalnav"><div class="wrap"><a href="./privacy-policy.html">Privacy</a><a href="./terms-of-service.html" aria-current="page" class="on">Terms</a><a href="./disclaimer.html">Disclaimer</a><a href="./copyright-takedown.html">Copyright</a></div></div>
 <main><div class="wrap"><article class="doc"><h1>Terms of Service</h1>
-<p><em>Effective date: 2026-08-01</em></p>
+<p><em>Effective date: 2026-10-17</em></p>
 <p>These Terms of Service (&quot;Terms&quot;) govern your access to and use of the Silo desktop application (the &quot;App&quot;), the website at silo.hllmr.com (including the marketing pages, the catalog browser at /browse, and the help documentation at /help) (the &quot;Website&quot;), and the public read API at silo-api.hllmr.com (the &quot;API&quot;). The App, the Website, and the API are together referred to as the &quot;Services.&quot;</p>
-<p>The Services are provided by <strong>HLLMR Ventures LLC</strong> (&quot;HLLMR,&quot; &quot;we,&quot; &quot;us,&quot; or &quot;our&quot;). By downloading, installing, accessing, or using any of the Services, you agree to be bound by these Terms. If you do not agree to these Terms, do not use the Services.</p>
+<p>The Services are provided by <strong>HLLMR Ventures LLC</strong>, a Texas limited liability company, USA (&quot;HLLMR,&quot; &quot;we,&quot; &quot;us,&quot; or &quot;our&quot;). By downloading, installing, accessing, or using any of the Services, you agree to be bound by these Terms. If you do not agree to these Terms, do not use the Services.</p>
 <h2>1. About Silo</h2>
 <p>Silo is a free, open-source desktop application that helps you manage mods for Farming Simulator 25 (&quot;FS25&quot;). The Services include:</p>
 <ul>
@@ -86,21 +86,20 @@
 <h2>3. Data Practices</h2>
 <p>We designed the Services to collect as little as possible about you. This Section describes what each part of the Services does. It is provided as part of these Terms for transparency; any separate privacy notice we publish also applies.</p>
 <h3>3.1 The App</h3>
-<p>The App has no telemetry, no analytics, no advertising, and no user account. It stores data only locally on your computer — a local SQLite cache, plus your operating system&#39;s keychain for any GitHub access tokens you choose to connect.</p>
-<p>The App communicates only with the following, and only as described:</p>
+<p>The App has no telemetry, no analytics, no advertising, and no user account. It stores data locally on your computer: a local database, plus your operating system&#39;s credential store for a GitHub token if you choose to connect one.</p>
+<p>The App checks GitHub for its own updates when it starts. Otherwise it goes online only when you use a feature that needs it:</p>
 <ul>
-<li><strong>The API (silo-api.hllmr.com)</strong> — to read the mod catalog. For lookups, the App sends mod technical names and file hashes. It does not send personal data.</li>
-<li><strong>The GitHub API</strong> — optional and user-initiated. If you choose to sign in using GitHub&#39;s device-flow login, the resulting token is used only for explicit actions you take, such as starring or watching a repository. The token is never attached to mod downloads.</li>
-<li><strong>Mod source content delivery networks</strong> (ModHub, GitHub) — to fetch images and, when you choose to, to download a mod.</li>
+<li><strong>The API (silo-api.hllmr.com)</strong>, to read the mod catalog when you browse, open a mod&#39;s details, check for updates, verify a mod, install from Browse or use Collections. For lookups, the App sends mod technical names, and for an integrity check the mod&#39;s version. File hashes are computed and compared on your computer and are not sent.</li>
+<li><strong>GitHub</strong>, to check mods linked to a GitHub repository for updates, show repository stats, download GitHub releases you install, and read shared collections. If you choose to sign in with GitHub&#39;s device-flow login, the token is used for those requests and for actions you take, such as starring or watching a repository or publishing a collection to your own GitHub account. The token is never attached to mod downloads.</li>
 </ul>
-<p>Mod integrity and provenance hashing is performed locally on your computer.</p>
+<p>The <a href="./privacy-policy.html">Privacy Policy</a> lists every connection in one table. Mod integrity and provenance hashing is performed locally on your computer.</p>
 <h3>3.2 The Website</h3>
-<p>The Website&#39;s static pages (the landing pages and /help) set no cookies and run no analytics. The only client-side storage is a &quot;theme&quot; preference kept in your browser&#39;s localStorage. The /browse page fetches catalog data from the public API from within your browser.</p>
-<h3>3.3 The API</h3>
-<p>To prevent abuse, the API applies per-IP rate limiting and keeps standard server logs. As a result, it processes IP addresses and request metadata on a transient basis. The API is (or will be) fronted by a content delivery network (Cloudflare), which also processes traffic for security and caching. The API has no accounts and sets no tracking cookies.</p>
+<p>The Website sets no cookies and runs no analytics scripts. The only client-side storage is a &quot;theme&quot; preference kept in your browser&#39;s localStorage. The /browse, /trust and /c/ pages load data from the API and from GitHub&#39;s API within your browser.</p>
+<h3>3.3 The API and Website servers</h3>
+<p>The API and the Website run on our own server. To keep them secure and to prevent abuse, the server applies per-IP rate limiting and keeps standard access logs (IP address, time, path and user agent) for 30 days. We publish aggregate counts from those logs on the Trust page. The API has no accounts and sets no tracking cookies.</p>
 <h2>4. The Catalog</h2>
 <p>The catalog aggregates publicly available mod metadata — such as names, images, descriptions, versions, and ratings — from ModHub and GitHub. This information is deduplicated into a single record per mod, and each record links back to its original source.</p>
-<p><strong>Silo does not host, mirror, or redistribute mod files.</strong> The catalog is an index of publicly available data with links back to the original sources. When you download a mod, the download comes from the original source, not from us.</p>
+<p><strong>Silo does not host, mirror, or redistribute mod files.</strong> The catalog is an index of publicly available data with links back to the original sources. Our catalog server keeps cached copies of cover images and the file hashes it computed for integrity checks. When the App installs a mod, the file downloads from the mod&#39;s GitHub release, not from us. For ModHub mods, the App opens the ModHub page in your browser.</p>
 <p>Catalog content — including mod names, artwork, descriptions, and other metadata — belongs to its respective authors and platforms. We make no claim of ownership over it and provide it only as an index and reference.</p>
 <h2>5. Acceptable Use</h2>
 <p>You agree to use the Services only for lawful purposes and in accordance with these Terms. In particular, you agree not to:</p>
@@ -116,7 +115,7 @@
 <h2>6. Your Game Files and the Mods You Install</h2>
 <p>The App modifies files in your own FS25 game folder in order to manage your mods. These changes are designed to be reversible. <strong>You use the App to modify your own game files at your own risk.</strong> You are responsible for maintaining your own backups.</p>
 <p>You are solely responsible for the mods you choose to install and use. Mods are created and distributed by third parties, and we do not create, host, review, endorse, or guarantee them.</p>
-<p><strong>Provenance and any &quot;Verified&quot; status the App displays is an integrity and origin signal — not a security guarantee and not a virus scan.</strong> It confirms whether a given build matches the source it claims to come from. It does not vouch for the safety, quality, or behavior of a mod, and it is not a substitute for your own judgment or your own security tools.</p>
+<p><strong>Provenance and any &quot;Verified&quot; status the App displays is an integrity and origin signal — not a security guarantee and not a virus scan.</strong> It confirms whether a given build matches the build its source published, when the catalog has that build on file. It does not vouch for the safety, quality, or behavior of a mod, and it is not a substitute for your own judgment or your own security tools.</p>
 <h2>7. Third-Party Sources and Services</h2>
 <p>The Services link to and interoperate with third-party platforms, including ModHub and GitHub, and with mod content delivered from their content delivery networks. Your use of those platforms and any content obtained from them is governed by their own terms of service and privacy policies, not by these Terms. We are not responsible for third-party platforms, their content, their availability, or their practices.</p>
 <p>If you connect a GitHub account to the App, you are responsible for complying with that platform&#39;s terms and for the security of your own credentials.</p>
@@ -142,7 +141,7 @@
 <h2>15. Severability and Entire Agreement</h2>
 <p>If any provision of these Terms is held to be unenforceable or invalid, that provision will be limited or eliminated to the minimum extent necessary, and the remaining provisions will remain in full force and effect. These Terms, together with the MIT License as it applies to the App&#39;s software, constitute the entire agreement between you and HLLMR regarding the Services and supersede any prior agreements on that subject. Our failure to enforce any provision is not a waiver of it.</p>
 <h2>16. Contact</h2>
-<p>Questions or notices regarding these Terms may be sent to <strong><a href="mailto:legal@hllmr.com">legal@hllmr.com</a></strong>.</p>
+<p>Questions or notices regarding these Terms may be sent to HLLMR Ventures LLC at <strong><a href="mailto:legal@hllmr.com">legal@hllmr.com</a></strong>.</p>
 <hr>
 <p><em>This document is a draft and has not yet been reviewed by an attorney.</em></p>
 </article></div></main>

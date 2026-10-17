@@ -4,136 +4,135 @@
 
 # Privacy Policy
 
-_Effective date: 2026-08-01_
+_Effective date: 2026-10-17_
 
-This Privacy Policy explains how **HLLMR Ventures LLC** ("HLLMR", "we", "us", or "our") handles information in connection with **Silo**, a free, open-source desktop application that manages Farming Simulator 25 (FS25) mods, together with the Silo website at silo.hllmr.com and the public read API at silo-api.hllmr.com (collectively, the "Services").
+This Privacy Policy explains how **HLLMR Ventures LLC** ("we", "us", or "our") handles information in connection with **Silo**, a free, open-source desktop application that manages Farming Simulator 25 (FS25) mods, together with the Silo website at silo.hllmr.com and the public read API at silo-api.hllmr.com (together, the "Services").
 
-The short version: Silo is built to be **local-first**. The desktop app has no telemetry, no analytics, no ads, and no user account. It keeps your data on your own machine. The rest of this document explains the details honestly, including the limited, necessary processing that happens on our public API and through third-party services you choose to use.
+The short version: the Silo app has no telemetry, no analytics, no ads and no user account. Your library, saves, notes and settings stay on your computer. The app goes online only for the specific jobs listed in the table below, and our servers keep standard access logs for 30 days.
 
-## Who this policy covers
+## Who is responsible
 
-This policy applies to:
+The controller for the Services is **HLLMR Ventures LLC**, a Texas limited liability company, USA. Contact: **legal@hllmr.com**.
 
-- The **Silo desktop app** (Windows, macOS, and Linux builds), whose source is MIT-licensed at github.com/HLLMR/silo.
-- The **Silo website** at silo.hllmr.com, including the marketing landing page, the public catalog browser at /browse, and the help docs at /help.
+This policy covers:
+
+- The **Silo desktop app** (Windows, macOS and Linux builds). Its source is MIT-licensed at github.com/HLLMR/silo.
+- The **Silo website** at silo.hllmr.com, including the landing page, /browse, /help, /trust and the shared-collection page /c/.
 - The **Silo public read API** at silo-api.hllmr.com.
 
-It does not cover third-party services that Silo links to or interacts with, such as ModHub, GitHub, or Cloudflare. Those services have their own privacy policies, which are linked in the "Third-party services" section below.
+It does not cover GitHub, ModHub or other services Silo links to or talks to. They have their own privacy policies, linked under "Third-party services" below.
 
-## The desktop app is local-first
+## What the app keeps on your computer
 
-The Silo desktop app is designed so that your information stays on your own computer. Specifically:
+- **A local database** (`silo.db`) with your mod library index, loadouts, curation (favorites, ratings, tags, notes), source pages you saved, scan results and settings. It lives in the app's data folder on your device.
+- **Your GitHub token**, if you connect GitHub. It goes into your operating system's credential store (Windows Credential Manager, macOS Keychain, Linux Secret Service). On a Linux system without a keyring, Silo stores it in its local database instead.
 
-- **No telemetry.** The app does not send usage data, event tracking, or crash analytics to us.
-- **No analytics.** There is no product analytics or behavioral tracking of any kind.
-- **No ads.** The app contains no advertising and no advertising trackers.
-- **No account.** There is nothing to sign up for. We do not create, hold, or manage any user account for you.
+We do not receive this data. If you uninstall the app and delete its data folder, it is gone; there is no copy on our side.
 
-### What the app stores, and where
+Silo also moves and links mod files inside your own game folder, and writes backups there (`backups/`, `.bak` files, `SiloBackups`). That happens on your computer and sends nothing to us.
 
-The app stores data **only locally on your machine**:
+## Every connection Silo makes
 
-- **A local SQLite cache**, used to track your mod library, loadouts, scan results, conflict and integrity findings, and similar working data. This lives on your device.
-- **The operating system keychain**, used only to hold any GitHub access tokens that **you** choose to connect (see below). Tokens are stored in your OS keychain, not sent to us.
+The app has no background telemetry. Apart from the update check at launch, it connects only when you do something that needs it. Most requests from the app carry Silo's version in their User-Agent header (for example `Silo/1.2.3`), and every server the app reaches sees your IP address.
 
-We do not receive, collect, or have access to this local data. If you uninstall the app or delete this data, it is gone from your machine; there is no copy on our side.
+| What triggers it | Where it goes | What is sent |
+|---|---|---|
+| **App update check**: every time Silo starts | GitHub (`github.com/HLLMR/silo/releases/latest/download/latest.json`) | A plain request for that file. No library data. If you choose to install an update, the installer downloads from GitHub Releases. |
+| **Browse**: opening the Browse tab, searching, filtering, sorting or paging | Our catalog API (silo-api.hllmr.com) | Your search terms, filters, sort order and page. |
+| **A mod's details**: opening a mod's drawer in Library or Browse | Our catalog API | That mod's tech name (or its catalog id), to show its catalog record and whether a newer version exists. |
+| **Check for updates** (⟳ Updates, or the Needs update filter) | Our catalog API | The tech names of your installed mods. Versions are compared on your computer. |
+| **Verify integrity** | Our catalog API | The mod's tech name and version, to fetch the published build's file list. Hashing and the comparison happen on your computer. No file hashes are sent. |
+| **Install from Browse** | Our catalog API, then GitHub | The catalog id and version, to find the download address and the published hash. The file itself downloads from the GitHub release. |
+| **Collections**: publishing, previewing or importing | Our catalog API | The tech names of the mods in the collection, to find where each one can be installed from. |
+| **Cover images** in Browse and the details drawer | Our catalog API's image cache; GitHub for GitHub-hosted images | The image address. Images on our API load directly in the app window; GitHub-hosted images are fetched by the app. |
+| **GitHub, without signing in**: checking a mod linked to a GitHub repository for updates, showing repository stats in a drawer, installing a GitHub mod, opening a shared collection link | GitHub API (api.github.com) and GitHub release downloads | The repository name or gist id. If you have connected GitHub, your token is sent with these API requests so you get the higher rate limit. It is never sent with mod downloads. |
+| **Connect GitHub** (sign-in) | GitHub (github.com/login/device, api.github.com/user) | GitHub's OAuth device flow. Silo asks for `read:user` (your username, for the higher rate limit). **Enable actions** adds `public_repo` (star, watch and public collections). **Enable collection sharing** adds `gist` (private collections). Silo never asks for access to private repositories. |
+| **Star / Watch** | GitHub API | The repository name and your token. The star or watch lands on your GitHub account. |
+| **Publishing a collection** | GitHub API | Creates a secret gist (private collection) or a public repository (public collection) in **your** GitHub account. It contains the collection name, your GitHub username, an optional description and the mod list (tech names, versions, sources and a hash of each mod's build). Silo also lists your gists and repositories to show *Your collections*. A secret gist is unlisted but anyone with its link can open it. |
+| **Mod downloads and updates** | GitHub release assets | A plain download. No token. |
+| **Links you open** (Open page ↗, ModHub pages, source pages you saved) | Your web browser | Silo hands the address to your browser. It never visits those pages itself. |
 
-### The app modifies files in your own game folder
-
-Silo manages your FS25 mods by organizing your mod files locally and projecting your active set into the game's `mods/` folder. These changes are made to files **in your own game folder on your own machine** and are designed to be reversible. This is a description of what the software does to your files locally; it is not a transfer of your data to us.
-
-## Network connections the app makes
-
-Although the app is local-first, it does connect to the network for specific, purpose-limited tasks. Here is every connection it makes and why:
-
-- **The Silo public read API (silo-api.hllmr.com).** The app reads the mod catalog from our API for search, update checks, cover images, and integrity/provenance checks. To perform lookups, the app may send **mod technical-names and mod file hashes** so the API can identify a mod and return its catalog record. **No personal data is sent for these lookups.** Mod integrity and provenance hashing is performed **locally** on your machine.
-- **The GitHub API (optional, user-initiated).** If you choose to log in to GitHub, the app uses GitHub's OAuth device flow. This login is used **only** for explicit actions you take, such as starring or watching a repository. The GitHub token is stored in your OS keychain and is **never attached to mod downloads**.
-- **Mod source CDNs (ModHub, GitHub).** The app fetches images from these sources and, **when you choose**, downloads a mod from its original source. Silo does not host, mirror, or redistribute mod files; downloads always go to the original source.
-
-Connections to GitHub and mod source CDNs are governed by those services' own privacy policies (linked below). When your app requests content from them, they will necessarily receive your IP address and standard request information as part of delivering that content.
+Silo never uploads your saves, mod archives, notes, settings or personal files.
 
 ## The website
 
-The Silo website is intentionally minimal:
+- The website sets **no cookies** and runs **no analytics scripts**. The only thing it stores in your browser is your light/dark theme choice (in `localStorage`).
+- **/browse** loads catalog data from our API in your browser. Cover images load from our API's image cache, or for some mods directly from where the source hosts them (GitHub or ModHub).
+- **/trust** loads catalog counts and traffic totals from our servers and release statistics from the GitHub API, in your browser.
+- **/c/** (shared collections) reads the collection from the GitHub API in your browser.
 
-- **The static pages** (the landing page and the /help docs) set **no cookies** and run **no analytics**.
-- **Client-side storage** on the site is limited to a single **"theme" preference stored in your browser's localStorage**, so the site can remember whether you prefer light or dark mode. This preference stays in your browser.
-- **The /browse catalog** fetches mod data directly from the public read API (silo-api.hllmr.com) from your browser. When your browser makes that request, the API and its CDN receive your IP address and request metadata as described in the next section.
+When your browser loads data from GitHub, GitHub sees your IP address under its own privacy policy.
 
-## The public read API (silo-api.hllmr.com)
+## Our servers and their logs
 
-The public read API serves the mod catalog. To keep the API available and to prevent abuse, it processes some information transiently:
+The website and the API run on our own server (a rented virtual server we administer ourselves). No CDN or third-party analytics service sits in front of it.
 
-- **IP addresses and request metadata**, used to apply **per-IP rate limiting** and standard server logging. This processing is transient and operational; the API has **no user accounts and sets no tracking cookies**.
-- **A content delivery network (Cloudflare).** The API is (or will be) fronted by Cloudflare, which processes traffic for security and caching. Cloudflare therefore also processes IP addresses and request metadata on our behalf. See Cloudflare's privacy policy, linked below.
+- **Access logs.** Like most web servers, ours logs each request: IP address, time, the page or API path requested, and the user agent (your browser, or Silo's version). We use these logs to keep the Services secure and available, to rate-limit abuse, and to fix problems.
+- **Retention.** Access logs are deleted after **30 days**.
+- **Published counts.** From those logs we compute aggregate counts, such as requests per hour and unique visitors or app clients per month, and publish only the totals on the [Trust page](https://silo.hllmr.com/trust/). The totals contain no IP addresses and can't be traced back to you.
+- **The catalog itself** contains public mod information (names, images, descriptions, versions, ratings and file hashes) gathered from ModHub and GitHub, with links back to each source. It contains no personal data about you.
 
-The catalog itself aggregates **publicly available mod metadata** (such as names, images, descriptions, versions, and ratings) from ModHub and GitHub, deduplicated into one record per mod, with links back to each original source. The catalog does not contain personal data about you.
+## Why we process data (lawful basis)
+
+If data-protection law such as the EU or UK GDPR applies to you:
+
+- **Server access logs and published counts:** our legitimate interest in running secure, reliable Services and understanding how much they're used. We keep the logs short-lived and publish only totals.
+- **Catalog requests from the app or website:** to provide the feature you asked for.
+- **GitHub sign-in features** (star, watch, publishing collections): these run between your computer and GitHub. We don't receive your token or your GitHub data. You start each one and can stop at any time by disconnecting GitHub in Silo or revoking the app in your GitHub settings.
+
+## What we don't do
+
+- We don't sell or rent personal information.
+- We don't show ads or use advertising trackers.
+- We don't set tracking cookies or track you across sites or apps.
+- We don't build profiles of users.
 
 ## Third-party services
 
-Silo interacts with the following third parties. Each has its own privacy policy that governs how it handles your information when you use it:
+These services have their own privacy policies:
 
-- **GitHub** (optional login and downloads) — https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement
-- **ModHub / GIANTS Software** (mod source and images) — https://www.giants-software.com/privacy.php
-- **Cloudflare** (CDN in front of the API) — https://www.cloudflare.com/privacypolicy/
+- **GitHub** (app updates, sign-in, downloads, collections) — https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement
+- **GIANTS Software / ModHub** (pages you open in your browser, and some cover images on /browse) — https://www.giants-software.com/privacy.php
 
-We are not responsible for the privacy practices of these third parties. We encourage you to review their policies.
+We are not responsible for their practices.
 
-## Data retention
+## Your rights
 
-- **App data** (the local SQLite cache and any tokens in your OS keychain) lives on your machine and is retained until you delete it or uninstall the app. We do not hold it.
-- **Server logs** for the public API (including IP addresses and request metadata) are retained transiently for rate-limiting, security, and operational purposes for **30 days**, after which they are deleted or aggregated. Cloudflare retains logs according to its own policies.
-- **Website theme preference** remains in your browser's localStorage until you clear it.
+Depending on where you live, you may have the right to **access** the personal data we hold about you, to have it **corrected** or **deleted**, to **object** to or restrict our processing, and to **complain to a data-protection supervisory authority** in your country.
 
-## No tracking, no ads, no profiling
+In practice, the only personal data we hold is the IP address and user agent in our access logs, for up to 30 days. To make a request, email **legal@hllmr.com**. Tell us the IP address and the approximate time of the requests, because we have no accounts to look you up by. We will reply within one month.
 
-We do not build advertising profiles, we do not sell or rent personal information, and we do not track you across sites or apps. The Services contain no advertising trackers and no cross-site tracking cookies.
+## Children
 
-## Children's privacy
-
-The Services are general-purpose software for managing game mods and are not directed to children. We do not knowingly collect personal information from children. Because the app is local-first and the API holds no accounts, we do not knowingly hold personal information about any child. If you believe a child has provided us with personal information through the Services, please contact us at **legal@hllmr.com** and we will address it.
-
-## Your privacy rights
-
-Depending on where you live, you may have rights over your personal information, such as the right to access, correct, delete, or restrict its processing, or to object to processing, under laws like the EU/UK General Data Protection Regulation (GDPR) or the California Consumer Privacy Act (CCPA).
-
-In practice, the Services hold very little that identifies you: the app keeps your data locally on your own machine (which you can access or delete yourself at any time), and our API only processes IP addresses and request metadata transiently for rate-limiting and security. We do not sell personal information, and we do not use it for targeted advertising.
-
-If you wish to make a data-subject request or have questions about your rights, contact us at **legal@hllmr.com**. We will respond as required by applicable law. Because we do not maintain accounts, we may be unable to identify or locate transient server-log data associated with a specific individual.
+The Services are not directed to children under 13, and we do not knowingly collect personal information from them. If you believe a child has sent us personal information, contact **legal@hllmr.com** and we will delete it.
 
 ## International users
 
-The Services are operated from **Texas, United States**, and our service providers (including Cloudflare) may process data in multiple locations. If you access the Services from outside that jurisdiction, you understand that limited operational data, such as IP addresses and request metadata processed by the API and its CDN, may be processed in countries other than your own, which may have different data-protection laws. We rely on the minimal, purpose-limited nature of this processing to protect your information.
+We operate the Services from Texas, United States. If you use them from another country, your requests are processed outside your country, under different data-protection laws. We keep that processing to the access logs described above.
 
 ## Security
 
-We take reasonable measures to protect the limited information the Services process. The desktop app keeps your data on your device and stores connected tokens in your operating system's keychain. No method of storage or transmission is completely secure, and we cannot guarantee absolute security.
+We take reasonable measures to protect what the Services process. The app keeps your data on your device and keeps a connected GitHub token in your operating system's credential store where one is available. No method of storage or transmission is completely secure.
 
-## No warranty
+## A note on "Verified"
 
-The software is provided "AS IS", without warranty of any kind, to the extent permitted by law. The app modifies files in your own game folder (and is designed to do so reversibly) **at your own risk**.
-
-## A note on "Verified" / provenance
-
-Silo's integrity and provenance feature is an **origin and integrity signal, not a security guarantee or virus scan**. It confirms whether an installed build matches the source it came from; it does **not** vouch for a mod's safety or scan it for malware. This is described here because people sometimes assume "Verified" means "safe" — it does not.
+Silo's integrity check confirms whether an installed build matches the build its source published. It is a provenance signal, not a virus scan, and it does not vouch for a mod's safety.
 
 ## Trademarks and affiliation
 
-Silo is **not affiliated with, endorsed by, or sponsored by GIANTS Software or the Farming Simulator brand**. "Farming Simulator", "FS25", "ModHub", "GitHub", and individual mod names and artwork are the property of their respective owners. Mod content in the catalog belongs to its respective authors and platforms.
+Silo is **not affiliated with, endorsed by, or sponsored by GIANTS Software or the Farming Simulator brand**. "Farming Simulator", "FS25", "ModHub", "GitHub" and individual mod names and artwork belong to their respective owners.
 
 ## Changes to this policy
 
-We may update this Privacy Policy from time to time. When we do, we will revise the effective date at the top. Material changes will be reflected in the version published with the Services.
+We may update this policy. When we do, we change the effective date at the top, and we describe material changes in the release notes or on this page.
 
 ## Governing law
 
-This Privacy Policy is governed by the laws of the **State of Texas**, without regard to its conflict-of-laws rules, except where applicable data-protection law provides otherwise.
+This policy is governed by the laws of the **State of Texas**, without regard to its conflict-of-laws rules, except where applicable data-protection law provides otherwise.
 
-## Contact us
+## Contact
 
-If you have questions about this Privacy Policy or our data practices, contact:
-
-**HLLMR Ventures LLC**
+**HLLMR Ventures LLC**, Texas, USA
 Email: **legal@hllmr.com**
 
 ---

@@ -4,9 +4,9 @@
 
 # Copyright & Takedown Policy
 
-_Effective date: 2026-08-01_
+_Effective date: 2026-10-17_
 
-This Copyright & Takedown Policy ("Policy") explains how HLLMR Ventures LLC ("HLLMR", "we", "us", or "our") handles copyright and other intellectual-property concerns relating to the Silo catalog, and how a rights holder can request the removal of content. This Policy is a draft template and does not constitute legal advice.
+This Copyright & Takedown Policy ("Policy") explains how HLLMR Ventures LLC, a Texas limited liability company, USA ("HLLMR", "we", "us", or "our"), handles copyright and other intellectual-property concerns relating to the Silo catalog, and how a rights holder can request the removal of content. This Policy is a draft template and does not constitute legal advice.
 
 ## 1. What Silo is and what the catalog contains
 
@@ -16,8 +16,8 @@ The catalog aggregates **publicly available mod metadata** — such as names, im
 
 Two points are central to this Policy:
 
-- **We do not host, mirror, or redistribute mod files.** When a user chooses to download a mod, the download goes to the original source (ModHub or GitHub). Silo does not store or serve the mod's files.
-- **The catalog consists of aggregated metadata and images drawn from public sources.** The underlying mods, their artwork, and their descriptions remain the property of their respective authors and platforms.
+- **We do not host, mirror, or redistribute mod files.** Silo indexes mods and links to them. When the app installs a mod, the file downloads from the mod's GitHub release; ModHub mods are downloaded from ModHub in the user's browser. Silo does not store or serve any mod's files.
+- **The catalog consists of aggregated metadata and images drawn from public sources.** Our catalog server keeps cached copies of cover images and the file hashes it computed for integrity checks. The underlying mods, their artwork, and their descriptions remain the property of their respective authors and platforms.
 
 Because of this design, most concerns about the availability of a **mod file** should be directed to the platform that hosts that file. This Policy addresses the **metadata and images** that appear in the Silo catalog itself.
 
@@ -47,17 +47,17 @@ To request the removal or correction of content in the Silo catalog, please send
 
 A notice that omits these elements may delay our ability to evaluate and respond to your request. We may contact you for clarification.
 
-## 5. Designated contact / agent
+## 5. Designated agent
 
-Notices, counter-notices, and other communications under this Policy should be sent to:
+Notices, counter-notices, and other communications under this Policy should be sent to our designated agent under 17 U.S.C. §512(c)(2):
 
-- **Designated contact:** DMCA Agent, HLLMR Ventures LLC
-- **Email:** legal@hllmr.com
-- **Entity:** HLLMR Ventures LLC (Texas, United States)
+**Copyright Agent, HLLMR Ventures LLC**\
+700 Highlander Blvd, #505\
+Arlington, TX 76015, USA\
+Phone: (469) 230-1213\
+Email: legal@hllmr.com
 
-Email is the fastest and preferred channel for notices under this Policy. We are in the
-process of completing a formal Designated Agent registration with the U.S. Copyright Office; a
-physical mailing address for the agent will be listed here once that registration is complete.
+Our designated agent is registered with the U.S. Copyright Office (registration number **DMCA-1083317**) and listed in its [DMCA Designated Agent Directory](https://dmca.copyright.gov). Email is the fastest channel for notices under this Policy.
 
 ## 6. How we respond
 
@@ -104,7 +104,7 @@ This Policy is governed by the laws of the **State of Texas**, without regard to
 
 ## 13. Contact
 
-For any copyright or takedown matter under this Policy, contact **legal@hllmr.com**.
+For any copyright or takedown matter under this Policy, contact our designated agent (Section 5) at **legal@hllmr.com**.
 
 ---
 
