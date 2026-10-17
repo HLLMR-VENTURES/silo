@@ -65,7 +65,7 @@ pub fn ensure_write_under(allowed_roots: &[std::path::PathBuf], dest: &Path) -> 
 /// Safely overwrite a config / mod-settings XML file. Same authority model as the organizer:
 /// the target must be a plain `.xml` file that already exists and whose parent resolves inside
 /// one of `allowed_roots` (the FS25 user dir). The current file is backed up to `<name>.bak`
-/// and that backup MUST succeed — Silo never overwrites without a recoverable copy. The new
+/// (older versions rotate, the original is kept; see `back_up_config`) and that backup MUST succeed — Silo never overwrites without a recoverable copy. The new
 /// bytes go to a temp sibling, are flushed, then atomically renamed into place; if the swap
 /// fails the original is restored from the backup, so a disk/permission error can't leave a
 /// half-written config. Closes the "wrote outside the intended folder" and "overwrote despite a
@@ -90,9 +90,8 @@ pub fn guarded_xml_write(
     ensure_write_under(allowed_roots, dest)?;
 
     // Backup REQUIRED — abort before touching the original if we can't preserve a copy.
-    let bak = dest.with_extension("xml.bak");
-    std::fs::copy(dest, &bak)
-        .map_err(|e| format!("aborted — couldn't back up the file first: {e}"))?;
+    back_up_config(dest)?;
+    let bak = backup_slot(dest, 1);
 
     // Write to a temp sibling, flush, then atomically replace (rename replaces on all OSes).
     let tmp = dest.with_extension("xml.silo-tmp");
@@ -109,6 +108,55 @@ pub fn guarded_xml_write(
         let _ = std::fs::copy(&bak, dest);
         return Err(format!("config write failed and was rolled back: {e}"));
     }
+    Ok(())
+}
+
+/// Previous versions kept beside an edited config: `.bak`, `.bak.2`, `.bak.3`.
+const CONFIG_BACKUPS: usize = 3;
+
+fn backup_slot(dest: &Path, n: usize) -> PathBuf {
+    let name = dest.file_name().unwrap_or_default().to_string_lossy();
+    if n == 1 {
+        dest.with_file_name(format!("{name}.bak"))
+    } else {
+        dest.with_file_name(format!("{name}.bak.{n}"))
+    }
+}
+
+/// Back up `dest` before it is replaced. The first time, keep the original as
+/// `<name>.silo-original.bak` (an existing single `.bak` from an older Silo is older, so it's
+/// used instead); that file is never replaced. Then shift `.bak` → `.bak.2` → `.bak.3` (the
+/// oldest drops) and copy `dest` to `.bak`. Any failure aborts before `dest` is touched.
+fn back_up_config(dest: &Path) -> Result<(), String> {
+    let abort = |e: std::io::Error| format!("aborted — couldn't back up the file first: {e}");
+    let name = dest.file_name().unwrap_or_default().to_string_lossy();
+    let original = dest.with_file_name(format!("{name}.silo-original.bak"));
+    if !original.exists() {
+        let source = if backup_slot(dest, 1).is_file() {
+            backup_slot(dest, 1)
+        } else {
+            dest.to_path_buf()
+        };
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&original)
+            .map_err(abort)?;
+        std::io::copy(&mut std::fs::File::open(&source).map_err(abort)?, &mut out)
+            .map_err(abort)?;
+        out.sync_all().map_err(abort)?;
+    }
+    let oldest = backup_slot(dest, CONFIG_BACKUPS);
+    if oldest.exists() {
+        std::fs::remove_file(&oldest).map_err(abort)?;
+    }
+    for n in (1..CONFIG_BACKUPS).rev() {
+        let from = backup_slot(dest, n);
+        if from.exists() {
+            std::fs::rename(&from, backup_slot(dest, n + 1)).map_err(abort)?;
+        }
+    }
+    std::fs::copy(dest, backup_slot(dest, 1)).map_err(abort)?;
     Ok(())
 }
 
@@ -230,6 +278,48 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn config_edits_keep_the_original_and_three_previous_versions() {
+        let root = std::env::temp_dir().join(format!("silo_cfg_rot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let roots = vec![root.clone()];
+        let dest = root.join("gameSettings.xml");
+        std::fs::write(&dest, "<v0/>").unwrap();
+        for v in 1..=5 {
+            guarded_xml_write(&roots, &dest, &format!("<v{v}/>")).unwrap();
+        }
+        let read = |n: &str| std::fs::read_to_string(root.join(n)).unwrap();
+        assert_eq!(read("gameSettings.xml"), "<v5/>");
+        assert_eq!(
+            read("gameSettings.xml.silo-original.bak"),
+            "<v0/>",
+            "never replaced"
+        );
+        assert_eq!(read("gameSettings.xml.bak"), "<v4/>");
+        assert_eq!(read("gameSettings.xml.bak.2"), "<v3/>");
+        assert_eq!(read("gameSettings.xml.bak.3"), "<v2/>");
+        assert!(!root.join("gameSettings.xml.bak.4").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_backup_from_an_older_silo_becomes_the_original() {
+        // Silo 0.9 kept a single .bak: the oldest copy there is, so the best "original".
+        let root = std::env::temp_dir().join(format!("silo_cfg_old_bak_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let dest = root.join("gameSettings.xml");
+        std::fs::write(&dest, "<v1/>").unwrap();
+        std::fs::write(root.join("gameSettings.xml.bak"), "<v0/>").unwrap();
+        guarded_xml_write(std::slice::from_ref(&root), &dest, "<v2/>").unwrap();
+        let read = |n: &str| std::fs::read_to_string(root.join(n)).unwrap();
+        assert_eq!(read("gameSettings.xml.silo-original.bak"), "<v0/>");
+        assert_eq!(read("gameSettings.xml.bak"), "<v1/>");
+        assert_eq!(read("gameSettings.xml.bak.2"), "<v0/>");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
