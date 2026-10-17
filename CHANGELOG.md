@@ -57,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Rescanning never fights a change in progress.** A rescan, for example when you switch back
   to Silo, no longer rewrites Silo's record of your library while another change is running.
-  (#PR)
+  (#218)
 
 ### Security
 
