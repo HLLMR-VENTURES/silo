@@ -97,6 +97,10 @@ export interface ModsRootStatus {
   unresolvedOverride: string | null;
   /** Why Silo won't change files in this folder (it shares files with another layout's archive). */
   layoutProblem: string | null;
+  /** What causes it: an overlap, only FS25's own setting, or a database read that failed. */
+  layoutProblemCause: "overlap" | "gameSetting" | "readError" | null;
+  /** The folder it runs into, when known. */
+  layoutConflict: string | null;
 }
 
 export function modsRootStatus(): Promise<ModsRootStatus> {

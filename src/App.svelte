@@ -2554,7 +2554,16 @@
       <div class="cn-text">
         <b>Silo won't change files in this mods folder:</b>
         <span class="tnum">{modsStatus.path}</span>. {modsStatus.layoutProblem}
+        {#if modsStatus.layoutConflict}
+          (<span class="tnum">{modsStatus.layoutConflict}</span>)
+        {/if}
       </div>
+      {#if modsStatus.layoutProblemCause === "readError"}
+        <button class="cn-act" onclick={retryModsFolder}>Retry</button>
+      {/if}
+      {#if modsStatus.mismatch && modsStatus.canWriteGameSetting}
+        <button class="cn-act" onclick={pointGameHere}>Point FS25 here</button>
+      {/if}
       <button class="cn-act" onclick={changeModsFolder}>Choose another</button>
     </div>
   {:else if modsStatus?.modsFolderMissing}

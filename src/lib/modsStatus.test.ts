@@ -15,6 +15,8 @@ function status(over: Partial<ModsRootStatus> = {}): ModsRootStatus {
     gameSettingProblem: null,
     unresolvedOverride: null,
     layoutProblem: null,
+    layoutProblemCause: null,
+    layoutConflict: null,
     ...over,
   };
 }

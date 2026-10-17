@@ -116,9 +116,32 @@ pub fn active() -> Option<Active> {
 /// The folder FS25 reads (its override, or the default), as last resolved.
 static GAME_READS: RwLock<Option<PathBuf>> = RwLock::new(None);
 
+/// What makes the resolved mods folder share files with another layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BlockCause {
+    /// It overlaps another mods folder or archive Silo knows.
+    Overlap,
+    /// Only because of the folder FS25's own setting points at: pointing FS25 at this folder
+    /// clears it.
+    GameSetting,
+    /// The check couldn't read Silo's database (try again).
+    ReadError,
+}
+
+/// Why the resolved mods folder `mods` has no writable layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blocked {
+    pub reason: String,
+    pub cause: BlockCause,
+    pub mods: PathBuf,
+    /// The folder it runs into, when known.
+    pub conflict: Option<PathBuf>,
+}
+
 /// Why the resolved mods folder has no writable layout (it shares files with another
 /// layout), as last resolved. `None` when nothing blocks it.
-static BLOCKED: RwLock<Option<String>> = RwLock::new(None);
+static BLOCKED: RwLock<Option<Blocked>> = RwLock::new(None);
 
 pub fn set_game_reads(p: Option<PathBuf>) {
     if let Ok(mut g) = GAME_READS.write() {
@@ -130,13 +153,18 @@ pub fn game_reads() -> Option<PathBuf> {
     GAME_READS.read().ok().and_then(|g| g.clone())
 }
 
-pub fn set_blocked(why: Option<String>) {
+pub fn set_blocked(why: Option<Blocked>) {
     if let Ok(mut g) = BLOCKED.write() {
         *g = why;
     }
 }
 
+/// The reason the resolved folder is blocked, if it is.
 pub fn blocked() -> Option<String> {
+    blocked_detail().map(|b| b.reason)
+}
+
+pub fn blocked_detail() -> Option<Blocked> {
     BLOCKED.read().ok().and_then(|g| g.clone())
 }
 
