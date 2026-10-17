@@ -2089,11 +2089,8 @@ async fn set_mods_root(app: tauri::AppHandle, path: String) -> Result<ModsRootSt
             return Err(picked::NOT_PICKED.into());
         }
         // Before the write probe: a folder sharing files with another layout's archive.
-        let archives =
-            other_archive_keys(&conn, p, &known_mods_folders(&conn, default.as_deref()))?;
-        if let Some(why) =
-            mods_folder_problem(&key_path(p), &key_path(&archive_of(&conn, p)), &archives)
-        {
+        let all = known_mods_folders(&conn, default.as_deref());
+        if let Some(why) = mods_folder_check(&conn, p, &all)? {
             return Err(why);
         }
         modsroot::validate_folder(p)?;
@@ -2394,12 +2391,14 @@ fn other_archive_keys(
 
 /// Pure: why `mods` can't be a mods folder — it overlaps another folder's archive (it is one,
 /// a category inside one, or holds one), or its own archive (`own_archive`: chosen, or the
-/// default `<mods>/archive`) would. Two layouts sharing files would shuffle each other's
-/// parked mods. All identity keys.
+/// default `<mods>/archive`) would overlap another archive or another mods folder
+/// (`other_mods`). Two layouts sharing files would shuffle each other's parked mods. All
+/// identity keys.
 fn mods_folder_problem(
     mods: &std::path::Path,
     own_archive: &std::path::Path,
     archives: &[PathBuf],
+    other_mods: &[PathBuf],
 ) -> Option<String> {
     if archives.iter().any(|a| overlaps(mods, a)) {
         return Some(OVERLAPS_AN_ARCHIVE.into());
@@ -2410,7 +2409,35 @@ fn mods_folder_problem(
                 .into(),
         );
     }
+    if other_mods.iter().any(|m| overlaps(own_archive, m)) {
+        return Some(
+            "That folder's archive would overlap another mods folder. Pick another folder.".into(),
+        );
+    }
     None
+}
+
+/// Why `mods` can't be a mods folder, given every mods folder Silo knows (`known`, which may
+/// include `mods` itself): `mods_folder_problem` over the other layouts in the database. An
+/// unreadable database is an error, never a pass.
+fn mods_folder_check(
+    conn: &rusqlite::Connection,
+    mods: &std::path::Path,
+    known: &[PathBuf],
+) -> Result<Option<String>, String> {
+    let mine = key_path(mods);
+    let archives = other_archive_keys(conn, mods, known)?;
+    let other_mods: Vec<PathBuf> = known
+        .iter()
+        .map(|k| key_path(k))
+        .filter(|k| *k != mine)
+        .collect();
+    Ok(mods_folder_problem(
+        &mine,
+        &key_path(&archive_of(conn, mods)),
+        &archives,
+        &other_mods,
+    ))
 }
 
 const OVERLAPS_AN_ARCHIVE: &str =
@@ -4875,7 +4902,8 @@ mod tests {
             super::mods_folder_problem(
                 Path::new("/ssd/mods"),
                 Path::new("/ssd/mods/archive"),
-                &archives
+                &archives,
+                &[PathBuf::from("/other/mods")]
             ),
             None
         );
@@ -4884,7 +4912,8 @@ mod tests {
             super::mods_folder_problem(
                 Path::new("/hdd/lib2"),
                 Path::new("/hdd/lib2/archive"),
-                &archives
+                &archives,
+                &[]
             ),
             None
         );
@@ -4896,7 +4925,7 @@ mod tests {
         // The archive itself, a category inside it, or a folder holding it.
         for p in ["/hdd/lib", "/hdd/lib/Tools", "/hdd"] {
             let own = PathBuf::from(p).join("archive");
-            let why = super::mods_folder_problem(Path::new(p), &own, &archives);
+            let why = super::mods_folder_problem(Path::new(p), &own, &archives, &[]);
             assert_eq!(
                 why.as_deref(),
                 Some(
@@ -4905,6 +4934,57 @@ mod tests {
                 "{p}"
             );
         }
+    }
+
+    #[test]
+    fn a_mods_folder_whose_own_archive_overlaps_another_mods_folder_is_refused() {
+        let other_mods = vec![PathBuf::from("/hdd/m2")];
+        let want =
+            Some("That folder's archive would overlap another mods folder. Pick another folder.");
+        // Its chosen archive inside another mods folder, or holding one.
+        for own in ["/hdd/m2/lib", "/hdd/m2", "/hdd"] {
+            let why = super::mods_folder_problem(
+                Path::new("/ssd/mods"),
+                Path::new(own),
+                &[],
+                &other_mods,
+            );
+            assert_eq!(why.as_deref(), want, "{own}");
+        }
+        assert_eq!(
+            super::mods_folder_problem(
+                Path::new("/ssd/mods"),
+                Path::new("/ssd/mods/archive"),
+                &[],
+                &other_mods
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_mods_folder_check_reads_the_other_layouts_from_the_database() {
+        let base = temp_base("modscheck");
+        let mine = base.join("mine");
+        let other = base.join("other");
+        for d in [&mine, &other] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let known = vec![mine.clone(), other.clone()];
+        assert_eq!(super::mods_folder_check(&conn, &mine, &known), Ok(None));
+        // Its own archive chosen inside the other mods folder.
+        crate::db::set_app_setting(
+            &conn,
+            &crate::relocate::archive_setting_key(&crate::modsroot::canonical_key(&mine)),
+            Some(&other.join("lib").to_string_lossy()),
+        )
+        .unwrap();
+        assert!(super::mods_folder_check(&conn, &mine, &known)
+            .unwrap()
+            .is_some_and(|w| w.contains("overlap another mods folder")));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -4924,15 +5004,22 @@ mod tests {
     fn a_mods_folder_whose_own_archive_is_another_folders_is_refused() {
         // The default `<X>/archive` is another folder's chosen archive...
         let archives = vec![PathBuf::from("/x/archive")];
-        assert!(
-            super::mods_folder_problem(Path::new("/x"), Path::new("/x/archive"), &archives)
-                .is_some()
-        );
+        assert!(super::mods_folder_problem(
+            Path::new("/x"),
+            Path::new("/x/archive"),
+            &archives,
+            &[]
+        )
+        .is_some());
         // ...or its own chosen archive sits inside another folder's (the folder itself is
         // clear, so this is the own-archive check speaking).
         let archives = vec![PathBuf::from("/hdd/lib")];
-        let why =
-            super::mods_folder_problem(Path::new("/ssd/mods"), Path::new("/hdd/lib/a"), &archives);
+        let why = super::mods_folder_problem(
+            Path::new("/ssd/mods"),
+            Path::new("/hdd/lib/a"),
+            &archives,
+            &[],
+        );
         assert_eq!(
             why.as_deref(),
             Some("That folder's archive would be another mods folder's archive. Pick another folder.")
