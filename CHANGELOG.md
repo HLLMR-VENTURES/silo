@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Your original game settings are kept.** The first time Silo edits gameSettings.xml or a mod's
+  settings file, it keeps the untouched original beside it (`.silo-original.bak`), plus the three
+  versions before each edit (`.bak`, `.bak.2`, `.bak.3`). Before, every edit replaced the only
+  backup. (#PR)
+
+- **Mod icons stay cached across Silo updates.** The icon cache uses stable names, so icons
+  aren't decoded again after every update. (#PR)
+
+### Security
+
+- **Stricter file-name checks.** File names with a colon, a trailing dot or space, or a reserved
+  Windows device name (such as `CON` or `NUL`) are refused. (#PR)
+
 ## [0.10.0] - 2026-10-17
 
 ### Added
@@ -58,14 +73,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Silo also asks before quitting, and won't install its own update, while it's still changing
   files. (#202)
 
-- **Your original game settings are kept.** The first time Silo edits gameSettings.xml or a mod's
-  settings file, it keeps the untouched original beside it (`.silo-original.bak`), plus the three
-  versions before each edit (`.bak`, `.bak.2`, `.bak.3`). Before, every edit replaced the only
-  backup. (#PR)
-
-- **Mod icons stay cached across Silo updates.** The icon cache uses stable names, so icons
-  aren't decoded again after every update. (#PR)
-
 ### Security
 
 - **Stricter image-host check.** The image proxy now parses URLs properly before checking the
@@ -75,9 +82,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stricter checks on GitHub requests.** Repository names and gist IDs are validated before
   Silo uses them, GitHub API addresses are built safely, and mod updates download only from
   GitHub. (#202)
-
-- **Stricter file-name checks.** File names with a colon, a trailing dot or space, or a reserved
-  Windows device name (such as `CON` or `NUL`) are refused. (#PR)
 
 ## [0.9.0] - 2026-10-17
 

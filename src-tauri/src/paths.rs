@@ -85,8 +85,8 @@ pub fn ensure_write_under(allowed_roots: &[std::path::PathBuf], dest: &Path) -> 
 /// Safely overwrite a config / mod-settings XML file. Same authority model as the organizer:
 /// the target must be a plain `.xml` file that already exists and whose parent resolves inside
 /// one of `allowed_roots` (the FS25 user dir). The current file is backed up to `<name>.bak`
-/// (older versions rotate, the original is kept; see `back_up_config`) and that backup MUST succeed — Silo never overwrites without a recoverable copy. The new
-/// bytes go to a temp sibling, are flushed, then atomically renamed into place; if the swap
+/// (older versions rotate and the original is kept; see `back_up_config`) and that backup MUST
+/// succeed — Silo never overwrites without a recoverable copy. The new bytes go to a temp sibling, are flushed, then atomically renamed into place; if the swap
 /// fails the original is restored from the backup, so a disk/permission error can't leave a
 /// half-written config. Closes the "wrote outside the intended folder" and "overwrote despite a
 /// failed backup" gaps a frontend-supplied path otherwise allowed.
@@ -162,9 +162,16 @@ fn back_up_config(dest: &Path) -> Result<(), String> {
             .create_new(true)
             .open(&original)
             .map_err(abort)?;
-        std::io::copy(&mut std::fs::File::open(&source).map_err(abort)?, &mut out)
-            .map_err(abort)?;
-        out.sync_all().map_err(abort)?;
+        let copied = std::fs::File::open(&source)
+            .and_then(|mut src| std::io::copy(&mut src, &mut out))
+            .and_then(|_| out.sync_all());
+        if let Err(e) = copied {
+            // A partial copy would be kept forever as the "original": remove the file we just
+            // created so the next edit tries again.
+            drop(out);
+            let _ = std::fs::remove_file(&original);
+            return Err(abort(e));
+        }
     }
     let oldest = backup_slot(dest, CONFIG_BACKUPS);
     if oldest.exists() {
