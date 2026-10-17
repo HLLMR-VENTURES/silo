@@ -722,32 +722,57 @@ fn settle_updates_locked() -> Result<(), String> {
 
 // ── SiloAPI (mod browser / discovery) ──
 
+/// The catalog address: the built-in one, or, in a debug build only, one a developer stored with
+/// `siloapi_set_base`. Release builds ignore any stored value.
+fn effective_siloapi_base(stored: Option<String>, debug: bool) -> String {
+    stored
+        .filter(|s| debug && !s.trim().is_empty())
+        .unwrap_or_else(|| siloapi::DEFAULT_BASE.to_string())
+}
+
 fn siloapi_base(app: &tauri::AppHandle) -> Result<String, String> {
     let conn = db::open(&db_path(app)?)?;
-    Ok(db::get_app_setting(&conn, "siloapi_base")
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| siloapi::DEFAULT_BASE.to_string()))
+    Ok(effective_siloapi_base(
+        db::get_app_setting(&conn, "siloapi_base"),
+        cfg!(debug_assertions),
+    ))
 }
 
 #[tauri::command]
-fn siloapi_status(app: tauri::AppHandle) -> Result<String, String> {
-    siloapi_base(&app)
+async fn siloapi_status(app: tauri::AppHandle) -> Result<String, String> {
+    off_main(move || siloapi_base(&app)).await
 }
 
+/// Developer-only: point the catalog at another address (e.g. a local SiloAPI). Debug builds
+/// only; the catalog decides where Browse and Collections installs download from.
+#[cfg(debug_assertions)]
 #[tauri::command]
-fn siloapi_set_base(app: tauri::AppHandle, base: String) -> Result<(), String> {
-    let conn = db::open(&db_path(&app)?)?;
-    let v = base.trim().trim_end_matches('/');
-    // SSRF guard: a custom base drives every catalog request, so validate it before storing.
-    // Allow localhost so a self-hoster/dev can point at their own endpoint; block private IPs.
-    if !v.is_empty() {
-        net::validate_outbound_url(v, true)?;
-    }
-    db::set_app_setting(
-        &conn,
-        "siloapi_base",
-        if v.is_empty() { None } else { Some(v) },
-    )
+async fn siloapi_set_base(app: tauri::AppHandle, base: String) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let conn = db::open(&db)?;
+        let v = base.trim().trim_end_matches('/');
+        // SSRF guard: a custom base drives every catalog request, so validate it before storing.
+        // Allow localhost so a developer can point at their own endpoint; block private IPs.
+        if !v.is_empty() {
+            net::validate_outbound_url(v, true)?;
+        }
+        db::set_app_setting(
+            &conn,
+            "siloapi_base",
+            if v.is_empty() { None } else { Some(v) },
+        )
+    })
+    .await
+}
+
+/// Release builds always use the built-in catalog; same signature so `generate_handler!` stays
+/// one list (the argument names are the IPC keys, so they keep their names).
+#[cfg(not(debug_assertions))]
+#[tauri::command]
+async fn siloapi_set_base(app: tauri::AppHandle, base: String) -> Result<(), String> {
+    let _ = (app, base);
+    Err("Not available in this build.".into())
 }
 
 // Mirrors siloapi::browse's filter set; flat args keep the invoke() call shape simple.
@@ -4134,6 +4159,7 @@ mod tests {
     use crate::{
         organize::{Layout, ModInput},
         relocate::MoveMarker,
+        siloapi,
     };
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
@@ -4800,6 +4826,22 @@ mod tests {
         // Fine-grained PATs report no scopes; "*" means assume capable.
         assert!(scope_grants("*", "gist"));
         assert!(scope_grants("*", "public_repo"));
+    }
+
+    #[test]
+    fn a_stored_catalog_address_is_ignored_in_release_builds() {
+        assert_eq!(
+            super::effective_siloapi_base(Some("https://evil.example".into()), false),
+            siloapi::DEFAULT_BASE
+        );
+        assert_eq!(
+            super::effective_siloapi_base(Some("http://localhost:3000".into()), true),
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            super::effective_siloapi_base(None, true),
+            siloapi::DEFAULT_BASE
+        );
     }
 
     #[test]

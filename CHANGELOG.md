@@ -94,6 +94,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Savegame backups only copy real savegames.** Silo now checks the folder against the
   savegames it found before copying anything. (#PR)
 
+- **The catalog address is fixed in release builds.** Silo always downloads catalog mods
+  through its own catalog; the developer-only setting to change it no longer exists in the
+  release app. (#PR)
+
 ## [0.9.0] - 2026-10-17
 
 ### Added

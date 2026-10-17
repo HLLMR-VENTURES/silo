@@ -501,10 +501,6 @@ export function siloapiStatus(): Promise<string> {
   return invoke<string>("siloapi_status");
 }
 
-export function siloapiSetBase(base: string): Promise<void> {
-  return invoke("siloapi_set_base", { base });
-}
-
 export function browseMods(opts: {
   query?: string;
   category?: string;
