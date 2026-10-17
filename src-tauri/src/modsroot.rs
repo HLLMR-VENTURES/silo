@@ -322,11 +322,17 @@ pub fn canonical_key(p: &Path) -> String {
 }
 
 /// `p` canonicalized as far as it exists: the nearest existing ancestor's real path plus the
-/// missing names below it. Unchanged when no ancestor resolves, or the missing part holds a
-/// `..` (it can't be re-appended faithfully).
+/// missing names below it. Unchanged when its drive or share root isn't there (checked once,
+/// so an offline share isn't waited on for every ancestor), when no ancestor resolves, or when
+/// the walk up meets a `..` before an ancestor that resolves (the names below it can't be
+/// re-appended faithfully; a `..` inside the part that exists is resolved as usual).
 fn resolve_existing(p: &Path) -> PathBuf {
     if let Ok(c) = std::fs::canonicalize(p) {
         return c;
+    }
+    let root = path_root(p);
+    if root.as_os_str().is_empty() || !root.exists() {
+        return p.to_path_buf();
     }
     let mut missing = Vec::new();
     let mut cur = p;
@@ -341,6 +347,15 @@ fn resolve_existing(p: &Path) -> PathBuf {
         }
     }
     p.to_path_buf()
+}
+
+/// Pure: the drive, share or `/` that `p` starts at (its prefix and root components), or
+/// empty for a relative path.
+fn path_root(p: &Path) -> PathBuf {
+    use std::path::Component;
+    p.components()
+        .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+        .collect()
 }
 
 /// True when two paths name the same folder.
@@ -684,6 +699,36 @@ mod tests {
         let _ = std::fs::remove_dir(&link);
         let _ = std::fs::remove_file(&link);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_paths_root_is_its_drive_share_or_slash() {
+        #[cfg(windows)]
+        {
+            assert_eq!(path_root(Path::new(r"C:\a\b")), PathBuf::from(r"C:\"));
+            assert_eq!(
+                path_root(Path::new(r"\\nas\share\mods\x")),
+                PathBuf::from(r"\\nas\share\")
+            );
+        }
+        #[cfg(unix)]
+        assert_eq!(path_root(Path::new("/mnt/nas/mods")), PathBuf::from("/"));
+        assert_eq!(path_root(Path::new("relative/x")), PathBuf::new());
+    }
+
+    /// A folder on a drive (or share) that isn't there is keyed as spelled, without walking
+    /// up its parents one by one (each would wait on the missing drive).
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_on_a_missing_drive_keeps_its_raw_key() {
+        let Some(letter) = ('M'..='Z')
+            .rev()
+            .find(|l| !Path::new(&format!("{l}:\\")).exists())
+        else {
+            return; // every letter in use: nothing to test here
+        };
+        let p = PathBuf::from(format!(r"{letter}:\Games\Mods\archive"));
+        assert_eq!(canonical_key(&p), normalize_key(&p.to_string_lossy(), true));
     }
 
     #[test]

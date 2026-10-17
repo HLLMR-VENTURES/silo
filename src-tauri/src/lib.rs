@@ -3129,8 +3129,8 @@ async fn archive_status(app: tauri::AppHandle) -> Result<ArchiveStatus, error::A
 }
 
 /// What moving the archive to `path` involves, and anything that blocks it. Read-only apart
-/// from the write probe and the symlink probe (both removed again), which only run when the
-/// folder itself isn't ruled out.
+/// from the write probe, the symlink probe and — on a drive the disk list doesn't know — the
+/// hardlink probe (each removed again), which only run when the folder itself isn't ruled out.
 #[tauri::command]
 async fn archive_move_preflight(
     app: tauri::AppHandle,
