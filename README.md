@@ -1,27 +1,28 @@
 <p align="center">
-  <img src="landing/og.png" alt="Silo — the Farming Simulator 25 mod manager" width="720" />
+  <img src="landing/og.png" alt="Silo. More farming. Less fixing." width="720" />
 </p>
 
 <h1 align="center">Silo</h1>
 
-<p align="center"><em>The mod manager Farming Simulator 25 should have shipped with.</em></p>
+<p align="center"><em>More farming, less fixing. A mod manager for Farming Simulator 25.</em></p>
 
 <p align="center">
   <a href="https://github.com/HLLMR/silo/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/HLLMR/silo?sort=semver&color=4a7330&label=release"></a>
   <a href="https://github.com/HLLMR/silo/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/HLLMR/silo/actions/workflows/ci.yml/badge.svg"></a>
   <a href="docs/VERIFY_DOWNLOAD.md"><img alt="Windows: code signed" src="https://img.shields.io/badge/Windows-code%20signed-4a7330"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4a7330"></a>
-  <img alt="Platforms" src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-4a7330">
+  <img alt="Platforms: Windows · macOS and Linux preview" src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20and%20Linux%20preview-4a7330">
   <a href="https://silo.hllmr.com"><img alt="Website" src="https://img.shields.io/badge/web-silo.hllmr.com-4a90c2"></a>
 </p>
 
-A desktop app for your FS25 mod library that stays quick at 700+ mods. Silo reads the
-game log to name the mod that crashed you, flags conflicts before you launch, and shows
-the latest version it can find across ModHub and GitHub. Everything it changes on
-disk is reversible. **Free and open source. Windows (tested) · macOS & Linux (experimental).**
+Silo reads your mods and your game log, points to the likely culprit when the game crashes,
+and flags conflicts before you launch. It keeps hundreds of mods in a tidy library, never
+edits inside one, and gives the game exactly the set you chose. **Free and open source.
+Windows (tested) · macOS and Linux (preview).**
 
 <p align="center">
-  <b><a href="https://github.com/HLLMR/silo/releases/latest">⬇ Download the beta</a></b>
+  <b><a href="https://github.com/HLLMR/silo/releases/latest">⬇ Download for Windows</a></b>
+  &nbsp;·&nbsp; <a href="https://github.com/HLLMR/silo/releases/latest">macOS and Linux preview</a>
   &nbsp;·&nbsp; <a href="https://silo.hllmr.com">silo.hllmr.com</a>
   &nbsp;·&nbsp; <a href="#install">Build from source</a>
 </p>
@@ -31,39 +32,39 @@ disk is reversible. **Free and open source. Windows (tested) · macOS & Linux (e
 > shows the publisher, not "unknown"). macOS/Linux builds are OS-unsigned — Gatekeeper may warn.
 >
 > **Platforms: Windows is the tested, supported platform.** macOS (Intel & Apple Silicon)
-> and Linux builds are **experimental and largely untested on real machines** — we'd love
+> and Linux builds are **a preview and largely untested on real machines**. We'd love
 > testers on those platforms, but expect rough edges. Silo runs natively on both; on Linux it
 > finds FS25's folder inside the Steam Proton prefix (native or Flatpak Steam), and on macOS it
 > handles Steam, GIANTS and Mac App Store installs. See [`docs/CROSS-PLATFORM.md`](docs/CROSS-PLATFORM.md).
 
 ## Why
 
-FS25 reads one flat `mods/` folder, so everything you own is always active at once. When
-something breaks, the game won't tell you what. There's no conflict detection, no
-organization, no update tracking, no way to bind a loadout to a savegame. Silo
-is the management layer the game left out.
+FS25 reads one `mods/` folder, so everything in it is active at once. With hundreds of mods
+installed, finding the one that broke your game can take the whole evening. Silo adds a
+management layer on top: crash triage, conflict checks before launch, update tracking,
+and loadouts you can switch between playthroughs.
 
 ## What it does
 
 - **Crash & log triage** — parses `log.txt`, separates real errors from cosmetic noise,
-  and names the mod at fault.
-- **Conflict detection** — duplicate active maps (an instant crash), plus colliding
+  and ranks the likely culprit.
+- **Conflict detection** — flags more than one active map before launch, plus colliding
   filltypes, vehicle types and scripts across your active set.
 - **Cross-source catalog** — one record per mod aggregating ModHub + GitHub,
-  with the latest version found across all of them. See the
+  with the latest version found across both. See the
   [verified catalog page](https://silo.hllmr.com/trust/) or
   [browse it live](https://silo.hllmr.com/browse/); it's served by the public
   [SiloAPI](https://silo-api.hllmr.com) read API.
 - **Integrity check** — hashes an installed mod and compares it to the trusted build its
   source published: a clean match, or the exact files that changed. Provenance, not
-  antivirus — it confirms what a mod is, not whether it means well. It works across
-  ModHub and GitHub — a cross-source integrity check that's rare among mod tools.
+  antivirus — it confirms what a mod is, not whether it means well. It works for mods
+  from both ModHub and GitHub.
 - **Guided bisection** — when the log can't name the culprit, automates "disable half,
   relaunch" to isolate it, and safely restores your active set afterward.
 - **Loadouts & projection** — curate profiles and project only the active set into the
   game's flat folder at launch (hardlinks for zips, junctions/symlinks for folder mods, copies
-  where links aren't allowed). Organizing files your zips into a reversible local archive;
-  *Restore vanilla layout* puts everything back.
+  where links aren't allowed). Organizing files your zips into a local archive; every move
+  is previewed first, and *Restore vanilla layout* puts your mods folder back.
 - **Any mods folder** — follows FS25's own mods-folder override, or pick any folder in
   Settings; Silo can point the game at it too (backing up `gameSettings.xml`) and keeps each
   folder's organized library separately.
@@ -96,18 +97,19 @@ npm run tauri:build   # produce an installer in src-tauri/target/release/bundle/
 
 ## Trust
 
-- **Open source** — the desktop app is fully open here; audit, fork, or build it yourself.
-  The hosted catalog (SiloAPI) is a separate service.
-- **No telemetry, no account** — Silo hits the network only for catalog search, update and
-  integrity checks, cover images, and the source actions you choose, sending just what those
-  need (search terms; mod IDs and versions). No telemetry, no analytics; your saves, mod
-  files and notes never leave your machine.
-- **Reversible, and it owns what it touches** — it files your mods into a local archive
-  and links the active set into the game; every move is recorded and undoable, it only
-  ever removes files it put there itself (your own edits are left alone), and it backs up
-  before any overwrite.
-- **Verifiable** — the integrity check proves an installed mod matches the build its
-  source published, byte for byte.
+- **Open source** — the desktop app's source is here under MIT; audit, fork, or build it
+  yourself. The hosted catalog (SiloAPI) is a separate service.
+- **No account, no ads, no telemetry** — Silo contacts its catalog only when you ask:
+  searching Browse, opening a mod's details, checking for updates, or verifying a mod. Each
+  request carries what it needs (search terms, or the IDs and versions of the mods being
+  checked). It also checks GitHub for its own app updates at launch, which sends no library
+  data. Your saves, mod files and notes are never uploaded.
+- **Previewed first, and it owns what it touches** — it files your mods into a local archive
+  and links the active set into the game; every move is previewed first, and *Restore
+  vanilla* puts your mods folder back. It only ever removes files it put there itself (your
+  own edits are left alone), and it backs up before any overwrite.
+- **Verifiable** — the integrity check compares an installed mod to the build its source
+  published, byte for byte.
 
 ## Stack
 

@@ -45,7 +45,7 @@ export const label = (s: string): string => SOURCE_LABEL[s] ?? s;
 /** Why a source can't be installed directly — shown on hover and in the drawer. */
 export function gatedReason(source: string): string {
   if (source === "modhub")
-    return "ModHub blocks downloads from outside its website, so Silo can't install this for you. Opens the mod page.";
+    return "ModHub mods download from GIANTS' website, so Silo opens the mod's page there.";
   return "This source doesn't allow direct downloads. Opens the mod page.";
 }
 

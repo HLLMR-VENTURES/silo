@@ -1,30 +1,32 @@
 # Silo
 
-> Silo is a free, open-source mod manager for Farming Simulator 25 (FS25). It organizes
-> your mods, names the mod that crashed you from the game log, detects conflicts, and
-> unifies ModHub and GitHub into one cross-source catalog — and everything it changes
-> on disk is reversible.
+> Silo is a free, open-source mod manager for Farming Simulator 25 (FS25). More farming,
+> less fixing: it reads your mods and your game log, ranks the likely culprit when the game
+> crashes, flags conflicts before launch, and unifies ModHub and GitHub into one
+> cross-source catalog. Every move is previewed first, and Restore vanilla puts your mods
+> folder back.
 
-Silo is a native desktop app for Windows, macOS and Linux. No account, no telemetry, fully
-open source. Its catalog is served by a public read-only API (SiloAPI) that aggregates mod
-metadata, versions, popularity and descriptions across sources.
+Silo is a native desktop app for Windows, with macOS and Linux builds in preview. No account,
+no ads, no telemetry, open source (MIT). Its catalog is served by a public read-only API
+(SiloAPI) that aggregates mod metadata, versions, popularity and descriptions from ModHub and
+GitHub.
 
 ## What Silo does
-- Crash & log triage: reads `log.txt`, separates real errors from noise, and names the mod at fault
-- Conflict detection: duplicate active maps (an instant crash), colliding filltypes, vehicle types and scripts
-- Cross-source catalog: one canonical record per mod across ModHub and GitHub, with the real latest version
+- Crash & log triage: reads `log.txt`, separates real errors from noise, and ranks the likely culprit
+- Conflict detection: flags more than one active map before launch, plus colliding filltypes, vehicle types and scripts
+- Cross-source catalog: one canonical record per mod across ModHub and GitHub, with the latest version across both
 - Guided bisection: automates "disable half, relaunch" to isolate a bad mod, then restores your set
-- Loadouts & projection: files zips into a reversible local archive and links only the active set into the game's flat mods folder
+- Loadouts & projection: files zips into a local archive and links only the active set into the game's flat mods folder
 - Filltype bridge: generates a companion mod that teaches equipment a stubborn map filltype
 - Any mods folder: follows FS25's mods-folder override, or pick any folder (optionally pointing the game at it, with a backup)
 - Library archive on any drive: move parked mods to another drive with verified, pausable, cancellable moves
 - Integrity check: verifies an installed mod against the build its source published (provenance, not antivirus)
 
 ## Principles
-- Free and open source — every line is on GitHub
-- No telemetry, no account
-- Reversible by design: projects with links, backs up before writing, saves never touched destructively
-- Acts through your own GitHub / ModHub accounts; never holds your data
+- Free and open source: the desktop app's source is on GitHub (MIT); the catalog server is a separate hosted service
+- No account, no ads, no telemetry. Silo contacts its catalog only when you search Browse, open a mod's details, check for updates or verify a mod; it also checks GitHub for its own app updates at launch, which sends no library data
+- Never edits inside a mod; every move is previewed first, and Restore vanilla puts your mods folder back; backs up before writing settings or saves
+- Acts through your own GitHub / ModHub accounts
 
 ## Links
 - Site: https://silo.hllmr.com/

@@ -111,7 +111,7 @@
   <div class="wrap">
     <p class="eyebrow">User guide</p>
     <h2>Everything Silo can do, explained.</h2>
-    <p>From your first scan to conflict triage, mod verification, savegame edits and multiplayer sync. Silo is free and open source, and everything it changes on disk is reversible.</p>
+    <p>From your first scan to conflict triage, mod verification, savegame edits and multiplayer sync. Silo is free and open source. Every move is previewed first, and Restore vanilla puts your mods folder back.</p>
   </div>
 </section>
 
@@ -148,7 +148,7 @@
 
 <p>Silo is a desktop app for managing your Farming Simulator 25 mods. It is <strong>not an in-game mod</strong> and you don't install it into the game — it's a standalone program that runs on your computer alongside FS25. It scans your existing mod library, organizes it, catches conflicts before you launch, triages crashes, and tracks updates.</p>
 
-<p>Silo never edits the game itself. It works with the files FS25 already keeps in <code>Documents\My Games\FarmingSimulator2025\</code>, and everything it does to those files is reversible.</p>
+<p>Silo never edits the game itself. It works with the files FS25 already keeps in <code>Documents\My Games\FarmingSimulator2025\</code>. Every move is previewed first, and Restore vanilla puts your mods folder back.</p>
 
 <h3>Installing on Windows</h3>
 
@@ -161,17 +161,17 @@
 
 <h3>What happens on first run</h3>
 
-<p>When Silo opens it lands on the <strong>Library</strong> view and looks for your FS25 mods folder automatically — on Windows that's <code>Documents\My Games\FarmingSimulator2025\mods</code>, unless FS25 has been set to use another folder, in which case Silo follows the game's setting. If it finds one, it starts scanning right away; a progress bar shows how many mods it has read. A cold scan of a large library takes seconds, and later scans are near-instant.</p>
+<p>When Silo opens it lands on the <strong>Library</strong> view and looks for your FS25 mods folder automatically — on Windows that's <code>Documents\My Games\FarmingSimulator2025\mods</code>, unless FS25 has been set to use another folder, in which case Silo follows the game's setting. If it finds one, it starts scanning right away; a progress bar shows how many mods it has read. The first scan of a large library takes a little while, and later scans are much quicker.</p>
 
 <p>When the scan finishes you'll see your whole library, with counts for mods, maps, and scripts. You can confirm which folder Silo found under <strong>Settings</strong> (the gear icon), in the <strong>Mods folder</strong> section, and pick a different one with <strong>Change…</strong> (see <a href="#mods-folder">Choosing your mods folder</a>). If nothing was found, the list reads <em>"No mods found yet. Point Silo at your mods folder and rescan"</em> — check that the folder exists, then use the <strong>Rescan</strong> button.</p>
 
 <h3>Your files stay safe</h3>
 
-<p>Silo is built so it never changes your original mod files destructively. On first run it only reads and catalogs — it moves nothing until you ask. When you do organize or activate mods, Silo projects them into the game's <code>mods/</code> folder using links (hardlinks or junctions), so there's no duplication and your originals are untouched. The <strong>Restore vanilla layout</strong> button in Settings undoes all of Silo's organization at any time, and your mods are never deleted.</p>
+<p>Silo is built so it never changes your original mod files destructively. On first run it only reads and catalogs — it moves nothing until you ask. When you do organize or activate mods, Silo projects them into the game's <code>mods/</code> folder using links (hardlinks or junctions), so there's no duplication and your originals are untouched. The <strong>Restore vanilla layout</strong> button in Settings puts your mods folder back at any time, and your mods are never deleted.</p>
 
 <blockquote class="note"><strong>If your <code>Documents</code> folder is synced by a cloud service</strong> — OneDrive, Google Drive, or Proton Drive — that service presents files as on-demand placeholders and won't allow hardlinks. Silo detects this on first run and shows a one-time notice: it will project your active mods as <strong>file copies</strong> instead of links. Everything still works and nothing is lost, but the active set uses extra disk and bulk activate/deactivate is slower. Excluding <code>…\My Games\FarmingSimulator2025</code> from your cloud sync lets Silo use hardlinks again — see <a href="#settings-accounts">Library layout &amp; maintenance</a>.</blockquote>
 
-<blockquote class="note"><strong>macOS and Linux are experimental.</strong> Silo is built and tested Windows-first. It runs natively on macOS and Linux: on Linux it finds FS25's folder inside the Steam Proton prefix (native or Flatpak Steam), and on macOS it handles Steam, GIANTS and Mac App Store installs. This hasn't been tested on many real machines yet, so expect rough edges — and reports are very welcome.</blockquote>
+<blockquote class="note"><strong>macOS and Linux are a preview.</strong> Silo is built and tested Windows-first. It runs natively on macOS and Linux: on Linux it finds FS25's folder inside the Steam Proton prefix (native or Flatpak Steam), and on macOS it handles Steam, GIANTS and Mac App Store installs. This hasn't been tested on many real machines yet, so expect rough edges — and reports are very welcome.</blockquote>
 
 </section>
 
@@ -188,9 +188,9 @@
 
 <h3>Projection at launch</h3>
 <p>Silo keeps the flat <code>mods/</code> folder holding exactly your active set by <strong>projecting</strong> the archived originals back into it — <code>.zip</code> mods as same-volume <strong>hardlinks</strong>, unpacked mod folders as directory symlinks/junctions. Hardlinks use no extra disk and need no admin rights or Developer Mode. (If your library archive is on another drive, Silo uses symlinks or copies instead — see <a href="#library-archive">Active mods across drives</a>.) When you hit <strong>▶ Launch</strong>, the game reads that folder and loads precisely the mods you marked active.</p>
-<p>Where links aren't permitted — most commonly a <strong>cloud-synced</strong> <code>Documents</code> folder (OneDrive, Google Drive, Proton Drive), which blocks hardlinks — Silo falls back to <strong>copies</strong>. It works exactly the same, but each active mod's bytes are duplicated into the live folder, so activating a large set is slower and uses more disk. Silo records what it projected so it can still tell its own copy from a build you swapped in, and it warns you once when it detects a cloud folder. To get instant, no-duplication hardlink projection back, exclude the FS25 folder from your cloud sync.</p>
+<p>Where links aren't permitted — most commonly a <strong>cloud-synced</strong> <code>Documents</code> folder (OneDrive, Google Drive, Proton Drive), which blocks hardlinks — Silo falls back to <strong>copies</strong>. It works exactly the same, but each active mod's bytes are duplicated into the live folder, so activating a large set is slower and uses more disk. Silo records what it projected so it can still tell its own copy from a build you swapped in, and it warns you once when it detects a cloud folder. To get fast, no-duplication hardlink projection back, exclude the FS25 folder from your cloud sync.</p>
 
-<blockquote class="note"><strong>It's reversible, and it never destroys your originals.</strong> Moves are instant same-volume renames (or a safe copy-then-swap across volumes) — the original is never lost mid-operation. <strong>Restore vanilla layout</strong> (Settings, shown once anything is organized) undoes everything: it drops Silo's projections, moves the archived files back into a plain flat <code>mods/</code>, and removes only empty archive folders. It never deletes a file it doesn't recognize, never removes the only copy of a mod, and won't touch a file you swapped in yourself — you're always one step from stock.</blockquote>
+<blockquote class="note"><strong>It never destroys your originals.</strong> Moves are instant same-volume renames (or a safe copy-then-swap across volumes) — the original is never lost mid-operation. <strong>Restore vanilla layout</strong> (Settings, shown once anything is organized) puts your mods folder back: it drops Silo's projections, moves the archived files back into a plain flat <code>mods/</code>, and removes only empty archive folders. It never deletes a file it doesn't recognize, never removes the only copy of a mod, and won't touch a file you swapped in yourself — you're always one step from stock.</blockquote>
 </section>
 
 <section id="mods-folder"><h2 id="mods-folder-h">Choosing your mods folder</h2>
@@ -383,7 +383,7 @@
 <blockquote class="note">Installing only adds a new <code>.zip</code> to your mods folder; it never edits or removes anything you already have. To undo an install, remove that mod from your library like any other.</blockquote>
 
 <h3>ModHub is index-only</h3>
-<p>Silo can list ModHub mods but cannot download them for you — its CDN requires the download to go through the ModHub website. The button reads <strong>Open page ↗</strong> and takes you to the source. Grab the <code>.zip</code> there, drop it in your mods folder, and Silo files a new mod automatically on the next scan. If you're <em>updating</em> a mod you already manage — dropping the newer <code>.zip</code> over Silo's copy — Silo notices the newer build and offers to adopt it; see <a href="#updates">Applying an update</a>.</p>
+<p>Silo can list ModHub mods but doesn't download them for you. ModHub mods download from GIANTS' website, so the button reads <strong>Open page ↗</strong> and takes you to the source. Grab the <code>.zip</code> there, drop it in your mods folder, and Silo files a new mod automatically on the next scan. If you're <em>updating</em> a mod you already manage — dropping the newer <code>.zip</code> over Silo's copy — Silo notices the newer build and offers to adopt it; see <a href="#updates">Applying an update</a>.</p>
 
 <h3>The detail drawer</h3>
 <p>Click <strong>anywhere on a card</strong> to open a side drawer with the cover image, author, version, category, tech name, rating and downloads, and the full <em>Available from</em> source list. For a GitHub source it also shows live repo stats (stars, forks, watchers, issues) and, once you connect GitHub, Star and Watch buttons. Use <em>Read more →</em> to expand the full description.</p>
@@ -395,7 +395,7 @@
 
 <section id="updates"><h2 id="updates-h">Keeping mods updated</h2>
 
-<p>Silo checks your whole mod library against a canonical catalog and tells you which mods have a newer version available. It is designed to avoid a common false alarm: a mod you installed from ModHub showing as "outdated" only because a different version exists on GitHub (or the reverse). Silo compares against the <strong>latest across all known sources</strong>, so you see a real update, not a source mismatch.</p>
+<p>Silo checks your whole mod library against a canonical catalog and tells you which mods have a newer version available. It is designed to avoid a common false alarm: a mod you installed from ModHub showing as "outdated" only because a different version exists on GitHub (or the reverse). Silo compares against the <strong>latest across ModHub and GitHub</strong>, so you see a real update, not a source mismatch.</p>
 
 <h3>Running the library-wide check</h3>
 
@@ -438,7 +438,7 @@
 <section id="provenance"><h2 id="provenance-h">Mod integrity &amp; provenance</h2>
 <p>The integrity check answers one question: <strong>is this the mod its author published, or has it been altered since?</strong> It hashes the archive you have installed and compares it to the canonical build that SiloAPI computed from the mod's own source. Reach for it when a mod came from somewhere other than its official page, when an update behaves unexpectedly, or when you simply want to confirm that what's on disk is exactly what shipped.</p>
 
-<blockquote class="note">This is provenance, not antivirus. A <strong>Verified</strong> result proves origin and integrity — that the files match the published build. It does not judge intent, and it cannot tell you whether a mod is <em>safe</em>. The check only reads and hashes files; it never writes, moves, or modifies anything, so running it is always safe to do.</blockquote>
+<blockquote class="note">This is provenance, not antivirus. A <strong>Verified</strong> result confirms origin and integrity — that the files match the published build. It does not judge intent, and it cannot tell you whether a mod is <em>safe</em>. The check only reads and hashes files; it never writes, moves, or modifies anything, so running it is always safe to do.</blockquote>
 
 <h3>Running the check</h3>
 <p>Open a mod's <strong>detail drawer</strong> and find the <strong>Integrity</strong> section, then click <strong>Verify integrity</strong>. Silo hashes the archive on a background thread (you'll see <em>Hashing &amp; comparing…</em>) and shows one of three verdicts. Only packaged mods can be checked — for an unpacked folder you'll see <em>Folder mods can't be verified — there's no archive to hash.</em></p>
@@ -461,7 +461,7 @@
 
 <h3>What Silo checks for</h3>
 <ul>
-<li><strong>Duplicate active map</strong> (critical) — more than one map enabled at once. FS loads a second map's scripts even when it isn't the one you're playing, which typically crashes on load. Keep exactly one map active.</li>
+<li><strong>Duplicate active map</strong> (critical) — more than one map enabled at once. FS loads a second map's scripts even when it isn't the one you're playing, which can cause errors when the game loads. Keep exactly one map active.</li>
 <li><strong>uniqueType collisions</strong> (critical) — two mods share a <code>uniqueType</code>. FS loads only one, so the others never take effect.</li>
 <li><strong>Specialization / type / registration collisions</strong> (critical) — multiple mods register the same specialization, vehicle type, placeable type, input action, brand, or store category. Only one registration wins; the others may break.</li>
 <li><strong>Script collisions</strong> (warning) — two mods inject a global Lua script with the same filename; they can override each other by load order. If the file is byte-identical in each mod, Silo downgrades it to <em>info</em> — it's a shared library, not a real fight.</li>
@@ -479,14 +479,14 @@
 <li>In the library, click the status toggle on the other mod's row to <strong>park</strong> it (an active mod reads <code>● Active — click to park</code>).</li>
 <li>Silo re-checks the active set automatically after any change, so the count updates on its own — no rescan needed.</li>
 </ol>
-<blockquote class="note">Parking is fully reversible and touches no files. It only removes the mod from the set Silo will project into the game's <code>mods/</code> folder at launch; the mod stays in your library, and one click reactivates it.</blockquote>
+<blockquote class="note">Parking never deletes a mod. It only removes the mod from the set Silo will project into the game's <code>mods/</code> folder at launch; the mod stays in your library, and one click reactivates it.</blockquote>
 </section>
 
 <section id="crash-triage"><h2 id="crash-triage-h">Crash &amp; log triage</h2>
 
-<p>When Farming Simulator 25 crashes or misbehaves, it leaves an explanation in a file called <code>log.txt</code> — but that file is thousands of lines of engine chatter, and most of it is harmless. Silo's <strong>diagnose</strong> feature reads that log for you, tells you whether the last run actually crashed, and names the specific mod that logged errors right before it stopped. It separates the real breakage from the cosmetic noise that scares people for no reason.</p>
+<p>When Farming Simulator 25 crashes or misbehaves, it leaves an explanation in a file called <code>log.txt</code> — but that file is thousands of lines of engine chatter, and most of it is harmless. Silo's <strong>diagnose</strong> feature reads that log for you, tells you whether the last run actually crashed, and ranks the mods that logged errors right before it stopped, so you can see the likely culprit. It separates the real breakage from the cosmetic noise that scares people for no reason.</p>
 
-<p>No FS25 tool does this on its own. The usual community advice is to manually disable half your mods and relaunch over and over. Silo starts by simply reading the name the engine already wrote next to each error.</p>
+<p>The usual community advice is to manually disable half your mods and relaunch over and over. Silo starts by simply reading the name the engine already wrote next to each error.</p>
 
 <h3>When to use it</h3>
 <ul>
@@ -589,7 +589,7 @@
 </section>
 
 <section id="multiplayer"><h2 id="multiplayer-h">Multiplayer mod-set sync</h2>
-<p>Everyone in an FS25 session needs the same mods, at the same versions, with the same files. A mismatch is the number-one reason a join fails, and the game's error rarely tells you <em>which</em> mod is wrong. Silo turns that guessing game into a checklist: the host publishes a hashed list of their active set, and each joiner checks their own set against it.</p>
+<p>Everyone in an FS25 session needs the same mods, at the same versions, with the same files. A mismatch is a common reason a join fails, and it can take a while to work out <em>which</em> mod is wrong. Silo turns that guessing game into a checklist: the host publishes a hashed list of their active set, and each joiner checks their own set against it.</p>
 <p>Open it from the <strong>Multiplayer</strong> button in the top bar. The panel has two sides: <strong>Host — share your set</strong> and <strong>Joiner — check you match</strong>. Both act only on your current <em>active set</em> (the mods Silo has switched on).</p>
 
 <blockquote class="note">This whole feature is read-only for your mods. It hashes files and writes one manifest file where you choose. It never changes your active set, your mods, or your game files — you make any fixes yourself.</blockquote>
@@ -635,7 +635,7 @@
 </section>
 
 <section id="bindings"><h2 id="bindings-h">Bindings map</h2>
-<p>The <strong>Bindings map</strong> shows the complete control layout that FS25's in-game help never fully lists: every action paired with the key, mouse button, or gamepad button that triggers it. Silo reads this straight from the game's own <code>inputBinding.xml</code> and lays it out so you can scan it in one place.</p>
+<p>The <strong>Bindings map</strong> shows the complete control layout in one place: every action paired with the key, mouse button, or gamepad button that triggers it. Silo reads this straight from the game's own <code>inputBinding.xml</code> and lays it out so you can scan it in one place.</p>
 
 <h3>When to reach for it</h3>
 <p>Open it when a control feels double-booked — you press a key and two things happen, or a mod's action seems to collide with a base-game one. It is the fastest way to answer "what is <em>everything</em> this key does?" without hunting through the settings menus one action at a time.</p>
@@ -666,7 +666,7 @@
 
 <section id="settings-accounts"><h2 id="settings-accounts-h">Settings & accounts</h2>
 
-<p>Open the <strong>Settings</strong> panel from the gear icon (<code>⚙</code>) in the top bar. It slides out on the right and covers appearance, your detected folders, account connections, diagnostics, and library layout. Nothing here changes your game files until you press a specific button, and the file-touching actions are reversible.</p>
+<p>Open the <strong>Settings</strong> panel from the gear icon (<code>⚙</code>) in the top bar. It slides out on the right and covers appearance, your detected folders, account connections, diagnostics, and library layout. Nothing here changes your game files until you press a specific button, and the library-layout actions are previewed or confirmed first.</p>
 
 <h3>Appearance</h3>
 <p>Under <strong>Appearance</strong>, pick <strong>system</strong>, <strong>light</strong>, or <strong>dark</strong>. <em>System</em> follows your OS theme; the other two force that look. Your choice is saved and reapplied on the next launch.</p>
@@ -683,9 +683,9 @@
 <h3>Library layout &amp; maintenance</h3>
 <p>Under <strong>Library layout</strong>:</p>
 <ul>
-<li><strong>Organize</strong> sorts your <code>.zip</code> mods into <code>mods/archive/&lt;Category&gt;/</code> subfolders (which the game ignores), or into your library archive if you moved it, and projects the active set back via hardlinks — no duplication, fully reversible.</li>
+<li><strong>Organize</strong> sorts your <code>.zip</code> mods into <code>mods/archive/&lt;Category&gt;/</code> subfolders (which the game ignores), or into your library archive if you moved it, and projects the active set back via hardlinks — no duplication, with a preview first.</li>
 <li><strong>↻ Rebuild categories</strong> re-scans every mod from scratch. Use it after a Silo update improves categorization so existing mods pick up the better categories.</li>
-<li><strong>⛓ Optimize links</strong> appears when mods are organized on a normal (non-cloud) drive. It collapses any active mod that ended up projected as a full copy back into a hardlink — reclaiming the duplicated disk and making activate/deactivate instant. It only touches files byte-identical to the archived copy, never a build you swapped in. On a cloud-synced folder this is replaced by a short note explaining that copies are used because the drive can't do hardlinks. If your library archive is on another drive and Windows can't link across drives (no Developer Mode), it says so and changes nothing.</li>
+<li><strong>⛓ Optimize links</strong> appears when mods are organized on a normal (non-cloud) drive. It collapses any active mod that ended up projected as a full copy back into a hardlink — reclaiming the duplicated disk and making activate/deactivate faster. It only touches files byte-identical to the archived copy, never a build you swapped in. On a cloud-synced folder this is replaced by a short note explaining that copies are used because the drive can't do hardlinks. If your library archive is on another drive and Windows can't link across drives (no Developer Mode), it says so and changes nothing.</li>
 <li><strong>Restore vanilla layout</strong> appears only when mods are organized. It moves every mod back out of <code>archive/</code> and removes all links, returning you to a plain flat <code>mods/</code> folder. You'll confirm first.</li>
 </ul>
 <blockquote class="note">Restore vanilla does <strong>not</strong> delete any mods — it only undoes Silo's organization. If some files can't be moved, Silo reports the errors rather than leaving things half-done.</blockquote>
@@ -718,7 +718,7 @@
 <p>Since most mods are zips, most people never hit an elevation prompt. The one exception is a <a href="#library-archive">library archive on another drive</a>: hardlinks can't cross drives, so Silo would need file symlinks, which on Windows require Developer Mode. Without it, active mods are copied instead — that works, it just uses more disk.</p>
 
 <h3>Is my library safe? Can I undo this?</h3>
-<p>Yes. Projection is fully reversible. Open <strong>Settings</strong> and use <strong>Restore vanilla layout</strong> to move every mod back into a plain flat <code>mods/</code> folder and clear Silo's bookkeeping.</p>
+<p>Yes. Every move is previewed first. Open <strong>Settings</strong> and use <strong>Restore vanilla layout</strong> to move every mod back into a plain flat <code>mods/</code> folder and clear Silo's bookkeeping.</p>
 <blockquote class="note">Silo never deletes a file it doesn't recognize and never removes the only copy of a mod. If you swap your own build into the mods folder, Silo detects that it isn't the file it projected and leaves it untouched. Config edits are backed up to a <code>.bak</code> first.</blockquote>
 
 <h3>Where does Silo store its data?</h3>

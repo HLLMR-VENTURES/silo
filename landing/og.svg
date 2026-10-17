@@ -36,13 +36,14 @@
   </g>
 
   <!-- headline -->
-  <text x="90" y="298" font-family="Georgia, 'DejaVu Serif', serif" font-weight="700" font-size="66" fill="#ffffff">The mod manager</text>
-  <text x="90" y="378" font-family="Georgia, 'DejaVu Serif', serif" font-weight="700" font-size="66" fill="#ffffff">FS25 <tspan fill="#f2d26b" font-style="italic">should</tspan> have shipped with.</text>
+  <text x="90" y="298" font-family="Georgia, 'DejaVu Serif', serif" font-weight="700" font-size="66" fill="#ffffff">More <tspan fill="#f2d26b" font-style="italic">farming.</tspan></text>
+  <text x="90" y="378" font-family="Georgia, 'DejaVu Serif', serif" font-weight="700" font-size="66" fill="#ffffff">Less fixing.</text>
 
   <!-- subhead -->
-  <text x="92" y="448" font-family="'DejaVu Sans', sans-serif" font-size="26" fill="#d7e0c8">Name the mod that crashed you. One catalog: ModHub, GitHub.</text>
+  <text x="92" y="444" font-family="'DejaVu Sans', sans-serif" font-size="26" fill="#d7e0c8">Silo points to the likely culprit when you crash,</text>
+  <text x="92" y="480" font-family="'DejaVu Sans', sans-serif" font-size="26" fill="#d7e0c8">and flags conflicts before launch.</text>
 
   <!-- footer strip -->
   <text x="92" y="556" font-family="'DejaVu Sans Mono', monospace" font-size="24" fill="#9cc06e">silo.hllmr.com</text>
-  <text x="360" y="556" font-family="'DejaVu Sans', sans-serif" font-size="24" fill="#a8b89a">Open source · Windows tested · macOS &amp; Linux experimental</text>
+  <text x="360" y="556" font-family="'DejaVu Sans', sans-serif" font-size="24" fill="#a8b89a">Free and open source · Windows · macOS and Linux preview</text>
 </svg>
