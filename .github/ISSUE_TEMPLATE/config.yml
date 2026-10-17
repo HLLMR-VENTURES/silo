@@ -3,6 +3,9 @@ contact_links:
   - name: Ask a question or get help
     url: https://github.com/HLLMR/silo/discussions/categories/help
     about: Not sure it's a bug? Ask in Discussions first — you'll usually get an answer faster.
+  - name: Chat on Discord
+    url: https://discord.gg/NpxcYdGHrW
+    about: Quick questions, crash help and release news from other Silo players.
   - name: Suggest an idea
     url: https://github.com/HLLMR/silo/discussions/categories/ideas
     about: Feature ideas are discussed and voted on before they become issues.
