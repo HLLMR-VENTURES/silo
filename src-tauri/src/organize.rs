@@ -837,15 +837,25 @@ fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Project `src` into the flat root at `link`. Files → hardlink (no privilege, same volume, no
 /// disk duplication); if that fails, a symlink only when the archive is on **another drive**
 /// and symlinks work there (`policy`, decided lazily); otherwise a copy. A same-volume folder
-/// that rejects hardlinks (cloud-synced) keeps copies. Dirs → OS symlink, falling back to copy.
-/// Never overwrites an existing entry at `link`.
+/// that rejects hardlinks (cloud-synced) keeps copies. Dirs → OS symlink, falling back to copy;
+/// inside a Mac App Store container always a marked copy (the sandboxed game can't follow a
+/// link out). Never overwrites an existing entry at `link`, and never links to a missing `src`
+/// (a dangling link would look active but load nothing, and cleanup couldn't prove it ours).
 pub(crate) fn make_link(
     src: &Path,
     link: &Path,
     kind: &str,
     policy: &mut LinkPolicy,
 ) -> std::io::Result<()> {
+    std::fs::metadata(src)?;
     if kind == "dir" {
+        if policy.mods_in_container() {
+            if link.symlink_metadata().is_ok() {
+                // Copying into a folder that's already there would merge into it.
+                return Err(std::io::ErrorKind::AlreadyExists.into());
+            }
+            return copy_dir_projection(src, link);
+        }
         #[cfg(unix)]
         let symlink = |s: &Path, l: &Path| std::os::unix::fs::symlink(s, l);
         #[cfg(windows)]
@@ -886,6 +896,12 @@ impl<'a> LinkPolicy<'a> {
             !same_volume(&layout.mods, &layout.archive) && symlinks_usable(layout)
         })
     }
+
+    /// The mods folder is inside a Mac App Store sandbox, so the game can't follow any link
+    /// out of it — folder mods must be projected as marked copies.
+    pub(crate) fn mods_in_container(&self) -> bool {
+        in_mac_app_container(&self.layout.mods)
+    }
 }
 
 /// Symlinks from the mods folder into the archive can be created and the game will follow them.
@@ -893,9 +909,12 @@ fn symlinks_usable(layout: &Layout) -> bool {
     !in_mac_app_container(&layout.mods) && supports_symlinks(layout)
 }
 
-/// The Mac App Store FS25 is sandboxed: it can't follow a link out of its container.
+/// The Mac App Store FS25 is sandboxed: it can't follow a link out of its container. Compared
+/// case-insensitively (APFS is case-insensitive by default).
 pub(crate) fn in_mac_app_container(mods: &Path) -> bool {
-    mods.to_string_lossy().contains("/Library/Containers/")
+    mods.to_string_lossy()
+        .to_lowercase()
+        .contains("/library/containers/")
 }
 
 /// Create a file symlink at `link` pointing to `src` (Windows needs Developer Mode or admin).
@@ -913,7 +932,9 @@ pub(crate) fn symlink_file(src: &Path, link: &Path) -> std::io::Result<()> {
 /// Zip projection: hardlink (same drive, no duplication) → symlink (when `allow_symlink()`
 /// says so; asked only after the hardlink failed) → byte copy. Never overwrites: an
 /// `AlreadyExists` from either link strategy is returned as-is, and the copy only ever creates
-/// a new file. The strategies are injected so the order is unit-testable.
+/// a new file. Never dangles: a missing `src` (the hardlink's `NotFound`, or no file there
+/// before a symlink) is an error, since a symlink to nothing would still be created. The
+/// strategies are injected so the order is unit-testable.
 fn link_zip(
     src: &Path,
     link: &Path,
@@ -921,11 +942,17 @@ fn link_zip(
     hard: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
     soft: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    use std::io::ErrorKind::AlreadyExists;
+    use std::io::ErrorKind::{AlreadyExists, NotFound};
     match hard(src, link) {
         Ok(()) => return Ok(()),
-        Err(e) if e.kind() == AlreadyExists => return Err(e),
+        Err(e) if matches!(e.kind(), AlreadyExists | NotFound) => return Err(e),
         Err(_) => {}
+    }
+    if !std::fs::metadata(src)?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the archived mod is not a file",
+        ));
     }
     if allow_symlink() {
         match soft(src, link) {
@@ -2224,9 +2251,113 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_source_never_becomes_a_dangling_link() {
+        let base = std::env::temp_dir().join(format!("silo_zdangle_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let missing = base.join("missing.zip");
+
+        // Real hardlink (fails NotFound); a "symlink" that would succeed regardless of the
+        // target, as a real one does on Linux/macOS. The policy allows symlinks.
+        let l1 = base.join("l1.zip");
+        let e = link_zip(
+            &missing,
+            &l1,
+            || true,
+            |s, l| std::fs::hard_link(s, l),
+            |_, l| std::fs::write(l, b""),
+        )
+        .unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+        assert!(l1.symlink_metadata().is_err(), "nothing at the link path");
+
+        // Even if the hardlink failed for another reason, no symlink is made to a missing file.
+        let l2 = base.join("l2.zip");
+        assert!(link_zip(
+            &missing,
+            &l2,
+            || true,
+            other_err,
+            |_, l| std::fs::write(l, b"")
+        )
+        .is_err());
+        assert!(l2.symlink_metadata().is_err(), "nothing at the link path");
+
+        // make_link refuses a missing source up front, for folder mods too.
+        let layout = Layout::default_for(&base);
+        for (name, kind) in [("l3.zip", "zip"), ("l3dir", "dir")] {
+            let link = base.join(name);
+            let src = base.join(format!("missing_{name}"));
+            assert!(make_link(&src, &link, kind, &mut LinkPolicy::new(&layout)).is_err());
+            assert!(link.symlink_metadata().is_err(), "nothing at {name}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn folder_mods_in_a_mac_app_container_are_copied_not_linked() {
+        let container = Layout {
+            mods: PathBuf::from(
+                "/Users/me/Library/Containers/com.astragon.farmingsim25/Data/Library/Application Support/FarmingSimulator2025/mods",
+            ),
+            archive: PathBuf::from("/Volumes/HDD/silo"),
+        };
+        assert!(LinkPolicy::new(&container).mods_in_container());
+        let plain = Layout::default_for(Path::new(
+            "/Users/me/Library/Application Support/FarmingSimulator2025/mods",
+        ));
+        assert!(!LinkPolicy::new(&plain).mods_in_container());
+    }
+
+    /// End to end on a real (fake) container path: the dir projection is a marked copy.
+    #[cfg(unix)]
+    #[test]
+    fn make_link_copies_a_folder_mod_inside_a_container() {
+        let base = std::env::temp_dir().join(format!("silo_container_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("Library/Containers/com.example.fs25/Data/mods");
+        let archive = base.join("hdd");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(archive.join("Tools/FS25_Dir")).unwrap();
+        std::fs::write(archive.join("Tools/FS25_Dir/modDesc.xml"), b"<modDesc/>").unwrap();
+        let layout = Layout {
+            mods: mods.clone(),
+            archive: archive.clone(),
+        };
+        let link = mods.join("FS25_Dir");
+        make_link(
+            &archive.join("Tools/FS25_Dir"),
+            &link,
+            "dir",
+            &mut LinkPolicy::new(&layout),
+        )
+        .unwrap();
+        let meta = link.symlink_metadata().unwrap();
+        assert!(
+            meta.is_dir() && !meta.file_type().is_symlink(),
+            "a real folder"
+        );
+        assert!(link.join(SILO_MARKER).is_file(), "marked as Silo's copy");
+        assert!(link.join("modDesc.xml").is_file());
+        // Never merges into an existing folder.
+        assert!(make_link(
+            &archive.join("Tools/FS25_Dir"),
+            &link,
+            "dir",
+            &mut LinkPolicy::new(&layout)
+        )
+        .is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn mac_app_store_containers_are_detected() {
         assert!(in_mac_app_container(Path::new(
             "/Users/me/Library/Containers/com.astragon.farmingsim25/Data/Library/Application Support/FarmingSimulator2025/mods"
+        )));
+        // APFS is case-insensitive by default.
+        assert!(in_mac_app_container(Path::new(
+            "/Users/me/library/CONTAINERS/com.astragon.farmingsim25/Data/mods"
         )));
         assert!(!in_mac_app_container(Path::new(
             "/Users/me/Library/Application Support/FarmingSimulator2025/mods"
