@@ -34,7 +34,7 @@
           repoInput = `${g.owner}/${g.repo}`;
           suggested = true;
         }
-      });
+      }).catch(() => {}); // only a suggestion: no guess is fine
     }
   });
 
