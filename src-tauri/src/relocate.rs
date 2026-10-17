@@ -820,20 +820,36 @@ pub fn collisions(new_archive: &Path, rows: &[OrganizedRow]) -> Vec<String> {
             }
         }
     }
+    // "<folder> already has a different file named X." / "… a folder named X — another copy
+    // of <tech>." (plain language, the path kept so the user can find it).
+    let say = |p: &Path, exact: bool, tech: &str| {
+        let dir = p
+            .parent()
+            .map(|d| d.display().to_string())
+            .unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let what = if p.is_dir() { "folder" } else { "file" };
+        if exact {
+            format!("{dir} already has a different {what} named {name}.")
+        } else {
+            format!("{dir} already has a {what} named {name} — another copy of {tech}.")
+        }
+    };
     rows.iter()
         .filter_map(|r| {
             let exact = organize::archive_path(new_archive, &r.category, &r.file_name);
-            let hit = if exists(&exact) {
-                Some(exact)
-            } else {
-                let file = r.file_name.to_lowercase();
-                let tech = r.tech_name.to_lowercase();
-                present
-                    .iter()
-                    .find(|(n, _)| *n == file || n.strip_suffix(".zip").unwrap_or(n) == tech)
-                    .map(|(_, p)| p.clone())
-            };
-            hit.map(|p| format!("{}: {} already exists", r.tech_name, p.display()))
+            if exists(&exact) {
+                return Some(say(&exact, true, &r.tech_name));
+            }
+            let file = r.file_name.to_lowercase();
+            let tech = r.tech_name.to_lowercase();
+            present
+                .iter()
+                .find(|(n, _)| *n == file || n.strip_suffix(".zip").unwrap_or(n) == tech)
+                .map(|(_, p)| say(p, false, &r.tech_name))
         })
         .collect()
 }
@@ -2171,7 +2187,16 @@ mod tests {
         ];
         let hits = collisions(&f.new, &rows);
         assert_eq!(hits.len(), 2, "{hits:?}");
-        assert!(hits[0].starts_with("FS25_X:") && hits[1].starts_with("FS25_Y:"));
+        let tools = f.new.join("Tools").display().to_string();
+        let maps = f.new.join("Maps").display().to_string();
+        assert_eq!(
+            hits[0],
+            format!("{tools} already has a different file named FS25_X.zip.")
+        );
+        assert_eq!(
+            hits[1],
+            format!("{maps} already has a folder named FS25_Y — another copy of FS25_Y.")
+        );
         let _ = std::fs::remove_dir_all(&f.base);
     }
 

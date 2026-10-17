@@ -1547,6 +1547,10 @@
   const unDot = (s: string) => s.replace(/[.\s]+$/, "");
   /** End a message with exactly one period. */
   const sentence = (s: string) => unDot(s) + ".";
+  /** "1 mod" / "N mods". */
+  const modsCount = (n: number) => (n === 1 ? "1 mod" : `${n} mods`);
+  /** Several problems as separate sentences, one per line. */
+  const problemLines = (ps: string[]) => ps.map(sentence).join("\n");
   /** "a, b, c +N more" */
   const capList = (xs: string[], n = 3, sep = ", ") =>
     xs.slice(0, n).join(sep) + (xs.length > n ? ` +${xs.length - n} more` : "");
@@ -1780,7 +1784,7 @@
         // Nothing to move and the folder clears every path check: offer to use it as the
         // library as it is.
         if (pf.canRepoint) await repointArchive(path, "empty", pf.problems[0]);
-        else errorMsg = pf.problems.join(" ");
+        else errorMsg = problemLines(pf.problems);
         return;
       }
       let msg =
@@ -1792,7 +1796,7 @@
       if (!pf.sameDrive && !pf.symlinksAvailable)
         msg += "\n\nTurn on Windows Developer Mode to link active mods instead of copying them.";
       if (pf.looseMods > 0)
-        msg += `\n\nThat folder already holds ${pf.looseMods} loose mod(s) — Silo will offer to file them in afterwards.`;
+        msg += `\n\nThat folder already holds ${pf.looseMods === 1 ? "1 loose mod" : `${pf.looseMods} loose mods`} — Silo will offer to file ${pf.looseMods === 1 ? "it" : "them"} in afterwards.`;
       msg += "\n\nClose Farming Simulator 25 first. You can pause the move to play and resume later.";
       if (!(await confirmDialog(msg, { okLabel: "Move library", cancelLabel: "Cancel" }))) return;
       settingsOpen = false;
@@ -1879,8 +1883,9 @@
   async function offerAdopt() {
     const pv = await archiveAdoptPreview().catch(() => null);
     if (!pv) return;
-    const dupNote = pv.duplicates.length
-      ? `${pv.duplicates.length} mod(s) in that folder are already in your library and were left untouched: ${capList(pv.duplicates)}.`
+    const n = pv.duplicates.length;
+    const dupNote = n
+      ? `${modsCount(n)} in that folder ${n === 1 ? "is" : "are"} already in your library and ${n === 1 ? "was" : "were"} left untouched: ${capList(pv.duplicates)}.`
       : null;
     if (pv.inputs.length === 0) {
       if (dupNote) infoMsg = dupNote;
@@ -2466,7 +2471,7 @@
           {/if}
           Launch is blocked until it pauses or finishes.
         {:else if archive?.moving?.errors.length}
-          <b>{archive.moving.errors.length} mod(s) couldn't be moved:</b>
+          <b>{modsCount(archive.moving.errors.length)} couldn't be moved:</b>
           {sentence(capList(archive.moving.errors.map(unDot), 3, "; "))}
           {archive.moving.pauseReason ? `${sentence(archive.moving.pauseReason)} ` : ""}The move is
           paused — Retry tries them again{moveCancelling ? "." : ", or Cancel moves everything back."}
@@ -2779,6 +2784,8 @@
     background: color-mix(in srgb, var(--danger) 12%, var(--surface));
     color: var(--danger);
     font-size: 13px;
+    /* Several problems arrive one per line. */
+    white-space: pre-line;
   }
   .cloud-notice {
     display: flex;

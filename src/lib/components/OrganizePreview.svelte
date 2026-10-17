@@ -61,7 +61,7 @@
       <p class="muted">Nothing to organize — every loose mod is already filed.</p>
     {:else if adopt}
       <p class="lead">
-        Your library archive{#if adopt.path} (<code>{adopt.path}</code>){/if} already holds loose
+        Your library archive{#if adopt.path}{" "}(<code>{adopt.path}</code>){/if} already holds loose
         mod zips. Silo can file them into its category folders there so they show up in your
         library (parked — activate them as usual). Nothing is overwritten, and nothing has moved yet.
       </p>

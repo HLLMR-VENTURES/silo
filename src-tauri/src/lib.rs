@@ -1867,7 +1867,7 @@ fn start_move(
         }
         let target = target_problems(ctx.conn, layout, &new, app_data.as_deref());
         if !target.is_empty() {
-            return Err(target.join(" "));
+            return Err(target.join("\n"));
         }
         if create {
             std::fs::create_dir_all(&new)
@@ -1876,7 +1876,7 @@ fn start_move(
         modsroot::validate_folder(&new)?;
         let check = check_move(ctx.conn, layout, ctx.mods_key, &new, Vec::new());
         if !check.problems.is_empty() {
-            return Err(check.problems.join(" "));
+            return Err(check.problems.join("\n"));
         }
         eprintln!(
             "[Silo] moving the library archive {} -> {}",
@@ -2114,7 +2114,7 @@ async fn archive_repoint(app: tauri::AppHandle, path: Option<String>) -> Result<
         };
         let problems = fence_problems(&layout, &new, &fences(&conn, &layout, app_data.as_deref()));
         if !problems.is_empty() {
-            return Err(problems.join(" "));
+            return Err(problems.join("\n"));
         }
         // A chosen folder must be usable now; the default is created when first filed into.
         if path.is_some() {
