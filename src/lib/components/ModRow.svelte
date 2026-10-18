@@ -199,11 +199,11 @@
     <button
       class="act warn"
       class:on={curation.broken}
-      use:tooltip={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
-      aria-label={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
+      use:tooltip={curation.broken ? "Remove flag" : "Flag"}
+      aria-label={curation.broken ? "Remove flag" : "Flag"}
       onclick={() => onToggle("broken")}
     >
-      <Icon name="problem" />
+      <Icon name="flagged" />
     </button>
   </div>
 

@@ -1408,8 +1408,8 @@
         onClick: () => toggleCuration(mod.techName, "hidden"),
       },
       {
-        label: c.broken ? "Clear broken flag" : "Mark broken",
-        icon: "problem",
+        label: c.broken ? "Remove flag" : "Flag",
+        icon: "flagged",
         danger: !c.broken,
         onClick: () => toggleCuration(mod.techName, "broken"),
       },

@@ -225,13 +225,30 @@
       <Icon name={active ? "dot" : "circle"} size={13} />
       {active ? "Active" : "Parked"}
     </button>
-    <button class="d-act" class:on={curation.favorite} onclick={() => onToggle("favorite")}>
+    <button
+      class="d-act"
+      class:on={curation.favorite}
+      aria-pressed={curation.favorite}
+      onclick={() => onToggle("favorite")}
+    >
       <Icon name="favorite" size={13} filled={curation.favorite} /> Favorite
     </button>
-    <button class="d-act" class:on={curation.broken} onclick={() => onToggle("broken")}>
-      <Icon name="problem" size={13} /> Broken
+    <!-- One name for the flag everywhere: "Flagged", like the Library filter. -->
+    <button
+      class="d-act"
+      class:on={curation.broken}
+      aria-pressed={curation.broken}
+      onclick={() => onToggle("broken")}
+    >
+      <Icon name="flagged" size={13} />
+      {curation.broken ? "Flagged" : "Flag"}
     </button>
-    <button class="d-act" class:on={curation.hidden} onclick={() => onToggle("hidden")}>
+    <button
+      class="d-act"
+      class:on={curation.hidden}
+      aria-pressed={curation.hidden}
+      onclick={() => onToggle("hidden")}
+    >
       <Icon name="hidden" size={13} /> Hidden
     </button>
     {#if hasSettings}

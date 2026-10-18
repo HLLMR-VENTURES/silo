@@ -74,7 +74,7 @@ shipping; macOS and Linux are experimental platforms, verified by testers as the
 
 ## 2. Curation & detail drawer  _(auto-verified: curation/tags/rating store)_
 - [x] `[app]` Click a mod row → detail drawer opens with icon, metadata, deps (with present/missing status).
-- [x] `[app]` Favorite / Broken / Hidden toggles persist across a rescan; star rating persists; tags add/remove & filter; notes save on blur.
+- [x] `[app]` Favorite / Flag / Hidden toggles persist across a rescan; star rating persists; tags add/remove & filter; notes save on blur.
 - [ ] `[app]` **Integrity verification**: in a mod's detail drawer, **Verify integrity** returns one of **Verified** (a GitHub-source mod SiloAPI has hashed, e.g. `FS25_CabView`), **Modified** (edit a file inside a verified mod's zip → expect the changed file listed), or **Unverified** (a ModHub-only-latest or unknown mod — correct, not a bug). Folder mods show "can't be verified". No red console errors.
 - [ ] `[app]` **Last run** section shows this mod's log health (see §8) — errors/cosmetic/clean.
 - [ ] `[net]` **Catalog** section shows latest version / "update available (source)" / "not in catalog".
@@ -180,7 +180,7 @@ start below it).
 
 **Library detail drawer (click a mod row) — every sub-section:**
 - [ ] `[app]` Header (icon/title/author/version/tech name) + **✕ closes** (Esc too); **drag the left edge to resize** (persists); the drawer docks beside the list, which stays clickable (clicking another mod switches the drawer).
-- [ ] `[app]` Action buttons all respond: **Active/Parked**, **Favorite**, **Broken**, **Hidden**, **Reveal**, and **Settings** (only when the mod has settings).
+- [ ] `[app]` Action buttons all respond: **Active/Parked**, **Favorite**, **Flag** (reads **Flagged** when on), **Hidden**, **Reveal**, and **Settings** (only when the mod has settings).
 - [ ] `[app]` **Category editor**: change the dropdown/subcategory → **Save** enables; **Reset to auto** shows for an overridden mod.
 - [ ] `[app]` **Last run** + **Catalog** status render (the `ModStatus` component).
 - [ ] `[app]` **Rating / tags / notes** (the `ModCuration` component): set a star, add + remove a tag, type a note (saves on blur).
