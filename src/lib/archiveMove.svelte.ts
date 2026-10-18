@@ -9,11 +9,11 @@ import {
   archiveMovePause,
   archiveMoveResume,
   archiveMoveCancel,
-  confirmDialog,
   onMoveProgress,
   type ArchiveStatus,
   type MoveProgress,
 } from "./api";
+import { askOrOs } from "./confirm";
 import { errorCode } from "./errors";
 import {
   cancelWasLost,
@@ -279,9 +279,12 @@ export class ArchiveMove {
     const home = this.archive?.path ?? null;
     const homeDefault = !!this.archive?.isDefault;
     if (
-      !(await confirmDialog("Cancel the move? Mods already moved go back to where they were.", {
-        okLabel: "Cancel move",
-        cancelLabel: "Keep going",
+      // askOrOs: this store isn't a view, so don't assume the dialog host is up.
+      !(await askOrOs({
+        title: "Cancel the library move?",
+        body: "Mods already moved go back to where they were. You can start the move again later.",
+        confirm: "Cancel move",
+        cancel: "Keep going",
       }))
     )
       return;

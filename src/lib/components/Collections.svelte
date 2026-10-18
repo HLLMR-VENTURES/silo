@@ -15,9 +15,9 @@
     collectionsList,
     collectionDelete,
     collectionUpdate,
-    confirmDialog,
     copyText,
   } from "../api";
+  import { ask } from "../ui";
   import type { CollectionSummary } from "../api";
   import type {
     MpModRef,
@@ -112,10 +112,13 @@
   async function doUpdate(c: CollectionSummary) {
     if (updatingRef) return;
     if (
-      !(await confirmDialog(
-        `Update “${c.name}” to your current active set (${zipCount} packaged mod${zipCount === 1 ? "" : "s"})? ` +
-          `The mod list is replaced; the share link stays the same.`,
-      ))
+      !(await ask({
+        title: `Update “${c.name}” to your current active set?`,
+        body:
+          `Its mod list is replaced with your ${zipCount} packaged mod${zipCount === 1 ? "" : "s"}; the share link stays the same. ` +
+          "To go back, switch to the old set and update it again.",
+        confirm: "Update collection",
+      }))
     )
       return;
     updatingRef = c.reference;
@@ -137,7 +140,14 @@
 
   async function doDelete(c: CollectionSummary) {
     if (!c.canDelete || deletingRef) return;
-    if (!(await confirmDialog(`Delete “${c.name}”? This removes it from your GitHub and breaks its share link.`)))
+    if (
+      !(await ask({
+        title: `Delete “${c.name}”?`,
+        body: "It's removed from your GitHub and its share link stops working. This can't be undone; you can share the mods again as a new collection with a new link.",
+        confirm: "Delete",
+        tone: "danger",
+      }))
+    )
       return;
     deletingRef = c.reference;
     myErr = null;
