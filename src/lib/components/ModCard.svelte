@@ -2,7 +2,7 @@
   // One Browse card, rendered inside a VirtualGrid item (which holds the focus and the keys, so
   // the button here is tabindex -1; Enter on the card opens the drawer, which has every action).
   // Cover, title, author, rating and downloads, the sources spelled out with their own versions
-  // ("GitHub 1.0.6.0"), at most three badges, and one primary button whose words follow the
+  // ("GitHub 1.0.6.0"), at most two badges then "+n", and one primary button whose words follow the
   // install state (installState): Install, Installing… 42%, Show in library, See update, or
   // Open on ModHub for index-only sources. Mods you already have are never dimmed.
   import Icon from "../ui/Icon.svelte";
@@ -34,7 +34,7 @@
 
   let { m, state: st, badges, busy = false, onPrimary, onOpenDetail }: Props = $props();
 
-  const disabled = $derived(st.kind === "installing" || st.kind === "none" || (st.kind === "install" && busy));
+  const disabled = $derived(st.kind === "installing" || (st.kind === "install" && busy));
   const hint = $derived.by(() => {
     switch (st.kind) {
       case "install":
@@ -50,7 +50,7 @@
     }
   });
   const icon = $derived(
-    st.kind === "install" ? "download" : st.kind === "open" ? "external" : st.kind === "update" ? "update" : st.kind === "installed" ? "library" : undefined,
+    st.kind === "install" ? "download" : st.kind === "open" ? "external" : st.kind === "update" ? "update" : st.kind === "installed" ? "library" : "info",
   );
 
   // Thumbnails: SiloAPI-cached URLs load directly; GitHub ones come through the Rust proxy.
@@ -108,7 +108,7 @@
         <span class="chip none">No sources listed</span>
       {/each}
     </div>
-    <div class="badges"><BadgeRow {badges} /></div>
+    <div class="badges"><BadgeRow {badges} max={2} /></div>
     <div class="primary" use:tooltip={hint}>
       {#if st.kind === "installing"}
         <div
@@ -230,7 +230,10 @@
     overflow: hidden;
   }
   .chip {
-    flex: none;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     font-size: var(--fs-xs);
     line-height: 1.25rem;
     padding: 0 var(--sp-2);
@@ -243,7 +246,8 @@
     color: var(--muted);
     border-style: dashed;
   }
-  /* Up to two lines, so three badges and their "+n" always fit a narrow card. */
+  /* Two badges then "+n" (the tooltip names the rest), on up to two lines so a narrow card
+     never hides one. */
   .badges {
     display: flex;
     max-height: calc(2.5rem + var(--sp-1));

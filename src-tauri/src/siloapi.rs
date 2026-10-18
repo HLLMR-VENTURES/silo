@@ -44,7 +44,7 @@ pub struct BrowseMod {
     pub verified: Option<bool>,
     /// The author's claim through SiloAPI's author program (A7). None when unclaimed or on an
     /// API that predates claims; Browse shows "Verified author" only when it's present.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_author")]
     pub verified_author: Option<VerifiedAuthor>,
     #[serde(default)]
     pub archive_sha256: Option<String>,
@@ -88,6 +88,19 @@ pub struct VerifiedAuthor {
     pub avatar_url: Option<String>,
     #[serde(default)]
     pub profile_url: Option<String>,
+}
+
+/// A claim that doesn't parse (no login, wrong shape) counts as no claim, so one odd row can
+/// never fail a whole catalog page.
+fn lenient_author<'de, D>(d: D) -> Result<Option<VerifiedAuthor>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(
+        v.and_then(|v| serde_json::from_value::<VerifiedAuthor>(v).ok())
+            .filter(|a| !a.login.trim().is_empty()),
+    )
 }
 
 /// One semantic facet tag on a mod (see SiloAPI docs/TAGGING.md). `confidence` lets the client
@@ -666,7 +679,10 @@ mod tests {
     fn verified_author_passes_through_when_claimed() {
         let base = r#"{"id":"m1","title":"Lizard","sources":[]}"#;
         let m: BrowseMod = serde_json::from_str(base).unwrap();
-        assert!(m.verified_author.is_none(), "an API without claims still parses");
+        assert!(
+            m.verified_author.is_none(),
+            "an API without claims still parses"
+        );
 
         let claimed = r#"{"id":"m1","title":"Lizard","sources":[],
             "verifiedAuthor":{"login":"octocat","avatarUrl":null,"profileUrl":"https://x/authors/octocat/"}}"#;
@@ -681,6 +697,20 @@ mod tests {
         let unclaimed = r#"{"id":"m1","title":"Lizard","sources":[],"verifiedAuthor":null}"#;
         let m: BrowseMod = serde_json::from_str(unclaimed).unwrap();
         assert!(m.verified_author.is_none());
+
+        // A malformed claim is no claim, never a failed page.
+        for bad in [
+            r#"{}"#,
+            r#"{"login":null}"#,
+            r#"{"login":"  "}"#,
+            r#""octocat""#,
+            r#"[1]"#,
+        ] {
+            let json =
+                format!(r#"{{"id":"m1","title":"Lizard","sources":[],"verifiedAuthor":{bad}}}"#);
+            let m: BrowseMod = serde_json::from_str(&json).unwrap();
+            assert!(m.verified_author.is_none(), "{bad}");
+        }
     }
 
     #[test]

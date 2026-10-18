@@ -32,8 +32,8 @@
   import VirtualGrid from "./library/VirtualGrid.svelte";
   import { browseCacheKey, getBrowseView, setBrowseView } from "../browseCache";
   import {
-    BROWSE_CARD_HEIGHT,
     BROWSE_GAP,
+    browseCardHeight,
     browseBadges,
     browseColumns,
     catalogErrorCopy,
@@ -200,6 +200,10 @@
   let loadError = $state<CatalogErrorCopy | null>(null);
   /** "Load more" failed: said beside the button, the cards already shown stay. */
   let moreError = $state(false);
+  /** The cache key of what `results` holds, so "Load more" never appends to another search. */
+  let shownKey: string | null = null;
+  /** The search the shown results (or the empty state) answer. */
+  let shownQuery = $state("");
   let installing = $state<string | null>(null);
   // Live download progress per mod id: { done, total } bytes.
   let progress = $state<Record<string, InstallProgressEntry>>({});
@@ -210,6 +214,10 @@
   let detailLoading = $state(false);
   /** The card the drawer opened from, so closing it hands focus back there. */
   let detailFrom: string | null = null;
+  /** Bumped by every open: only the latest request may fill the drawer. */
+  let detailSeq = 0;
+  /** The drawer was opened from the keyboard: it takes focus once loaded. */
+  let detailByKey = $state(false);
   // Full-description modal (the drawer shows a clamped snippet). `source` records where
   // the body came from so we can label it honestly.
   let descModal = $state<{
@@ -236,27 +244,35 @@
   /** Set on unmount: late answers (the progress listener, the first load) must not act after it. */
   let destroyed = false;
 
-  async function openDetail(m: BrowseMod) {
+  async function openDetail(m: BrowseMod, byKey = false) {
+    const seq = ++detailSeq;
     detail = null;
     detailLoading = true;
     detailFrom = m.id;
+    detailByKey = byKey;
     // Re-read GitHub state so a connection made in Settings reflects in the cards.
     refreshGh();
     try {
-      detail = await siloapiModDetail(m.id);
+      const d = await siloapiModDetail(m.id);
+      if (seq === detailSeq) detail = d;
     } catch (e) {
-      reportError(e, `Loading ${m.title}`, { retry: () => openDetail(m) });
+      if (seq === detailSeq) reportError(e, `Loading ${m.title}`, { retry: () => openDetail(m, byKey) });
     } finally {
-      detailLoading = false;
+      if (seq === detailSeq) detailLoading = false;
     }
   }
 
   function closeDetail() {
+    detailSeq++;
+    // Hand focus back to the card only when it was in the drawer (or fell to the page), so a
+    // grid the user scrolled meanwhile isn't yanked back.
+    const active = document.activeElement;
+    const restore = !active || active === document.body || !!active.closest("aside.drawer");
     detail = null;
     detailLoading = false;
     const from = detailFrom;
     detailFrom = null;
-    if (from) grid?.focusKey(from);
+    if (from && restore) grid?.focusKey(from);
   }
 
   /** Open a source's page in the browser. */
@@ -275,13 +291,17 @@
   }
 
   const ctx = $derived({ installed, updates, installingId: installing });
-  const stateOf = (m: BrowseMod) => installState(m, { ...ctx, progress: progress[m.id] });
+  // Only the installing card reads `progress`, so a progress event re-renders that card alone.
+  const stateOf = (m: BrowseMod) =>
+    installState(m, { ...ctx, progress: m.id === installing ? progress[m.id] : undefined });
 
   /** A card's primary button: Install, Open on ModHub, Show in library or See update. */
   function primary(m: BrowseMod) {
     const st = stateOf(m);
     switch (st.kind) {
       case "install":
+        // The button becomes a progress bar: keep focus on the card rather than lose it.
+        grid?.focusKey(m.id);
         return void install(m, st.source.source);
       case "open":
         return void openSource(st.source);
@@ -292,6 +312,8 @@
         if (onShowUpdates) onShowUpdates();
         else if (m.techName) onFindInLibrary?.(m.techName);
         return;
+      case "none":
+        return void openDetail(m);
     }
   }
 
@@ -310,17 +332,28 @@
   const hasMore = $derived(knowsTotal ? results.length < total : lastPageFull);
   const filtered = $derived(filterCount > 0);
 
+  /** The root font size (Settings → UI size), so card heights follow it. */
+  let remPx = $state(16);
+  function readRem() {
+    const px = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    if (Number.isFinite(px) && px > 0) remPx = px;
+  }
+  const cardHeight = $derived(browseCardHeight(remPx));
+
   /** Fetch the first page for the current filters, replacing what's shown. Served from the
    *  cross-mount view cache when we've seen this exact filter+sort combo before (no re-poll). */
   async function load() {
     loadError = null;
     moreError = false;
     const key = browseCacheKey({ category, tags: activeTags, availableBy, query, sort });
+    const forQuery = query;
     const cached = getBrowseView(key);
     if (cached) {
       results = cached.results;
       total = cached.total;
       lastPageFull = cached.lastPageFull;
+      shownKey = key;
+      shownQuery = forQuery;
       loading = false;
       return;
     }
@@ -335,16 +368,24 @@
         limit: PAGE,
         offset: 0,
       });
-      // The filters moved on while this was out: a newer load owns the grid.
-      if (key !== browseCacheKey({ category, tags: activeTags, availableBy, query, sort })) return;
-      results = page.mods;
-      total = page.total;
-      lastPageFull = page.mods.length === PAGE;
-      setBrowseView(key, { results, total, lastPageFull });
+      const view = { results: page.mods, total: page.total, lastPageFull: page.mods.length === PAGE };
+      // The filters moved on while this was out: keep the page for later, a newer load owns the grid.
+      if (key !== browseCacheKey({ category, tags: activeTags, availableBy, query, sort })) {
+        if (!getBrowseView(key)) setBrowseView(key, view);
+        return;
+      }
+      results = view.results;
+      total = view.total;
+      lastPageFull = view.lastPageFull;
+      shownKey = key;
+      shownQuery = forQuery;
+      setBrowseView(key, view);
     } catch (e) {
       if (key !== browseCacheKey({ category, tags: activeTags, availableBy, query, sort })) return;
       reportError(e, "Loading the catalog", { quiet: true });
       loadError = catalogErrorCopy(e);
+      shownKey = null;
+      shownQuery = forQuery;
       results = [];
       total = 0;
       lastPageFull = false;
@@ -356,10 +397,13 @@
   /** Append the next page. Guards against double-firing and against the filters
    *  changing mid-flight, which would splice the wrong results onto the grid. */
   async function loadMore() {
-    if (loadingMore || !hasMore) return;
+    if (loadingMore || !hasMore || loading) return;
+    const key = browseCacheKey({ category, tags: activeTags, availableBy, query, sort });
+    // The shown cards answer another search (typing, its load still pending): appending this
+    // search's next page to them would mix two searches, and cache the mix.
+    if (key !== shownKey) return;
     loadingMore = true;
     moreError = false;
-    const key = browseCacheKey({ category, tags: activeTags, availableBy, query, sort });
     try {
       const page = await browseMods({
         query: query.trim() || undefined,
@@ -371,7 +415,8 @@
         offset: results.length,
       });
       // filters moved on mid-flight → drop this page rather than splice wrong results
-      if (key !== browseCacheKey({ category, tags: activeTags, availableBy, query, sort })) return;
+      if (key !== browseCacheKey({ category, tags: activeTags, availableBy, query, sort }) || key !== shownKey)
+        return;
       results = [...results, ...page.mods];
       total = page.total;
       lastPageFull = page.mods.length === PAGE;
@@ -379,7 +424,7 @@
       setBrowseView(key, { results, total, lastPageFull });
     } catch (e) {
       reportError(e, "Loading more mods", { quiet: true });
-      moreError = true;
+      if (key === shownKey) moreError = true;
     } finally {
       loadingMore = false;
     }
@@ -483,7 +528,12 @@
       (e) => reportError(e, "Listening for install progress", { quiet: true }),
     );
     void init(seedText, seedTarget);
+    // Settings → UI size changes the root font size (App sets --ui-scale on <html>).
+    readRem();
+    const rem = new MutationObserver(readRem);
+    rem.observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
     return () => {
+      rem.disconnect();
       destroyed = true;
       unlisten?.();
       unlisten = null;
@@ -552,7 +602,7 @@
   {:else if loading && results.length === 0}
     <div class="skeletons" aria-busy="true" aria-label="Loading the catalog">
       {#each { length: 8 } as _, i (i)}
-        <div class="sk-card" style:height="{BROWSE_CARD_HEIGHT}px">
+        <div class="sk-card" style:height="{cardHeight}px">
           <Skeleton variant="block" height="124px" class="sk-thumb" />
           <div class="sk-body">
             <Skeleton width="85%" />
@@ -564,9 +614,9 @@
       {/each}
     </div>
   {:else if results.length === 0}
-    <EmptyState icon="search" title={emptyResultsTitle(query, filtered)} level={3}>
+    <EmptyState icon="search" title={emptyResultsTitle(shownQuery, filtered)} level={3}>
       {#snippet actions()}
-        {#if query.trim()}<Button variant="primary" onclick={clearSearch}>Clear search</Button>{/if}
+        {#if shownQuery.trim()}<Button variant="primary" onclick={clearSearch}>Clear search</Button>{/if}
         {#if filtered}<Button variant="secondary" onclick={clearFilters}>Clear filters</Button>{/if}
       {/snippet}
     </EmptyState>
@@ -576,12 +626,12 @@
         bind:this={grid}
         items={results}
         getKey={(m) => m.id}
-        itemHeight={BROWSE_CARD_HEIGHT}
+        itemHeight={cardHeight}
         gap={BROWSE_GAP}
         columns={browseColumns}
         label="Catalog mods"
         itemLabel={cardLabel}
-        onopen={openDetail}
+        onopen={(m) => openDetail(m, true)}
       >
         {#snippet item(m)}
           <ModCard
@@ -599,7 +649,7 @@
     {#if hasMore || moreError}
       <div class="more">
         {#if moreError}<span class="more-error">Silo couldn't load more mods.</span>{/if}
-        <Button variant="secondary" loading={loadingMore} onclick={loadMore}>
+        <Button variant="secondary" loading={loadingMore} disabled={loading} onclick={loadMore}>
           {#if moreError}
             Try again
           {:else if knowsTotal}
@@ -621,6 +671,7 @@
       installingId={installing}
       progress={detail ? progress[detail.id] : undefined}
       busy={installing !== null}
+      takeFocus={detailByKey}
       {gh}
       {installed}
       {updates}

@@ -25,6 +25,7 @@
     installingId,
     progress,
     busy = false,
+    takeFocus = false,
     gh,
     installed,
     updates,
@@ -42,6 +43,8 @@
     progress?: InstallProgressEntry;
     /** Some install is running: Install waits for it. */
     busy?: boolean;
+    /** Opened from the keyboard: move focus to the title once the details are in. */
+    takeFocus?: boolean;
     gh: { connected: boolean; canWrite: boolean };
     installed: Set<string>;
     /** Tech names with a known newer version. */
@@ -59,6 +62,16 @@
   }
   const pct = $derived(progressPct(progress));
   const badges = $derived(detail ? browseBadges(detail, { installed, updates }) : []);
+
+  // A keyboard open lands on the title (Tab goes on into the actions); a mouse open leaves focus.
+  let titleEl = $state<HTMLElement>();
+  let focusedFor: string | null = null;
+  $effect(() => {
+    const id = detail?.id ?? null;
+    if (!takeFocus || !id || !titleEl || focusedFor === id) return;
+    focusedFor = id;
+    titleEl.focus();
+  });
 
   // The drawer is non-modal (clicks fall through to the grid), so Escape is the click-away close.
   $effect(() => {
@@ -94,7 +107,7 @@
     {@const d = detail}
     <div class="drawer-head">
       <div class="dh-info">
-        <div class="dh-title">{d.title}</div>
+        <h2 class="dh-title" tabindex="-1" bind:this={titleEl}>{d.title}</h2>
         {#if d.author || d.latestVersion}
           <div class="dh-sub">
             {#if d.author}{d.author}{/if}{#if d.author && d.latestVersion}
@@ -155,16 +168,19 @@
                 <button
                   class="src-action"
                   class:can-install={s.installable}
-                  disabled={s.installable && (hasLocally(d) || busy)}
+                  disabled={s.installable && !hasLocally(d) && busy}
                   use:tooltip={s.installable && busy && installingId !== d.id
                     ? "Wait for the current install to finish."
                     : ""}
-                  onclick={() => onUseSource(d, s)}
+                  onclick={() =>
+                    s.installable && hasLocally(d) && d.techName
+                      ? onFindInLibrary?.(d.techName)
+                      : onUseSource(d, s)}
                 >
                   {#if s.installable && installingId === d.id}
                     Installing…{#if pct !== null}&nbsp;<span class="tnum">{pct}%</span>{/if}
                   {:else if s.installable && hasLocally(d)}
-                    Installed <Icon name="check" size={13} />
+                    Show in library
                   {:else if s.installable}
                     Install <Icon name="download" size={13} />
                   {:else}
@@ -284,6 +300,14 @@
     font-weight: 600;
     line-height: 1.2;
     color: var(--text);
+    margin: 0;
+  }
+  .dh-title:focus {
+    outline: none;
+  }
+  .dh-title:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
   }
   .dh-sub {
     font-size: var(--fs-xs);

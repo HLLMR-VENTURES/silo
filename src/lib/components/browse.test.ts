@@ -33,6 +33,7 @@ import {
   ghDevicePoll,
   ghDeviceStart,
   onInstallProgress,
+  siloapiModDetail,
 } from "../api";
 import { AppError } from "../errors";
 import type { BrowseMod, ModSourceOption } from "../types";
@@ -89,7 +90,8 @@ function mod(id: string, over: Partial<BrowseMod> = {}): BrowseMod {
 let seq = 0;
 const uniqueSearch = (word: string) => `${word}-${++seq}`;
 
-/** Let mocked promises and the 300 ms search debounce settle. */
+/** Let mocked promises and the renders they cause settle (timers don't advance: a seeded search
+ *  loads at once, without the 300 ms typing pause). */
 async function settle() {
   for (let i = 0; i < 6; i++) {
     await Promise.resolve();
@@ -113,6 +115,7 @@ beforeEach(() => {
   unlisten = vi.fn<() => void>();
   vi.mocked(onInstallProgress).mockResolvedValue(unlisten);
   vi.mocked(browseMods).mockReset();
+  vi.mocked(siloapiModDetail).mockReset();
 });
 
 afterEach(() => {
@@ -194,6 +197,68 @@ describe("Browse cards", () => {
     render(ModBrowser, props());
     await settle();
     expect(screen.getByRole("button", { name: "Open on ModHub: Mod m" })).toBeInTheDocument();
+  });
+});
+
+describe("Browse search and drawer", () => {
+  it("never appends a page of a search still waiting to run onto the shown cards", async () => {
+    const page = Array.from({ length: 60 }, (_, i) => mod(`t${seq}-${i}`));
+    vi.mocked(browseMods).mockResolvedValueOnce({ mods: page, total: 200 });
+    const { rerender } = render(ModBrowser, props());
+    await settle();
+    expect(browseMods).toHaveBeenCalledTimes(1);
+    // The user types a new search; its load waits for the typing pause.
+    await rerender({ query: uniqueSearch("plow") });
+    await fireEvent.click(screen.getByRole("button", { name: "Load 60 more" }));
+    await settle();
+    expect(browseMods).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the drawer for Find in Browse's mod once the seeded search lands it", async () => {
+    const target = mod("seeded", { title: "Seeded Mod" });
+    vi.mocked(browseMods).mockResolvedValueOnce({ mods: [mod("x"), target], total: 2 });
+    vi.mocked(siloapiModDetail).mockResolvedValueOnce(target);
+    render(ModBrowser, props({ seedTech: "FS25_seeded" }));
+    await settle();
+    expect(siloapiModDetail).toHaveBeenCalledWith("seeded");
+    expect(screen.getByRole("heading", { name: "Seeded Mod" })).toBeInTheDocument();
+  });
+
+  it("shows the last card opened, even when an earlier one answers later", async () => {
+    const a = mod("ra", { title: "Card A" });
+    const b = mod("rb", { title: "Card B" });
+    vi.mocked(browseMods).mockResolvedValueOnce({ mods: [a, b], total: 2 });
+    let answerA!: (m: BrowseMod) => void;
+    vi.mocked(siloapiModDetail)
+      .mockReturnValueOnce(new Promise((r) => (answerA = r)))
+      .mockResolvedValueOnce(b);
+    const { container } = render(ModBrowser, props());
+    await settle();
+    await fireEvent.click(container.querySelector('[data-key="ra"] .card')!);
+    await fireEvent.click(container.querySelector('[data-key="rb"] .card')!);
+    await settle();
+    answerA(a);
+    await settle();
+    expect(screen.getByRole("heading", { name: "Card B" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Card A" })).toBeNull();
+  });
+
+  it("takes focus to the drawer on Enter, and back to the card on Esc", async () => {
+    const m = mod("kb", { title: "Keyboard Mod" });
+    vi.mocked(browseMods).mockResolvedValueOnce({ mods: [m], total: 1 });
+    vi.mocked(siloapiModDetail).mockResolvedValueOnce(m);
+    const { container } = render(ModBrowser, props());
+    await settle();
+    const card = container.querySelector<HTMLElement>('[role="listitem"][data-key="kb"]')!;
+    card.focus();
+    await fireEvent.keyDown(card, { key: "Enter" });
+    await settle();
+    const title = screen.getByRole("heading", { name: "Keyboard Mod" });
+    expect(document.activeElement).toBe(title);
+    await fireEvent.keyDown(window, { key: "Escape" });
+    await settle();
+    expect(screen.queryByRole("heading", { name: "Keyboard Mod" })).toBeNull();
+    expect(document.activeElement).toBe(container.querySelector('[role="listitem"][data-key="kb"]'));
   });
 });
 

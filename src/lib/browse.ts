@@ -80,8 +80,19 @@ export function canExpand(d: CatalogModDetail): boolean {
 export const BROWSE_CARD_MIN_W = 232;
 /** Gap between Browse cards (both axes), px. */
 export const BROWSE_GAP = 16;
-/** Height of one Browse card, px (VirtualGrid's itemHeight). */
+/** Height of one Browse card at 100% UI size, px. */
 export const BROWSE_CARD_HEIGHT = 356;
+
+/**
+ * A Browse card's height for the current UI size (the card's text is rem-based, so it grows with
+ * Settings → UI size; VirtualGrid needs it in px).
+ * @param remPx the root font size, px (16 at 100%)
+ * @returns whole px, never below the 100% height
+ */
+export function browseCardHeight(remPx: number): number {
+  const scale = Number.isFinite(remPx) && remPx > 16 ? remPx / 16 : 1;
+  return Math.ceil(BROWSE_CARD_HEIGHT * scale);
+}
 
 /**
  * Columns of Browse cards for a measured width.
@@ -173,7 +184,7 @@ export function installLabel(st: InstallState): string {
     case "open":
       return `Open on ${label(st.source.source)}`;
     case "none":
-      return "No download";
+      return "See details";
   }
 }
 

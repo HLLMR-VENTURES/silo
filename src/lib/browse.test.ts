@@ -6,7 +6,9 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("./api", () => ({ catalogImage: vi.fn() }));
 
 import {
+  BROWSE_CARD_HEIGHT,
   browseBadges,
+  browseCardHeight,
   browseColumns,
   catalogErrorCopy,
   emptyResultsTitle,
@@ -110,9 +112,10 @@ describe("installState", () => {
     expect(installState(mod(), { installed: none, updates: mine, installingId: null }).kind).toBe("install");
   });
 
-  it("has nothing to do for a mod with no sources", () => {
+  it("offers the details for a mod with no sources", () => {
     const st = installState(mod({ sources: [] }), { installed: none, installingId: null });
     expect(st.kind).toBe("none");
+    expect(installLabel(st)).toBe("See details");
   });
 
   it("clamps progress and needs a total", () => {
@@ -187,6 +190,15 @@ describe("catalog error and empty states", () => {
     expect(emptyResultsTitle("lizard", false)).toBe("No mods match “lizard”.");
     expect(emptyResultsTitle("  lizard ", true)).toBe("No mods match “lizard”.");
     expect(emptyResultsTitle("", true)).toBe("No mods match these filters.");
+  });
+});
+
+describe("browseCardHeight", () => {
+  it("grows with the UI size so rem-sized text never overflows the card", () => {
+    expect(browseCardHeight(16)).toBe(BROWSE_CARD_HEIGHT);
+    expect(browseCardHeight(20)).toBe(Math.ceil(BROWSE_CARD_HEIGHT * 1.25));
+    expect(browseCardHeight(14.4)).toBe(BROWSE_CARD_HEIGHT); // 90%: never shorter
+    expect(browseCardHeight(Number.NaN)).toBe(BROWSE_CARD_HEIGHT);
   });
 });
 
