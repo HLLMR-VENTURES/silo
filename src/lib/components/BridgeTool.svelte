@@ -5,6 +5,7 @@
   import { inlineError } from "../state/notify.svelte";
   import { generateBridge } from "../api";
   import { blocked, tryStart } from "../state/ops.svelte";
+  import { tooltip } from "../ui/tooltip";
 
   interface Props {
     onGenerated: (filename: string) => void; // parent rescans
@@ -104,18 +105,18 @@
       <h2>Filltype compatibility bridge</h2>
       <p class="sub">
         Got a map filltype nothing can haul, store, or sell? Silo builds a small companion
-        mod that adds it to the categories your equipment accepts — no editing other mods.
+        mod that adds it to the categories your equipment accepts, with no edits to other mods.
       </p>
     </div>
     {#if onClose}
-      <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+      <button class="x" use:tooltip={"Close"} aria-label="Close" onclick={onClose}><Icon name="close" /></button>
     {/if}
   </div>
 
   {#if done}
     <div class="ok-note">
       Created <b>{done}</b> in your mods folder and rescanned. Enable it (and load your save)
-      to test — the filltype should now work with the checked equipment.
+      to test. The filltype should now work with the checked equipment.
     </div>
   {/if}
   {#if error}<div class="err">{error}</div>{/if}
@@ -160,7 +161,7 @@
   </div>
 
   <div class="caveat">
-    Adds category membership only — it doesn't change balance or realism. If two mods
+    Adds category membership only. It doesn't change balance or realism. If two mods
     both define the fill type, load order still decides its properties. Test in-game after
     generating; if a control/category feels off, just delete the .zip (fully reversible).
   </div>

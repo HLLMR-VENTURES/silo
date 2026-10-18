@@ -2,6 +2,7 @@
   import Icon from "../ui/Icon.svelte";
   import type { CurationRow } from "../types";
   import { setCuration, setTags } from "../api";
+  import { tooltip } from "../ui/tooltip";
 
   let {
     techName,
@@ -70,7 +71,7 @@
     {#each tags as t (t)}
       <span class="d-tag">
         <button class="d-tag-name" onclick={() => onFilterTag(t)} title="Filter by this tag">{t}</button>
-        <button class="d-tag-x" onclick={() => removeTag(t)} title="Remove tag" aria-label="Remove tag"><Icon name="close" size={12} /></button>
+        <button class="d-tag-x" onclick={() => removeTag(t)} use:tooltip={"Remove tag"} aria-label="Remove tag"><Icon name="close" size={12} /></button>
       </span>
     {/each}
     <input

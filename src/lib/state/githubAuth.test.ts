@@ -168,7 +168,7 @@ describe("githubAuth device flow", () => {
     await startDeviceFlow();
     expect(githubAuth.message).toBeNull();
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(githubAuth.message).toBe("The code expired — try again.");
+    expect(githubAuth.message).toBe("The code expired. Try again.");
     expect(toasts).toHaveLength(1); // only the first one, shown while no view was mounted
     detach();
   });

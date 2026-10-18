@@ -5,7 +5,7 @@
 import { openKnownFolder } from "../../api";
 import { inlineError } from "../../state/notify.svelte";
 
-export type OpenTarget = "modsFolder" | "archive" | "gameInstall";
+export type OpenTarget = "modsFolder" | "archive" | "gameInstall" | "logs";
 
 /** A per-component opener; `error` is the last failure (cleared by the next open). */
 export function folderOpener() {

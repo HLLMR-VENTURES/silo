@@ -125,7 +125,7 @@
     />
     <button class="gh-btn" onclick={linkRepo}>{repo ? "Update link" : "Link"}</button>
   </div>
-  {#if suggested && !repo}<div class="gh-suggest">Suggested from the mod's page — click Link to confirm.</div>{/if}
+  {#if suggested && !repo}<div class="gh-suggest">Suggested from the mod's page. Click Link to confirm.</div>{/if}
   {#if repo}
     <div class="gh-actions">
       <button class="gh-btn" onclick={checkUpdate} disabled={checking}>
@@ -144,7 +144,7 @@
       {#if update.hasUpdate}
         <b>Update available:</b> {update.release.tag} (you have {update.current})
       {:else}
-        Up to date — latest is {update.release.tag}
+        Up to date. Latest is {update.release.tag}
       {/if}
       {#if update.release.htmlUrl}
         <button class="gh-open" onclick={() => openExternal(update!.release.htmlUrl!)}>

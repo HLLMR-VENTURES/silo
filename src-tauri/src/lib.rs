@@ -2526,6 +2526,8 @@ enum KnownFolder {
     ModsFolder,
     Archive,
     GameInstall,
+    /// Where the log plugin writes `silo.log` (`app_log_dir()`, see `log_plugin`).
+    Logs,
 }
 
 fn existing_dir(p: Option<PathBuf>) -> Result<PathBuf, String> {
@@ -2533,12 +2535,14 @@ fn existing_dir(p: Option<PathBuf>) -> Result<PathBuf, String> {
         .ok_or_else(|| FOLDER_MISSING.to_string())
 }
 
-fn known_folder_path(which: KnownFolder) -> Result<PathBuf, String> {
-    let active = modsroot::active();
+/// The folder `which` names, if it exists. `log_dir` is the app's log folder (`app_log_dir()`),
+/// passed in so this resolves without a running app.
+fn known_folder_path(which: KnownFolder, log_dir: Option<PathBuf>) -> Result<PathBuf, String> {
     existing_dir(match which {
-        KnownFolder::ModsFolder => active.map(|a| a.layout.mods),
-        KnownFolder::Archive => active.map(|a| a.layout.archive),
+        KnownFolder::ModsFolder => modsroot::active().map(|a| a.layout.mods),
+        KnownFolder::Archive => modsroot::active().map(|a| a.layout.archive),
         KnownFolder::GameInstall => gamelaunch::detect().map(|g| PathBuf::from(g.install_dir)),
+        KnownFolder::Logs => log_dir,
     })
 }
 
@@ -2547,9 +2551,10 @@ fn known_folder_path(which: KnownFolder) -> Result<PathBuf, String> {
 #[tauri::command]
 async fn open_known_folder(app: tauri::AppHandle, which: KnownFolder) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+    let log_dir = app.path().app_log_dir().ok();
     // Resolving the game folder reads Steam's files, and the shell call can stall: both off main.
     off_main(move || {
-        let path = known_folder_path(which)?;
+        let path = known_folder_path(which, log_dir)?;
         app.opener()
             .open_path(path.to_string_lossy(), None::<&str>)
             .map_err(|e| format!("Couldn't open {}: {e}", path.display()))
@@ -6329,6 +6334,27 @@ mod tests {
         );
         assert_eq!(
             super::existing_dir(None).unwrap_err(),
+            super::FOLDER_MISSING
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_logs_folder_is_the_app_log_dir_when_it_exists() {
+        let base = temp_base("known_folder_logs");
+        let logs = base.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        assert_eq!(
+            super::known_folder_path(super::KnownFolder::Logs, Some(logs.clone())).unwrap(),
+            logs
+        );
+        assert_eq!(
+            super::known_folder_path(super::KnownFolder::Logs, Some(base.join("none")))
+                .unwrap_err(),
+            super::FOLDER_MISSING
+        );
+        assert_eq!(
+            super::known_folder_path(super::KnownFolder::Logs, None).unwrap_err(),
             super::FOLDER_MISSING
         );
         let _ = std::fs::remove_dir_all(&base);

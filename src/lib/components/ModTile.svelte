@@ -8,6 +8,7 @@
   import type { ModEntry, CurationRow } from "../types";
   import { getModIcon } from "../api";
   import { getVerdict } from "../provenanceCache.svelte";
+  import { tooltip } from "../ui/tooltip";
 
   type Flag = "favorite" | "hidden" | "broken";
   let {
@@ -100,16 +101,15 @@
       class="tc-switch"
       class:on={active}
       onclick={stop(onToggleActive)}
-      title={active ? "Active — click to park" : "Parked — click to activate"}
+      use:tooltip={active ? "Active. Click to park." : "Parked. Click to activate."}
       aria-label="Toggle active"
     >
       <span class="knob"></span>
     </button>
     <span class="tc-state" class:on={active}>{active ? "Active" : "Parked"}</span>
-    {#if organized && !active}<span class="tc-parked">parked</span>{/if}
     <span class="tc-sp"></span>
     {#if hasSettings}
-      <button class="tc-gear" onclick={stop(onOpenSettings)} title="Edit this mod's settings" aria-label="Edit this mod's settings"><Icon name="modSettings" /></button>
+      <button class="tc-gear" onclick={stop(onOpenSettings)} use:tooltip={"Edit this mod's settings"} aria-label="Edit this mod's settings"><Icon name="modSettings" /></button>
     {/if}
   </div>
 
@@ -147,7 +147,7 @@
       <button
         class="tc-act star"
         class:on={curation.favorite}
-        title={curation.favorite ? "Remove favorite" : "Favorite"}
+        use:tooltip={curation.favorite ? "Remove favorite" : "Favorite"}
         aria-label={curation.favorite ? "Remove favorite" : "Favorite"}
         onclick={stop(() => onToggle("favorite"))}
       >
@@ -156,7 +156,7 @@
       <button
         class="tc-act"
         class:on={curation.hidden}
-        title={curation.hidden ? "Unhide" : "Hide"}
+        use:tooltip={curation.hidden ? "Unhide" : "Hide"}
         aria-label={curation.hidden ? "Unhide" : "Hide"}
         onclick={stop(() => onToggle("hidden"))}
       >
@@ -165,11 +165,11 @@
       <button
         class="tc-act warn"
         class:on={curation.broken}
-        title={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
-        aria-label={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
+        use:tooltip={curation.broken ? "Remove flag" : "Flag"}
+        aria-label={curation.broken ? "Remove flag" : "Flag"}
         onclick={stop(() => onToggle("broken"))}
       >
-        <Icon name="problem" />
+        <Icon name="flagged" />
       </button>
     </div>
   </div>
@@ -179,7 +179,7 @@
     <button
       class="pill cat"
       class:overridden
-      title={overridden ? "Custom category — click to change" : "Click to reassign category"}
+      title={overridden ? "Custom category. Click to change." : "Click to reassign category"}
       onclick={(e) => {
         e.stopPropagation();
         onEditCategory(e);
@@ -202,7 +202,7 @@
     {/if}
     {#if mod.kind === "dir"}<span class="pill dev" title="Unpacked folder mod (dev build)">Dev</span>{/if}
     {#if mod.ignoredDigitPrefix}
-      <span class="pill warn" title="Name starts with a digit — the game ignores this mod">ignored</span>
+      <span class="pill warn" title="Name starts with a digit, so the game ignores this mod">ignored</span>
     {/if}
     {#if mod.error}<span class="pill err" title={mod.error}>error</span>{/if}
     {#each tags.slice(0, 2) as t (t)}<span class="pill tag">#{t}</span>{/each}
@@ -285,13 +285,6 @@
   }
   .tc-state.on {
     color: var(--primary-text);
-  }
-  .tc-parked {
-    font-size: var(--fs-xs);
-    color: var(--text-muted);
-    background: color-mix(in srgb, var(--text-muted) 12%, transparent);
-    border-radius: 999px;
-    padding: 1px 8px;
   }
   .tc-sp {
     flex: 1 1 auto;

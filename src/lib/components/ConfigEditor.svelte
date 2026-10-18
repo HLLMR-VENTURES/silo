@@ -3,6 +3,7 @@
   import { inlineError } from "../state/notify.svelte";
   import { getConfig, setConfig } from "../api";
   import type { CfgField, CfgPreset } from "../configSchemas";
+  import { tooltip } from "../ui/tooltip";
 
   interface Props {
     title: string;
@@ -66,7 +67,7 @@
       <div class="ms-title">{title}</div>
       <div class="ms-sub tnum">{path}</div>
     </div>
-    <button class="ms-x" onclick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
+    <button class="ms-x" onclick={onClose} use:tooltip={"Close"} aria-label="Close"><Icon name="close" /></button>
   </div>
 
   {#if loading}

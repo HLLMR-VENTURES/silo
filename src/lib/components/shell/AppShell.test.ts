@@ -50,6 +50,14 @@ describe("AppShell", () => {
     expect(presentRegions(container)).toEqual(["rail", "header", "notices", "main", "drawer"]);
   });
 
+  it("caps content at the regular width unless the view is wide", async () => {
+    const { container, rerender } = render(ShellHarness, {});
+    const content = () => container.querySelector("main .content");
+    expect(content()).not.toHaveClass("wide");
+    await rerender({ wide: true });
+    expect(content()).toHaveClass("wide");
+  });
+
   it("omits the notices and drawer regions when not given", () => {
     const { container } = render(ShellHarness, { withNotices: false });
     expect(presentRegions(container)).toEqual(["rail", "header", "main"]);

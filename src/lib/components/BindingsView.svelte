@@ -8,6 +8,7 @@
   import { onMount } from "svelte";
   import { scanBindings } from "../api";
   import type { BindingReport } from "../types";
+  import { tooltip } from "../ui/tooltip";
 
   interface Props {
     /** Shows a close button (the page has none). */
@@ -73,7 +74,7 @@
     </div>
     <div class="bv-head-actions">
       {#if onClose}
-        <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+        <button class="x" use:tooltip={"Close"} aria-label="Close" onclick={onClose}><Icon name="close" /></button>
       {/if}
     </div>
   </div>
@@ -100,7 +101,7 @@
         {#if shared.length > 0}
           <div class="sec">
             Inputs bound to more than one action
-            <span class="sec-note">— usually intentional (different contexts); review if a control feels double-booked</span>
+            <span class="sec-note">Usually intentional (different contexts). Review if a control feels double-booked.</span>
           </div>
           {#each shared as s (s.input)}
             <div class="shared-row">

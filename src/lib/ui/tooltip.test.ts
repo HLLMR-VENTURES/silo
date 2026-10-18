@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-// use:tooltip: created lazily on first show, hover delay, aria-describedby wiring and cleanup.
+// use:tooltip: created lazily on first show, hover delay, aria-describedby wiring and cleanup, and
+// never lingering once its trigger is gone or turns disabled.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tooltip } from "./tooltip";
 
@@ -56,6 +57,52 @@ describe("tooltip", () => {
     node.dispatchEvent(new Event("pointerenter"));
     vi.advanceTimersByTime(500);
     expect(tips()[0]).toHaveTextContent("Two");
+    action.destroy();
+  });
+
+  it("hides at once when its trigger is removed from the page", async () => {
+    const action = tooltip(node, "Delete loadout");
+    node.dispatchEvent(new Event("pointerenter"));
+    vi.advanceTimersByTime(500);
+    const tip = tips()[0] as HTMLElement;
+    expect(tip.hidden).toBe(false);
+    node.remove(); // the row went away before the action was destroyed
+    await Promise.resolve(); // MutationObserver callbacks run as a microtask
+    expect(tip.hidden).toBe(true);
+    action.destroy();
+    expect(tips()).toHaveLength(0);
+  });
+
+  it("never shows after a hover delay if the trigger left the page meanwhile", () => {
+    const action = tooltip(node, "Delete loadout");
+    node.dispatchEvent(new Event("pointerenter"));
+    node.remove();
+    vi.advanceTimersByTime(500);
+    expect(tips()).toHaveLength(0);
+    action.destroy();
+  });
+
+  it("hides at once when its trigger becomes disabled", async () => {
+    const action = tooltip(node, "Overwrite");
+    node.dispatchEvent(new Event("pointerenter"));
+    vi.advanceTimersByTime(500);
+    const tip = tips()[0] as HTMLElement;
+    expect(tip.hidden).toBe(false);
+    node.disabled = true;
+    await Promise.resolve();
+    expect(tip.hidden).toBe(true);
+    action.destroy();
+  });
+
+  it("keeps a tip that explains why an already-disabled trigger is off", async () => {
+    node.disabled = true;
+    const action = tooltip(node, "Silo is reclaiming disk space.");
+    node.dispatchEvent(new Event("pointerenter"));
+    vi.advanceTimersByTime(500);
+    const tip = tips()[0] as HTMLElement;
+    document.body.append(document.createElement("span")); // unrelated page change
+    await Promise.resolve();
+    expect(tip.hidden).toBe(false);
     action.destroy();
   });
 });

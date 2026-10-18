@@ -119,7 +119,7 @@ async function poll(gen: number, deviceCode: string, seconds: number): Promise<v
     case "denied":
       return fail(gen, "Authorization was denied.");
     case "expired":
-      return fail(gen, "The code expired — try again.");
+      return fail(gen, "The code expired. Try again.");
     case "error":
       return fail(gen, `Auth error: ${r.error ?? "unknown"}`);
     case "slow_down":

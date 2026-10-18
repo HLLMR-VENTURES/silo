@@ -4,6 +4,7 @@
   import type { HTMLAttributes } from "svelte/elements";
   import Icon from "./Icon.svelte";
   import type { IconName } from "./icons";
+  import { tooltip } from "./tooltip";
 
   interface Props extends Omit<HTMLAttributes<HTMLSpanElement>, "class" | "children"> {
     label: string;
@@ -23,7 +24,7 @@
       type="button"
       class="remove"
       aria-label="Remove filter: {label}"
-      title="Remove filter"
+      use:tooltip={"Remove filter"}
       onclick={onremove}
     >
       <Icon name="close" size={12} />

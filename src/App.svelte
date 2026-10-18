@@ -157,6 +157,7 @@
   import VirtualList from "./lib/components/VirtualList.svelte";
   import ModRow from "./lib/components/ModRow.svelte";
   import ModTile from "./lib/components/ModTile.svelte";
+  import { chunk, tileColumns } from "./lib/views/tileGrid";
   import FilterBar from "./lib/components/FilterBar.svelte";
   import ModSettings from "./lib/components/ModSettings.svelte";
   import ModDetail from "./lib/components/ModDetail.svelte";
@@ -514,7 +515,7 @@
   function openGameGraphics() {
     if (!userDir) return;
     configEditor = {
-      title: "Graphics settings — game.xml",
+      title: "Graphics settings: game.xml",
       path: `${userDir}/game.xml`,
       fields: GAME_GRAPHICS_FIELDS,
       presets: GAME_GRAPHICS_PRESETS,
@@ -525,7 +526,7 @@
   function openSaveConfig(s: Savegame) {
     if (!userDir) return;
     configEditor = {
-      title: `Configure — ${s.name}`,
+      title: `Configure: ${s.name}`,
       path: `${userDir}/${s.folder}/careerSavegame.xml`,
       fields: SAVEGAME_FIELDS,
       presets: SAVEGAME_PRESETS,
@@ -687,7 +688,7 @@
     for (const c of libStats.cats) L.push(`- ${c.name}: ${c.count}  (${fmtSize(c.size)})`);
     L.push("");
     const al = loadouts.find((l) => l.id === activeLoadoutId);
-    L.push(`## Active set${al ? ` — loadout “${al.name}”` : ""} (${activeSet.size} mods)`, "");
+    L.push(`## Active set${al ? `, loadout “${al.name}”` : ""} (${activeSet.size} mods)`, "");
     L.push(`## Conflicts (${criticalCount} critical, ${conflicts.length} total)`);
     for (const c of conflicts.filter((x) => x.severity !== "info")) {
       L.push(`- [${c.severity}] ${c.kind} “${c.name}”: ${c.mods.join(", ")}`);
@@ -698,9 +699,9 @@
       L.push(`- Missing dependency: ${d.mod.title ?? d.mod.techName} needs ${d.missing.join(", ")}`);
     }
     for (const m of health.ignored) L.push(`- Ignored (digit prefix): ${m.techName}`);
-    for (const m of health.corrupt) L.push(`- Corrupt: ${m.techName} — ${m.error}`);
+    for (const m of health.corrupt) L.push(`- Corrupt: ${m.techName}: ${m.error}`);
     for (const f of health.foreign)
-      L.push(`- Foreign file at a managed name: ${f.fileName} (isn't Silo's — left untouched)`);
+      L.push(`- Foreign file at a managed name: ${f.fileName} (isn't Silo's, left untouched)`);
     return L.join("\n");
   }
 
@@ -1321,15 +1322,15 @@
       }))
     )
       return;
-    const op = beginWrite("Restoring a flat mods folder");
+    const op = beginWrite("Undoing organizing");
     if (!op) return;
     try {
       const rep = await flatten();
       if (rep.errors.length)
-        reportError(rep.errors.slice(0, 3).join("; "), "Restoring a flat mods folder");
+        reportError(rep.errors.slice(0, 3).join("; "), "Undoing organizing");
       if (rep.notices?.length) info(rep.notices.join(" "), { duration: 10_000 });
     } catch (e) {
-      reportError(e, "Restoring a flat mods folder");
+      reportError(e, "Undoing organizing");
     } finally {
       op.end();
     }
@@ -1408,8 +1409,8 @@
         onClick: () => toggleCuration(mod.techName, "hidden"),
       },
       {
-        label: c.broken ? "Clear broken flag" : "Mark broken",
-        icon: "problem",
+        label: c.broken ? "Remove flag" : "Flag",
+        icon: "flagged",
         danger: !c.broken,
         onClick: () => toggleCuration(mod.techName, "broken"),
       },
@@ -1783,12 +1784,11 @@
     });
     return arr;
   });
-  // Two tiles per virtualized row for the landscape grid.
-  const visiblePairs = $derived.by(() => {
-    const out: ModEntry[][] = [];
-    for (let i = 0; i < visible.length; i += 2) out.push(visible.slice(i, i + 2));
-    return out;
-  });
+  // The landscape grid: as many tiles per virtualized row as fit the list's width (two at the
+  // regular content width, more on a wide window, one when narrow).
+  let listWidth = $state(0);
+  const tileCols = $derived(tileColumns(listWidth));
+  const visibleTileRows = $derived(chunk(visible, tileCols));
 
   // Select-all checkbox state over the filtered view.
   const filteredActiveCount = $derived(
@@ -1810,7 +1810,7 @@
     if (libFilterCount === 0 && changing.length > 25) {
       const verb = active ? "Activate" : "Deactivate";
       const tail = cloudSynced
-        ? " Your mods folder is cloud-synced, so each one is copied/removed individually — this can take a while."
+        ? " Your mods folder is cloud-synced, so each one is copied/removed individually. This can take a while."
         : "";
       if (
         !(await ask({
@@ -1849,7 +1849,7 @@
   // activate/deactivate O(1) instead of a full-library content hash. Progress-reported so a
   // large one-time pass shows a bar instead of looking frozen.
   async function optimizeLinks() {
-    const op = beginWrite("Optimizing links", true);
+    const op = beginWrite("Reclaiming disk space", true);
     if (!op) return;
     let unlisten: (() => void) | null = null;
     let done = "";
@@ -1862,11 +1862,11 @@
       if (rep.crossDriveCopies) {
         explained = true;
         done =
-          "Your library archive is on another drive and Windows can't link across drives without Developer Mode — active mods stay as copies.";
+          "Your library archive is on another drive and Windows can't link across drives without Developer Mode. Active mods stay as copies.";
       } else if (rep.hardlinksUnsupported) {
         explained = true;
         cloudSynced = true;
-        done = "Mods folder is cloud-synced — hardlinks aren't available, so there's nothing to optimize";
+        done = "Your mods folder is cloud-synced. Hardlinks aren't available, so there's no space to reclaim.";
       } else {
         if (rep.errors.length) problem = rep.errors.slice(0, 3).join("; ");
         const gb = rep.reclaimedBytes / 1024 ** 3;
@@ -1874,8 +1874,8 @@
           gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(rep.reclaimedBytes / 1024 ** 2)} MB`;
         done =
           rep.upgraded > 0
-            ? `Optimized ${rep.upgraded} mod${rep.upgraded === 1 ? "" : "s"} — reclaimed ${freed}`
-            : "Links already optimized — nothing to reclaim";
+            ? `Reclaimed ${freed} from ${rep.upgraded} mod${rep.upgraded === 1 ? "" : "s"}.`
+            : "Links are already optimized. Nothing to reclaim.";
       }
     } catch (e) {
       problem = e;
@@ -1884,7 +1884,7 @@
       op.end();
     }
     await runScan(false); // reconcile + refresh sizes
-    if (problem !== null) reportError(problem, "Optimizing links");
+    if (problem !== null) reportError(problem, "Reclaiming disk space");
     // Long enough to read: the cross-drive explanation is a full sentence.
     const duration = Math.max(6000, done.length * 50);
     if (done && explained) info(done, { duration });
@@ -1972,7 +1972,7 @@
           title: "Point Farming Simulator at this folder too?",
           body:
             "Silo updates FS25's gameSettings.xml and keeps a backup of it, so you can switch back later. " +
-            "Close FS25 first — the game rewrites that file when it exits.",
+            "Close FS25 first. The game rewrites that file when it exits.",
           facts: [
             { label: "FS25 reads now", value: st.gameReads ?? "(unknown)" },
             { label: "Silo uses", value: path },
@@ -2140,7 +2140,7 @@
             body:
               path === null
                 ? "Your library archive isn't available. Nothing is moved or copied, and mods still on the old drive stay there, untouched. If you restored your archive somewhere, cancel, use Choose another and pick that folder instead."
-                : "Your library archive isn't available. Nothing is moved or copied — use this if you moved or restored your archive there yourself. Mods still on the old drive stay there, untouched, and you can point Silo back at it later in Settings.",
+                : "Your library archive isn't available. Nothing is moved or copied. Use this if you moved or restored your archive there yourself. Mods still on the old drive stay there, untouched, and you can point Silo back at it later in Settings.",
             facts: [
               { label: "Missing archive", value: old },
               { label: "New archive", value: target },
@@ -2199,12 +2199,12 @@
         return;
       }
       let body =
-        "Active mods stay playable — Silo links them into your mods folder" +
+        "Active mods stay playable. Silo links them into your mods folder" +
         (pf.sameDrive ? "." : " (or copies them if links aren't available).");
       if (!pf.sameDrive && !pf.symlinksAvailable)
         body += " Turn on Windows Developer Mode to link active mods instead of copying them.";
       if (pf.looseMods > 0)
-        body += ` That folder already holds ${pf.looseMods === 1 ? "1 loose mod" : `${pf.looseMods} loose mods`} — Silo will offer to file ${pf.looseMods === 1 ? "it" : "them"} in afterwards.`;
+        body += ` That folder already holds ${pf.looseMods === 1 ? "1 loose mod" : `${pf.looseMods} loose mods`}. Silo will offer to file ${pf.looseMods === 1 ? "it" : "them"} in afterwards.`;
       body +=
         " Close Farming Simulator 25 first. You can pause the move to play and resume later, cancel it to put moved mods back, or move the library back afterwards.";
       const facts = [
@@ -2702,7 +2702,7 @@
   // Play keeps the old Launch button's guards: off during a foreground library write or while an
   // archive move is copying (launching would race it).
   const playOffReason = $derived(
-    archiveMove.running ? "An archive move is running — pause it to play" : fgLock.reason,
+    archiveMove.running ? "An archive move is running. Pause it to play." : fgLock.reason,
   );
 
   /** Saves (already loaded) that use mods the library doesn't have. */
@@ -2909,6 +2909,7 @@
 <AppShell
   badges={{ updates: availableUpdates.length, diagnose: bisecting ? BISECT_BADGE : undefined }}
   fill={nav.view === "library"}
+  wide={nav.view === "library" || nav.view === "browse"}
   drawer={detailMod && nav.view === "library" ? modDrawer : undefined}
   drawerLabel="Mod details"
 >
@@ -3016,7 +3017,7 @@
               class="lib-tog lib-upd"
               class:on={needsUpdateOnly}
               disabled={updateChecking}
-              title="Show only mods with a newer version available — checks for updates the first time"
+              title="Show only mods with a newer version available. Checks for updates the first time."
               onclick={toggleNeedsUpdate}
             >
               <Icon name="update" size={13} />
@@ -3047,7 +3048,7 @@
           />
         {/snippet}
         {#snippet list()}
-          <div class="list-body">
+          <div class="list-body" bind:clientWidth={listWidth}>
             {#if filtered.length === 0 && !scanning}
               <div class="empty">
                 {mods.length === 0
@@ -3055,10 +3056,10 @@
                   : "No mods match your filter."}
               </div>
             {:else if libView === "tiles"}
-              <VirtualList items={visiblePairs} rowHeight={TILE_ROW_H} bottomPad={16}>
-                {#snippet row(pair)}
-                  <div class="tile-pair">
-                    {#each pair as mod (mod.techName)}
+              <VirtualList items={visibleTileRows} rowHeight={TILE_ROW_H} bottomPad={16}>
+                {#snippet row(tileRow)}
+                  <div class="tile-row" style:--tile-cols={tileCols}>
+                    {#each tileRow as mod (mod.techName)}
                       <ModTile
                         {mod}
                         curation={cur(mod.techName)}
@@ -3517,17 +3518,12 @@
     color: var(--primary-text);
     text-decoration: underline;
   }
-  .tile-pair {
+  .tile-row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
+    grid-template-columns: repeat(var(--tile-cols, 2), minmax(0, 1fr));
+    gap: 16px; /* TILE_GAP in tileGrid.ts */
     height: 100%;
     padding-bottom: 16px;
-  }
-  @media (max-width: 720px) {
-    .tile-pair {
-      grid-template-columns: 1fr;
-    }
   }
   .list-body {
     height: 100%;

@@ -7,6 +7,7 @@
     saveModSettingsRaw,
   } from "../api";
   import type { SettingsFile, SettingsEdit } from "../types";
+  import { tooltip } from "../ui/tooltip";
 
   interface Props {
     modName: string;
@@ -81,7 +82,7 @@
       <div class="ms-title">{title}</div>
       <div class="ms-sub">Mod settings</div>
     </div>
-    <button class="ms-x" onclick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
+    <button class="ms-x" onclick={onClose} use:tooltip={"Close"} aria-label="Close"><Icon name="close" /></button>
   </div>
 
   {#if loading}
@@ -113,7 +114,7 @@
         <button class="ms-save" onclick={() => saveRaw(file)}>Save raw XML</button>
       {:else if file.fields.length === 0}
         <div class="ms-empty small">
-          Silo couldn't model this file as a form — use “raw XML” to edit it directly.
+          Silo couldn't model this file as a form. Use “raw XML” to edit it directly.
         </div>
       {:else}
         {#each file.fields as fld (fld.id)}

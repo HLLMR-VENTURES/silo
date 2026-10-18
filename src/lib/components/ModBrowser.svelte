@@ -329,7 +329,7 @@
     let filename: string | null = null;
     try {
       filename = await installRemoteMod(m.id, source);
-      installedNote = `Installed ${filename}`;
+      installedNote = `Installed ${filename}.`;
     } catch (e) {
       error = inlineError(e, "Installing the mod");
     } finally {
@@ -436,7 +436,7 @@
     <div class="error">{error}</div>
   {/if}
   {#if installedNote}
-    <div class="ok-note">{installedNote} — rescanning library…</div>
+    <div class="ok-note">{installedNote} Rescanning library…</div>
   {/if}
 
   {#if loading && results.length === 0}
@@ -498,10 +498,10 @@
 </div>
 
 <style>
+  /* No width cap of its own: AppShell's wide content cap bounds Browse, and the auto-fill grid
+     adds columns as the window grows. */
   .browse {
     padding: 16px 20px 40px;
-    max-width: 1200px;
-    margin: 0 auto;
   }
   .browse-head {
     display: flex;

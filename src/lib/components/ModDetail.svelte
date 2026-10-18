@@ -10,6 +10,7 @@
   import ModRepoLink from "./ModRepoLink.svelte";
   import ModSourceLink from "./ModSourceLink.svelte";
   import ProvenanceCheck from "./ProvenanceCheck.svelte";
+  import { tooltip } from "../ui/tooltip";
 
   type Flag = "favorite" | "hidden" | "broken";
   interface Props {
@@ -188,7 +189,7 @@
       </div>
       <div class="d-tech tnum">{mod.techName}</div>
     </div>
-    <button class="d-x" onclick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
+    <button class="d-x" onclick={onClose} use:tooltip={"Close"} aria-label="Close"><Icon name="close" /></button>
   </div>
 
   {#if foreign}
@@ -196,10 +197,10 @@
       <div class="d-foreign-msg">
         <b
           >{foreignIsNewer
-            ? `A newer build is in your mods folder — v${foreign.flatVersion ?? "?"}.`
-            : `A different build is in your mods folder — v${foreign.flatVersion ?? "?"}.`}</b
+            ? `A newer build is in your mods folder: v${foreign.flatVersion ?? "?"}.`
+            : `A different build is in your mods folder: v${foreign.flatVersion ?? "?"}.`}</b
         >
-        Silo manages <b>v{foreign.managedVersion ?? "?"}</b>. This is how ModHub updates arrive —
+        Silo manages <b>v{foreign.managedVersion ?? "?"}</b>. This is how ModHub updates arrive:
         you download the zip into the folder. <b>Adopt</b> it to make it Silo's managed version.
       </div>
       <div class="d-foreign-actions">
@@ -224,13 +225,30 @@
       <Icon name={active ? "dot" : "circle"} size={13} />
       {active ? "Active" : "Parked"}
     </button>
-    <button class="d-act" class:on={curation.favorite} onclick={() => onToggle("favorite")}>
+    <button
+      class="d-act"
+      class:on={curation.favorite}
+      aria-pressed={curation.favorite}
+      onclick={() => onToggle("favorite")}
+    >
       <Icon name="favorite" size={13} filled={curation.favorite} /> Favorite
     </button>
-    <button class="d-act" class:on={curation.broken} onclick={() => onToggle("broken")}>
-      <Icon name="problem" size={13} /> Broken
+    <!-- One name for the flag everywhere: "Flagged", like the Library filter. -->
+    <button
+      class="d-act"
+      class:on={curation.broken}
+      aria-pressed={curation.broken}
+      onclick={() => onToggle("broken")}
+    >
+      <Icon name="flagged" size={13} />
+      {curation.broken ? "Flagged" : "Flag"}
     </button>
-    <button class="d-act" class:on={curation.hidden} onclick={() => onToggle("hidden")}>
+    <button
+      class="d-act"
+      class:on={curation.hidden}
+      aria-pressed={curation.hidden}
+      onclick={() => onToggle("hidden")}
+    >
       <Icon name="hidden" size={13} /> Hidden
     </button>
     {#if hasSettings}
@@ -239,7 +257,7 @@
       <button
         class="d-act"
         disabled
-        title="Silo edits these once they're written to modSettings/ — usually after you launch the mod once."
+        title="Silo edits these once they're written to modSettings/, usually after you launch the mod once."
       >
         <Icon name="modSettings" size={13} /> Has settings
       </button>
@@ -254,7 +272,7 @@
     <div class="d-cat-info">
       {#if catalogNewer && !foreign}
         <div class="d-upd">
-          <span><Icon name="update" size={13} /> Update available — catalog has <b>v{catalog.latestVersion}</b>{mod.version ? ` (you have v${mod.version})` : ""}</span>
+          <span><Icon name="update" size={13} /> Update available. The catalog has <b>v{catalog.latestVersion}</b>{mod.version ? ` (you have v${mod.version})` : ""}</span>
           {#if catalog.pageUrl}
             <button class="d-upd-link" onclick={() => openExternal(catalog!.pageUrl!)}>View source <Icon name="external" size={12} /></button>
           {/if}
@@ -359,7 +377,7 @@
       {#each myConflicts as c (c.kind + c.name)}
         <div class="d-conf" class:crit={c.severity === "critical"}>
           <span class="d-conf-sev">{c.severity}</span>
-          {c.kind} “{c.name}” — with {c.mods.filter((m) => m !== label).join(", ")}
+          {c.kind} “{c.name}”, with {c.mods.filter((m) => m !== label).join(", ")}
         </div>
       {/each}
     </div>
@@ -372,7 +390,7 @@
   <div class="fd-modal">
     <div class="fd-head">
       <span class="fd-title">{label}</span>
-      <button class="d-x" onclick={() => (showFullDesc = false)} title="Close" aria-label="Close"><Icon name="close" /></button>
+      <button class="d-x" onclick={() => (showFullDesc = false)} use:tooltip={"Close"} aria-label="Close"><Icon name="close" /></button>
     </div>
     <div class="fd-body">{catalog.descriptionFull || catalog.description}</div>
   </div>

@@ -2,7 +2,7 @@
 // LoadoutsPanel under a foreground library change: Save current, Overwrite, Delete and Import are
 // off and say why; Apply stays (App refuses a switch itself). Without a lock they all work.
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/svelte";
+import { render, screen, waitFor } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import LoadoutsPanel from "./LoadoutsPanel.svelte";
 
@@ -25,6 +25,17 @@ function setup(lockReason = "") {
   return props;
 }
 
+/** The in-app tooltip an icon-only button shows on hover (they carry no native title). */
+async function tipText(b: HTMLElement): Promise<string> {
+  b.dispatchEvent(new Event("pointerenter"));
+  const tip = await waitFor(() => {
+    const el = document.getElementById(b.getAttribute("aria-describedby") ?? "");
+    if (!el) throw new Error("no tooltip yet");
+    return el;
+  });
+  return tip.textContent ?? "";
+}
+
 const writes = () => [
   screen.getByRole("button", { name: /Save current active set/ }),
   screen.getByRole("button", { name: "Overwrite with current active set" }),
@@ -34,10 +45,15 @@ const writes = () => [
 
 describe("LoadoutsPanel lock", () => {
   it("turns off the buttons that change loadouts and names the reason", async () => {
-    const p = setup("Silo is optimizing links.");
+    const p = setup("Silo is reclaiming disk space.");
     for (const b of writes()) {
       expect(b).toBeDisabled();
-      expect(b).toHaveAttribute("title", "Silo is optimizing links.");
+      if (b.classList.contains("lp-icon")) {
+        expect(b).not.toHaveAttribute("title");
+        expect(await tipText(b)).toBe("Silo is reclaiming disk space.");
+      } else {
+        expect(b).toHaveAttribute("title", "Silo is reclaiming disk space.");
+      }
     }
     const user = userEvent.setup();
     for (const b of writes()) await user.click(b);

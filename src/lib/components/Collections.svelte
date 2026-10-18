@@ -33,6 +33,7 @@
   } from "../types";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import { onDestroy, onMount } from "svelte";
+  import { tooltip } from "../ui/tooltip";
 
   interface Props {
     /** The active set as (techName, path, kind, version) refs — the source for "share". */
@@ -316,21 +317,21 @@
     <div>
       <h3 class="coll-title">Collections</h3>
       <p class="sub">
-        Share a curated set of mods as a link — anyone who opens it in Silo can preview what
+        Share a curated set of mods as a link. Anyone who opens it in Silo can preview what
         they already have, install the rest, and verify they got the exact set. Only the list
         is shared; no mod files are uploaded.
       </p>
     </div>
     {#if onClose}
-      <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+      <button class="x" use:tooltip={"Close"} aria-label="Close" onclick={onClose}><Icon name="close" /></button>
     {/if}
   </div>
 
   <div class="share">
     <div class="card-title">Share as a link</div>
     <p class="card-body">
-      Publishes a collection — the list of your {zipCount} packaged mods, each pinned to a
-      version and a content hash — to your own GitHub, and gives you a link. Whoever opens it
+      Publishes a collection (the list of your {zipCount} packaged mods, each pinned to a
+      version and a content hash) to your own GitHub, and gives you a link. Whoever opens it
       in Silo can install and verify the exact set. No mod files are uploaded, only the list.
     </p>
 
@@ -351,10 +352,10 @@
       </div>
       <p class="caveat">
         {#if sharePublic}
-          <b>Public</b>: anyone with the link can view, install, and fork it — good for sharing
+          <b>Public</b>: anyone with the link can view, install, and fork it. Good for sharing
           widely. It's a normal repo on your GitHub; delete it there to unpublish.
         {:else}
-          <b>Secret</b> gist: unlisted, but <b>not</b> password-protected — anyone with the link
+          <b>Secret</b> gist: unlisted, but <b>not</b> password-protected: anyone with the link
           can see the list. Share it only with your group.
         {/if}
       </p>
@@ -366,8 +367,8 @@
         maxlength="80"
       />
       <div class="vis-row">
-        <label><input type="radio" bind:group={sharePublic} value={false} /> Private — secret gist</label>
-        <label><input type="radio" bind:group={sharePublic} value={true} /> Public — forkable repo</label>
+        <label><input type="radio" bind:group={sharePublic} value={false} /> Private: secret gist</label>
+        <label><input type="radio" bind:group={sharePublic} value={true} /> Public: forkable repo</label>
       </div>
       {#if missingScope}
         <p class="caveat">
@@ -405,7 +406,7 @@
       {:else if myErr}
         <div class="err">{myErr}</div>
       {:else if myColls.length === 0}
-        <p class="caveat" style="margin-top:6px">Nothing published yet — create one above.</p>
+        <p class="caveat" style="margin-top:6px">Nothing published yet. Create one above.</p>
       {:else}
         {#each myColls as c (c.reference)}
           <div class="coll-row">
@@ -458,7 +459,7 @@
     <div class="card-title">Open a shared link</div>
     <p class="card-body">
       Paste a Silo collection link someone sent you. Silo shows what you already have, what's
-      a different version, what it can install for you, and what you'll need to grab yourself —
+      a different version, what it can install for you, and what you'll need to grab yourself,
       before anything is downloaded.
     </p>
     <div class="share-form">
@@ -498,8 +499,8 @@
 
       {@render bucket("Silo can install these", p.willInstall)}
       {@render bucket("Get these yourself from ModHub", p.openPage)}
-      {@render bucket("Different version — update to match", p.versionDrift, true)}
-      {@render bucket("Not in the catalog — find these manually", p.unresolved)}
+      {@render bucket("Different version: update to match", p.versionDrift, true)}
+      {@render bucket("Not in the catalog: find these manually", p.unresolved)}
       {@render bucket("Already in your library", p.alreadyPresent)}
 
       {#if preflightDeps.length > 0 || preflightConflicts.length > 0}
@@ -514,7 +515,7 @@
           {#each preflightDeps as d (d.mod)}
             <div class="row">
               <span class="mn">{d.mod}</span>
-              <span class="rt">needs {d.missing.join(", ")} — not in the collection or your library</span>
+              <span class="rt">needs {d.missing.join(", ")} , not in the collection or your library</span>
             </div>
           {/each}
           <p class="caveat" style="margin-top:6px">
@@ -538,7 +539,7 @@
         {#if applyBusy && applyProgress}
           <div class="busy">
             Installing {applyProgress.done}/{applyProgress.total}
-            {applyProgress.current ? `— ${applyProgress.current}` : ""}
+            {applyProgress.current ? `: ${applyProgress.current}` : ""}
           </div>
         {/if}
       {:else}
@@ -560,7 +561,7 @@
             <span class="rt">
               {#if r.status === "failed"}<Icon name="problem" size={13} /> {r.detail ?? "failed"}
               {:else if r.verdict === "verified"}<Icon name="verifiedBuild" size={13} /> verified
-              {:else if r.verdict === "modified"}<Icon name="modified" size={13} /> modified — differs from the shared build
+              {:else if r.verdict === "modified"}<Icon name="modified" size={13} /> modified: differs from the shared build
               {:else}installed (unverified){/if}
             </span>
           </div>

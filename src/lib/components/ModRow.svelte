@@ -9,6 +9,7 @@
   import type { ModEntry, CurationRow } from "../types";
   import { getModIcon } from "../api";
   import { getVerdict } from "../provenanceCache.svelte";
+  import { tooltip } from "../ui/tooltip";
 
   type Flag = "favorite" | "hidden" | "broken";
   let {
@@ -94,7 +95,7 @@
   <button
     class="active-dot"
     class:on={active}
-    title={active ? "Active — click to park" : "Parked — click to activate"}
+    use:tooltip={active ? "Active. Click to park." : "Parked. Click to activate."}
     onclick={onToggleActive}
     aria-label="Toggle active"
   ></button>
@@ -124,7 +125,7 @@
     <button
       class="badge cat"
       class:overridden
-      title={overridden ? "Custom category — click to change" : "Click to reassign category"}
+      title={overridden ? "Custom category. Click to change." : "Click to reassign category"}
       onclick={(e) => onEditCategory(e)}
     >
       {mod.category}{mod.subcategory ? " · " + mod.subcategory : ""}
@@ -132,7 +133,7 @@
     {#if mod.kind === "dir"}
       <span
         class="badge dev"
-        title="Unpacked folder mod (dev build) — Silo shows it but leaves it unmanaged"
+        title="Unpacked folder mod (dev build). Silo shows it but leaves it unmanaged."
       >Dev</span>
     {/if}
     {#if organized && !active}<span class="badge parked">parked</span>{/if}
@@ -157,7 +158,7 @@
       </span>
     {/if}
     {#if mod.ignoredDigitPrefix}
-      <span class="badge warn" title="Name starts with a digit — the game ignores this mod">
+      <span class="badge warn" title="Name starts with a digit, so the game ignores this mod">
         ignored
       </span>
     {/if}
@@ -170,7 +171,7 @@
     {#if hasSettings}
       <button
         class="act on"
-        title="Edit this mod's settings"
+        use:tooltip={"Edit this mod's settings"}
         aria-label="Edit this mod's settings"
         onclick={onOpenSettings}
       >
@@ -180,7 +181,7 @@
     <button
       class="act star"
       class:on={curation.favorite}
-      title={curation.favorite ? "Remove favorite" : "Favorite"}
+      use:tooltip={curation.favorite ? "Remove favorite" : "Favorite"}
       aria-label={curation.favorite ? "Remove favorite" : "Favorite"}
       onclick={() => onToggle("favorite")}
     >
@@ -189,7 +190,7 @@
     <button
       class="act"
       class:on={curation.hidden}
-      title={curation.hidden ? "Unhide" : "Hide"}
+      use:tooltip={curation.hidden ? "Unhide" : "Hide"}
       aria-label={curation.hidden ? "Unhide" : "Hide"}
       onclick={() => onToggle("hidden")}
     >
@@ -198,11 +199,11 @@
     <button
       class="act warn"
       class:on={curation.broken}
-      title={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
-      aria-label={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
+      use:tooltip={curation.broken ? "Remove flag" : "Flag"}
+      aria-label={curation.broken ? "Remove flag" : "Flag"}
       onclick={() => onToggle("broken")}
     >
-      <Icon name="problem" />
+      <Icon name="flagged" />
     </button>
   </div>
 

@@ -48,7 +48,7 @@
       </button>
       <button
         class="sg-make"
-        title={lockReason || "Back up this savegame (a safe copy — original untouched)"}
+        title={lockReason || "Back up this savegame (a safe copy, the original stays untouched)"}
         onclick={() => onBackup(s)}
         disabled={!!lockReason}
       >

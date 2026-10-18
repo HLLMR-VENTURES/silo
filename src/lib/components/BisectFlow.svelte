@@ -18,6 +18,7 @@
   } from "../api";
   import { BISECT_RESTORE_FIRST, canStartBisect, finishBisect } from "../bisect";
   import type { BisectStep } from "../types";
+  import { tooltip } from "../ui/tooltip";
 
   interface Props {
     /** Suspects to bisect (active mods minus always-on). */
@@ -214,7 +215,7 @@
 <div class="bf">
   <div class="bf-head">
     <h3>Guided bisection</h3>
-    <button class="x" title="Cancel & restore" aria-label="Cancel & restore" onclick={finish} disabled={!!working}><Icon name="close" /></button>
+    <button class="x" use:tooltip={"Cancel & restore"} aria-label="Cancel & restore" onclick={finish} disabled={!!working}><Icon name="close" /></button>
   </div>
 
   {#if working}
@@ -227,7 +228,7 @@
   {#if phase === "intro"}
     <p class="body">
       Silo will find the culprit by halving your active mods and having you relaunch a few
-      times. There are <b>{total}</b> mods to test — about <b
+      times. There are <b>{total}</b> mods to test, about <b
         >{Math.ceil(Math.log2(Math.max(total, 2)))}</b
       > launches. Maps and required mods stay on the whole time, and your exact mod set is
       saved now and restored when you finish.
@@ -266,7 +267,7 @@
   {:else if phase === "verdict"}
     <p class="body">Did the problem still happen this run?</p>
     {#if crashHint === true}
-      <div class="hint bad">The log shows FS25 didn't exit cleanly — looks like it crashed again.</div>
+      <div class="hint bad">The log shows FS25 didn't exit cleanly. It looks like it crashed again.</div>
     {:else if crashHint === false}
       <div class="hint good">The log shows a clean exit this run.</div>
     {/if}
@@ -283,7 +284,7 @@
       <div class="result-title">Most likely culprit</div>
       <div class="culprit">{culprit}</div>
       <p class="body">
-        The problem tracked to this mod. Disable or update it — or, if it only breaks
+        The problem tracked to this mod. Disable or update it. If it only breaks
         alongside another mod, the pair is worth reporting to its author.
       </p>
     </div>
@@ -298,7 +299,7 @@
       <p class="body">
         Narrowing cleared every half, which means the problem only appears with a
         <b>combination</b> of mods (or isn't mod-related). Bisection can't pin an interaction
-        on one mod — that's an honest dead end, not a Silo bug.
+        on one mod. That's an honest dead end, not a Silo bug.
       </p>
     </div>
     <div class="actions">

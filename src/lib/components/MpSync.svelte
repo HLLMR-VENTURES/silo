@@ -7,6 +7,7 @@
   import { mpExport, mpVerify } from "../api";
   import type { MpModRef, MpVerifyReport } from "../types";
   import { start } from "../state/ops.svelte";
+  import { tooltip } from "../ui/tooltip";
 
   interface Props {
     /** The active set as (techName, path, kind, version) refs. */
@@ -70,12 +71,12 @@
     <div>
       <h3 class="mp-title">Multiplayer mod-set sync</h3>
       <p class="sub">
-        Everyone in an FS25 session needs the same mods, same versions, same files —
-        that's the #1 "can't join" cause. Match sets here instead of guessing.
+        Everyone in an FS25 session needs the same mods, same versions, same files.
+        That's the #1 "can't join" cause. Match sets here instead of guessing.
       </p>
     </div>
     {#if onClose}
-      <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+      <button class="x" use:tooltip={"Close"} aria-label="Close" onclick={onClose}><Icon name="close" /></button>
     {/if}
   </div>
 
@@ -85,7 +86,7 @@
 
   <div class="cards">
     <div class="card">
-      <div class="card-title">Host — share your set</div>
+      <div class="card-title">Host: share your set</div>
       <p class="card-body">
         Exports a manifest of your {active.length} active mods (name, version, content
         hash). Send the file to whoever's joining.
@@ -95,7 +96,7 @@
       </button>
     </div>
     <div class="card">
-      <div class="card-title">Joiner — check you match</div>
+      <div class="card-title">Joiner: check you match</div>
       <p class="card-body">
         Open the host's manifest; Silo compares it to your active set and tells you
         exactly what to add, update, or turn off.
@@ -109,7 +110,7 @@
   {#if dirCount > 0}
     <p class="caveat">
       {dirCount} active mod{dirCount === 1 ? " is" : "s are"} unpacked folder{dirCount === 1 ? "" : "s"}
-      (dev mods) — those can't be byte-verified and are marked unmatched in a manifest.
+      (dev mods). Those can't be byte-verified and are marked unmatched in a manifest.
     </p>
   {/if}
 
@@ -128,25 +129,25 @@
       </div>
 
       {#if r.missing.length > 0}
-        <div class="sec">Get these ({r.missing.length}) — the host has them, you don't</div>
+        <div class="sec">Get these ({r.missing.length}): the host has them, you don't</div>
         {#each r.missing as m (m.techName)}
           <div class="row"><span class="mn">{m.techName}</span><span class="rt">{m.version ?? ""}</span></div>
         {/each}
       {/if}
       {#if r.versionMismatch.length > 0}
-        <div class="sec">Wrong version ({r.versionMismatch.length}) — match the host's</div>
+        <div class="sec">Wrong version ({r.versionMismatch.length}): match the host's</div>
         {#each r.versionMismatch as m (m.techName)}
           <div class="row"><span class="mn">{m.techName}</span><span class="rt">yours {m.got || "?"} → need {m.expected || "?"}</span></div>
         {/each}
       {/if}
       {#if r.hashMismatch.length > 0}
-        <div class="sec">Same version, different file ({r.hashMismatch.length}) — re-download to be safe</div>
+        <div class="sec">Same version, different file ({r.hashMismatch.length}): re-download to be safe</div>
         {#each r.hashMismatch as m (m.techName)}
           <div class="row"><span class="mn">{m.techName}</span><span class="rt">file differs from host</span></div>
         {/each}
       {/if}
       {#if r.extra.length > 0}
-        <div class="sec">Turn these off ({r.extra.length}) — the host doesn't have them</div>
+        <div class="sec">Turn these off ({r.extra.length}): the host doesn't have them</div>
         {#each r.extra as name (name)}
           <div class="row"><span class="mn">{name}</span></div>
         {/each}

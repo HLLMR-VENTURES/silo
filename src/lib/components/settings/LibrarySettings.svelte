@@ -98,7 +98,7 @@
     </p>
     {#if !archive.available && !archive.isDefault}
       <p class="hint">
-        Reconnect its drive, or use Change… / Use default to point Silo elsewhere — nothing is moved.
+        Reconnect its drive, or use Change… / Use default to point Silo elsewhere. Nothing is moved.
       </p>
     {/if}
     {#if !archive.isDefault}
@@ -114,7 +114,7 @@
       {archive
         ? "No mods folder selected."
         : archiveLoadFailed
-          ? "Couldn't read the library archive — reopen Settings to retry."
+          ? "Couldn't read the library archive. Reopen Settings to retry."
           : "Loading…"}
     </p>
   {/if}

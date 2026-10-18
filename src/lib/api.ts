@@ -436,8 +436,11 @@ export function revealInFolder(path: string): Promise<void> {
   return revealItemInDir(path);
 }
 
-/** Open one of Silo's folders in the file manager. Rust resolves the path from the name. */
-export function openKnownFolder(which: "modsFolder" | "archive" | "gameInstall"): Promise<void> {
+/**
+ * Open one of Silo's folders in the file manager. Rust resolves the path from the name;
+ * "logs" is the folder holding silo.log.
+ */
+export function openKnownFolder(which: "modsFolder" | "archive" | "gameInstall" | "logs"): Promise<void> {
   return invoke("open_known_folder", { which });
 }
 

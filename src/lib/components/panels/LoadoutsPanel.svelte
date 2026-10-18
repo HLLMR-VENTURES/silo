@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from "../../ui/Icon.svelte";
   import type { Loadout } from "../../types";
+  import { tooltip } from "../../ui/tooltip";
 
   let {
     loadouts,
@@ -40,27 +41,27 @@
   {/if}
   {#each loadouts as l (l.id)}
     <div class="lp-row" class:active={l.id === activeLoadoutId}>
-      <button class="lp-apply" onclick={() => onApply(l)} title="Apply this loadout">
+      <button class="lp-apply" onclick={() => onApply(l)} use:tooltip={"Apply this loadout"}>
         <span class="lp-dot" class:on={l.id === activeLoadoutId}></span>
         <span class="lp-name">{l.name}</span>
         <span class="lp-count tnum">{l.mods.length}</span>
       </button>
       <button
         class="lp-icon"
-        title={lockReason || "Overwrite with current active set"}
+        use:tooltip={lockReason || "Overwrite with current active set"}
         aria-label="Overwrite with current active set"
         disabled={!!lockReason}
         onclick={() => onOverwrite(l)}><Icon name="rescan" size={14} /></button
       >
       <button
         class="lp-icon"
-        title="Export to a .silo file"
+        use:tooltip={"Export to a .silo file"}
         aria-label="Export to a .silo file"
         onclick={() => onExport(l)}><Icon name="share" size={14} /></button
       >
       <button
         class="lp-icon danger"
-        title={lockReason || "Delete loadout"}
+        use:tooltip={lockReason || "Delete loadout"}
         aria-label="Delete loadout"
         disabled={!!lockReason}
         onclick={() => onRemove(l)}><Icon name="close" size={14} /></button

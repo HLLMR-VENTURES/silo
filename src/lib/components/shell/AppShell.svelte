@@ -10,7 +10,8 @@
   // (drawer). The first focusable element is a "Skip to content" link that focuses #main. Every
   // region carries data-region (rail, header, notices, main, drawer) for F6 cycling (./regions).
   // The rail collapses to icons below 1200px window width unless pinned (nav.rail); without a
-  // `rail` snippet it renders NavRail bound to the nav state.
+  // `rail` snippet it renders NavRail bound to the nav state. Content is capped at --content-max
+  // (1280px), or --content-max-wide (1920px) for the grid views that pass `wide`.
   import type { Snippet } from "svelte";
   import {
     go,
@@ -40,6 +41,8 @@
     pin?: RailPin;
     /** The view manages its own scrolling (virtual lists): main doesn't scroll, content fills it. */
     fill?: boolean;
+    /** Grid views (Library, Browse): content may grow to --content-max-wide instead of --content-max. */
+    wide?: boolean;
   }
 
   let {
@@ -52,6 +55,7 @@
     badges = {},
     pin,
     fill = false,
+    wide = false,
   }: Props = $props();
 
   let width = $state(typeof window === "undefined" ? 1280 : window.innerWidth);
@@ -94,7 +98,7 @@
   {/if}
 
   <main id="main" class="main" class:fill tabindex="-1" bind:this={mainEl} data-region="main">
-    <div class="content">
+    <div class="content" class:wide>
       {@render children?.()}
     </div>
   </main>
@@ -173,6 +177,9 @@
     min-height: 100%;
     margin: 0 auto;
     padding: var(--sp-5);
+  }
+  .content.wide {
+    max-width: var(--content-max-wide);
   }
   .main.fill {
     overflow: hidden;

@@ -8,7 +8,14 @@ import MaintenanceSettings from "./MaintenanceSettings.svelte";
 import LibrarySettings from "./LibrarySettings.svelte";
 import ModsFolderSettings from "./ModsFolderSettings.svelte";
 import GeneralSettings from "./GeneralSettings.svelte";
+import DiagnosticsSettings from "./DiagnosticsSettings.svelte";
+import { openKnownFolder } from "../../api";
 import { MOVE_UNFINISHED_REASON, rereadLock, SCANNING_REASON, settingsLock } from "./lock";
+
+vi.mock("../../api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api")>()),
+  openKnownFolder: vi.fn(() => Promise.resolve()),
+}));
 
 describe("settingsLock", () => {
   it("is off with no reason when nothing runs", () => {
@@ -18,9 +25,9 @@ describe("settingsLock", () => {
     });
   });
   it("names the move first, then the write, then the scan", () => {
-    const both = { lockReason: "Silo is optimizing links.", scanning: true };
+    const both = { lockReason: "Silo is reclaiming disk space.", scanning: true };
     expect(settingsLock({ ...both, moveUnfinished: true }).reason).toBe(MOVE_UNFINISHED_REASON);
-    expect(settingsLock({ ...both, moveUnfinished: false }).reason).toBe("Silo is optimizing links.");
+    expect(settingsLock({ ...both, moveUnfinished: false }).reason).toBe("Silo is reclaiming disk space.");
     expect(settingsLock({ lockReason: "", scanning: true, moveUnfinished: false })).toEqual({
       locked: true,
       reason: SCANNING_REASON,
@@ -62,13 +69,13 @@ describe("MaintenanceSettings", () => {
   });
 
   it("a disabled control shows its reason as text under it", () => {
-    const p = maintenance("Silo is optimizing links.");
+    const p = maintenance("Silo is reclaiming disk space.");
     for (const name of ["Re-read every mod", "Reclaim disk space", "Undo organizing"]) {
       const b = screen.getByRole("button", { name });
       expect(b).toBeDisabled();
-      expect(b).toHaveAttribute("title", "Silo is optimizing links.");
+      expect(b).toHaveAttribute("title", "Silo is reclaiming disk space.");
     }
-    expect(screen.getAllByText("Silo is optimizing links.")).toHaveLength(3);
+    expect(screen.getAllByText("Silo is reclaiming disk space.")).toHaveLength(3);
     expect(p.onRestoreVanilla).not.toHaveBeenCalled();
   });
 
@@ -162,5 +169,22 @@ describe("GeneralSettings", () => {
     await user.click(screen.getByRole("radio", { name: "Dark" }));
     expect(onSetTheme).toHaveBeenCalledWith("dark");
     expect(screen.getByLabelText("UI size")).toHaveValue("1");
+  });
+});
+
+describe("DiagnosticsSettings", () => {
+  it("Open log folder asks Rust for the logs folder; a failure shows under the card", async () => {
+    const user = userEvent.setup();
+    const onCopyDiagnostics = vi.fn();
+    render(DiagnosticsSettings, { onCopyDiagnostics, onExportReport: vi.fn() });
+    await user.click(screen.getByRole("button", { name: "Open log folder" }));
+    expect(openKnownFolder).toHaveBeenCalledWith("logs");
+
+    vi.mocked(openKnownFolder).mockRejectedValueOnce("That folder isn't there right now.");
+    await user.click(screen.getByRole("button", { name: "Open log folder" }));
+    expect(await screen.findByText(/That folder isn't there right now\./)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Copy diagnostics" }));
+    expect(onCopyDiagnostics).toHaveBeenCalledOnce();
   });
 });

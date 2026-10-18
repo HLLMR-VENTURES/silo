@@ -74,7 +74,7 @@
   </div>
 
   {#if !canVerify}
-    <p class="prov-note">Folder mods can't be verified — there's no archive to hash.</p>
+    <p class="prov-note">Folder mods can't be verified. There's no archive to hash.</p>
   {:else if phase === "idle"}
     <p class="prov-note">
       Check this mod against the trusted build SiloAPI hashed from its source.
@@ -127,7 +127,7 @@
       </div>
     {/if}
     <p class="prov-fine">
-      Provenance check, not a virus scan — it confirms origin &amp; integrity, it can't
+      Provenance check, not a virus scan. It confirms origin &amp; integrity, it can't
       judge whether a mod is safe.
     </p>
   {/if}

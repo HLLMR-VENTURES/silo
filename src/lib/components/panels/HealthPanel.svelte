@@ -41,7 +41,7 @@
   </div>
 
   {#if healthCount === 0}
-    <div class="lp-empty">Everything looks healthy — no problems found.</div>
+    <div class="lp-empty">Everything looks healthy. No problems found.</div>
   {/if}
 
   {#if health.missingDeps.length > 0}
@@ -50,20 +50,20 @@
       <div class="hz-row">
         <div class="hz-name">{d.mod.title ?? d.mod.techName}</div>
         <div class="hz-detail">
-          needs {#each d.missing as dep, i (dep)}<span class="hz-dep">{dep}</span>{#if i < d.missing.length - 1}, {/if}{/each}
-          — not in your library
+          needs {#each d.missing as dep, i (dep)}<span class="hz-dep">{dep}</span>{#if i < d.missing.length - 1}, {/if}{/each},
+          not in your library
         </div>
       </div>
     {/each}
   {/if}
 
   {#if health.ignored.length > 0}
-    <div class="hz-group">Ignored by the game — name starts with a digit ({health.ignored.length})</div>
+    <div class="hz-group">Ignored by the game: name starts with a digit ({health.ignored.length})</div>
     {#each health.ignored as m (m.techName)}
       <div class="hz-row">
         <div class="hz-name">{m.title ?? m.techName}</div>
         <div class="hz-detail">
-          <span class="tnum">{m.techName}</span> — FS won't load a mod whose name starts with a number.
+          <span class="tnum">{m.techName}</span>: FS won't load a mod whose name starts with a number.
         </div>
       </div>
     {/each}
@@ -85,8 +85,8 @@
       <div class="hz-row">
         <div class="hz-name tnum">{f.fileName}</div>
         <div class="hz-detail">
-          The file in your mods folder isn't the one Silo manages. Pick which build to keep —
-          the other is moved to <span class="tnum">backups/</span>, so nothing is lost.
+          The file in your mods folder isn't the one Silo manages. Pick which build to keep.
+          The other is moved to <span class="tnum">backups/</span>, so nothing is lost.
         </div>
         <div class="hz-vers">
           <span class="hz-ver">Mods folder: <b class="tnum">{f.flatVersion ? `v${f.flatVersion}` : "unknown"}</b></span>
