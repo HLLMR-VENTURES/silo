@@ -22,6 +22,10 @@
     applying,
     progress = null,
     failures = [],
+    filed: filedCount = null,
+    problem = "",
+    blockedReason = "",
+    cloudSynced = false,
     activeCount = 0,
     folderMods = 0,
     autoFile = false,
@@ -37,6 +41,13 @@
     progress?: { done: number; total: number } | null;
     /** Mods that couldn't be filed: the dialog stays open and lists them. */
     failures?: FilingFailure[];
+    /** How many were filed, with `failures` (else plan length minus failures). */
+    filed?: number | null;
+    /** Why the last try filed nothing (the game is running…), shown above the buttons. */
+    problem?: string;
+    /** Why filing can't start right now (a scan, another change), or "". */
+    blockedReason?: string;
+    cloudSynced?: boolean;
     activeCount?: number;
     folderMods?: number;
     /** Auto-file is on already (the checkbox starts ticked). */
@@ -59,7 +70,9 @@
   let open = $state(true);
 
   const failed = $derived(new Set(failures.map((f) => f.techName).filter(Boolean)));
-  const filed = $derived(Math.max(0, plan.length - failures.length));
+  const filed = $derived(filedCount ?? Math.max(0, plan.length - failures.length));
+  // The file lists render only while their disclosure is open (hundreds of rows).
+  let filesOpen = $state(false);
   const title = $derived(adopt ? `File ${nMods(plan.length)} into your library` : "Organize new mods");
   const fileLabel = $derived(`File ${nMods(plan.length)}`);
 </script>
@@ -86,9 +99,9 @@
       </ul>
       <p class="muted">The rest are in your library. The ones above are still in your mods folder.</p>
     </div>
-    <details class="files">
+    <details class="files" bind:open={filesOpen}>
       <summary>See every file</summary>
-      <OrganizeFiles {plan} {failed} {dest} />
+      {#if filesOpen}<OrganizeFiles {plan} {failed} {dest} />{/if}
     </details>
   {:else if plan.length === 0}
     <p class="muted">Nothing to organize. Every loose mod is already filed.</p>
@@ -101,10 +114,10 @@
     {#if adopt.note}<p class="muted">{adopt.note}</p>{/if}
     <OrganizeFiles {plan} {dest} />
   {:else}
-    <OrganizeSummary {plan} {activeCount} {folderMods} />
-    <details class="files">
+    <OrganizeSummary {plan} {activeCount} {folderMods} {cloudSynced} />
+    <details class="files" bind:open={filesOpen}>
       <summary>See every file</summary>
-      <OrganizeFiles {plan} {dest} />
+      {#if filesOpen}<OrganizeFiles {plan} {dest} />{/if}
     </details>
     <Checkbox
       class="auto"
@@ -112,6 +125,9 @@
       disabled={applying}
       label="File new mods automatically from now on"
     />
+  {/if}
+  {#if !loading && failures.length === 0 && (problem || blockedReason)}
+    <p class="problem" role={problem ? "alert" : "status"}>{problem || blockedReason}</p>
   {/if}
 
   {#snippet footer()}
@@ -134,7 +150,8 @@
       <Button variant="ghost" onclick={() => (open = false)}>Cancel</Button>
       <Button
         variant="primary"
-        disabled={loading || plan.length === 0}
+        disabled={loading || plan.length === 0 || !!blockedReason}
+        title={blockedReason || undefined}
         onclick={() => onConfirm(!adopt && autoFileNext)}>{fileLabel}</Button
       >
     {/if}
@@ -176,6 +193,14 @@
   }
   .fn {
     font-weight: 600;
+  }
+  .problem {
+    margin: var(--sp-3) 0 0;
+    padding: var(--sp-2) var(--sp-3);
+    border-radius: var(--r-md);
+    background: var(--warn-soft);
+    color: var(--warn-text);
+    font-size: var(--fs-sm);
   }
   :global(.foot-progress) {
     flex: 1 1 auto;

@@ -539,12 +539,12 @@ mod tests {
             ),
             ("Bad credentials", UNIX, code::GITHUB_AUTH),
             (
-                "GitHub rejected the token. Reconnect your account",
+                "GitHub rejected the token. Reconnect your account.",
                 WIN,
                 code::GITHUB_AUTH,
             ),
             (
-                "GitHub rate limit hit (60/hr unauthenticated). Try again later",
+                "GitHub rate limit hit (60/hr unauthenticated). Try again later.",
                 UNIX,
                 code::GITHUB_RATE_LIMIT,
             ),
@@ -622,7 +622,7 @@ mod tests {
                 code::DB_NEWER,
             ),
             (
-                "the downloaded file isn't a Farming Simulator mod (no modDesc.xml). It may be a source",
+                "the downloaded file isn't a Farming Simulator mod (no modDesc.xml). It may be a source archive or the wrong release asset.",
                 WIN,
                 code::NOT_A_MOD,
             ),

@@ -12,10 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **First run.** A new library opens a short setup: Silo shows the mods folder it found (and
   sorts out a missing, unavailable or different folder right there), explains active and parked
   mods and where parked mods live, then shows exactly what organizing would do before anything
-  moves. **Skip setup** or **Not now** goes straight to the Library with nothing moved. Upgrading
-  libraries don't see it. (#250)
+  moves. **Skip setup** or **Not now** goes straight to the Library with nothing moved. A library
+  that's already organized, or has favorites, hidden or flagged mods, doesn't see it. (#250)
 
-- **What's new in Silo 1.0.** Upgrading users get a one-time card about the new layout, Mod
+- **What's new in Silo 1.0.** Upgrading users with an organized library get a one-time card about the new layout, Mod
   sets, Undo, keyboard shortcuts and plain-English errors; Help → What's new shows it again. (#250)
 
 - **Help.** Help topics you can search (an old name like "loadouts" finds Mod sets), What's new,

@@ -238,7 +238,7 @@
   import Onboarding from "./lib/firstRun/Onboarding.svelte";
   import WhatsNew from "./lib/firstRun/WhatsNew.svelte";
   import {
-    chunks,
+    fileInRuns,
     filingFailures,
     firstRunScreen,
     firstRunState,
@@ -246,6 +246,7 @@
     type ArchiveChoice,
     type FilingFailure,
     type FinishHow,
+    type FilingRun,
     type FirstRunFlag,
     type OrganizeOutcome,
   } from "./lib/firstRun/firstRun";
@@ -1271,31 +1272,30 @@
     techNames: string[],
     keepActive: boolean,
     opts: { auto?: boolean; onStart?: () => void; onProgress?: (done: number, total: number) => void } = {},
-  ): Promise<{ errors: string[]; thrown: unknown } | null> {
+  ): Promise<FilingRun | null> {
     if (inputs.length === 0) return null;
     const op = beginWrite(`Filing ${modsCount(inputs.length)} into the library`, !!opts.onProgress, {
       silent: opts.auto,
     });
     if (!op) return null;
     opts.onStart?.();
-    const errors: string[] = [];
-    let thrown: unknown = null;
-    let done = 0;
+    let out: FilingRun;
     try {
-      try {
-        for (const run of opts.onProgress ? chunks(inputs, FILE_RUN) : [inputs]) {
-          const rep = await applyOrganize(run);
-          errors.push(...rep.errors);
-          done += run.length;
-          op.progress(done, inputs.length);
-          opts.onProgress?.(done, inputs.length);
-        }
-      } catch (e) {
-        thrown = e;
-      }
+      // With progress, in runs of FILE_RUN; otherwise in one call, as before.
+      const onProgress = opts.onProgress;
+      out = await fileInRuns(
+        inputs,
+        applyOrganize,
+        FILE_RUN,
+        onProgress &&
+          ((done, total) => {
+            op.progress(done, total);
+            onProgress(done, total);
+          }),
+      );
       // Filed mods left the mods folder: link them back, after a partial failure too (the
       // ones that failed are still loose, so set_active leaves them alone).
-      if (keepActive && done > errors.length) {
+      if (keepActive && out.changed > 0) {
         const next = new Set([...activeSet, ...techNames]);
         activeSet = next;
         await applyActive([...next]); // reports its own problems
@@ -1304,7 +1304,7 @@
       op.end();
     }
     await runScan(false);
-    return { errors, thrown };
+    return out;
   }
 
   // Apply a prepared set of organize inputs, reporting any problem as a toast (with Try again).
@@ -1339,6 +1339,8 @@
 
   // Auto-filer (opt-in): file new mods and keep them active — no prompt, they chose it.
   async function autoFile() {
+    // Never behind the setup flow: it moves nothing until the user clicks Organize there.
+    if (firstRun === "onboarding") return;
     const { inputs, techNames } = looseInputs();
     await applyLoose(inputs, techNames, true, true);
   }
@@ -1365,16 +1367,18 @@
     if (!out) return { refused: true };
     const failures = filingFailures(out.errors, plan);
     if (out.thrown !== null) {
-      reportError(out.thrown, "Filing mods into the library");
+      // Shown in place (the dialog or the setup flow), and kept in the activity list.
+      const why = inlineError(out.thrown, "Filing mods into the library");
+      if (out.changed === 0) return { refused: true, message: why };
       const listed = new Set(failures.map((f) => f.techName));
       const loose = new Set(looseInputs().techNames);
       for (const p of plan)
         if (loose.has(p.techName) && !listed.has(p.techName))
-          failures.push({ techName: p.techName, fileName: p.fileName, message: "Not moved." });
+          failures.push({ techName: p.techName, fileName: p.fileName, message: why });
     } else if (failures.length) {
       reportError(out.errors.join("\n"), "Filing mods into the library", { quiet: true });
     }
-    return { failures };
+    return { failures, filed: out.changed };
   }
 
   // ── Organize dialog: the status strip's Review (and Settings → Library) ─────────
@@ -1389,6 +1393,10 @@
     applying: boolean;
     progress?: { done: number; total: number } | null;
     failures?: FilingFailure[];
+    /** Mods filed by the last try (with `failures`). */
+    filed?: number;
+    /** Why the last try filed nothing (shown in the dialog). */
+    problem?: string;
     /** Filing loose mods already in the library archive (#166), not organizing mods/. */
     adopt?: { path: string | null; note: string | null };
   } | null>(null);
@@ -1439,17 +1447,24 @@
       if (organizePreview) organizePreview = { ...organizePreview, progress: { done, total } };
     });
     if (out.refused) {
-      if (organizePreview) organizePreview = { ...organizePreview, applying: false, progress: null };
+      if (organizePreview)
+        organizePreview = { ...organizePreview, applying: false, progress: null, problem: out.message ?? "" };
       return;
     }
-    if (autoFileNext) setAutoFile(true);
+    if (autoFileNext !== autoFileNew) setAutoFile(autoFileNext);
     if (out.failures.length) {
       if (organizePreview)
-        organizePreview = { ...organizePreview, applying: false, progress: null, failures: out.failures };
+        organizePreview = {
+          ...organizePreview,
+          applying: false,
+          progress: null,
+          failures: out.failures,
+          filed: out.filed,
+        };
       return;
     }
     organizePreview = null;
-    success(`Filed ${modsCount(plan.length)} into your library. All active mods stay active.`);
+    success(`Filed ${modsCount(out.filed)} into your library. All active mods stay active.`);
   }
 
   // ── First run (#250): the setup flow for a new library, "What's new" for an upgrade ─────
@@ -1484,6 +1499,8 @@
     if (firstRun !== "whatsNew") return;
     firstRun = null;
     storeFlag("whats_new_seen");
+    // An existing library: the setup flow never comes up later (e.g. after Undo organizing).
+    storeFlag("onboarding_done");
   }
 
   /** The setup flow's "On another drive…": pick a folder and use it as the (empty) archive. */
@@ -1495,6 +1512,11 @@
     try {
       const pf = await archiveMovePreflight(path);
       if (pf.problems.length && !pf.canRepoint) return { problem: problemLines(pf.problems) };
+      // Mods already there need the adopt step Settings offers; setup only uses an empty folder.
+      if (pf.looseMods > 0)
+        return {
+          problem: `That folder already holds ${modsCount(pf.looseMods)}. Choose an empty folder, or set it up later in Settings → Library.`,
+        };
       const op = beginWrite("Pointing Silo at the archive");
       if (!op) return { problem: blocked("library-write").reason || "Silo is busy. Try again in a moment." };
       try {
@@ -1504,6 +1526,7 @@
       }
       await archiveMove.refresh();
       modsStatus = await modsRootStatus().catch(() => modsStatus);
+      await runScan(false);
       return { path };
     } catch (e) {
       return { problem: inlineError(e, "Pointing Silo at the archive") };
@@ -1522,6 +1545,7 @@
       op.end();
     }
     await archiveMove.refresh();
+    await runScan(false);
     return null;
   }
 
@@ -1542,7 +1566,12 @@
       firstRunPlan.filter((p) => wanted.has(p.techName)),
       onProgress,
     );
-    if (!out.refused && autoFileNext) setAutoFile(true);
+    if (!out.refused) {
+      if (autoFileNext) setAutoFile(true);
+      // Organized: the setup flow is done even if Silo closes before "Go to my library".
+      storeFlag("onboarding_done");
+      storeFlag("whats_new_seen");
+    }
     return out;
   }
 
@@ -3020,13 +3049,14 @@
       } catch (e) {
         reportError(e, "Reading the mods folder setting", { retry: retryModsFolder, background: true });
       }
-      await decideFirstRun();
       // Where the library archive lives, and any unfinished move (paused before a restart).
       // Awaited when there is a folder to scan, so the first scan's auto-file guard sees a move
       // left paused before a restart. With nothing to scan (the mods-folder status failed or is
       // unavailable), deep links, bisect recovery and the focus listener don't wait on it.
       const archiveReady = archiveMove.load();
       if (roots.length) await archiveReady;
+      // Before the first scan: while the setup flow is up, the auto-filer stays off.
+      await decideFirstRun();
       try {
         // e.g. the library database was restored from a backup: worth reading, so it stays up
         // until dismissed.
@@ -3957,6 +3987,10 @@
         applying={organizePreview.applying}
         progress={organizePreview.progress ?? null}
         failures={organizePreview.failures ?? []}
+        filed={organizePreview.filed ?? null}
+        problem={organizePreview.problem ?? ""}
+        blockedReason={organizeOffReason}
+        {cloudSynced}
         activeCount={activeSet.size}
         folderMods={mods.filter((m) => !m.organized && m.kind !== "zip").length}
         autoFile={autoFileNew}
@@ -3969,20 +4003,24 @@
   {/if}
 
   {#if firstRun === "onboarding"}
-    <ViewBoundary name="Setup" overlay onClose={() => finishOnboarding("skip")}>
+    <ViewBoundary name="Setup" overlay onClose={() => (firstRun = null)}>
       <Onboarding
         {modsStatus}
         gameFound={!!gameInfo}
         {cloudSynced}
         {scanning}
         scanned={libraryScanned}
+        {scanFailed}
+        onRescan={() => runScan(false)}
         {progress}
+        autoFileOn={autoFileNew}
         modCount={mods.length}
         activeCount={activeSet.size}
         folderMods={mods.filter((m) => !m.organized && m.kind !== "zip").length}
         archive={archiveMove.archive}
         sep={pathSep}
         busy={fgLock.reason}
+        organizeBlocked={organizeOffReason}
         onChooseModsFolder={changeModsFolder}
         onCreateModsFolder={makeModsFolder}
         onUseGameFolder={useGameFolder}

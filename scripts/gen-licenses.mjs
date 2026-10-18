@@ -13,8 +13,9 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 
-/** devDependencies whose code ends up in the bundle (the rest are build tools). */
-const BUNDLED_DEV = ["svelte", "@lucide/svelte"];
+/** Other packages whose code ends up in the bundle: devDependencies that aren't only build tools,
+ *  and the runtime packages Svelte's client code imports. */
+const BUNDLED_DEV = ["svelte", "@lucide/svelte", "clsx", "esm-env"];
 
 /** A package's license text: LICENSE*, else (Tauri plugins ship only an SPDX line) the MIT text
  *  of the project they belong to. */

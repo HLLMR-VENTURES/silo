@@ -111,7 +111,7 @@ pub fn latest_release(owner: &str, repo: &str, token: Option<&str>) -> Result<Re
     let resp = req.call().map_err(|e| match e {
         ureq::Error::Status(404, _) => "No releases found for this repo".to_string(),
         ureq::Error::Status(403, _) => {
-            "GitHub rate limit hit (60/hr unauthenticated). Try again later".to_string()
+            "GitHub rate limit hit (60/hr unauthenticated). Try again later.".to_string()
         }
         other => other.to_string(),
     })?;
@@ -326,8 +326,8 @@ pub(crate) fn verify_update_identity(
     dest: &std::path::Path,
 ) -> Result<(), String> {
     let new_xml = crate::scan::read_moddesc_xml(new_zip, "zip").map_err(|_| {
-        "the downloaded file isn't a Farming Simulator mod (no modDesc.xml) — it may be a source \
-         archive or the wrong release asset"
+        "the downloaded file isn't a Farming Simulator mod (no modDesc.xml). It may be a source \
+         archive or the wrong release asset."
             .to_string()
     })?;
     let new_md = crate::moddesc::parse(&new_xml);
@@ -349,7 +349,7 @@ pub(crate) fn verify_update_identity(
         if !cur_ut.trim().eq_ignore_ascii_case(new_ut.trim()) {
             return Err(format!(
                 "refusing to replace this mod: the download declares uniqueType {new_ut:?}, but \
-                 the installed mod is {cur_ut:?} — that's a different mod"
+                 the installed mod is {cur_ut:?}, so it's a different mod"
             ));
         }
         return Ok(());
@@ -436,11 +436,11 @@ fn gh_get(url: &str, token: Option<&str>) -> Result<serde_json::Value, String> {
 fn gh_err(e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(401, _) => {
-            "GitHub rejected the token. Reconnect your account".to_string()
+            "GitHub rejected the token. Reconnect your account.".to_string()
         }
         ureq::Error::Status(403, _) => {
-            "This token can't perform that action — reconnect with actions enabled \
-             (public_repo), or use a PAT with Starring permission"
+            "This token can't perform that action. Reconnect with actions enabled \
+             (public_repo), or use a PAT with Starring permission."
                 .to_string()
         }
         ureq::Error::Status(404, _) => "Not found on GitHub".to_string(),
@@ -696,7 +696,7 @@ pub fn read_gist_file(id: &str, filename: &str, token: Option<&str>) -> Result<S
     let file = &v["files"][filename];
     if file.is_null() {
         return Err(format!(
-            "That gist has no {filename}. It may not be a Silo collection"
+            "That gist has no {filename}. It may not be a Silo collection."
         ));
     }
     // GitHub inlines file content, but truncates very large files and gives a raw_url.
@@ -779,8 +779,8 @@ pub fn create_public_repo(token: &str, name: &str, description: &str) -> Result<
         .send_json(body)
         .map_err(|e| match e {
             ureq::Error::Status(422, _) => {
-                "You already have a repository with that name — rename the collection or \
-                 delete the old repo"
+                "You already have a repository with that name. Rename the collection or \
+                 delete the old repo."
                     .to_string()
             }
             other => gh_err(other),

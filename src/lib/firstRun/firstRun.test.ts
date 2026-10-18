@@ -1,8 +1,9 @@
 // First run (#250): who sees the setup flow / What's new, the plan grouping, and failures.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   chunks,
   failureDetails,
+  fileInRuns,
   filingFailures,
   firstRunScreen,
   folderUsable,
@@ -124,6 +125,45 @@ describe("folderVariant", () => {
   it("only moves on from a folder Silo can use", () => {
     expect(["ok", "override", "mismatch"].every((v) => folderUsable(v as never))).toBe(true);
     expect(["unknown", "unavailable", "layout", "missing"].some((v) => folderUsable(v as never))).toBe(false);
+  });
+});
+
+describe("fileInRuns", () => {
+  const apply = (fail: Set<string> = new Set(), throwOn = -1) => {
+    let call = 0;
+    return vi.fn(async (run: string[]) => {
+      if (call++ === throwOn) throw new Error("GAME_RUNNING");
+      const errors = run.filter((t) => fail.has(t)).map((t) => `${t}: move: in use`);
+      return { changed: run.length - errors.length, errors };
+    });
+  };
+
+  it("files in runs with progress after each", async () => {
+    const a = apply(new Set(["c"]));
+    const seen: number[] = [];
+    const out = await fileInRuns(["a", "b", "c", "d", "e"], a, 2, (d) => seen.push(d));
+    expect(a.mock.calls.map((c) => c[0])).toEqual([["a", "b"], ["c", "d"], ["e"]]);
+    expect(seen).toEqual([2, 4, 5]);
+    expect(out).toEqual({ errors: ["c: move: in use"], thrown: null, changed: 4, done: 5 });
+  });
+
+  it("without progress, files in one call", async () => {
+    const a = apply();
+    await fileInRuns(["a", "b", "c"], a, 2);
+    expect(a).toHaveBeenCalledOnce();
+  });
+
+  it("stops at a throw and keeps what was filed", async () => {
+    const out = await fileInRuns(["a", "b", "c", "d"], apply(new Set(), 1), 2, () => {});
+    expect(out.changed).toBe(2);
+    expect(out.done).toBe(2);
+    expect(String(out.thrown)).toContain("GAME_RUNNING");
+  });
+
+  it("a throw on the first run files nothing", async () => {
+    const out = await fileInRuns(["a", "b"], apply(new Set(), 0), 2, () => {});
+    expect(out.changed).toBe(0);
+    expect(out.thrown).not.toBeNull();
   });
 });
 

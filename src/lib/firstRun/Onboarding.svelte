@@ -38,6 +38,12 @@
     scanning: boolean;
     /** The first scan of this folder finished. */
     scanned: boolean;
+    /** The last scan failed (its notice says why). */
+    scanFailed?: boolean;
+    /** Scan the folder again. */
+    onRescan?: () => void | Promise<void>;
+    /** Auto-file is on already (the step 2 box starts ticked). */
+    autoFileOn?: boolean;
     progress: { done: number; total: number };
     modCount: number;
     activeCount: number;
@@ -47,8 +53,10 @@
     archive: { path: string | null; isDefault: boolean } | null;
     /** Path separator to show (`\` on Windows). */
     sep?: string;
-    /** Why changes are off right now (a scan or another change), or "". */
+    /** Why folder changes are off right now (another change is running), or "". */
     busy?: string;
+    /** Why organizing can't start right now (a scan, another change, an archive move), or "". */
+    organizeBlocked?: string;
     onChooseModsFolder: () => void | Promise<void>;
     onCreateModsFolder: () => void | Promise<void>;
     onUseGameFolder: () => void | Promise<void>;
@@ -76,6 +84,9 @@
     cloudSynced = false,
     scanning,
     scanned,
+    scanFailed = false,
+    onRescan,
+    autoFileOn = false,
     progress,
     modCount,
     activeCount,
@@ -83,6 +94,7 @@
     archive,
     sep = "\\",
     busy = "",
+    organizeBlocked = "",
     onChooseModsFolder,
     onCreateModsFolder,
     onUseGameFolder,
@@ -114,6 +126,14 @@
     heading?.focus();
   }
 
+  // Focus the heading when the setup opens, and again when it's replaced under the user (the
+  // folder's situation changed: found, switched, created) and focus fell to the page.
+  $effect(() => {
+    if (!heading) return;
+    const lost = document.activeElement === document.body || document.activeElement === null;
+    if (lost || !host?.contains(document.activeElement)) heading.focus();
+  });
+
   // ── Step 1: the mods folder ──
   const variant = $derived(folderVariant(modsStatus));
   const path = $derived(modsStatus?.path ?? "");
@@ -131,10 +151,17 @@
 
   // ── Step 2: where parked mods live, and auto-file ──
   type Where = "inside" | "other";
-  // svelte-ignore state_referenced_locally
-  let where = $state<Where>(archive && !archive.isDefault ? "other" : "inside");
+  const archiveWhere = (): Where => (archive && !archive.isDefault ? "other" : "inside");
+  let where = $state<Where>(archiveWhere());
   let archiveProblem = $state("");
-  let autoFile = $state(false);
+  // svelte-ignore state_referenced_locally
+  let autoFile = $state(autoFileOn);
+  // Follow the archive Silo actually uses (it loads after startup, and changes when a choice
+  // here goes through), except while a choice is being made.
+  $effect(() => {
+    const now = archiveWhere();
+    if (!acting) where = now;
+  });
   const insidePath = $derived(path ? `${path}${sep}archive` : `mods${sep}archive`);
   const otherPath = $derived(archive && !archive.isDefault ? archive.path : null);
 
@@ -162,6 +189,9 @@
   let planError = $state("");
   let planning = $state(false);
   let filing = $state<{ done: number; total: number } | null>(null);
+  /** Why the last try filed nothing (the game is running…). */
+  let organizeProblem = $state("");
+  let filedCount = $state(0);
   let failures = $state<FilingFailure[] | null>(null);
   let showFiles = $state(false);
 
@@ -185,6 +215,7 @@
   async function organize() {
     if (!plan || filing) return;
     const total = plan.length;
+    organizeProblem = "";
     filing = { done: 0, total };
     try {
       const out = await onOrganize(
@@ -192,7 +223,11 @@
         autoFile,
         (done, t) => (filing = { done, total: t }),
       );
-      if (!out.refused) failures = out.failures;
+      if (out.refused) organizeProblem = out.message ?? "";
+      else {
+        filedCount = out.filed;
+        failures = out.failures;
+      }
     } finally {
       filing = null;
     }
@@ -200,7 +235,7 @@
     heading?.focus();
   }
 
-  const filed = $derived(plan && failures ? plan.length - failures.length : 0);
+  const filed = $derived(failures ? filedCount : 0);
   const failedSet = $derived(new Set((failures ?? []).map((f) => f.techName).filter(Boolean)));
 </script>
 
@@ -221,7 +256,7 @@
     {/each}
   </ol>
 
-  <main class="body">
+  <div class="body">
     {#if step === 1}
       {#if variant === "unavailable"}
         <h2 bind:this={heading} tabindex="-1">Silo can't open your mods folder</h2>
@@ -280,15 +315,18 @@
             </span>
           </p>
         {/if}
-        <p class="tnum" aria-live="polite">
+        <p class="tnum">
           {#if scanning && progress.total > 0}
             Reading {formatCount(progress.done)} of {nMods(progress.total)}…
           {:else if scanning}
             Reading your mods…
+          {:else if scanFailed}
+            Silo couldn't read this folder.
           {:else if scanned}
             Found {nMods(modCount)}.
           {/if}
         </p>
+        <p class="sr-only" aria-live="polite">{scanned && !scanning ? `Silo found ${nMods(modCount)} in this folder.` : ""}</p>
         <div class="actions">
           <Button variant="primary" disabled={acting || !folderUsable(variant)} onclick={() => goTo(2)}>
             This is right
@@ -371,9 +409,16 @@
         <Button variant="primary" onclick={loadPlan}>Try again</Button>
         <Button variant="ghost" onclick={() => onfinish("notNow")}>Not now, show my library</Button>
       </div>
+    {:else if plan === null && scanFailed && !scanning}
+      <h2 bind:this={heading} tabindex="-1">Silo couldn't read your mods folder</h2>
+      <p>The notice behind this screen has the details. Try again, or organize later from the Library.</p>
+      <div class="actions">
+        {#if onRescan}<Button variant="primary" onclick={() => onRescan?.()}>Try again</Button>{/if}
+        <Button variant="ghost" onclick={() => onfinish("notNow")}>Not now, show my library</Button>
+      </div>
     {:else if plan === null}
       <h2 bind:this={heading} tabindex="-1">Organize when you're ready</h2>
-      <p class="tnum" aria-live="polite">
+      <p class="tnum">
         {#if scanning && progress.total > 0}
           Reading {formatCount(progress.done)} of {nMods(progress.total)}…
         {:else}
@@ -388,7 +433,7 @@
       </div>
     {:else}
       <h2 bind:this={heading} tabindex="-1" class="sr-only">Organize when you're ready</h2>
-      <OrganizeSummary {plan} {activeCount} {folderMods} heading={false} />
+      <OrganizeSummary {plan} {activeCount} {folderMods} {cloudSynced} heading={false} />
       <button class="disclose" type="button" aria-expanded={showFiles} onclick={() => (showFiles = !showFiles)}>
         <Icon name={showFiles ? "chevronDown" : "chevronRight"} size={16} />
         {showFiles ? "Hide the files" : "See every file"}
@@ -403,15 +448,25 @@
           label="Filing {formatCount(filing.done)} of {formatCount(filing.total)}…"
         />
       {:else}
+        {#if organizeProblem || organizeBlocked}
+          <p class="warn" role={organizeProblem ? "alert" : "status"}>
+            <Icon name="problem" size={16} /><span>{organizeProblem || organizeBlocked}</span>
+          </p>
+        {/if}
         <div class="actions">
-          <Button variant="primary" disabled={!!busy} title={busy || undefined} onclick={organize}>
+          <Button
+            variant="primary"
+            disabled={!!organizeBlocked}
+            title={organizeBlocked || undefined}
+            onclick={organize}
+          >
             Organize {nMods(plan.length)}
           </Button>
           <Button variant="ghost" onclick={() => onfinish("notNow")}>Not now, show my library</Button>
         </div>
       {/if}
     {/if}
-  </main>
+  </div>
 </div>
 
 <style>

@@ -2230,7 +2230,7 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
         Some(l) => match std::fs::read_to_string(l.user_dir.join("gameSettings.xml")) {
             Err(_) => (
                 None,
-                Some("gameSettings.xml not found. Start FS25 once to create it".to_string()),
+                Some("gameSettings.xml not found. Start FS25 once to create it.".to_string()),
             ),
             Ok(xml) => match modsroot::read_override(&xml) {
                 Some(o) => (Some(o), None),
@@ -3529,7 +3529,7 @@ async fn archive_adopt_apply(
         for n in missing {
             report.skipped += 1;
             report.errors.push(format!(
-                "{n}: no longer a loose mod Silo can file in. Left untouched"
+                "{n}: no longer a loose mod Silo can file in, so it was left untouched."
             ));
         }
         log::info!(
@@ -4636,7 +4636,7 @@ async fn scan_log() -> Result<logscan::LogReport, String> {
         .ok_or_else(|| "Could not locate the FS25 user directory".to_string())?;
     tauri::async_runtime::spawn_blocking(move || -> Result<logscan::LogReport, String> {
         if !path.exists() {
-            return Err("No log.txt found. Launch FS25 at least once first".to_string());
+            return Err("No log.txt found. Launch FS25 at least once first.".to_string());
         }
         // Logs are read as lossy UTF-8; FS writes mostly ASCII but paths can carry stray bytes.
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
@@ -4655,7 +4655,7 @@ async fn scan_bindings() -> Result<bindings::BindingReport, String> {
         .ok_or_else(|| "Could not locate the FS25 user directory".to_string())?;
     tauri::async_runtime::spawn_blocking(move || -> Result<bindings::BindingReport, String> {
         if !path.exists() {
-            return Err("No inputBinding.xml found. Launch FS25 at least once first".to_string());
+            return Err("No inputBinding.xml found. Launch FS25 at least once first.".to_string());
         }
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         Ok(bindings::parse(&String::from_utf8_lossy(&bytes)))

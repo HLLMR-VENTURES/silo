@@ -222,7 +222,7 @@ fn remove_any(p: &Path) -> std::io::Result<()> {
 
 fn link_inside(p: &Path) -> String {
     format!(
-        "{} is a link inside a mod folder. Silo won't copy links; remove it, then retry",
+        "{} is a link inside a mod folder. Silo won't copy links; remove it, then retry.",
         p.display()
     )
 }
@@ -329,7 +329,7 @@ fn verify(src: &Path, dst: &Path, kind: &str) -> Result<bool, String> {
 fn place(tmp: &Path, dst: &Path, kind: &str) -> Result<(), String> {
     let taken = || {
         format!(
-            "place: something appeared at {}. Move or rename it, then retry",
+            "place: something appeared at {}. Move or rename it, then retry.",
             dst.display()
         )
     };
@@ -523,7 +523,7 @@ impl Env<'_> {
 fn refuse_link(src: &Path) -> Result<(), StepErr> {
     match src.symlink_metadata() {
         Ok(m) if m.file_type().is_symlink() => Err(StepErr::Failed(format!(
-            "move: {} is a link, not a file. Silo won't move links",
+            "move: {} is a link, not a file. Silo won't move links.",
             src.display()
         ))),
         _ => Ok(()),
@@ -533,7 +533,7 @@ fn refuse_link(src: &Path) -> Result<(), StepErr> {
 /// "Something else is at `at`" — said without guessing who put it there.
 fn occupied(at: &Path) -> StepErr {
     StepErr::Failed(format!(
-        "move: a different copy is already at {}. Silo won't replace it; move or rename it, then retry",
+        "move: a different copy is already at {}. Silo won't replace it; move or rename it, then retry.",
         at.display()
     ))
 }
@@ -566,7 +566,7 @@ fn forward_one(
         (false, true) => {
             if !ours {
                 return Err(StepErr::Failed(format!(
-                    "move: the original is missing from the old location, and Silo won't adopt the copy at {}. Check it, then retry",
+                    "move: the original is missing from the old location, and Silo won't adopt the copy at {}. Check it, then retry.",
                     dst.display()
                 )));
             }
@@ -1225,8 +1225,8 @@ fn run_locked(
             marker.errors.extend(unknown_messages(
                 &unknown,
                 &rows,
-                "then resume",
-                "cancel the move, rescan, then start again",
+                "then resume.",
+                "cancel the move, rescan, then start again.",
             ));
             return pause(&env, marker);
         }
@@ -1248,7 +1248,7 @@ fn run_locked(
             for t in &snapshot {
                 if !rows.iter().any(|r| &r.tech_name == t) {
                     marker.errors.push(format!(
-                        "{t}: no longer in Silo's library. Can't move it back"
+                        "{t}: no longer in Silo's library, so Silo can't move it back."
                     ));
                 }
             }

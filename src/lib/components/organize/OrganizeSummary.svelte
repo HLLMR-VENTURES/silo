@@ -17,9 +17,12 @@
     shown?: number;
     /** Heading level for the summary line (the setup flow uses its own h2). */
     heading?: boolean;
+    /** The mods folder is cloud-synced: active mods are copied back, not linked. */
+    cloudSynced?: boolean;
   }
 
-  let { plan, activeCount, folderMods = 0, shown = 6, heading = true }: Props = $props();
+  let { plan, activeCount, folderMods = 0, shown = 6, heading = true, cloudSynced = false }: Props =
+    $props();
 
   const groups = $derived(groupPlan(plan));
   const title = $derived(
@@ -42,7 +45,7 @@
       <span>
         {#if activeCount > 0}
           {activeCount === 1 ? "Your active mod stays" : `All ${formatCount(activeCount)} active mods stay`} active. Silo
-          links them back into your mods folder.
+          {cloudSynced ? "copies" : "links"} {activeCount === 1 ? "it" : "them"} back into your mods folder.
         {:else}
           Mods you switch on later load from your mods folder as usual.
         {/if}

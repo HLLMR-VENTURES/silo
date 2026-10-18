@@ -19,7 +19,7 @@ export const HELP_TOPICS: HelpTopic[] = [
   {
     id: "organize",
     title: "Organizing your library",
-    body: "Organizing files your loose mod zips into category folders in your library archive. Active mods stay active: Silo links them back into your mods folder. Folder mods (unzipped) are left where they are. Turn on \"File new mods automatically\" in Settings → Library to file new downloads as they appear.",
+    body: "Organizing files your loose mod zips into category folders in your library archive. Active mods stay active: Silo links them back into your mods folder (or copies them, when the folder is cloud-synced). Folder mods (unzipped) are left where they are. Turn on Auto-file new mods in Settings → Library to file new downloads as they appear.",
     aliases: ["file", "auto-file", "archive", "categories", "sort"],
   },
   {
@@ -37,7 +37,7 @@ export const HELP_TOPICS: HelpTopic[] = [
   {
     id: "multiplayer",
     title: "Playing multiplayer",
-    body: "Mod sets → Multiplayer makes a Multiplayer check file from your active mods. A friend opens it in Silo to see which mods they're missing or have in a different version.",
+    body: "Mod sets → Multiplayer: the host shares their set, and each player checks that theirs matches. Silo lists the mods that are missing, in a different version or extra.",
     aliases: ["mp", "server", "sync", "friends"],
   },
   {
@@ -49,7 +49,7 @@ export const HELP_TOPICS: HelpTopic[] = [
   {
     id: "crash",
     title: "When the game crashes",
-    body: "Diagnose → Last run reads the game's log.txt and names the mod that most likely broke. If the log can't tell, Find the problem mod switches half your mods off at a time until it finds it, and puts your mods back afterwards.",
+    body: "Diagnose → Last run reads the game's log.txt and names the mod that most likely broke. If the log can't tell, Run guided bisection switches half your mods off at a time until it finds the one, and puts your mods back afterwards.",
     aliases: ["crash", "log", "bisect", "error", "broken", "won't start"],
   },
   {

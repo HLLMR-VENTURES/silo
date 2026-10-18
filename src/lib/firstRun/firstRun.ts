@@ -78,7 +78,10 @@ export function filingFailures(errors: string[], plan: PlannedMove[]): FilingFai
 }
 
 /** How filing went: refused (another change is running; the app said why) or done. */
-export type OrganizeOutcome = { refused: true } | { refused?: false; failures: FilingFailure[] };
+/** `message`: why nothing was filed, when it was tried and stopped (the game is running…). */
+export type OrganizeOutcome =
+  | { refused: true; message?: string }
+  | { refused?: false; failures: FilingFailure[]; filed: number };
 /** What choosing another archive folder did: cancelled, a problem to show, or the new path. */
 export type ArchiveChoice = null | { problem: string } | { path: string };
 /** How the setup flow ended: Skip setup, Not now, or after organizing. */
@@ -89,6 +92,42 @@ export function failureDetails(failures: FilingFailure[], filed: number, total: 
   const lines = [`Silo filed ${filed} of ${total} mods. These couldn't be moved:`];
   for (const f of failures) lines.push(`- ${f.fileName || f.techName || "?"}: ${f.message}`);
   return lines.join("\n");
+}
+
+/** What filing in runs did: problem lines, a thrown error (it stopped), and counts. */
+export interface FilingRun {
+  errors: string[];
+  thrown: unknown;
+  /** Mods moved into the library (the reports' `changed`). */
+  changed: number;
+  /** Mods handed to apply_organize before it finished or threw. */
+  done: number;
+}
+
+/**
+ * File `inputs` in runs of `size` with `apply` (apply_organize), reporting progress after each
+ * run. Stops at the first throw (the game started, the library got busy); what was filed before
+ * stays filed.
+ */
+export async function fileInRuns<T>(
+  inputs: T[],
+  apply: (run: T[]) => Promise<{ changed: number; errors: string[] }>,
+  size: number,
+  onProgress?: (done: number, total: number) => void,
+): Promise<FilingRun> {
+  const out: FilingRun = { errors: [], thrown: null, changed: 0, done: 0 };
+  try {
+    for (const run of onProgress ? chunks(inputs, size) : [inputs]) {
+      const rep = await apply(run);
+      out.errors.push(...rep.errors);
+      out.changed += rep.changed;
+      out.done += run.length;
+      onProgress?.(out.done, inputs.length);
+    }
+  } catch (e) {
+    out.thrown = e;
+  }
+  return out;
 }
 
 /** Split `items` into runs of `size` (the last one shorter), for filing with progress. */

@@ -56,7 +56,7 @@ function setup(over: Record<string, unknown> = {}) {
     onPlan: vi.fn(async () => PLAN),
     onOrganize: vi.fn(async (_t: string[], _a: boolean, p: (d: number, t: number) => void) => {
       p(3, 3);
-      return { failures: [] };
+      return { failures: [], filed: 3 };
     }),
     onCopyDetails: vi.fn(),
     onfinish: vi.fn(),
@@ -119,6 +119,7 @@ describe("Onboarding", () => {
     const { props, user } = setup({
       onOrganize: vi.fn(async () => ({
         failures: [{ techName: "FS25_C", fileName: "FS25_C.zip", message: "move: in use" }],
+        filed: 2,
       })),
     });
     await user.click(screen.getByRole("button", { name: "This is right" }));
@@ -133,11 +134,52 @@ describe("Onboarding", () => {
   });
 
   it("a refused organize stays on the summary", async () => {
-    const { user } = setup({ onOrganize: vi.fn(async () => ({ refused: true })) });
+    const { user } = setup({ onOrganize: vi.fn(async () => ({ refused: true as const })) });
     await user.click(screen.getByRole("button", { name: "This is right" }));
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await user.click(await screen.findByRole("button", { name: "Organize 3 mods" }));
     expect(await screen.findByRole("button", { name: "Organize 3 mods" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Skip setup" })).toBeInTheDocument();
+  });
+
+  it("an organize stopped before filing anything says why and can be tried again", async () => {
+    const onOrganize = vi
+      .fn()
+      .mockResolvedValueOnce({ refused: true, message: "Close Farming Simulator 25 first, then try again." })
+      .mockResolvedValueOnce({ failures: [], filed: 3 });
+    const { user } = setup({ onOrganize });
+    await user.click(screen.getByRole("button", { name: "This is right" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(await screen.findByRole("button", { name: "Organize 3 mods" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Close Farming Simulator 25 first");
+    await user.click(screen.getByRole("button", { name: "Organize 3 mods" }));
+    expect(await screen.findByRole("heading", { name: "Your library is organized." })).toBeInTheDocument();
+  });
+
+  it("Organize is off, with the reason, while a scan or another change runs", async () => {
+    const { user } = setup({ organizeBlocked: "Wait for the scan to finish." });
+    await user.click(screen.getByRole("button", { name: "This is right" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await screen.findByRole("button", { name: "Organize 3 mods" })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Wait for the scan to finish.");
+  });
+
+  it("a failed scan offers Try again instead of waiting forever", async () => {
+    const onRescan = vi.fn();
+    const { props, user } = setup({ scanned: false, scanFailed: true, onRescan });
+    await user.click(screen.getByRole("button", { name: "This is right" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(screen.getByRole("heading", { name: "Silo couldn't read your mods folder" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRescan).toHaveBeenCalledOnce();
+    expect(props.onPlan).not.toHaveBeenCalled();
+  });
+
+  it("the auto-file box starts as Silo has it, and the heading has focus on open", async () => {
+    const { user } = setup({ autoFileOn: true });
+    expect(screen.getByRole("heading", { name: "Silo found your mods folder" })).toHaveFocus();
+    await user.click(screen.getByRole("button", { name: "This is right" }));
+    expect(screen.getByRole("checkbox", { name: /File new mods automatically/ })).toBeChecked();
   });
 
   it("a folder FS25 hasn't made yet offers Create it", async () => {
@@ -176,20 +218,26 @@ describe("Onboarding", () => {
     expect(screen.getByRole("button", { name: "Choose another…" })).toBeInTheDocument();
   });
 
-  it("another drive uses the picked folder, or shows why not and stays inside", async () => {
-    const onChooseArchive = vi
-      .fn()
-      .mockResolvedValueOnce({ problem: "That folder is inside your mods folder." })
-      .mockResolvedValueOnce({ path: "E:\\Silo" });
+  it("another drive shows why a folder can't be used and stays inside", async () => {
+    const onChooseArchive = vi.fn().mockResolvedValueOnce({ problem: "That folder already holds 2 mods." });
     const { user } = setup({ onChooseArchive });
     await user.click(screen.getByRole("button", { name: "This is right" }));
     await user.click(screen.getByRole("radio", { name: /On another drive/ }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("inside your mods folder");
+    expect(await screen.findByRole("alert")).toHaveTextContent("already holds 2 mods");
     expect(screen.getByRole("radio", { name: /Inside your mods folder/ })).toBeChecked();
-    await user.click(screen.getByRole("radio", { name: /On another drive/ }));
-    await vi.waitFor(() => expect(onChooseArchive).toHaveBeenCalledTimes(2));
+  });
+
+  it("the archive choice follows the archive Silo uses", async () => {
+    const props = { ...setup().props };
+    const user = userEvent.setup();
+    document.body.innerHTML = "";
+    const r = render(Onboarding, { ...props, archive: null });
+    await user.click(screen.getByRole("button", { name: "This is right" }));
+    expect(screen.getByRole("radio", { name: /Inside your mods folder/ })).toBeChecked();
+    // The archive loads (or a choice went through): a custom one.
+    await r.rerender({ archive: { path: "E:\\Silo", isDefault: false } });
     expect(screen.getByRole("radio", { name: /On another drive/ })).toBeChecked();
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText("E:\\Silo")).toBeInTheDocument();
   });
 });
 
@@ -224,6 +272,27 @@ describe("Organize dialog", () => {
     expect(onConfirm).toHaveBeenCalledWith(false);
   });
 
+  it("says why filing is off, and why the last try filed nothing", () => {
+    const { unmount } = render(OrganizePreview, { ...base, blockedReason: "Wait for the scan to finish." });
+    expect(screen.getByRole("button", { name: "File 3 mods" })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("Wait for the scan to finish.");
+    unmount();
+    render(OrganizePreview, { ...base, problem: "Close Farming Simulator 25 first, then try again." });
+    expect(screen.getByRole("alert")).toHaveTextContent("Close Farming Simulator 25 first");
+    expect(screen.getByRole("button", { name: "File 3 mods" })).toBeEnabled();
+  });
+
+  it("unticking a ticked auto-file box confirms with it off", async () => {
+    const user = userEvent.setup();
+    const onConfirm = vi.fn();
+    render(OrganizePreview, { ...base, autoFile: true, onConfirm });
+    const box = screen.getByRole("checkbox", { name: "File new mods automatically from now on" });
+    expect(box).toBeChecked();
+    await user.click(box);
+    await user.click(screen.getByRole("button", { name: "File 3 mods" }));
+    expect(onConfirm).toHaveBeenCalledWith(false);
+  });
+
   it("shows progress in the footer while filing", () => {
     render(OrganizePreview, { ...base, applying: true, progress: { done: 25, total: 50 } });
     expect(screen.getByRole("progressbar", { name: "Filing 25 of 50…" })).toBeInTheDocument();
@@ -239,8 +308,10 @@ describe("Organize dialog", () => {
       onCancel,
       onCopyDetails,
       failures: [{ techName: "FS25_B", fileName: "FS25_B.zip", message: "move: in use" }],
+      filed: 2,
     });
     expect(screen.getByRole("alert")).toHaveTextContent("Silo filed 2 of 3 mods. 1 couldn't be moved:");
+    await user.click(screen.getByText("See every file"));
     expect(screen.getByText("Not moved")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Copy details" }));
     expect(onCopyDetails).toHaveBeenCalledWith(expect.stringContaining("FS25_B.zip: move: in use"));
@@ -256,14 +327,14 @@ describe("Organize dialog", () => {
 });
 
 describe("WhatsNew", () => {
-  it("lists what's new and closes with Got it", async () => {
+  it("lists what's new and closes", async () => {
     const user = userEvent.setup();
     const onclose = vi.fn();
     render(WhatsNew, { open: true, onclose });
     const dialog = screen.getByRole("dialog", { name: "What's new in Silo 1.0" });
     for (const t of ["A new layout", "Mod sets", "Undo", "Keyboard shortcuts", "Plain-English errors"])
       expect(dialog).toHaveTextContent(t);
-    await user.click(screen.getByRole("button", { name: "Got it" }));
+    await user.click(screen.getByRole("button", { name: "Close" }));
     expect(onclose).toHaveBeenCalledOnce();
   });
 });

@@ -40,7 +40,7 @@
         }}>See keyboard shortcuts</Button
       >
     {/if}
-    <Button variant="primary" onclick={() => (open = false)}>Got it</Button>
+    <Button variant="primary" onclick={() => (open = false)}>Close</Button>
   {/snippet}
 </Dialog>
 
