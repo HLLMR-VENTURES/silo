@@ -16,6 +16,9 @@ pub struct AppError {
 pub mod code {
     pub const STILL_LOADING: &str = "STILL_LOADING";
     pub const LIBRARY_BUSY: &str = "LIBRARY_BUSY";
+    /// A library archive move is paused or unfinished (or already under way): it must be
+    /// resumed or cancelled before this can run.
+    pub const MOVE_UNFINISHED: &str = "MOVE_UNFINISHED";
     pub const GAME_RUNNING: &str = "GAME_RUNNING";
     /// Another program (often the game, an antivirus scan or a sync client) has the file open.
     pub const FILE_IN_USE: &str = "FILE_IN_USE";
@@ -148,11 +151,14 @@ fn known_phrase(lower: &str) -> Option<&'static str> {
     const PHRASES: &[(&str, &str)] = &[
         ("silo is still loading", code::STILL_LOADING),
         ("silo is busy with another change", code::LIBRARY_BUSY),
-        ("archive move is already", code::LIBRARY_BUSY),
+        ("archive move is already", code::MOVE_UNFINISHED),
+        ("already unfinished", code::MOVE_UNFINISHED),
         (
             "finish or cancel the archive move first",
-            code::LIBRARY_BUSY,
+            code::MOVE_UNFINISHED,
         ),
+        // Before the plain "moving" phrase: launching while a move runs.
+        ("pause the move to play", code::MOVE_UNFINISHED),
         ("silo is moving your library archive", code::LIBRARY_BUSY),
         ("close farming simulator 25 first", code::GAME_RUNNING),
         ("reconnect its drive", code::ARCHIVE_UNAVAILABLE),
@@ -335,7 +341,8 @@ fn transport_code(kind: ureq::ErrorKind, message: &str) -> &'static str {
 const FRONTEND_LOG_MAX: usize = 4096;
 
 /// One frontend-reported event as one log line: the level from `level` ("error" | "warn" |
-/// "info", anything else is error), the text prefixed `[frontend]`, newlines folded to ` | `,
+/// "info", anything else is error), the text prefixed `[frontend]`, newlines folded to ` | `
+/// and other control characters to spaces,
 /// message and context each cut to 4 KB.
 pub fn format_frontend_log(
     level: &str,
@@ -355,11 +362,13 @@ pub fn format_frontend_log(
     (level, line)
 }
 
-/// `s` on one line (CR/LF runs → ` | `), cut to `FRONTEND_LOG_MAX` bytes on a char boundary.
+/// `s` on one line (CR/LF runs → ` | `; every other control character → a space, see
+/// `log_safe_char`), cut to `FRONTEND_LOG_MAX` bytes on a char boundary.
 fn one_line(s: &str) -> String {
     let flat = s
         .split(['\r', '\n'])
         .filter(|part| !part.is_empty())
+        .map(|part| part.chars().map(log_safe_char).collect::<String>())
         .collect::<Vec<_>>()
         .join(" | ");
     if flat.len() <= FRONTEND_LOG_MAX {
@@ -370,6 +379,16 @@ fn one_line(s: &str) -> String {
         end -= 1;
     }
     format!("{}…", &flat[..end])
+}
+
+/// A space for any character that could break or fake a log line: C0 controls (tab included),
+/// DEL, NEL (U+0085) and the Unicode line / paragraph separators. CR and LF never get here
+/// (`one_line` splits on them).
+fn log_safe_char(c: char) -> char {
+    match c {
+        '\u{0}'..='\u{1f}' | '\u{7f}' | '\u{85}' | '\u{2028}' | '\u{2029}' => ' ',
+        _ => c,
+    }
 }
 
 #[cfg(test)]
@@ -548,17 +567,32 @@ mod tests {
             (
                 "Finish or cancel the archive move first.",
                 WIN,
-                code::LIBRARY_BUSY,
+                code::MOVE_UNFINISHED,
             ),
             (
                 "Silo is moving your library archive — pause the move to play.",
                 UNIX,
+                code::MOVE_UNFINISHED,
+            ),
+            (
+                "Silo is moving your library archive.",
+                WIN,
                 code::LIBRARY_BUSY,
             ),
             (
                 "An archive move is already under way.",
                 UNIX,
-                code::LIBRARY_BUSY,
+                code::MOVE_UNFINISHED,
+            ),
+            (
+                "An archive move is already running.",
+                WIN,
+                code::MOVE_UNFINISHED,
+            ),
+            (
+                "An archive move is already unfinished — resume or cancel it first.",
+                UNIX,
+                code::MOVE_UNFINISHED,
             ),
             (
                 "Close Farming Simulator 25 first, then update.",
@@ -737,6 +771,14 @@ mod tests {
         assert_eq!(format_frontend_log("error", "x", None).0, log::Level::Error);
         let (lvl, line) = format_frontend_log("bogus", "x", Some("  "));
         assert_eq!((lvl, line.as_str()), (log::Level::Error, "[frontend] x"));
+
+        // Other control characters can't split or fake a line: each becomes a space.
+        let (_, line) = format_frontend_log(
+            "error",
+            "a\tb\u{0}c\u{1b}[31md\u{7f}e\u{85}f\u{2028}g\u{2029}h",
+            Some("x\u{8}y"),
+        );
+        assert_eq!(line, "[frontend] a b c [31md e f g h | context: x y");
 
         // Each part is cut to 4 KB on a char boundary, so a huge event stays one bounded line.
         let big = "é".repeat(5000); // 10 000 bytes
