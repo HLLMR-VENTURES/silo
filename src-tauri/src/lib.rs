@@ -1295,6 +1295,8 @@ struct CatalogUpdate {
     has_update: bool,
     download_url: Option<String>,
     source: Option<String>,
+    /// Where to get it by hand when there's no direct download (a ModHub page).
+    page_url: Option<String>,
 }
 
 /// Check the whole library against the SiloAPI catalog in one request (by tech name),
@@ -1330,6 +1332,7 @@ async fn catalog_check_updates(
                 has_update,
                 download_url: r.download.as_ref().map(|d| d.url.clone()),
                 source: r.download.as_ref().map(|d| d.source.clone()),
+                page_url: r.page_url.clone(),
             });
         }
         Ok(out)

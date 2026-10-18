@@ -1,15 +1,18 @@
 <script lang="ts">
-  // Settings → General: theme, UI size, the Library's list density, and a pointer to the game's
+  // Settings → General: theme, UI size, the Library's list density, checking for mod updates at
+  // startup (off unless turned on; persisted by updates/autoCheck), and a pointer to the game's
   // graphics settings.
   //   <GeneralSettings {theme} {uiScale} {density} {userDir} {onSetTheme} {onSetUiScale}
   //     {onSetDensity} {onOpenGameGraphics} />
   import Button from "../../ui/Button.svelte";
   import Segmented from "../../ui/Segmented.svelte";
   import Select from "../../ui/Select.svelte";
+  import Switch from "../../ui/Switch.svelte";
   import type { ChoiceOption } from "../../ui/types";
   import { UI_SCALES, parseUiScale, type UiScale } from "../../uiScale";
   import type { Density } from "../library/ModListRow.svelte";
   import SettingsCard from "./SettingsCard.svelte";
+  import { autoCheck, setAutoCheck, UPDATE_PRIVACY_LINE } from "../../updates/autoCheck.svelte";
 
   type Theme = "system" | "light" | "dark";
 
@@ -84,6 +87,21 @@
     />
   </div>
   <p class="hint">Compact fits more mods on screen in the Library's list.</p>
+</SettingsCard>
+
+<SettingsCard title="Updates">
+  <div class="row">
+    <span class="label">Check for mod updates when Silo starts</span>
+    <Switch
+      checked={autoCheck.on}
+      controlled
+      ariaLabel="Check for mod updates when Silo starts"
+      onchange={(on) => setAutoCheck(on)}
+    />
+  </div>
+  <p class="hint">
+    {UPDATE_PRIVACY_LINE} Silo only checks. You choose what to install in Updates.
+  </p>
 </SettingsCard>
 
 {#if userDir}

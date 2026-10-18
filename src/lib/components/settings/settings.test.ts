@@ -11,6 +11,7 @@ import GeneralSettings from "./GeneralSettings.svelte";
 import DiagnosticsSettings from "./DiagnosticsSettings.svelte";
 import { openKnownFolder } from "../../api";
 import { MOVE_UNFINISHED_REASON, rereadLock, SCANNING_REASON, settingsLock } from "./lock";
+import { AUTO_CHECK_KEY, autoCheckEnabled, reloadAutoCheck } from "../../updates/autoCheck.svelte";
 
 vi.mock("../../api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api")>()),
@@ -189,6 +190,30 @@ describe("GeneralSettings", () => {
     await user.click(screen.getByRole("radio", { name: "Dark" }));
     expect(onSetTheme).toHaveBeenCalledWith("dark");
     expect(screen.getByLabelText("UI size")).toHaveValue("1");
+  });
+
+  it("checking for mod updates at startup is off until switched on, and persists", async () => {
+    localStorage.clear();
+    reloadAutoCheck();
+    const user = userEvent.setup();
+    render(GeneralSettings, {
+      theme: "system",
+      uiScale: 1,
+      userDir: null,
+      onSetTheme: vi.fn(),
+      onSetUiScale: vi.fn(),
+      onOpenGameGraphics: vi.fn(),
+    });
+    const sw = screen.getByRole("switch", { name: "Check for mod updates when Silo starts" });
+    expect(sw).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByText(/sends the names of your installed mods/)).toBeInTheDocument();
+    await user.click(sw);
+    expect(sw).toHaveAttribute("aria-checked", "true");
+    expect(localStorage.getItem(AUTO_CHECK_KEY)).toBe("on");
+    reloadAutoCheck();
+    expect(autoCheckEnabled()).toBe(true);
+    await user.click(sw);
+    expect(localStorage.getItem(AUTO_CHECK_KEY)).toBe("off");
   });
 });
 

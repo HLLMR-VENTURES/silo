@@ -1,0 +1,234 @@
+// The Updates view's sections, from one check's rows and the library as it is now. Pure, so the
+// grouping, the rail badge and the ModHub "you saved the new zip" detection unit-test without the
+// app.
+//   const s = groupUpdates({ mods, rows, checkYourself, catalogReached: true });
+//   s.ready     // newer version Silo can install in place (a GitHub release)
+//   s.modhub    // newer version that downloads from its page (ModHub)
+//   updatesBadge(s, checked)  // the rail count: ready + modhub, only after a check
+
+import type { ForeignFile } from "../api";
+import type { CheckYourselfRow } from "../sources";
+import type { UpdateRow } from "../types";
+
+/** What the grouping reads from a library mod. */
+export interface LibraryModLike {
+  techName: string;
+  title?: string | null;
+  version?: string | null;
+  /** Where the mod's file is now (Organize or auto-file can move it after a check). */
+  path?: string;
+}
+
+/** A mod Silo's catalog doesn't know, with no linked repo and no saved page. */
+export interface UntrackedMod {
+  techName: string;
+  title: string;
+}
+
+export interface UpdateSections {
+  /** A newer version Silo can download and swap in (a release asset). */
+  ready: UpdateRow[];
+  /** A newer version that only downloads from its page (ModHub). */
+  modhub: UpdateRow[];
+  /** A saved source page the check couldn't answer: the user looks for themselves. */
+  checkYourself: CheckYourselfRow[];
+  /** The check failed for these (a linked repo that didn't answer), with the reason. */
+  failed: UpdateRow[];
+  upToDate: UpdateRow[];
+  /** Only filled when the catalog answered (otherwise Silo can't tell). */
+  notTracked: UntrackedMod[];
+}
+
+export const NO_SECTIONS: UpdateSections = {
+  ready: [],
+  modhub: [],
+  checkYourself: [],
+  failed: [],
+  upToDate: [],
+  notTracked: [],
+};
+
+/** A version as compared and shown: no leading "v", no surrounding space. */
+export function normVersion(v: string): string {
+  return v.trim().replace(/^v(?=\d)/i, "");
+}
+
+/**
+ * Whether version `a` is newer than `b`, comparing dot-separated numbers ("1.0.10.0" > "1.0.9.0";
+ * missing parts count as 0). Versions that aren't plain numbers are never called newer.
+ * @param a candidate
+ * @param b baseline
+ */
+export function isNewerVersion(a: string, b: string): boolean {
+  const parse = (v: string) => normVersion(v).split(".").map((p) => (/^\d+$/.test(p) ? Number(p) : NaN));
+  const x = parse(a);
+  const y = parse(b);
+  if (x.some(Number.isNaN) || y.some(Number.isNaN)) return false;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d !== 0) return d > 0;
+  }
+  return false;
+}
+
+/**
+ * Whether the library already has the version a row offers (updated since the check, by Silo or
+ * by hand), so the row stops offering it.
+ * @param mod the library mod now
+ * @param row the check's row for it
+ */
+export function installedSinceCheck(mod: LibraryModLike, row: UpdateRow): boolean {
+  if (!mod.version || !row.latest) return false;
+  return normVersion(mod.version) === normVersion(row.latest);
+}
+
+const byTitle = (a: { title: string }, b: { title: string }) =>
+  a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+
+/**
+ * Sort one check's rows into the Updates view's sections.
+ * @param opts `mods` the library now; `rows` the check's rows; `checkYourself` saved pages the
+ *   check couldn't answer; `catalogReached` false when the catalog request failed (then no mod is
+ *   called "not tracked", because Silo can't tell)
+ * @returns each section sorted by title; rows for mods no longer in the library are dropped
+ */
+export function groupUpdates(opts: {
+  mods: LibraryModLike[];
+  rows: UpdateRow[];
+  checkYourself: CheckYourselfRow[];
+  catalogReached: boolean;
+}): UpdateSections {
+  const byTech = new Map(opts.mods.map((m) => [m.techName, m]));
+  const out: UpdateSections = {
+    ready: [],
+    modhub: [],
+    checkYourself: [...opts.checkYourself],
+    failed: [],
+    upToDate: [],
+    notTracked: [],
+  };
+  const answered = new Set<string>(opts.checkYourself.map((r) => r.techName));
+  for (const checked of opts.rows) {
+    const mod = byTech.get(checked.techName);
+    if (!mod) continue;
+    // Install from where the file is now, not where it was at check time.
+    const row = mod.path && mod.path !== checked.path ? { ...checked, path: mod.path } : checked;
+    if (typeof row.hasUpdate !== "boolean") {
+      if (row.error) {
+        out.failed.push(row);
+        answered.add(row.techName);
+      }
+      continue;
+    }
+    answered.add(row.techName);
+    if (!row.hasUpdate) out.upToDate.push(row);
+    else if (installedSinceCheck(mod, row))
+      out.upToDate.push({ ...row, hasUpdate: false, current: mod.version ?? row.current });
+    else if (row.assetUrl) out.ready.push(row);
+    else out.modhub.push(row);
+  }
+  if (opts.catalogReached) {
+    for (const m of opts.mods) {
+      if (!answered.has(m.techName))
+        out.notTracked.push({ techName: m.techName, title: m.title || m.techName });
+    }
+  }
+  out.ready.sort(byTitle);
+  out.modhub.sort(byTitle);
+  out.failed.sort(byTitle);
+  out.upToDate.sort(byTitle);
+  out.notTracked.sort(byTitle);
+  return out;
+}
+
+/** The rows with a newer version (Ready to install, then Download from ModHub). */
+export function availableRows(s: UpdateSections): UpdateRow[] {
+  return [...s.ready, ...s.modhub];
+}
+
+/**
+ * The rail badge: Ready to install + Download from ModHub. No badge before a check (it means
+ * "never checked", not "0"), and none when nothing is newer.
+ * @param s the sections
+ * @param checked a check has finished this session
+ */
+export function updatesBadge(s: UpdateSections, checked: boolean): number | undefined {
+  const n = s.ready.length + s.modhub.length;
+  return checked && n > 0 ? n : undefined;
+}
+
+/**
+ * The file in the mods folder that's a newer build of a ModHub row's mod (the zip the user saved
+ * from the page): the version the check found, or anything newer than the installed one. An older
+ * or same build (a rollback, a multiplayer server's copy) isn't offered as "newer".
+ * @param row a Download from ModHub row
+ * @param foreign files at a managed mod's name that Silo didn't put there
+ */
+export function droppedBuildFor(row: UpdateRow, foreign: ForeignFile[]): ForeignFile | null {
+  return (
+    foreign.find(
+      (f) =>
+        f.techName === row.techName &&
+        !!f.flatVersion &&
+        ((!!row.latest && normVersion(f.flatVersion) === normVersion(row.latest)) ||
+          isNewerVersion(f.flatVersion, f.managedVersion ?? row.current ?? "")),
+    ) ?? null
+  );
+}
+
+/** Identifies one dropped build, so each is announced once. */
+export function droppedKey(f: ForeignFile): string {
+  return `${f.techName}\u0000${f.fileName}\u0000${f.flatVersion ?? ""}`;
+}
+
+/**
+ * ModHub builds that newly arrived in the mods folder: one "Found a newer ..." toast each.
+ * @param modhub the Download from ModHub rows
+ * @param foreign the latest foreign-file scan
+ * @param announced keys already announced (droppedKey); not changed here
+ */
+export function newDroppedBuilds(
+  modhub: UpdateRow[],
+  foreign: ForeignFile[],
+  announced: ReadonlySet<string>,
+): { row: UpdateRow; file: ForeignFile }[] {
+  const out: { row: UpdateRow; file: ForeignFile }[] = [];
+  for (const row of modhub) {
+    const file = droppedBuildFor(row, foreign);
+    if (file && !announced.has(droppedKey(file))) out.push({ row, file });
+  }
+  return out;
+}
+
+/** "8.0.0.4 → 8.0.1.0" (never a doubled "v"); just the new version when the old is unknown. */
+export function versionChange(row: Pick<UpdateRow, "current" | "latest">): string {
+  const to = row.latest ? normVersion(row.latest) : "?";
+  return row.current ? `${normVersion(row.current)} → ${to}` : to;
+}
+
+/** The source chip's words: "GitHub", "ModHub", or the source as given. */
+export function sourceLabel(row: Pick<UpdateRow, "source" | "pageUrl">): string | null {
+  const s = row.source?.toLowerCase();
+  if (s === "github") return "GitHub";
+  if (s === "modhub") return "ModHub";
+  if (!s && row.pageUrl && /farming-simulator\.com/i.test(row.pageUrl)) return "ModHub";
+  return row.source ?? null;
+}
+
+const relative = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+
+/**
+ * When the last check ran, for the header: "just now", "2 minutes ago", "3 hours ago", then a
+ * date.
+ * @param at epoch ms of the check
+ * @param now epoch ms now
+ */
+export function lastCheckedText(at: number, now: number): string {
+  const secs = Math.max(0, Math.round((now - at) / 1000));
+  if (secs < 60) return "just now";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return relative.format(-mins, "minute");
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return relative.format(-hours, "hour");
+  return new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}

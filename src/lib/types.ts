@@ -334,6 +334,9 @@ export interface CatalogUpdate {
   hasUpdate: boolean;
   downloadUrl: string | null;
   source: string | null;
+  /** Where to get it by hand when there's no direct download (a ModHub page). Older Silo
+   *  builds' catalog rows don't carry it. */
+  pageUrl?: string | null;
 }
 
 /** The detail record is a BrowseMod plus its registrations; sources are the same shape. */
@@ -484,7 +487,11 @@ export interface UpdateRow {
   hasUpdate?: boolean;
   assetUrl?: string | null;
   source?: string;
+  /** The mod's page, for updates Silo can't download itself (ModHub). */
+  pageUrl?: string | null;
   error?: string;
+  /** The text behind "Copy details" for `error`. */
+  errorDetail?: string;
 }
 
 // ── Guided bisection ──
