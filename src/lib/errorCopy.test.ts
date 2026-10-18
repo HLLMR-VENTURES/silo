@@ -6,6 +6,7 @@ import {
   ERROR_CODES,
   fileNameIn,
   formatDetail,
+  looksLikeHumanCopy,
   rememberAppVersion,
 } from "./errorCopy";
 
@@ -161,5 +162,43 @@ describe("formatDetail", () => {
     expect(formatDetail(d)).toBe("Silo (version unknown)\nTime: t\nCode: UNKNOWN\nMessage: x");
     rememberAppVersion("1.2.3");
     expect(formatDetail(d).split("\n")[0]).toBe("Silo 1.2.3");
+  });
+});
+
+describe("body line for errors without copy (#228)", () => {
+  it("shows a human-looking backend message under the generic title", () => {
+    const d = describeError("Close the other Silo window first.", "Saving the loadout");
+    expect(d.title).toBe("Something went wrong while saving the loadout.");
+    expect(d.body).toBe("Close the other Silo window first.");
+    const typed = describeError({ code: "OTHER", message: "That loadout is gone." }, "Saving");
+    expect(typed.body).toBe("That loadout is gone.");
+    expect(describeError(new AppError(null, "Nothing to cancel.")).body).toBe("Nothing to cancel.");
+  });
+
+  it("leaves technical text behind Copy details", () => {
+    const cases = [
+      "weird failure (os error 1234)",
+      "Error: invalid zip header",
+      "error: something broke",
+      "TypeError: x is undefined",
+      "boom\n    at foo (bar.js:1:2)",
+      "C:\\Users\\me\\mods\\FS25_X.zip",
+      "/home/me/mods/FS25_X.zip",
+      "x".repeat(241),
+    ];
+    for (const msg of cases) expect(describeError(msg, "Saving").body).toBeUndefined();
+  });
+
+  it("never shows a JS Error's own words, and never for codes with their own copy", () => {
+    expect(describeError(new Error("Cannot read properties of undefined"), "Saving").body).toBeUndefined();
+    expect(describeError(new AppError("GAME_RUNNING", "FS25 is running.")).body).toBeUndefined();
+    expect(describeError("Access is denied. (os error 5)").body).toBeUndefined();
+  });
+
+  it("looksLikeHumanCopy: the rule on its own", () => {
+    expect(looksLikeHumanCopy("Couldn't link FS25_X: the file changed.")).toBe(true);
+    expect(looksLikeHumanCopy("x".repeat(240))).toBe(true);
+    expect(looksLikeHumanCopy("   ")).toBe(false);
+    expect(looksLikeHumanCopy("C:\\mods")).toBe(false);
   });
 });

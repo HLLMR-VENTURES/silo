@@ -175,6 +175,7 @@
   import LibraryToolbar from "./lib/components/panels/LibraryToolbar.svelte";
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
   import NoticeArea from "./lib/components/NoticeArea.svelte";
+  import ViewBoundary from "./lib/components/ViewBoundary.svelte";
   import Icon from "./lib/ui/Icon.svelte";
   import { fmtSize } from "./lib/format";
   import {
@@ -2558,250 +2559,280 @@
   />
 
   {#if loadoutsOpen}
-    <LoadoutsPanel
-      {loadouts}
-      activeCount={activeSet.size}
-      {activeLoadoutId}
-      onApply={applyLoadout}
-      onOverwrite={overwriteLoadout}
-      onExport={exportLoadout}
-      onRemove={removeLoadout}
-      onSaveCurrent={saveCurrentLoadout}
-      onImport={importLoadout}
-      onClose={() => (loadoutsOpen = false)}
-    />
+    <ViewBoundary name="Loadouts">
+      <LoadoutsPanel
+        {loadouts}
+        activeCount={activeSet.size}
+        {activeLoadoutId}
+        onApply={applyLoadout}
+        onOverwrite={overwriteLoadout}
+        onExport={exportLoadout}
+        onRemove={removeLoadout}
+        onSaveCurrent={saveCurrentLoadout}
+        onImport={importLoadout}
+        onClose={() => (loadoutsOpen = false)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if savesOpen}
-    <SavegamesPanel
-      rows={saveRows}
-      lockReason={writeLock.reason}
-      onConfigure={openSaveConfig}
-      onBackup={backupSave}
-      onLoadout={loadoutFromSave}
-      onClose={() => (savesOpen = false)}
-    />
+    <ViewBoundary name="Savegames">
+      <SavegamesPanel
+        rows={saveRows}
+        lockReason={writeLock.reason}
+        onConfigure={openSaveConfig}
+        onBackup={backupSave}
+        onLoadout={loadoutFromSave}
+        onClose={() => (savesOpen = false)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if conflictsOpen}
-    <ConflictsPanel
-      {conflicts}
-      {criticalCount}
-      activeCount={activeSet.size}
-      onClose={() => (conflictsOpen = false)}
-    />
+    <ViewBoundary name="Conflicts">
+      <ConflictsPanel
+        {conflicts}
+        {criticalCount}
+        activeCount={activeSet.size}
+        onClose={() => (conflictsOpen = false)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if settingsOpen}
-    <SettingsPanel
-      {theme}
-      {uiScale}
-      {roots}
-      {gameInfo}
-      {userDir}
-      {appVer}
-      {autoFileNew}
-      {organizedCount}
-      {unorganizedCount}
-      {cloudSynced}
-      lockReason={writeLock.reason}
-      {scanning}
-      onSetTheme={setTheme}
-      onSetUiScale={setUiScale}
-      onOpenGameGraphics={openGameGraphics}
-      onExportReport={exportReport}
-      onCopyDiagnostics={copyDiagnostics}
-      onSetAutoFile={setAutoFile}
-      onOrganize={() => {
-        settingsOpen = false;
-        organizeNew();
-      }}
-      onRebuild={rebuildLibrary}
-      onRestoreVanilla={() => {
-        settingsOpen = false;
-        restoreVanilla();
-      }}
-      onOptimizeLinks={optimizeLinks}
-      onClose={() => (settingsOpen = false)}
-      {modsStatus}
-      onChangeModsFolder={changeModsFolder}
-      onUseGameFolder={useGameFolder}
-      onSwitchModsFolder={switchModsFolder}
-      archive={archiveMove.archive}
-      moveUnfinished={archiveMove.unfinished}
-      archiveLoadFailed={archiveMove.loadFailed}
-      onChangeArchive={changeArchive}
-      onArchiveDefault={archiveDefault}
-    />
+    <ViewBoundary name="Settings">
+      <SettingsPanel
+        {theme}
+        {uiScale}
+        {roots}
+        {gameInfo}
+        {userDir}
+        {appVer}
+        {autoFileNew}
+        {organizedCount}
+        {unorganizedCount}
+        {cloudSynced}
+        lockReason={writeLock.reason}
+        {scanning}
+        onSetTheme={setTheme}
+        onSetUiScale={setUiScale}
+        onOpenGameGraphics={openGameGraphics}
+        onExportReport={exportReport}
+        onCopyDiagnostics={copyDiagnostics}
+        onSetAutoFile={setAutoFile}
+        onOrganize={() => {
+          settingsOpen = false;
+          organizeNew();
+        }}
+        onRebuild={rebuildLibrary}
+        onRestoreVanilla={() => {
+          settingsOpen = false;
+          restoreVanilla();
+        }}
+        onOptimizeLinks={optimizeLinks}
+        onClose={() => (settingsOpen = false)}
+        {modsStatus}
+        onChangeModsFolder={changeModsFolder}
+        onUseGameFolder={useGameFolder}
+        onSwitchModsFolder={switchModsFolder}
+        archive={archiveMove.archive}
+        moveUnfinished={archiveMove.unfinished}
+        archiveLoadFailed={archiveMove.loadFailed}
+        onChangeArchive={changeArchive}
+        onArchiveDefault={archiveDefault}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if settingsMod}
-    <ModSettings
-      modName={settingsMod.techName}
-      title={settingsMod.title}
-      onClose={() => (settingsMod = null)}
-    />
+    <ViewBoundary name="Mod settings">
+      <ModSettings
+        modName={settingsMod.techName}
+        title={settingsMod.title}
+        onClose={() => (settingsMod = null)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if configEditor}
-    <ConfigEditor
-      title={configEditor.title}
-      path={configEditor.path}
-      fields={configEditor.fields}
-      presets={configEditor.presets}
-      footnote={configEditor.footnote}
-      onClose={() => (configEditor = null)}
-    />
+    <ViewBoundary name="the settings editor">
+      <ConfigEditor
+        title={configEditor.title}
+        path={configEditor.path}
+        fields={configEditor.fields}
+        presets={configEditor.presets}
+        footnote={configEditor.footnote}
+        onClose={() => (configEditor = null)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if detailMod}
     {@const dm = detailMod}
     {@const fgn = foreignFiles.find((f) => f.techName === dm.techName) ?? null}
-    <ModDetail
-      mod={dm}
-      curation={cur(dm.techName)}
-      tags={tagsOf(dm.techName)}
-      active={activeSet.has(dm.techName)}
-      organized={dm.organized}
-      hasSettings={settingsModsSet.has(dm.techName)}
-      foreign={fgn}
-      onAdoptForeign={async () => {
-        if (fgn) {
-          await resolveForeign(fgn.fileName, "adopt");
+    <ViewBoundary name="the mod details">
+      <ModDetail
+        mod={dm}
+        curation={cur(dm.techName)}
+        tags={tagsOf(dm.techName)}
+        active={activeSet.has(dm.techName)}
+        organized={dm.organized}
+        hasSettings={settingsModsSet.has(dm.techName)}
+        foreign={fgn}
+        onAdoptForeign={async () => {
+          if (fgn) {
+            await resolveForeign(fgn.fileName, "adopt");
+            detailMod = null;
+          }
+        }}
+        onRestoreForeign={async () => {
+          if (fgn) {
+            await resolveForeign(fgn.fileName, "restore");
+            detailMod = null;
+          }
+        }}
+        {libraryTechNames}
+        {conflicts}
+        categories={CATEGORIES}
+        isOverridden={overrideMap[dm.techName] != null}
+        onSetCategory={(c, s) => setCategory(dm.techName, c, s)}
+        onResetCategory={() => resetCategory(dm.techName)}
+        onClose={() => (detailMod = null)}
+        onToggle={(flag) => toggleCuration(dm.techName, flag)}
+        onToggleActive={() => toggleActive(dm.techName)}
+        onOpenSettings={() =>
+          (settingsMod = { techName: dm.techName, title: dm.title ?? dm.techName })}
+        onFindInBrowse={() => openInBrowse(dm)}
+        onCurationChange={(row) => (curationMap = { ...curationMap, [dm.techName]: row })}
+        onTagsChange={(t) => (tagMap = { ...tagMap, [dm.techName]: t })}
+        onFilterTag={(t) => {
+          selectedTag = t;
           detailMod = null;
-        }
-      }}
-      onRestoreForeign={async () => {
-        if (fgn) {
-          await resolveForeign(fgn.fileName, "restore");
+        }}
+        repo={repoMap[dm.techName] ?? null}
+        onRepoChange={(r) => {
+          const next = { ...repoMap };
+          if (r) next[dm.techName] = r;
+          else delete next[dm.techName];
+          repoMap = next;
+        }}
+        source={sourceMap[dm.techName] ?? null}
+        onSourceChange={(row) => setSource(dm.techName, row)}
+        onInstalled={() => {
           detailMod = null;
-        }
-      }}
-      {libraryTechNames}
-      {conflicts}
-      categories={CATEGORIES}
-      isOverridden={overrideMap[dm.techName] != null}
-      onSetCategory={(c, s) => setCategory(dm.techName, c, s)}
-      onResetCategory={() => resetCategory(dm.techName)}
-      onClose={() => (detailMod = null)}
-      onToggle={(flag) => toggleCuration(dm.techName, flag)}
-      onToggleActive={() => toggleActive(dm.techName)}
-      onOpenSettings={() =>
-        (settingsMod = { techName: dm.techName, title: dm.title ?? dm.techName })}
-      onFindInBrowse={() => openInBrowse(dm)}
-      onCurationChange={(row) => (curationMap = { ...curationMap, [dm.techName]: row })}
-      onTagsChange={(t) => (tagMap = { ...tagMap, [dm.techName]: t })}
-      onFilterTag={(t) => {
-        selectedTag = t;
-        detailMod = null;
-      }}
-      repo={repoMap[dm.techName] ?? null}
-      onRepoChange={(r) => {
-        const next = { ...repoMap };
-        if (r) next[dm.techName] = r;
-        else delete next[dm.techName];
-        repoMap = next;
-      }}
-      source={sourceMap[dm.techName] ?? null}
-      onSourceChange={(row) => setSource(dm.techName, row)}
-      onInstalled={() => {
-        detailMod = null;
-        runScan(false);
-      }}
-    />
+          runScan(false);
+        }}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if updatesOpen}
-    <UpdatesPanel
-      {updateResults}
-      {availableUpdates}
-      {updateChecking}
-      lockReason={writeLock.reason}
-      {checkYourself}
-      onInstall={installFromRow}
-      onOpenSource={(s) => openExternal(s.url)}
-      onMarkChecked={markChecked}
-      onClose={() => (updatesOpen = false)}
-    />
+    <ViewBoundary name="Updates">
+      <UpdatesPanel
+        {updateResults}
+        {availableUpdates}
+        {updateChecking}
+        lockReason={writeLock.reason}
+        {checkYourself}
+        onInstall={installFromRow}
+        onOpenSource={(s) => openExternal(s.url)}
+        onMarkChecked={markChecked}
+        onClose={() => (updatesOpen = false)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if statsOpen}
-    <StatsPanel
-      modCount={mods.length}
-      {organizedCount}
-      activeCount={activeSet.size}
-      mapsCount={stats.maps}
-      {libStats}
-      onClose={() => (statsOpen = false)}
-    />
+    <ViewBoundary name="Library stats">
+      <StatsPanel
+        modCount={mods.length}
+        {organizedCount}
+        activeCount={activeSet.size}
+        mapsCount={stats.maps}
+        {libStats}
+        onClose={() => (statsOpen = false)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if healthOpen}
-    <HealthPanel
-      {health}
-      {healthCount}
-      onResolveForeign={resolveForeign}
-      onClose={() => (healthOpen = false)}
-    />
+    <ViewBoundary name="Library health">
+      <HealthPanel
+        {health}
+        {healthCount}
+        onResolveForeign={resolveForeign}
+        onClose={() => (healthOpen = false)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if logOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="backdrop" onclick={() => (logOpen = false)}></div>
-    <div class="log-panel">
-      <LogTriage
-        onClose={() => (logOpen = false)}
-        activeMods={[...activeSet]}
-        activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
-        onApply={bisectRound}
-        onBisecting={(v) => void bisectingChanged(v)}
-        recoveryPending={bisectRecovery !== null}
-      />
-    </div>
+    <ViewBoundary name="Diagnose">
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="backdrop" onclick={() => (logOpen = false)}></div>
+      <div class="log-panel">
+        <LogTriage
+          onClose={() => (logOpen = false)}
+          activeMods={[...activeSet]}
+          activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
+          onApply={bisectRound}
+          onBisecting={(v) => void bisectingChanged(v)}
+          recoveryPending={bisectRecovery !== null}
+        />
+      </div>
+    </ViewBoundary>
   {/if}
 
   {#if bindingsOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="backdrop" onclick={() => (bindingsOpen = false)}></div>
-    <div class="log-panel">
-      <BindingsView onClose={() => (bindingsOpen = false)} />
-    </div>
+    <ViewBoundary name="Bindings">
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="backdrop" onclick={() => (bindingsOpen = false)}></div>
+      <div class="log-panel">
+        <BindingsView onClose={() => (bindingsOpen = false)} />
+      </div>
+    </ViewBoundary>
   {/if}
 
   {#if mpOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="backdrop" onclick={() => (mpOpen = false)}></div>
-    <div class="log-panel">
-      <MpSync active={activeModRefs} onClose={() => (mpOpen = false)} />
-    </div>
+    <ViewBoundary name="Multiplayer">
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="backdrop" onclick={() => (mpOpen = false)}></div>
+      <div class="log-panel">
+        <MpSync active={activeModRefs} onClose={() => (mpOpen = false)} />
+      </div>
+    </ViewBoundary>
   {/if}
 
   {#if collectionsOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="backdrop" onclick={() => (collectionsOpen = false)}></div>
-    <div class="log-panel">
-      <Collections
-        active={activeModRefs}
-        library={mods}
-        initialImportUrl={collImportUrl}
-        onImported={() => runScan(false)}
-        onClose={() => {
-          collectionsOpen = false;
-          collImportUrl = null;
-        }}
-      />
-    </div>
+    <ViewBoundary name="Collections">
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="backdrop" onclick={() => (collectionsOpen = false)}></div>
+      <div class="log-panel">
+        <Collections
+          active={activeModRefs}
+          library={mods}
+          initialImportUrl={collImportUrl}
+          onImported={() => runScan(false)}
+          onClose={() => {
+            collectionsOpen = false;
+            collImportUrl = null;
+          }}
+        />
+      </div>
+    </ViewBoundary>
   {/if}
 
   {#if bridgeOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="backdrop" onclick={() => (bridgeOpen = false)}></div>
-    <div class="log-panel">
-      <BridgeTool
-        onGenerated={() => runScan(true)}
-        onClose={() => (bridgeOpen = false)}
-      />
-    </div>
+    <ViewBoundary name="the filltype bridge">
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="backdrop" onclick={() => (bridgeOpen = false)}></div>
+      <div class="log-panel">
+        <BridgeTool
+          onGenerated={() => runScan(true)}
+          onClose={() => (bridgeOpen = false)}
+        />
+      </div>
+    </ViewBoundary>
   {/if}
 
   {#if scanning}
@@ -2812,14 +2843,16 @@
   {/if}
 
   {#if organizePreview}
-    <OrganizePreview
-      plan={organizePreview.plan}
-      loading={organizePreview.loading}
-      applying={organizePreview.applying}
-      adopt={organizePreview.adopt ?? null}
-      onConfirm={confirmOrganize}
-      onCancel={() => (organizePreview = null)}
-    />
+    <ViewBoundary name="the Organize preview">
+      <OrganizePreview
+        plan={organizePreview.plan}
+        loading={organizePreview.loading}
+        applying={organizePreview.applying}
+        adopt={organizePreview.adopt ?? null}
+        onConfirm={confirmOrganize}
+        onCancel={() => (organizePreview = null)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if statusOp}
@@ -2835,16 +2868,19 @@
     <!-- Own scroll region: the library scrolls via its inner VirtualList, but Browse
          is plain flow content, so it needs a flex-fill scroll container of its own. -->
     <div class="browse-scroll">
-      <ModBrowser
-        installed={libraryTechNames}
-        onInstalled={() => runScan(true)}
-        onNeedAuth={() => (settingsOpen = true)}
-        onFindInLibrary={openInLibrary}
-        seed={browseSeed}
-        seedTech={browseSeedTech}
-      />
+      <ViewBoundary name="Browse">
+        <ModBrowser
+          installed={libraryTechNames}
+          onInstalled={() => runScan(true)}
+          onNeedAuth={() => (settingsOpen = true)}
+          onFindInLibrary={openInLibrary}
+          seed={browseSeed}
+          seedTech={browseSeedTech}
+        />
+      </ViewBoundary>
     </div>
   {:else}
+  <ViewBoundary name="the library">
   <div class="lib">
     <div class="lib-inner">
       <FilterBar
@@ -3008,6 +3044,7 @@
       </div>
     </div>
   </div>
+  </ViewBoundary>
   {/if}
 
   {#if editing}
@@ -3031,7 +3068,9 @@
   {/if}
 </div>
 
-<DialogHost />
+<ViewBoundary name="the dialog">
+  <DialogHost />
+</ViewBoundary>
 <ToastRegion />
 
 <style>

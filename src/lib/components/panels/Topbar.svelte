@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from "../../ui/Icon.svelte";
   import SiloMark from "../../ui/SiloMark.svelte";
+  import ActivityButton from "../ActivityButton.svelte";
   let {
     topbarH = $bindable(),
     view,
@@ -156,6 +157,8 @@
         <Icon name="play" size={14} /> Launch{activeCount ? ` (${activeCount})` : ""}
       </button>
     {/if}
+    <!-- What Silo is doing and what it said: never disabled, so errors stay reachable. -->
+    <span class="activity-slot"><ActivityButton /></span>
     <button
       class="btn icon-btn"
       class:on={settingsOpen}
@@ -326,6 +329,20 @@
     padding: 9px 12px;
     display: inline-grid;
     place-items: center;
+  }
+  /* The bell matches the settings button next to it (16px icon + 10px padding = its 18px + 9px). */
+  .activity-slot {
+    display: inline-flex;
+  }
+  .activity-slot :global(.icon-btn) {
+    padding: 10px 13px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-raised);
+    color: var(--text);
+  }
+  .activity-slot :global(.icon-btn:hover:not(:disabled)) {
+    border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
   }
   .icon-btn.on {
     color: var(--primary-text);

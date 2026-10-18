@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An activity list.** The bell next to Settings lists what Silo is doing right now and what it
+  said recently: results, warnings and errors, each error with Copy details. A dot on the bell
+  shows when something is running or an error came in. (#228)
+
 - **UI size setting.** Settings → Appearance lets you make text and icons smaller or larger
   (90%, 100%, 110% or 125%). (#224)
 
@@ -23,6 +27,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running. (#226)
 
 ### Changed
+
+- **One notice area instead of stacked banners.** Warnings like "your mods folder isn't
+  available", a library move in progress or an interrupted diagnosis now share one strip under
+  the top bar, most important first, with "+N more" for the rest. Results and one-off problems
+  appear as short notices in the corner instead of a coloured line. (#228)
+
+- **Plain-English error messages.** When something fails, Silo says what went wrong and what to
+  do about it ("another program is using FS25_X.zip, close it and try again") instead of the raw
+  system error, offers Try again where that helps, and keeps the technical text behind Copy
+  details for bug reports. (#228)
+
+- **Controls say why they're unavailable.** While Silo is changing your library, the buttons that
+  would start another change are off and, when you point at them, say what Silo is busy with. A
+  second change started some other way is refused with the same reason instead of overlapping
+  the first. (#228)
 
 - **Sharper text and better contrast.** Secondary text, warnings, links and buttons are easier to
   read in both the light and dark themes, and nothing is smaller than 12 px. (#224)
@@ -50,6 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   your library, with the list of mods. Cancel changes nothing. (#226)
 
 ### Fixed
+
+- **A rescan no longer hides a warning.** Rescanning (including the automatic rescan when you
+  come back to Silo) used to clear whatever problem was showing, such as a mods folder FS25
+  doesn't read or a failed install. Each warning now stays until its cause is fixed. (#228)
 
 - **Overwriting a loadout asks first.** Saving your current mods over an existing loadout now
   says how many mods it had and how many are added and removed, and waits for you to choose

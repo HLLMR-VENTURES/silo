@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  modsFolderNotices,
   rootsFor,
   showOverrideNotice,
   switchBlockReason,
@@ -90,5 +91,90 @@ describe("rootsFor", () => {
     expect(
       rootsFor(status({ layoutProblem: "That folder overlaps another mods folder's archive." })),
     ).toEqual([]);
+  });
+});
+
+describe("modsFolderNotices (#228)", () => {
+  const acts = () => ({
+    retry: vi.fn(),
+    chooseAnother: vi.fn(),
+    useGameFolder: vi.fn(),
+    pointGameHere: vi.fn(),
+    createFolder: vi.fn(),
+    dismissFollowed: vi.fn(),
+  });
+  const labels = (n: { actions?: { label: string }[] } | null) => n?.actions?.map((a) => a.label);
+
+  it("says nothing for a healthy folder, or before the first status", () => {
+    expect(modsFolderNotices(status(), false, acts())).toEqual({
+      modsFolder: null,
+      override: null,
+      followed: null,
+    });
+    expect(modsFolderNotices(null, true, acts()).modsFolder).toBeNull();
+  });
+
+  it("an unavailable chosen folder blocks, with the banner's three ways out", () => {
+    const n = modsFolderNotices(status({ available: false }), false, acts());
+    expect(n.modsFolder).toMatchObject({
+      key: "mods-folder",
+      level: "blocking",
+      title: "Your mods folder isn't available: C:/mods.",
+      dismissible: false,
+    });
+    expect(labels(n.modsFolder)).toEqual(["Try again", "Choose another", "Use the game's folder"]);
+    expect(n.override).toBeNull();
+  });
+
+  it("a blocked folder explains why; Try again only after a failed read", () => {
+    const blocked = status({
+      layoutProblem: "It overlaps another folder's archive.",
+      layoutProblemCause: "overlap",
+      layoutConflict: "D:/other",
+      mismatch: true,
+    });
+    const n = modsFolderNotices(blocked, true, acts());
+    expect(n.modsFolder?.body).toBe("It overlaps another folder's archive. (D:/other)");
+    expect(labels(n.modsFolder)).toEqual(["Point FS25 here", "Choose another"]);
+    // The mismatch is part of the blocked notice, not a second one; no "now follows" either.
+    expect(n.override).toBeNull();
+    expect(n.followed).toBeNull();
+    const readError = modsFolderNotices(
+      status({ layoutProblem: "Silo couldn't read its database.", layoutProblemCause: "readError" }),
+      false,
+      acts(),
+    );
+    expect(labels(readError.modsFolder)).toEqual(["Try again", "Choose another"]);
+  });
+
+  it("a missing mods folder offers to create it", () => {
+    const n = modsFolderNotices(status({ modsFolderMissing: true }), false, acts());
+    expect(n.modsFolder).toMatchObject({ level: "warning" });
+    expect(labels(n.modsFolder)).toEqual(["Create it", "Choose a folder"]);
+  });
+
+  it("FS25 reading another folder is its own warning", () => {
+    const n = modsFolderNotices(status({ mismatch: true, gameReads: "D:/fs" }), false, acts());
+    expect(n.modsFolder).toBeNull();
+    expect(n.override).toMatchObject({
+      key: "override",
+      level: "warning",
+      title: "FS25 is reading a different mods folder (D:/fs).",
+    });
+    expect(labels(n.override)).toEqual(["Point FS25 here", "Switch Silo to the game's folder"]);
+    const cantWrite = modsFolderNotices(
+      status({ mismatch: true, canWriteGameSetting: false }),
+      false,
+      acts(),
+    );
+    expect(labels(cantWrite.override)).toEqual(["Switch Silo to the game's folder"]);
+  });
+
+  it("the one-time 'now follows FS25' notice is dismissible and remembers it", () => {
+    const a = acts();
+    const n = modsFolderNotices(status({ source: "gameOverride" }), true, a);
+    expect(n.followed).toMatchObject({ key: "override-followed", level: "info", dismissible: true });
+    n.followed?.onDismiss?.();
+    expect(a.dismissFollowed).toHaveBeenCalled();
   });
 });
