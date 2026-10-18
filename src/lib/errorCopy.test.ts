@@ -74,8 +74,8 @@ describe("describeError copy", () => {
     for (const msg of [
       "Finish or cancel the archive move first.",
       "An archive move is already running.",
-      "An archive move is already unfinished — resume or cancel it first.",
-      "Silo is moving your library archive — pause the move to play.",
+      "An archive move is already unfinished. Resume or cancel it first.",
+      "Silo is moving your library archive. Pause the move to play.",
     ]) {
       expect(classifyMessage(msg)).toBe("MOVE_UNFINISHED");
       expect(describeError(msg).retryable).toBe(false);

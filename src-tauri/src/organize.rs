@@ -254,7 +254,7 @@ pub fn apply_organize(
         // Adopting a folder mod named like its category would move it into itself.
         if to.starts_with(&from) {
             rep.errors.push(format!(
-                "{}: {} would be filed inside itself — left it untouched",
+                "{}: {} would be filed inside itself. Left it untouched",
                 m.tech_name, m.file_name
             ));
             rep.skipped += 1;
@@ -264,7 +264,7 @@ pub fn apply_organize(
         // (another build, the user's own file) may be the only copy.
         if to.symlink_metadata().is_ok() {
             rep.errors.push(format!(
-                "{}: {} already exists in the archive — left both untouched",
+                "{}: {} already exists in the archive. Left both untouched",
                 m.tech_name, m.file_name
             ));
             rep.skipped += 1;
@@ -369,7 +369,7 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
             //     If the user swapped in their own file at that name, neither matches — leave it.
             if !src.exists() {
                 rep.errors.push(format!(
-                    "{}: no archived copy behind the root file — kept it (won't delete the only copy)",
+                    "{}: no archived copy behind the root file. Kept it (won't delete the only copy)",
                     row.tech_name
                 ));
                 rep.skipped += 1;
@@ -377,7 +377,7 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
                 || is_silo_projection(&link, &src, &row.kind))
             {
                 rep.errors.push(format!(
-                    "{}: the file in the mods folder isn't the one Silo projected (did you replace it?) — left it untouched",
+                    "{}: the file in the mods folder isn't the one Silo projected (did you replace it?). Left it untouched",
                     row.tech_name
                 ));
                 rep.skipped += 1;
@@ -667,7 +667,7 @@ pub fn adopt_foreign(conn: &Connection, layout: &Layout, file_name: &str) -> Res
     // Promoting a link would file the link itself (not a mod) into the archive and back up the
     // real archived copy out of the way. Refuse before touching anything.
     if fmeta.file_type().is_symlink() {
-        return Err("The mods-folder entry is a link, not a file — use Restore instead".into());
+        return Err("The mods-folder entry is a link, not a file. Use Restore instead".into());
     }
     let archive = archive_path(&layout.archive, &row.category, file_name);
     // Back up the old archived copy before replacing it.
@@ -802,7 +802,7 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             // copy — leave both in place and report the anomaly for the user to resolve.
             if occupied && !is_silo_projection(&link, &src, &row.kind) {
                 rep.errors.push(format!(
-                    "{}: the mods-folder file isn't Silo's projection — left it and the archived copy untouched",
+                    "{}: the mods-folder file isn't Silo's projection. Left it and the archived copy untouched",
                     row.tech_name
                 ));
                 rep.skipped += 1;
@@ -835,7 +835,7 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             // exactly the state a crash between the manifest write and the move leaves. Never
             // delete it: keep the file, drop the stale manifest row.
             rep.errors.push(format!(
-                "{}: no archived copy — kept the file in the mods root (not deleted)",
+                "{}: no archived copy. Kept the file in the mods root (not deleted)",
                 row.tech_name
             ));
         }
@@ -1993,7 +1993,7 @@ mod tests {
             "the stale manifest row should be cleared"
         );
         assert!(
-            rep.errors.iter().any(|e| e.contains("kept the file")),
+            rep.errors.iter().any(|e| e.contains("Kept the file")),
             "the kept-file case should be reported, got: {:?}",
             rep.errors
         );
@@ -2353,7 +2353,7 @@ mod tests {
         flatten(&conn, &Layout::default_for(&b));
         assert!(
             b.join("FS25_Foo.zip").exists(),
-            "B's file is not Silo's — never removed"
+            "B's file is not Silo's. Never removed"
         );
         assert!(
             a.join("FS25_Foo.zip").exists(),

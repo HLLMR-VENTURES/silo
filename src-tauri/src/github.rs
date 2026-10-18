@@ -111,7 +111,7 @@ pub fn latest_release(owner: &str, repo: &str, token: Option<&str>) -> Result<Re
     let resp = req.call().map_err(|e| match e {
         ureq::Error::Status(404, _) => "No releases found for this repo".to_string(),
         ureq::Error::Status(403, _) => {
-            "GitHub rate limit hit (60/hr unauthenticated) — try again later".to_string()
+            "GitHub rate limit hit (60/hr unauthenticated). Try again later".to_string()
         }
         other => other.to_string(),
     })?;
@@ -436,7 +436,7 @@ fn gh_get(url: &str, token: Option<&str>) -> Result<serde_json::Value, String> {
 fn gh_err(e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(401, _) => {
-            "GitHub rejected the token — reconnect your account".to_string()
+            "GitHub rejected the token. Reconnect your account".to_string()
         }
         ureq::Error::Status(403, _) => {
             "This token can't perform that action — reconnect with actions enabled \
@@ -696,7 +696,7 @@ pub fn read_gist_file(id: &str, filename: &str, token: Option<&str>) -> Result<S
     let file = &v["files"][filename];
     if file.is_null() {
         return Err(format!(
-            "That gist has no {filename} — it may not be a Silo collection"
+            "That gist has no {filename}. It may not be a Silo collection"
         ));
     }
     // GitHub inlines file content, but truncates very large files and gives a raw_url.

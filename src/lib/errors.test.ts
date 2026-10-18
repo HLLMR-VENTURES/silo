@@ -52,11 +52,11 @@ describe("the invoke wrapper", () => {
   it("rejects a typed error with its code, reading as its message", async () => {
     vi.mocked(rawInvoke).mockRejectedValueOnce({
       code: "STILL_LOADING",
-      message: "Silo is still loading your library — try again in a moment.",
+      message: "Silo is still loading your library. Try again in a moment.",
     });
     const e: unknown = await archiveStatus().catch((x: unknown) => x);
     expect(errorCode(e)).toBe("STILL_LOADING");
-    expect(String(e)).toBe("Silo is still loading your library — try again in a moment.");
+    expect(String(e)).toBe("Silo is still loading your library. Try again in a moment.");
   });
 
   it("passes results through untouched", async () => {

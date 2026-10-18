@@ -137,7 +137,7 @@ pub fn manifest_from_zip(zip_path: &Path) -> Result<LocalManifest, String> {
         }
         if !seen.insert(path.clone()) {
             return Err(format!(
-                "anomalous archive: duplicate canonical path {path:?} — not verifiable"
+                "anomalous archive: duplicate canonical path {path:?}. Not verifiable"
             ));
         }
         let sha256 = sha256_stream(&mut f, ENTRY_LIMIT)?;
