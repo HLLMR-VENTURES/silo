@@ -59,7 +59,7 @@ describe("go / back", () => {
     go("diagnose", "conflicts");
     expect(nav.view).toBe("diagnose");
     expect(nav.tab.diagnose).toBe("conflicts");
-    go("modSets", "share");
+    go("modSets", "open");
     expect(nav.view).toBe("modSets");
     expect(back()).toBe(true);
     expect(nav.view).toBe("diagnose");
@@ -88,10 +88,10 @@ describe("go / back", () => {
   });
 
   it("go without a tab keeps the view's last tab", () => {
-    go("modSets", "multiplayer");
+    go("modSets", "savegames");
     go("library");
     go("modSets");
-    expect(nav.tab.modSets).toBe("multiplayer");
+    expect(nav.tab.modSets).toBe("savegames");
   });
 
   it("setTab changes a tab without history", () => {

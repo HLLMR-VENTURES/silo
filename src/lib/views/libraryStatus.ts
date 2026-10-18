@@ -1,4 +1,5 @@
-// What the header status chip, the Play menu's first line and the Library status strip say,
+// What the header status chip and the Library status strip say (the Play menu's set line is
+// `activeSetLine` in lib/modsets/modSets.ts),
 // derived from data App already holds. Pure, so it unit-tests without the app.
 //   libraryStatusCounts({ criticalConflicts: 1, warningConflicts: 2, missingDeps: 0, ... })
 //     -> { problems: 1, review: 2 }
@@ -36,19 +37,10 @@ export function libraryStatusCounts(i: LibraryStatusInput): { problems: number; 
 }
 
 /**
- * The Play menu's heading line for the active set.
- * @param exactLoadoutName the loadout whose mods match the active set exactly, or null
- * @return "Harvest 2026, unchanged" or "No mod set"
- */
-export function activeSetLine(exactLoadoutName: string | null): string {
-  return exactLoadoutName ? `${exactLoadoutName}, unchanged` : "No mod set";
-}
-
-/**
  * The left side of the Library status strip. It only says "Ready to play" when Play would work:
  * the game was found, Play isn't blocked and there's no critical conflict.
- * @param s scan state, whether Play is ready, active and total counts, and the matching loadout's
- *   name if any
+ * @param s scan state, whether Play is ready, active and total counts, and the active set's
+ *   part (`stripSetName`: "Harvest 2026" or "Custom (3 changes since Harvest 2026)") if any
  * @return e.g. "Ready to play · 142 of 737 active · Harvest 2026", or "142 of 737 active"
  */
 export function stripLeft(s: {

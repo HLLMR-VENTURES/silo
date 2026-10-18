@@ -1,7 +1,7 @@
 // Where the user is in the app: the current view, each view's sub-tab, a short back history and
 // the rail pin preference.
 //   go("diagnose", "conflicts") // switch view (and that view's tab); pushes history
-//   setTab("modSets", "share") // change a view's tab without a history entry (Tabs bindings)
+//   setTab("modSets", "open")  // change a view's tab without a history entry (Tabs bindings)
 //   back()                     // returns false when there is nothing to go back to
 //   setRailPin("collapsed")    // persisted; railCollapsedFor(width, nav.rail) gives the layout
 // The last view and the rail pin persist in localStorage (silo.nav.view, silo.nav.rail); a launch
@@ -31,7 +31,7 @@ export const VIEW_IDS: readonly ViewId[] = [
 ];
 
 /** Known sub-tabs (views store them as plain strings in nav.tab). */
-export type ModSetsTab = "sets" | "share" | "multiplayer" | "savegames";
+export type ModSetsTab = "sets" | "open" | "savegames";
 /** Guided bisection runs inside Last run, so it has no tab of its own. */
 export type DiagnoseTab = "lastRun" | "conflicts" | "problems";
 export type ToolsTab = "stats" | "controls" | "bridge" | "graphics";

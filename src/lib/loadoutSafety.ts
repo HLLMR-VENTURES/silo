@@ -1,5 +1,5 @@
-// Pure helpers behind the loadout save / switch / overwrite confirmations in App.svelte.
-// Loadouts and the active set are both lists of mod tech names.
+// Pure helpers behind the mod set save / switch / overwrite confirmations (src/lib/modsets).
+// Mod sets (loadouts in the code and database) and the active set are both lists of tech names.
 
 /** What `askText`'s validate may return for a loadout name. */
 export type LoadoutNameCheck = null | { error: string } | { warn: string; confirm: string };
@@ -13,11 +13,11 @@ export type LoadoutNameCheck = null | { error: string } | { warn: string; confir
  */
 export function loadoutNameCheck(name: string, existing: readonly string[]): LoadoutNameCheck {
   const n = name.trim();
-  if (!n) return { error: "Give the loadout a name" };
+  if (!n) return { error: "Give the set a name" };
   const key = n.toLocaleLowerCase();
   const hit = existing.find((e) => e.trim().toLocaleLowerCase() === key);
   if (hit === undefined) return null;
-  return { warn: `You already have a loadout called ${hit}. Replace it?`, confirm: "Replace" };
+  return { warn: `You already have a set called ${hit}. Replace it?`, confirm: "Replace" };
 }
 
 /**

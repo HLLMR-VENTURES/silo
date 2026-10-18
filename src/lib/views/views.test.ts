@@ -56,9 +56,8 @@ describe("ViewOutlet", () => {
 
 describe("ModSetsView", () => {
   const props = {
-    setsTab: stub("Loadouts body"),
-    shareTab: stub("Collections body"),
-    multiplayerTab: stub("MP body"),
+    setsTab: stub("My sets body"),
+    openTab: stub("Open body"),
     savegamesTab: stub("Savegames body"),
   };
 
@@ -67,19 +66,18 @@ describe("ModSetsView", () => {
     expect(screen.getByRole("heading", { level: 2, name: "Mod sets" })).toBeInTheDocument();
     expect(screen.getAllByRole("tab").map((t) => t.textContent?.trim())).toEqual([
       "My sets",
-      "Share",
-      "Multiplayer",
+      "Open a shared set",
       "Savegames",
     ]);
-    expect(screen.getByText("Loadouts body")).toBeInTheDocument();
+    expect(screen.getByText("My sets body")).toBeInTheDocument();
   });
 
-  it("go('modSets', 'share') lands on Share; clicking a tab sets nav.tab", async () => {
+  it("go('modSets', 'open') lands on Open a shared set; clicking a tab sets nav.tab", async () => {
     const user = userEvent.setup();
     render(ModSetsView, props);
-    go("modSets", "share");
+    go("modSets", "open");
     await tick();
-    expect(screen.getByText("Collections body")).toBeInTheDocument();
+    expect(screen.getByText("Open body")).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "Savegames" }));
     expect(nav.tab.modSets).toBe("savegames");
     expect(screen.getByText("Savegames body")).toBeInTheDocument();

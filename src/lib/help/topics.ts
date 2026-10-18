@@ -37,7 +37,7 @@ export const HELP_TOPICS: HelpTopic[] = [
   {
     id: "multiplayer",
     title: "Playing multiplayer",
-    body: "Mod sets → Multiplayer: the host shares their set, and each player checks that theirs matches. Silo lists the mods that are missing, in a different version or extra.",
+    body: "The host shares their mods as a Multiplayer check file (Mod sets → Share). Each player opens it in Mod sets → Open a shared set and presses Check my mods. Silo lists the mods that are missing, in a different version or extra.",
     aliases: ["mp", "server", "sync", "friends"],
   },
   {

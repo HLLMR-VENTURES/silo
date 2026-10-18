@@ -696,7 +696,7 @@ pub fn read_gist_file(id: &str, filename: &str, token: Option<&str>) -> Result<S
     let file = &v["files"][filename];
     if file.is_null() {
         return Err(format!(
-            "That gist has no {filename}. It may not be a Silo collection."
+            "That gist has no {filename}. It may not be a Silo shared set."
         ));
     }
     // GitHub inlines file content, but truncates very large files and gives a raw_url.

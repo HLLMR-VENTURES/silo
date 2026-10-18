@@ -3579,43 +3579,54 @@ async fn delete_loadout(app: tauri::AppHandle, id: i64) -> Result<(), error::App
     .map_err(error::AppError::from)
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct LoadoutFile {
-    silo: u32,
-    name: String,
-    mods: Vec<String>,
-}
-
+/// Whether a shared file the user picked is a Multiplayer check file (`"multiplayer"`: checked
+/// against the active mods) or a mod set (`"set"`: previewed). Decided by its content, so a check
+/// file saved as `.json` still opens as one.
 #[tauri::command]
-async fn export_loadout(app: tauri::AppHandle, id: i64, path: String) -> Result<(), String> {
-    let db = db_path(&app)?;
+async fn shared_file_kind(path: String) -> Result<String, String> {
     off_main(move || {
-        let conn = db::open(&db)?;
-        let lo = db::load_loadouts(&conn)
-            .into_iter()
-            .find(|l| l.id == id)
-            .ok_or_else(|| "Loadout not found".to_string())?;
-        let file = LoadoutFile {
-            silo: 1,
-            name: lo.name,
-            mods: lo.mods,
+        let p = std::path::Path::new(&path);
+        paths::safe_inbound(p, &["silo", "silomp", "json"])?;
+        let text = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
+        let kind = if mpsync::is_manifest(&text) {
+            "multiplayer"
+        } else {
+            "set"
         };
-        let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
-        paths::safe_outbound(std::path::Path::new(&path), &["silo"])?;
-        std::fs::write(&path, json).map_err(|e| e.to_string())
+        Ok(kind.to_string())
     })
     .await
 }
 
+/// Save an automatic "Before …" snapshot of the active mods before a switch; only the newest
+/// few are kept (`db::AUTO_SNAPSHOTS_KEPT`).
 #[tauri::command]
-async fn import_loadout(app: tauri::AppHandle, path: String) -> Result<i64, String> {
+async fn save_auto_snapshot(
+    app: tauri::AppHandle,
+    name: String,
+    mods: Vec<String>,
+) -> Result<i64, error::AppError> {
     let db = db_path(&app)?;
     off_main(move || {
-        paths::safe_inbound(std::path::Path::new(&path), &["silo", "json"])?;
-        let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        let file: LoadoutFile = serde_json::from_str(&content).map_err(|e| e.to_string())?;
         let mut conn = db::open(&db)?;
-        db::save_loadout(&mut conn, None, &file.name, &file.mods)
+        db::save_auto_snapshot(&mut conn, &name, &mods)
+    })
+    .await
+    .map_err(error::AppError::from)
+}
+
+/// Write a mod set to a `.silo` file the user can send any way they like.
+#[tauri::command]
+async fn export_set_file(name: String, mods: Vec<String>, path: String) -> Result<(), String> {
+    off_main(move || {
+        let file = collection::SetFile {
+            silo: 1,
+            name,
+            mods,
+        };
+        let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
+        paths::safe_outbound(std::path::Path::new(&path), &["silo"])?;
+        std::fs::write(&path, json).map_err(|e| e.to_string())
     })
     .await
 }
@@ -3774,7 +3785,7 @@ async fn mp_verify_file(
         paths::safe_inbound(std::path::Path::new(&path), &["silomp", "json"])?;
         let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
         let manifest: mpsync::Manifest = serde_json::from_str(&text)
-            .map_err(|_| "That file isn't a valid Silo mod-set manifest".to_string())?;
+            .map_err(|_| "That file isn't a Silo Multiplayer check file".to_string())?;
         let local_hashed = mpsync::hash_mods(&local);
         Ok(mpsync::diff(&manifest.mods, &local_hashed))
     })
@@ -3860,7 +3871,7 @@ async fn collection_export(
     tauri::async_runtime::spawn_blocking(move || -> Result<ExportResult, String> {
         let name = name.trim().to_string();
         if name.is_empty() {
-            return Err("Give the collection a name".into());
+            return Err("Give the set a name".into());
         }
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token")
@@ -3871,7 +3882,7 @@ async fn collection_export(
         let (entries, omitted) = build_collection_entries(&base, mods);
         if entries.is_empty() {
             return Err(
-                "Nothing to share — a collection needs at least one packaged (.zip) mod".into(),
+                "Nothing to share. A shared set needs at least one packaged (.zip) mod.".into(),
             );
         }
 
@@ -3893,7 +3904,7 @@ async fn collection_export(
             let repo = github::create_public_repo(
                 &token,
                 &collection::repo_slug(&name),
-                &format!("A Silo FS25 mod collection ({} mods)", coll.mods.len()),
+                &format!("A Silo FS25 mod set ({} mods)", coll.mods.len()),
             )?;
             let (owner, rname) = repo
                 .full_name
@@ -3908,7 +3919,7 @@ async fn collection_export(
                 &rname,
                 collection::FILE_NAME,
                 &json,
-                "Add collection (via Silo)",
+                "Add mod set (via Silo)",
             )?;
             github::put_repo_file(
                 &token,
@@ -3924,7 +3935,7 @@ async fn collection_export(
             // then attach a README linking the handoff page (its URL needs the new gist id).
             let gist = github::create_secret_gist(
                 &token,
-                &format!("{name} — a Silo mod collection"),
+                &format!("{name}: a Silo mod set"),
                 collection::FILE_NAME,
                 &json,
             )?;
@@ -3961,7 +3972,7 @@ async fn collection_update(
         let token = secrets::get(&conn, "gh_token")
             .ok_or_else(|| "Connect your GitHub account first".to_string())?;
         let where_ = collection::parse_collection_ref(&reference)
-            .ok_or_else(|| "That collection reference isn't valid".to_string())?;
+            .ok_or_else(|| "That shared link isn't valid".to_string())?;
 
         // Preserve the collection's identity (name/description/author/date); re-pin the mods.
         let existing = read_collection_json(&reference, Some(&token))?;
@@ -4034,6 +4045,22 @@ fn read_collection_json(
     read_collection_raw(url_or_id, token).map(|(c, _)| c)
 }
 
+/// A shared set to preview or install: a `.silo` / collection file the user picked (`file`), or
+/// else a gist / repo link. The returned text is what the fingerprint covers.
+fn read_set_source(
+    url_or_id: &str,
+    file: Option<&str>,
+    token: Option<&str>,
+) -> Result<(collection::Collection, String), String> {
+    let Some(path) = file else {
+        return read_collection_raw(url_or_id, token);
+    };
+    let path = std::path::Path::new(path);
+    paths::safe_inbound(path, &["silo", "json"])?;
+    let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    Ok((collection::parse_set_file(&json)?, json))
+}
+
 /// `read_collection_json`, plus the file's exact text (for `collection::fingerprint`, so apply
 /// can refuse a collection that changed after its preview).
 fn read_collection_raw(
@@ -4041,7 +4068,10 @@ fn read_collection_raw(
     token: Option<&str>,
 ) -> Result<(collection::Collection, String), String> {
     let reference = collection::parse_collection_ref(url_or_id)
-        .ok_or_else(|| "That doesn't look like a GitHub gist or repo link".to_string())?;
+        .ok_or_else(|| {
+            "That doesn't look like a Silo set link. Links look like https://silo.hllmr.com/c/… or a GitHub gist."
+                .to_string()
+        })?;
     let json = match &reference {
         collection::CollectionRef::Gist(id) => {
             github::read_gist_file(id, collection::FILE_NAME, token)
@@ -4243,13 +4273,14 @@ async fn collection_import_preview(
     app: tauri::AppHandle,
     url_or_id: String,
     installed: Vec<LocalMod>,
+    file: Option<String>,
 ) -> Result<ImportPlan, error::AppError> {
     let base = siloapi_base(&app)?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<ImportPlan, String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token");
-        let (coll, json) = read_collection_raw(&url_or_id, token.as_deref())?;
+        let (coll, json) = read_set_source(&url_or_id, file.as_deref(), token.as_deref())?;
 
         let installed_by: std::collections::HashMap<&str, Option<&str>> = installed
             .iter()
@@ -4364,6 +4395,7 @@ async fn collection_apply(
     installed: Vec<LocalMod>,
     fingerprint: String,
     root: Option<String>,
+    file: Option<String>,
 ) -> Result<ApplyReport, error::AppError> {
     ensure_no_move()?;
     let base = siloapi_base(&app)?;
@@ -4373,13 +4405,13 @@ async fn collection_apply(
     tauri::async_runtime::spawn_blocking(move || -> Result<ApplyReport, String> {
         let mut conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token");
-        let (coll, json) = read_collection_raw(&url_or_id, token.as_deref())?;
+        let (coll, json) = read_set_source(&url_or_id, file.as_deref(), token.as_deref())?;
         // Resolve every mod by techName, exactly as the preview did. A collection's own
         // `catalog_id` and source hint never decide what downloads. The fingerprint covers the
         // file and this resolution, so a changed gist or catalog answer is refused.
         let (targets, fp) = resolve_collection(&base, &coll, &json);
         const COLLECTION_CHANGED: &str =
-            "This collection changed since you previewed it. Preview it again before installing.";
+            "This set changed since you previewed it. Preview it again before installing.";
         if fp != fingerprint {
             return Err(COLLECTION_CHANGED.into());
         }
@@ -5042,8 +5074,9 @@ pub fn run() {
             get_loadouts,
             save_loadout,
             delete_loadout,
-            export_loadout,
-            import_loadout,
+            save_auto_snapshot,
+            export_set_file,
+            shared_file_kind,
             get_savegames,
             backup_savegame,
             detect_conflicts,
@@ -5157,6 +5190,41 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_shared_set_file_is_read_only_from_a_plain_silo_or_json_path() {
+        let dir = std::env::temp_dir().join(format!("silo_set_source_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("weekend.silo");
+        std::fs::write(
+            &good,
+            r#"{ "silo": 1, "name": "Weekend", "mods": ["FS25_A"] }"#,
+        )
+        .unwrap();
+        let (c, json) =
+            super::read_set_source("ignored", Some(good.to_str().unwrap()), None).unwrap();
+        assert_eq!(c.name, "Weekend");
+        assert!(
+            json.contains("FS25_A"),
+            "the fingerprint covers the file's text"
+        );
+        let txt = dir.join("weekend.txt");
+        std::fs::write(&txt, "{}").unwrap();
+        assert!(super::read_set_source("", Some(txt.to_str().unwrap()), None).is_err());
+        let up = format!(
+            "{}/../{}/weekend.silo",
+            dir.display(),
+            dir.file_name().unwrap().to_string_lossy()
+        );
+        assert!(
+            super::read_set_source("", Some(&up), None).is_err(),
+            "no .. segments"
+        );
+        let missing = dir.join("missing.silo");
+        assert!(super::read_set_source("", Some(missing.to_str().unwrap()), None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn fences() -> Fences {
         Fences {

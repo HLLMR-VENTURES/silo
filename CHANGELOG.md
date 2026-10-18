@@ -23,6 +23,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   form), and About with Silo's license and the third-party licenses (the fonts' OFL texts,
   Lucide's ISC license and the bundled packages). (#250)
 
+- **Mod sets.** Loadouts, Collections, Multiplayer sync and Savegames are now one page, **Mod
+  sets**, with **My sets**, **Open a shared set** and **Savegames**. My sets compares every set
+  with your active mods ("Same" or "+31 / −77"). Switching shows what changes, saves your current
+  mods as an automatic "Before …" set first (Silo keeps the newest five) and offers Undo. (#251)
+
+- **Custom since a set.** After you change mods, the Library strip and the Play menu say
+  "Custom (3 changes since Harvest 2026)" instead of forgetting the set, with **Update the set**
+  and **Save as new**. (#251)
+
+- **One Share dialog.** Share a set (or your active mods) as an unlisted link on your GitHub, a
+  `.silo` file, or a Multiplayer check file. Links need GitHub; files need no account. (#251)
+
+- **Open a shared set.** Paste a link or choose a `.silo` / `.silomp` file. Silo shows a preview
+  first; nothing downloads, saves or switches until you click. A Multiplayer check file is
+  checked against your active mods, with Turn on, Park and Find in Browse on each mismatch. (#251)
+
+- **Savegame cards.** Each save shows its map, when it was last played and how many of its mods
+  you have. **Use this save's mods** goes through the same switch dialog, and missing mods can be
+  looked up in Browse. (#251)
+
 - **Updates, in sections.** Updates now lists **Ready to install**, **Download from ModHub**,
   **Check these yourself**, **Couldn't check** (with the reason, Try again and Copy details), and
   collapsed **Up to date** and **Not tracked** lists, with when you last checked. **Update all**
@@ -105,6 +125,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Plainer messages.** Silo's own messages (errors, conflict descriptions, archive-move and
   organize problems) no longer use dash asides. (#250)
+
+- **"Loadouts" and "Collections" are now "mod sets" and "shared sets"** everywhere in the app.
+  Your saved loadouts carry over as mod sets. The library database moves to version 2 (one
+  added column); Silo keeps a copy of the old one in `db-snapshots/` before upgrading. (#251)
+
+- **A `silo://collection` link opens a preview** in Mod sets → Open a shared set, and Silo
+  listens for it before anything else at startup. (#251)
+
+- **A share link pasted back into Silo opens.** The `silo.hllmr.com/c/…` link Silo gives you
+  now works in Open a shared set, not only the raw gist link. (#251)
 
 - **Updates' badge counts what you can act on.** The rail badge counts Ready to install plus
   Download from ModHub, appears only after a check, and drops as you update. A failed install
