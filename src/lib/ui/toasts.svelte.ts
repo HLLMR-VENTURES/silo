@@ -2,13 +2,16 @@
 //   toast({ message: "Mod set saved", tone: "success" });
 //   const t = toast({ message: "Moved 12 mods", action: { label: "Undo", run: undo } });
 //   t.dismiss();
-// Toasts never take focus. Their timer pauses while hovered or focused and while the window is
-// in the background, so nobody misses one by alt-tabbing.
+// Toasts never take focus, and their buttons are inert while a dialog is open. Their timer pauses
+// while hovered or focused and while the window is in the background, so nobody misses one by
+// alt-tabbing.
 
 export type ToastTone = "neutral" | "success" | "warn" | "danger";
 
 export interface ToastAction {
   label: string;
+  /** The button's accessible name. Default: "<label>: <message>" ("Undo: Switched to Harvest."). */
+  ariaLabel?: string;
   run: () => void | Promise<void>;
 }
 

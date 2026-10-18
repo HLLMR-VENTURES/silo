@@ -2,10 +2,13 @@
   // Yes/no dialog with a verb button. Usually reached through `ask()`; standalone:
   //   <ConfirmDialog bind:open title="Delete?" confirm="Delete" tone="danger" onresult={...} />
   // Layout: body, optional facts table, optional scrolling list, footer [Cancel] [Verb].
+  // The body is the dialog's accessible description; a danger confirm is an alertdialog.
+  // The verb button only answers ARM_MS after opening (see dialogs.svelte.ts), and never to a
+  // held-down (repeating) Enter or Space.
   import type { Snippet } from "svelte";
   import Button from "./Button.svelte";
   import Dialog from "./Dialog.svelte";
-  import type { ConfirmFact } from "./dialogs.svelte";
+  import { armTimer, type ConfirmFact } from "./dialogs.svelte";
 
   interface Props {
     open?: boolean;
@@ -32,7 +35,16 @@
     onresult,
   }: Props = $props();
 
+  const uid = $props.id();
+  const bodyId = `${uid}-body`;
   const danger = $derived(tone === "danger");
+  const arm = armTimer();
+
+  $effect(() => {
+    if (!open) return;
+    arm.rearm();
+    return () => arm.stop();
+  });
   /** Set by the buttons so the Dialog's follow-up "programmatic" close isn't reported twice. */
   let answered = false;
 
@@ -46,11 +58,27 @@
     if (!answered) onresult?.(false);
     answered = false;
   }
+
+  function onVerbClick() {
+    if (arm.armed()) answer(true);
+  }
+
+  /** Enter/Space before the button is armed, or auto-repeating from a held key, does nothing. */
+  function onVerbKeydown(e: KeyboardEvent) {
+    if ((e.key === "Enter" || e.key === " ") && (e.repeat || !arm.armed())) e.preventDefault();
+  }
 </script>
 
-<Dialog bind:open {title} size="sm" {onclose}>
+<Dialog
+  bind:open
+  {title}
+  size="sm"
+  role={danger ? "alertdialog" : "dialog"}
+  describedby={body ? bodyId : undefined}
+  {onclose}
+>
   {#if body}
-    <div class="body-text">
+    <div class="body-text" id={bodyId}>
       {#if typeof body === "string"}<p>{body}</p>{:else}{@render body()}{/if}
     </div>
   {/if}
@@ -78,7 +106,8 @@
     <Button
       variant={danger ? "danger" : "primary"}
       data-autofocus={danger ? undefined : ""}
-      onclick={() => answer(true)}
+      onclick={onVerbClick}
+      onkeydown={onVerbKeydown}
     >
       {confirm}
     </Button>

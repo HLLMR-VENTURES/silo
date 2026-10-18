@@ -1,6 +1,7 @@
 // `use:tooltip={"Rescan library"}`: a short hint on hover (after 500 ms) or keyboard focus
-// (at once), hidden again on leave, blur, click or Esc. The tip is a role="tooltip" element wired
-// to the trigger's aria-describedby.
+// (at once; focus from a click waits like hover), hidden again on leave, blur, click or Esc. The
+// tip is a role="tooltip" element, created the first time it shows and only then wired to the
+// trigger's aria-describedby.
 //
 // A tooltip is a hint, never the only place essential information lives: it's invisible on touch,
 // easy to miss, and gone the moment the pointer moves. Put anything the user needs in the UI itself.
@@ -72,6 +73,7 @@ export function tooltip(node: HTMLElement, text: string | null | undefined) {
     clearTimeout(timer);
     if (!current) return;
     const el = ensureTip();
+    describedBy(true);
     el.hidden = false;
     position(el);
     document.addEventListener("keydown", onKey, true);
@@ -93,18 +95,24 @@ export function tooltip(node: HTMLElement, text: string | null | undefined) {
     timer = setTimeout(show, SHOW_DELAY_MS);
   }
 
-  function attach() {
-    if (!current) return;
-    ensureTip();
-    describedBy(true);
+  /** Keyboard focus shows the tip at once; focus that came with a click waits like hover. */
+  function onFocusIn(e: FocusEvent) {
+    const el = e.target instanceof Element ? e.target : node;
+    let keyboard = true;
+    try {
+      keyboard = el.matches(":focus-visible");
+    } catch {
+      /* no :focus-visible support: treat it as keyboard focus */
+    }
+    if (keyboard) show();
+    else onEnter();
   }
 
   node.addEventListener("pointerenter", onEnter);
   node.addEventListener("pointerleave", hide);
   node.addEventListener("pointerdown", hide);
-  node.addEventListener("focusin", show);
+  node.addEventListener("focusin", onFocusIn);
   node.addEventListener("focusout", hide);
-  attach();
 
   return {
     update(next: string | null | undefined) {
@@ -114,15 +122,17 @@ export function tooltip(node: HTMLElement, text: string | null | undefined) {
         describedBy(false);
         return;
       }
-      attach();
-      if (tip && !tip.hidden) position(tip);
+      if (!tip) return; // created on first show
+      tip.textContent = current;
+      describedBy(true);
+      if (!tip.hidden) position(tip);
     },
     destroy() {
       hide();
       node.removeEventListener("pointerenter", onEnter);
       node.removeEventListener("pointerleave", hide);
       node.removeEventListener("pointerdown", hide);
-      node.removeEventListener("focusin", show);
+      node.removeEventListener("focusin", onFocusIn);
       node.removeEventListener("focusout", hide);
       describedBy(false);
       tip?.remove();

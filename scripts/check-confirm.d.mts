@@ -3,6 +3,9 @@
 export declare const bareConfirm: RegExp;
 export declare const barePrompt: RegExp;
 export declare const dialogCall: RegExp;
-export declare const allowedBefore: RegExp;
+export declare const awaitedBefore: RegExp;
+export declare const asyncArrowBefore: RegExp;
+export declare const aliasImport: RegExp;
+export declare function stripBlockComments(line: string): string;
 export declare function isCommentLine(line: string): boolean;
-export declare function lineProblem(line: string, skipAwait?: boolean): string | null;
+export declare function lineProblem(line: string, skipAwait?: boolean, file?: string): string | null;

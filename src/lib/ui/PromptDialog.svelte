@@ -3,12 +3,15 @@
   //   <PromptDialog bind:open title="Rename" label="Name" value={old} confirm="Rename" onresult={...} />
   // Enter submits. `validate` gets the trimmed value: a string / {error} shows inline and blocks;
   // {warn, confirm} shows a warning and relabels the button, and a second submit of the same value accepts.
+  // Submitting (Enter or the button) only works ARM_MS after the dialog opens and again ARM_MS after
+  // the button turns into the warning's label (see dialogs.svelte.ts), and never from a held-down,
+  // repeating key, so one double-click or long Enter can't accept a "Replace".
   import Button from "./Button.svelte";
   import Dialog from "./Dialog.svelte";
   import Field from "./Field.svelte";
   import Icon from "./Icon.svelte";
   import TextField from "./TextField.svelte";
-  import type { PromptValidation } from "./dialogs.svelte";
+  import { armTimer, type PromptValidation } from "./dialogs.svelte";
 
   interface Props {
     open?: boolean;
@@ -44,6 +47,13 @@
   let error = $state<string | undefined>();
   let warning = $state<{ message: string; confirm: string; forValue: string } | null>(null);
   let answered = false;
+  const arm = armTimer();
+
+  $effect(() => {
+    if (!open) return;
+    arm.rearm();
+    return () => arm.stop();
+  });
 
   const confirmLabel = $derived(warning ? warning.confirm : confirm);
 
@@ -54,6 +64,7 @@
   }
 
   function submit() {
+    if (!arm.armed()) return;
     const v = text.trim();
     const verdict = validate?.(v) ?? null;
     if (typeof verdict === "string") {
@@ -66,6 +77,7 @@
     }
     if (verdict && "warn" in verdict && warning?.forValue !== v) {
       warning = { message: verdict.warn, confirm: verdict.confirm, forValue: v };
+      arm.rearm();
       return;
     }
     answered = true;
@@ -76,8 +88,13 @@
   function onkeydown(e: KeyboardEvent) {
     if (e.key === "Enter" && !e.isComposing) {
       e.preventDefault();
-      submit();
+      if (!e.repeat) submit();
     }
+  }
+
+  /** Enter/Space on the button before it's armed, or auto-repeating from a held key, does nothing. */
+  function onVerbKeydown(e: KeyboardEvent) {
+    if ((e.key === "Enter" || e.key === " ") && (e.repeat || !arm.armed())) e.preventDefault();
   }
 
   function cancelPrompt() {
@@ -114,7 +131,9 @@
   {/if}
   {#snippet footer()}
     <Button onclick={cancelPrompt}>{cancel}</Button>
-    <Button variant={warning ? "danger" : "primary"} onclick={submit}>{confirmLabel}</Button>
+    <Button variant={warning ? "danger" : "primary"} onclick={submit} onkeydown={onVerbKeydown}>
+      {confirmLabel}
+    </Button>
   {/snippet}
 </Dialog>
 

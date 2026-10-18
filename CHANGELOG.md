@@ -15,9 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The silo mark.** Silo's own logo, a grain silo with the sun rising behind it, now sits in the
   top bar. (#224)
 
-- **Undo for loadout switches and deletes.** After you switch to a loadout, use a savegame's mods
-  or delete a loadout, a notice offers Undo, which puts your previous active mods or the deleted
-  loadout back. The notice waits while you're in another window or pointing at it. (#226)
+- **Undo for loadout switches, replacements and deletes.** After you switch to a loadout, use a
+  savegame's mods, replace a loadout's mods with your current ones or delete a loadout, a notice
+  offers Undo, which puts your previous active mods, the loadout's old mods or the deleted loadout
+  back. The notice waits while you're in another window or pointing at it. Undo after a switch
+  refuses, and says why, if your active mods changed since or a diagnosis or library move is
+  running. (#226)
 
 ### Changed
 
@@ -54,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **No more duplicate loadouts.** Saving a loadout under a name you already use now offers to
   replace that loadout instead of quietly creating a second one with the same name. (#226)
+
+- **Using a savegame's mods switches to the right loadout.** When you already had a loadout with
+  the same name as the save, "→ Loadout" could switch to that older loadout instead of the one it
+  had just made. It now switches to exactly the mods it showed you. (#226)
 
 - **Filing errors stay on screen.** When filing loose mods into the library failed (Organize,
   auto-file, or turning off a loose mod), the rescan that followed cleared the error, so it never

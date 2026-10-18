@@ -3,8 +3,11 @@
 //   - Escape: one window listener (capture phase) hands Esc to the TOP layer only.
 //   - inert: while any modal layer is open, every <body> child except the top modal's host is
 //     made `inert` (so #app, lower dialogs and stray portals can't be clicked or tabbed into).
-//     Elements marked `data-overlay-exempt` (the toast live region) are left alone.
+//     Elements marked `data-overlay-exempt` (the toast live region) are left alone; `modalOpen`
+//     lets them disable their own controls meanwhile.
 //   - focus containment: focus that lands outside the top modal's host is pulled back in.
+
+import { writable, type Readable } from "svelte/store";
 
 export interface OverlayLayer {
   /** The layer's root element (for a modal: the portaled host holding scrim + panel). */
@@ -34,6 +37,13 @@ const stack: OverlayLayer[] = [];
 /** Elements this module set `inert` on, so we never strip an `inert` someone else set. */
 const madeInert = new Set<Element>();
 let listening = false;
+const modal = writable(false);
+
+/**
+ * True while a modal layer (a dialog) is open. A Svelte store: `$modalOpen` in a component.
+ * Exempt elements (the toast region) use it to make their buttons inert behind a dialog.
+ */
+export const modalOpen: Readable<boolean> = { subscribe: modal.subscribe };
 
 /**
  * The tabbable elements inside `root`, in DOM order (skips anything under an `inert` or `hidden` ancestor).
@@ -79,7 +89,8 @@ function applyInert() {
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (e.key !== "Escape" || e.defaultPrevented) return;
+  // Esc while an IME is composing cancels the composition, not the overlay.
+  if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
   const top = stack[stack.length - 1];
   if (!top) return;
   if (top.onEscape) {
@@ -115,6 +126,7 @@ function sync() {
     listening = false;
   }
   applyInert();
+  modal.set(!!topModal());
 }
 
 /**

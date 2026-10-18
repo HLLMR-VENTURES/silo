@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
-// toast() + ToastRegion: rendering, action, auto-dismiss, pause on hover / focus / window blur.
+// toast() + ToastRegion: rendering, action, auto-dismiss, pause on hover / focus / window blur,
+// and inert buttons while a dialog is open.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
+import { pushLayer } from "./overlayStack";
 import ToastRegion from "./ToastRegion.svelte";
 import { dismissToast, toast, toasts } from "./toasts.svelte";
 
@@ -36,9 +38,50 @@ describe("toast", () => {
     const run = vi.fn();
     render(ToastRegion);
     await act(() => toast({ message: "Moved 12 mods", action: { label: "Undo", run } }));
-    await user.click(screen.getByRole("button", { name: "Undo" }));
+    await user.click(screen.getByRole("button", { name: "Undo: Moved 12 mods" }));
     await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
     expect(screen.queryByText("Moved 12 mods")).not.toBeInTheDocument();
+  });
+
+  it("names the action after the toast, or uses its ariaLabel", async () => {
+    render(ToastRegion);
+    await act(() => {
+      toast({ message: "Switched to Harvest.", action: { label: "Undo", run: () => {} } });
+      const restore = { label: "Undo", ariaLabel: "Restore Harvest", run: () => {} };
+      toast({ message: "Deleted Harvest.", action: restore });
+    });
+    const named = screen.getByRole("button", { name: "Undo: Switched to Harvest." });
+    expect(named).toHaveTextContent("Undo");
+    expect(screen.getByRole("button", { name: "Restore Harvest" })).toBeInTheDocument();
+  });
+
+  it("its buttons are inert while a modal is open; the text stays announced", async () => {
+    const user = userEvent.setup();
+    const run = vi.fn();
+    render(ToastRegion);
+    await act(() => toast({ message: "Moved 12 mods", action: { label: "Undo", run } }));
+    const undo = screen.getByRole("button", { name: "Undo: Moved 12 mods" });
+    const close = screen.getByRole("button", { name: "Dismiss" });
+    expect(undo.closest("[inert]")).toBeNull();
+
+    const host = document.createElement("div");
+    document.body.append(host);
+    const layer = pushLayer({ host, modal: true });
+    await act();
+    expect(undo.closest("[inert]")).not.toBeNull();
+    expect(close.closest("[inert]")).not.toBeNull();
+    const region = screen.getByRole("status");
+    expect(region).not.toHaveAttribute("inert");
+    expect(region).toHaveTextContent("Moved 12 mods");
+    await user.click(undo); // jsdom ignores inert; the toast refuses the click itself too
+    expect(run).not.toHaveBeenCalled();
+
+    layer.pop();
+    host.remove();
+    await act();
+    expect(undo.closest("[inert]")).toBeNull();
+    await user.click(undo);
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
   });
 
   it("the close button and the returned handle dismiss it", async () => {

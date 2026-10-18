@@ -67,3 +67,18 @@ export function activeSetDiff(
   const off = [...now].filter((t) => !want.has(t));
   return { on, off, missing };
 }
+
+/**
+ * True when two mod lists hold the same tech names, ignoring order and duplicates. The Undo
+ * after a switch or an overwrite uses it to check nothing changed in between.
+ * @param a one list (or set) of tech names
+ * @param b the other
+ * @return whether they name the same mods
+ */
+export function sameMods(a: Iterable<string>, b: Iterable<string>): boolean {
+  const x = new Set(a);
+  const y = new Set(b);
+  if (x.size !== y.size) return false;
+  for (const t of x) if (!y.has(t)) return false;
+  return true;
+}

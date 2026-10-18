@@ -200,7 +200,7 @@ keyboard behavior, so a view gets them for free. Each file's header comment show
 - **Drawer**: non-modal side panel (mod details); the page behind stays usable; resizable.
 - **Popover**: floating panel anchored to an element or a point; flips to stay on screen.
 - **Menu** / **MenuButton**: action menu on a Popover, and a trigger button paired with one.
-- **Tooltip** / `use:tooltip`: a short hint on hover or focus. Never the only place for
+- **Tooltip** / `use:tooltip`: a short hint on hover or keyboard focus. Never the only place for
   information the user needs.
 - **Toast** / **ToastRegion**: short notices from `toast()`, optionally with one action (Undo).
 
@@ -212,8 +212,9 @@ keyboard behavior, so a view gets them for free. Each file's header comment show
 - **Always `await ask({...})`** (or `await askText({...})` for a name). An un-awaited call is a
   Promise, which is always truthy, so a `!ask(...)` guard would never stop the action. The
   build guard `scripts/check-confirm.mjs` fails on un-awaited `ask` / `askText` / `askOrOs` /
-  `confirmAction` calls and on any `confirm()`, `window.confirm`, `prompt()` or
-  `window.prompt`.
+  `confirmAction` / `confirmDialog` calls (member calls like `ui.ask(` included; the body of an
+  arrow counts only when the arrow is `async`), on importing one of them under another name, and
+  on any `confirm()`, `window.confirm`, `prompt()` or `window.prompt`.
 - **The button says the verb**, never "OK": "Delete", "Switch", "Move library", "Replace".
   Cancel stays "Cancel" unless a clearer pair exists ("Keep going" / "Cancel move").
 - **The title is the action as a question** ("Delete Harvest 2026?", "Switch to Modded
@@ -224,9 +225,19 @@ keyboard behavior, so a view gets them for free. Each file's header comment show
   and the mods that get parked).
 - **Danger tone only when Silo can't undo it** (deleting a collection from GitHub, forgetting
   an interrupted diagnosis) or when the Undo is only a short-lived notice (deleting a
-  loadout). Danger makes the button red and puts the starting focus on Cancel.
+  loadout). Danger makes the button red, puts the starting focus on Cancel and makes the dialog
+  an `alertdialog`. The body is the dialog's accessible description.
 - **Offer Undo after the fact** where Silo can put things back: a toast with an Undo action
-  after switching a loadout, using a savegame's mods or deleting a loadout.
+  after switching a loadout, using a savegame's mods, replacing a loadout's mods or deleting a
+  loadout. An Undo checks first that nothing moved on (the active set is still the one the
+  switch left, no diagnosis or library move is running, the loadout wasn't changed again) and
+  otherwise says why it can't undo instead of guessing. A new switch dismisses the previous
+  switch's Undo.
+- **One gesture answers one dialog.** A confirm's verb button (and a name dialog's submit)
+  ignores clicks and Enter/Space for `ARM_MS` (300 ms) after the dialog opens, and again after
+  a name dialog's button turns into "Replace", and never reacts to a held, repeating key. So a
+  double-click or a long Enter meant for one dialog can't answer the next one in the queue.
+  Cancel, Esc and the scrim work at once.
 - **The OS dialog is only for two cases**: the quit guard (it has to work whatever state the
   window is in) and code that can run before the app shell mounts. The latter uses
   `askOrOs()` from `src/lib/confirm.ts`, which asks in-app once the dialog host is up and
@@ -248,7 +259,8 @@ keyboard behavior, so a view gets them for free. Each file's header comment show
 - **Drawers** move focus to their title when they open and return it on close, but don't trap
   it; the page behind stays usable.
 - **Toasts never take focus.** They're announced through a live region that stays readable
-  while a dialog is open. Tab can reach their action button. The countdown pauses while the
+  while a dialog is open; their buttons are inert until it closes. Tab can reach their action
+  button, whose name says what it acts on ("Undo: Switched to Harvest."). The countdown pauses while the
   toast is hovered or focused and while Silo's window is in the background, so alt-tabbing
   away doesn't make an Undo disappear. A toast with an action stays 10 s, others 6 s.
 

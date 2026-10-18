@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeSetDiff, findLoadoutByName, loadoutNameCheck } from "./loadoutSafety";
+import { activeSetDiff, findLoadoutByName, loadoutNameCheck, sameMods } from "./loadoutSafety";
 
 describe("loadoutNameCheck", () => {
   it("rejects an empty or blank name", () => {
@@ -59,5 +59,19 @@ describe("activeSetDiff", () => {
   it("handles empty sides", () => {
     expect(activeSetDiff([], ["a"])).toEqual({ on: ["a"], off: [], missing: [] });
     expect(activeSetDiff(["a"], [])).toEqual({ on: [], off: ["a"], missing: [] });
+  });
+});
+
+describe("sameMods", () => {
+  it("ignores order and duplicates", () => {
+    expect(sameMods(["a", "b"], ["b", "a"])).toBe(true);
+    expect(sameMods(["a", "a", "b"], new Set(["b", "a"]))).toBe(true);
+    expect(sameMods([], [])).toBe(true);
+  });
+
+  it("spots a mod added, removed or swapped", () => {
+    expect(sameMods(["a"], ["a", "b"])).toBe(false);
+    expect(sameMods(["a", "b"], ["a"])).toBe(false);
+    expect(sameMods(["a", "b"], ["a", "c"])).toBe(false);
   });
 });

@@ -49,6 +49,49 @@ let nextId = 1;
 let queue = $state.raw<DialogRequest[]>([]);
 let hosts = 0;
 
+/**
+ * How long (ms) a confirm or prompt dialog ignores its verb button (click, Enter, Space) after it
+ * opens, and a prompt after its button turns into a warning ("Replace"). A double-click or a held
+ * key meant for the previous dialog then can't answer the next one in the queue. Cancel, Esc and
+ * the scrim work at once.
+ */
+export const ARM_MS = 300;
+let armDelay = ARM_MS;
+
+/** The current arm delay in ms (ARM_MS unless a test changed it). */
+export function dialogArmDelay(): number {
+  return armDelay;
+}
+
+/**
+ * Tests only: change the arm delay (0 = the verb button works at once).
+ * @param ms the delay; default ARM_MS
+ */
+export function setDialogArmDelay(ms: number = ARM_MS): void {
+  armDelay = Math.max(0, ms);
+}
+
+/**
+ * Arm a verb button after `dialogArmDelay()` ms. Used by ConfirmDialog and PromptDialog.
+ * @returns `armed()` (true once the delay has passed), `rearm()` (start the delay again) and
+ *   `stop()` (clear the timer, on close / unmount)
+ */
+export function armTimer(): { armed: () => boolean; rearm: () => void; stop: () => void } {
+  let ready = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  function stop() {
+    clearTimeout(timer);
+    timer = undefined;
+  }
+  function rearm() {
+    stop();
+    const ms = armDelay;
+    ready = ms <= 0;
+    if (!ready) timer = setTimeout(() => (ready = true), ms);
+  }
+  return { armed: () => ready, rearm, stop };
+}
+
 /** The request on screen (head of the queue), or undefined. Reactive. */
 export function currentDialog(): DialogRequest | undefined {
   return queue[0];

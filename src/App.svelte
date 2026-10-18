@@ -1,6 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { DialogHost, ToastRegion, ask, askText, toast, type ConfirmFact } from "./lib/ui";
+  import {
+    DialogHost,
+    ToastRegion,
+    ask,
+    askText,
+    toast,
+    type ConfirmFact,
+    type ToastHandle,
+  } from "./lib/ui";
   import {
     modsRootStatus,
     setModsRoot,
@@ -76,6 +84,7 @@
     activeSetDiff,
     findLoadoutByName,
     loadoutNameCheck,
+    sameMods,
     type ActiveSetDiff,
   } from "./lib/loadoutSafety";
   import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
@@ -164,6 +173,9 @@
   let modsStatus = $state<ModsRootStatus | null>(null);
   let overrideNoticeOpen = $state(false);
   let mods = $state<ModEntry[]>([]);
+  // True once a scan of the current mods folder finished (even with no mods), so "not in your
+  // library" counts are only shown against a library Silo has actually read.
+  let libraryScanned = $state(false);
   let foreignFiles = $state<ForeignFile[]>([]);
   let scanning = $state(false);
   // Epoch-ms of the last scan attempt — throttles the auto-rescan-on-focus so alt-tabbing
@@ -615,7 +627,7 @@
       return;
     }
     const target = present.map((m) => m.modName);
-    const diff = activeSetDiff([...activeSet], target, mods.length ? libraryTechNames : undefined);
+    const diff = activeSetDiff([...activeSet], target, libraryScanned ? libraryTechNames : undefined);
     const sum = switchSummary(diff, missing.length);
     const note =
       missing.length > 0
@@ -632,14 +644,14 @@
     )
       return;
     try {
-      await saveLoadout(null, s.name, target);
+      const id = await saveLoadout(null, s.name, target);
       await loadLoadouts();
       savesOpen = false;
-      // Apply it immediately (already confirmed above).
-      const created = loadouts.find((l) => l.name === s.name);
-      if (!created) return;
-      if (diff.on.length + diff.off.length === 0) toast({ message: `Already using ${created.name}` });
-      else await switchTo(created.name, created.mods);
+      // Apply exactly the mods the confirmation showed (already confirmed above). The new
+      // loadout is found by its id, never by name: another loadout may share the save's name.
+      const name = loadouts.find((l) => l.id === id)?.name ?? s.name;
+      if (diff.on.length + diff.off.length === 0) toast({ message: `Already using ${name}` });
+      else await switchTo(name, target);
     } catch (e) {
       errorMsg = String(e);
     }
@@ -667,26 +679,85 @@
     return { body, facts, list };
   }
 
-  /** Set the active set through the loadout apply path (optimistic set, then project it). */
-  async function setActiveSetTo(techNames: string[], label: string) {
+  /** Set the active set through the loadout apply path (optimistic set, then project it).
+   *  @return true when it applied without errors (failures go to the error banner) */
+  async function setActiveSetTo(techNames: string[], label: string): Promise<boolean> {
     busy = label;
     activeSet = new Set(techNames);
+    let clean = false;
     try {
-      await applyActive(techNames);
+      const rep = await applyActive(techNames);
+      clean = rep.errors.length === 0;
     } catch (e) {
       errorMsg = String(e);
     }
     busy = null;
+    return clean;
+  }
+
+  /** The Undo notice of the last loadout switch; a new switch dismisses it. */
+  let switchUndo: ToastHandle | null = null;
+
+  /**
+   * Why an Undo that puts the active set back can't run now, or null.
+   * @param expected the active set the Undo assumes (the one the switch left)
+   */
+  function activeUndoBlocked(expected: string[]): string | null {
+    if (bisecting) return "Can't undo while a diagnosis is running.";
+    if (archiveMove.running) return "Can't undo while a library move is running.";
+    if (!sameMods(expected, activeSet)) return "Can't undo: your active mods changed since the switch.";
+    return null;
   }
 
   /** Switch to a loadout's mods (already confirmed), then offer to switch back. Errors the
    *  apply reports stay in the error banner; the toast still shows so Undo is reachable. */
   async function switchTo(name: string, techNames: string[]) {
+    switchUndo?.dismiss();
+    switchUndo = null;
     const previous = [...activeSet];
-    await setActiveSetTo(techNames, `Applying loadout “${name}”…`);
+    const clean = await setActiveSetTo(techNames, `Applying loadout “${name}”…`);
+    const switched = [...techNames];
+    switchUndo = toast({
+      message: clean ? `Switched to ${name}.` : `Switch to ${name} finished with problems.`,
+      tone: clean ? "neutral" : "warn",
+      action: {
+        label: "Undo",
+        run: async () => {
+          const why = activeUndoBlocked(switched);
+          if (why) {
+            toast({ message: why, tone: "warn" });
+            return;
+          }
+          await setActiveSetTo(previous, "Switching back…");
+        },
+      },
+    });
+  }
+
+  /**
+   * After a loadout was overwritten, offer to put its previous mods back.
+   * @param prev the loadout as it was (id, name, mods)
+   * @param written the mods it was overwritten with; Undo refuses if it changed again since
+   */
+  function offerOverwriteUndo(prev: { id: number; name: string; mods: string[] }, written: string[]) {
     toast({
-      message: `Switched to ${name}.`,
-      action: { label: "Undo", run: () => setActiveSetTo(previous, "Switching back…") },
+      message: `Saved your current mods to ${prev.name}.`,
+      action: {
+        label: "Undo",
+        run: async () => {
+          const now = loadouts.find((l) => l.id === prev.id);
+          if (!now || !sameMods(now.mods, written)) {
+            toast({ message: `Can't undo: ${prev.name} changed since.`, tone: "warn" });
+            return;
+          }
+          try {
+            await saveLoadout(prev.id, prev.name, prev.mods);
+            await loadLoadouts();
+          } catch (e) {
+            errorMsg = String(e);
+          }
+        },
+      },
     });
   }
 
@@ -713,7 +784,7 @@
 
   async function applyLoadout(l: Loadout) {
     // With no scan yet every mod would look missing, so only count missing once mods are known.
-    const diff = activeSetDiff([...activeSet], l.mods, mods.length ? libraryTechNames : undefined);
+    const diff = activeSetDiff([...activeSet], l.mods, libraryScanned ? libraryTechNames : undefined);
     if (diff.on.length + diff.off.length === 0) {
       loadoutsOpen = false;
       toast({ message: `Already using ${l.name}` });
@@ -748,10 +819,17 @@
     if (name === null || !name.trim()) return;
     // A duplicate name was accepted with "Replace": overwrite that loadout, don't add a second.
     const existing = findLoadoutByName(name, loadouts);
+    const current = [...activeSet];
     try {
-      if (existing) await saveLoadout(existing.id, existing.name, [...activeSet]);
-      else await saveLoadout(null, name.trim(), [...activeSet]);
-      await loadLoadouts();
+      if (existing) {
+        const prev = { id: existing.id, name: existing.name, mods: [...existing.mods] };
+        await saveLoadout(existing.id, existing.name, current);
+        await loadLoadouts();
+        offerOverwriteUndo(prev, current);
+      } else {
+        await saveLoadout(null, name.trim(), current);
+        await loadLoadouts();
+      }
     } catch (e) {
       errorMsg = String(e);
     }
@@ -770,9 +848,11 @@
       }))
     )
       return;
+    const prev = { id: l.id, name: l.name, mods: [...l.mods] };
     try {
       await saveLoadout(l.id, l.name, current);
       await loadLoadouts();
+      offerOverwriteUndo(prev, current);
     } catch (e) {
       errorMsg = String(e);
     }
@@ -1648,6 +1728,7 @@
     if ((roots[0] ?? null) === prev) return;
     result = null;
     mods = [];
+    libraryScanned = false;
     activeSet = new Set();
     foreignFiles = [];
     if (roots.length) {
@@ -1779,7 +1860,10 @@
     const ok = await ask(
       why === "empty"
         ? {
-            title: `Use ${path} as your library archive?`,
+            title:
+              path === null
+                ? "Use the default library archive?"
+                : `Use ${target} as your library archive?`,
             body:
               `Silo can't move your library there${refusal ? ` (${unDot(refusal)})` : ""}, but your current archive is empty, ` +
               "so Silo can use this folder as your library instead. Nothing is moved; you can choose another archive folder later in Settings.",
@@ -1793,7 +1877,7 @@
             title:
               path === null
                 ? "Start fresh with the default library archive?"
-                : `Use ${path} as your library archive?`,
+                : `Use ${target} as your library archive?`,
             body:
               path === null
                 ? "Your library archive isn't available. Nothing is moved or copied, and mods still on the old drive stay there, untouched. If you restored your archive somewhere, cancel, use Choose another and pick that folder instead."
@@ -1946,6 +2030,7 @@
       const r = await scanMods(roots.length ? roots : undefined);
       result = r;
       mods = r.mods;
+      libraryScanned = true;
       activeSet = new Set(r.mods.filter((m) => m.active).map((m) => m.techName));
       // Interrupted mod updates Silo finished or rolled back before scanning. Added to the
       // banner, so a startup notice (a database restored) isn't wiped by the first scan.

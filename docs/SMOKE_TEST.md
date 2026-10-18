@@ -221,15 +221,17 @@ top header bar (the drawer/backdrop must start below it).
 - [ ] `[app]` **Esc cancels.** Esc closes the dialog and the action does **not** happen (no loadout saved, switched or deleted; nothing moved).
 - [ ] `[app]` **Focus comes back.** After Cancel or Esc, focus is back on the button that opened the dialog.
 - [ ] `[app]` **Buttons say what they do.** No dialog has an "OK" button; each confirm button names its action ("Delete", "Switch", "Replace", "Move library").
+- [ ] `[app]` **One click answers one dialog.** Double-click a confirm button whose answer opens another confirm (or hold Enter on it) → only the first dialog is answered; the next one stays open until you click it again. A name dialog's **Replace** also needs a fresh click or Enter after it appears.
 
 **Loadouts:**
 - [ ] `[app]` **Save, empty name.** Loadouts → **+ Save current active set as a loadout**, leave the name empty and press Save → an error under the field ("Give the loadout a name"); the dialog stays open and nothing is saved.
-- [ ] `[app]` **Save, duplicate name.** Type the name of an existing loadout (try different capitals) → a warning that it already exists and the button changes to **Replace**. Press Replace → that loadout now holds your current mods, and the list still has **one** loadout of that name, not two.
+- [ ] `[app]` **Save, duplicate name.** Type the name of an existing loadout (try different capitals) → a warning that it already exists and the button changes to **Replace**. Press Replace → that loadout now holds your current mods, and the list still has **one** loadout of that name, not two. A notice offers **Undo**; pressing it puts the loadout's old mods back.
 - [ ] `[app]` **Switch shows what changes.** Pick a loadout that differs from your active mods → the dialog shows counts (Turn on / Park, plus Not in your library when some are missing) and the list of mods that change. **Cancel** → your active mods are exactly as before.
-- [ ] `[app]` **Switch, then Undo.** Switch again and confirm → the loadout's mods are active and a notice says "Switched to …" with **Undo**. Press Undo → your previous active mods are back (check the active count and a few rows).
+- [ ] `[app]` **Switch, then Undo.** Switch again and confirm → the loadout's mods are active and a notice says "Switched to …" with **Undo** (or "Switch to … finished with problems." when some mods couldn't be applied; the error shows too). Press Undo → your previous active mods are back (check the active count and a few rows).
+- [ ] `[app]` **Undo refuses when things moved on.** Switch, then turn one mod on or off, then press the switch notice's Undo → a notice says it can't undo because your active mods changed, and nothing changes. Switching twice leaves only the newest switch's Undo notice.
 - [ ] `[app]` **Already in use.** Pick the loadout that matches your active mods → no dialog, just an "Already using …" notice.
 - [ ] `[game]` **Use a savegame's mods.** Savegames → "→ Loadout" on a save → the same what-changes dialog, plus a note about mods the save used that aren't in your library; Switch then Undo restores your previous active mods.
-- [ ] `[app]` **Overwrite asks.** Press a loadout's **Overwrite with current active set** button → a dialog says how many mods it had and how many are added and removed. Cancel leaves the loadout unchanged; Replace updates it and doesn't change your active mods.
+- [ ] `[app]` **Overwrite asks.** Press a loadout's **Overwrite with current active set** button → a dialog says how many mods it had and how many are added and removed. Cancel leaves the loadout unchanged; Replace updates it and doesn't change your active mods, and a notice offers **Undo**, which puts the loadout's old mods back.
 - [ ] `[app]` **Delete, then Undo.** Press a loadout's **Delete loadout** button → a dialog with focus on Cancel. Delete → it leaves the list and a notice offers **Undo**. Press Undo → the loadout is back with the same name and mods.
 
 **Cancel truly cancels, and the quit guard:**
@@ -239,6 +241,7 @@ top header bar (the drawer/backdrop must start below it).
 
 **Notices (toasts):**
 - [ ] `[app]` **They don't steal focus.** When a notice appears, focus stays where it was (typing in a field carries on uninterrupted). Tab can still reach its Undo button.
+- [ ] `[app]` **Not behind a dialog.** With an Undo notice on screen, open any confirm dialog → clicking the notice's Undo or close button does nothing until the dialog is closed.
 - [ ] `[app]` **They wait for you.** Switch to a loadout, then alt-tab away for 20 seconds and come back → the Undo notice is still there and Undo still works. Pointing at a notice also keeps it on screen.
 
 ## Sign-off

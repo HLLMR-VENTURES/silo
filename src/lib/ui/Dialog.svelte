@@ -19,6 +19,10 @@
     open?: boolean;
     title: string;
     description?: string | Snippet;
+    /** Id of an element inside the body that also describes the dialog (aria-describedby). */
+    describedby?: string;
+    /** "alertdialog" for a confirmation of something that can't easily be undone. */
+    role?: "dialog" | "alertdialog";
     size?: "sm" | "md" | "lg";
     initialFocus?: HTMLElement | "first" | "none";
     /** Called once per close. "programmatic" = the parent set `open` false (or unmounted the dialog). */
@@ -34,6 +38,8 @@
     open = $bindable(false),
     title,
     description,
+    describedby,
+    role = "dialog",
     size = "md",
     initialFocus,
     onclose,
@@ -46,6 +52,10 @@
   const uid = $props.id();
   const titleId = `${uid}-title`;
   const descId = `${uid}-desc`;
+
+  const describedBy = $derived(
+    [description ? descId : "", describedby ?? ""].filter(Boolean).join(" ") || undefined,
+  );
 
   let host = $state<HTMLElement | null>(null);
   let panel = $state<HTMLElement | null>(null);
@@ -133,10 +143,10 @@
     <div
       bind:this={panel}
       class="panel size-{size} {className}"
-      role="dialog"
+      {role}
       aria-modal="true"
       aria-labelledby={titleId}
-      aria-describedby={description ? descId : undefined}
+      aria-describedby={describedBy}
       tabindex="-1"
       onkeydown={trapTab}
     >
