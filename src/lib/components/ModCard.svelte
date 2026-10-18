@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { BrowseMod, ModSourceOption } from "../types";
   import { label, shortLabel, gatedReason, fmtCount, fmtMB, loadCatalogImage } from "../browse";
 
@@ -56,13 +57,13 @@
       <div class="stats">
         {#if m.rating != null}
           <span class="stat" title="Rating">
-            ⭐ {m.rating.toFixed(1)}{#if m.ratingCount}<span class="stat-sub"
+            <Icon name="favorite" size={12} filled /> {m.rating.toFixed(1)}{#if m.ratingCount}<span class="stat-sub"
                 >&nbsp;({fmtCount(m.ratingCount)})</span
               >{/if}
           </span>
         {/if}
         {#if m.downloads != null}
-          <span class="stat" title="Downloads">⬇ {fmtCount(m.downloads)}</span>
+          <span class="stat" title="Downloads"><Icon name="download" size={12} /> {fmtCount(m.downloads)}</span>
         {/if}
       </div>
     {/if}
@@ -101,8 +102,8 @@
             onFindInLibrary?.();
           }}
         >
-          <span class="srcbtn-name">⌕ Find in Library</span>
-          <span class="srcbtn-icon">↗</span>
+          <span class="srcbtn-name"><Icon name="search" size={12} /> Find in Library</span>
+          <span class="srcbtn-icon"><Icon name="external" size={12} /></span>
         </button>
       {:else}
         {#each m.sources as s (s.source)}
@@ -122,7 +123,7 @@
           >
             <span class="srcbtn-name">{shortLabel(s.source)}</span>
             {#if s.version}<span class="srcbtn-ver tnum">{s.version}</span>{/if}
-            <span class="srcbtn-icon">{s.installable ? "⬇" : "↗"}</span>
+            <span class="srcbtn-icon"><Icon name={s.installable ? "download" : "external"} size={12} /></span>
           </button>
         {:else}
           <span class="srcbar-none">No sources</span>
@@ -231,8 +232,8 @@
   .chip {
     align-self: flex-start;
     font-size: var(--fs-xs);
-    color: var(--soil-700);
-    background: color-mix(in srgb, var(--soil-500) 16%, transparent);
+    color: var(--earth-text);
+    background: color-mix(in srgb, var(--earth) 16%, transparent);
     padding: 2px 8px;
     border-radius: 999px;
   }

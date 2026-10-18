@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { ModEntry, LogModHealth, CatalogUpdate } from "../types";
   import { scanLog, catalogCheckUpdates, openExternal } from "../api";
 
@@ -63,7 +64,7 @@
     {@const c = catalog}
     <div class="d-log warn">
       Update available: you have {mod.version ?? "?"}, catalog has <b>{c.latest}</b>{c.source ? ` (${c.source})` : ""}.
-      {#if c.downloadUrl}<button class="d-cat-link" onclick={() => openExternal(c.downloadUrl!)}>Get it ↗</button>{/if}
+      {#if c.downloadUrl}<button class="d-cat-link" onclick={() => openExternal(c.downloadUrl!)}>Get it <Icon name="external" size={12} /></button>{/if}
     </div>
   {:else}
     <div class="d-log ok">Up to date with the catalog{catalog.latest ? ` (${catalog.latest})` : ""}.</div>

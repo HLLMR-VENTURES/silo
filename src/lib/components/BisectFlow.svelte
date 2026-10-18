@@ -4,6 +4,7 @@
   // set changes + launch; the player provides the verdict each round (a crash is
   // auto-detected from the log). The player's real mod set is snapshotted first and
   // restored on finish/cancel — nothing here is destructive.
+  import Icon from "../ui/Icon.svelte";
   import { onDestroy } from "svelte";
   import {
     bisectPlan,
@@ -212,7 +213,7 @@
 <div class="bf">
   <div class="bf-head">
     <h3>Guided bisection</h3>
-    <button class="x" title="Cancel & restore" onclick={finish} disabled={!!working}>✕</button>
+    <button class="x" title="Cancel & restore" aria-label="Cancel & restore" onclick={finish} disabled={!!working}><Icon name="close" /></button>
   </div>
 
   {#if working}
@@ -256,7 +257,7 @@
       </ol>
     {/if}
     <div class="actions">
-      <button class="btn" onclick={launch} disabled={!!working}>▶ Launch FS25</button>
+      <button class="btn" onclick={launch} disabled={!!working}><Icon name="play" size={14} /> Launch FS25</button>
       <button class="btn primary" onclick={backFromGame} disabled={!!working}>
         I've quit the game →
       </button>

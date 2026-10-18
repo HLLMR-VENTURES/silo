@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import { openExternal } from "../api";
 
   let {
@@ -21,7 +22,7 @@
 <div class="modal" role="dialog" aria-modal="true">
   <div class="modal-head">
     <h3>{modal.title}</h3>
-    <button class="drawer-x" title="Close" onclick={onClose}>✕</button>
+    <button class="drawer-x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
   </div>
   <div class="modal-body">
     {#if modal.text}
@@ -43,7 +44,7 @@
     </span>
     {#if modal.url}
       <button class="modal-link" onclick={() => openExternal(modal.url!)}>
-        Open full mod page ↗
+        Open full mod page <Icon name="external" size={13} />
       </button>
     {/if}
   </div>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import {
     ghStatus,
     ghSetClientId,
@@ -123,7 +124,7 @@
   {#if status.user}
     <div class="gha-row">
       <div>
-        <div class="gha-connected">✓ Connected as {status.user}</div>
+        <div class="gha-connected"><Icon name="ok" size={14} /> Connected as {status.user}</div>
         <div class="gha-hint">
           {#if status.canWrite}
             Star &amp; Watch actions enabled · 5,000 req/hr.
@@ -146,7 +147,7 @@
       {#if !status.canWrite}
         <div class="gha-row">
           <div class="gha-hint">
-            Enable ⭐ Star / 👁 Watch on mod pages — grants the <code>public_repo</code>
+            Enable Star / Watch on mod pages — grants the <code>public_repo</code>
             scope so actions land on your GitHub account.
           </div>
           <button class="gha-btn primary" onclick={() => connect(true, status.canGist)}>
@@ -194,7 +195,7 @@
         GitHub sign-in isn't configured in this build. (One-time: register a GitHub OAuth App with
         Device Flow enabled and add its Client ID.)
         <button class="gha-link" onclick={() => openExternal("https://github.com/settings/applications/new")}>
-          Register an OAuth App ↗
+          Register an OAuth App <Icon name="external" size={12} />
         </button>
       </div>
       <div class="gha-row">
@@ -216,7 +217,7 @@
           class="gha-link"
           onclick={() => openExternal("https://github.com/settings/personal-access-tokens/new")}
         >
-          Create one ↗
+          Create one <Icon name="external" size={12} />
         </button>
       </div>
       <div class="gha-row">

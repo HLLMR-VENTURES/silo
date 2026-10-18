@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../../ui/Icon.svelte";
   let {
     categories,
     x,
@@ -32,7 +33,7 @@
     </button>
   {/each}
   <button class="menu-item reset" onclick={onReset}>
-    ↺ Reset to auto
+    <Icon name="undo" size={13} /> Reset to auto
   </button>
 </div>
 

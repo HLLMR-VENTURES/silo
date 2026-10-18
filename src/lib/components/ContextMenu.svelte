@@ -1,9 +1,13 @@
 <script lang="ts" module>
+  import type { IconName } from "../ui/icons";
+
   export type ContextMenuItem =
     | {
         label: string;
         onClick: () => void;
-        icon?: string;
+        icon?: IconName;
+        /** Draw the icon filled (e.g. a set favorite star). */
+        iconFilled?: boolean;
         danger?: boolean;
         disabled?: boolean;
       }
@@ -11,6 +15,8 @@
 </script>
 
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
+
   // A generic right-click menu, positioned at the cursor. Mirrors CategoryMenu's
   // backdrop + fixed-position pattern; closes on pick, outside click, or Escape.
   let {
@@ -59,7 +65,7 @@
         onclick={() => pick(item.onClick)}
         role="menuitem"
       >
-        {#if item.icon}<span class="ico">{item.icon}</span>{/if}
+        {#if item.icon}<span class="ico"><Icon name={item.icon} size={14} filled={item.iconFilled} /></span>{/if}
         <span class="lbl">{item.label}</span>
       </button>
     {/if}
@@ -110,8 +116,8 @@
   .ico {
     flex: 0 0 auto;
     width: 16px;
-    text-align: center;
-    font-size: 0.8125rem;
+    display: inline-flex;
+    justify-content: center;
     opacity: 0.9;
   }
   .lbl {

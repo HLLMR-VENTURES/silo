@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import {
     getModSettings,
     saveModSettings,
@@ -79,7 +80,7 @@
       <div class="ms-title">{title}</div>
       <div class="ms-sub">Mod settings</div>
     </div>
-    <button class="ms-x" onclick={onClose} aria-label="Close">✕</button>
+    <button class="ms-x" onclick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
   </div>
 
   {#if loading}
@@ -95,7 +96,7 @@
       <div class="ms-file-head">
         <span class="ms-file-name tnum">{file.name}</span>
         <div class="ms-file-actions">
-          {#if savedPath === file.path}<span class="ms-saved">saved ✓</span>{/if}
+          {#if savedPath === file.path}<span class="ms-saved">saved <Icon name="check" size={13} /></span>{/if}
           <button
             class="ms-link"
             onclick={() => (rawMode[file.path] = !rawMode[file.path])}
@@ -194,10 +195,11 @@
     border: none;
     background: transparent;
     color: var(--text-muted);
-    font-size: 0.9375rem;
     width: 30px;
     height: 30px;
     border-radius: var(--radius-sm);
+    display: inline-grid;
+    place-items: center;
   }
   .ms-x:hover {
     background: color-mix(in srgb, var(--primary) 12%, transparent);

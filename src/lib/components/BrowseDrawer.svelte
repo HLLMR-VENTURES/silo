@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { CatalogModDetail, ModSourceOption } from "../types";
   import { resizable } from "../resize";
   import GithubCard from "./GithubCard.svelte";
@@ -69,7 +70,7 @@
         {/if}
         {#if d.techName}<div class="dh-tech tnum">{d.techName}</div>{/if}
       </div>
-      <button class="drawer-x" title="Close" onclick={onClose}>✕</button>
+      <button class="drawer-x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
     </div>
     <div class="drawer-body">
       {#if cover}
@@ -80,7 +81,7 @@
         {#if d.rating != null}
           <dt>Rating</dt>
           <dd class="tnum">
-            ⭐ {d.rating.toFixed(1)}{#if d.ratingCount}
+            <Icon name="favorite" size={13} filled /> {d.rating.toFixed(1)}{#if d.ratingCount}
               &nbsp;({fmtCount(d.ratingCount)}){/if}
           </dd>
         {/if}
@@ -126,9 +127,9 @@
                   {#if hasLocally(d)}
                     In library
                   {:else if s.installable}
-                    {installingId === d.id ? "Installing…" : "Install ⬇"}
+                    {#if installingId === d.id}Installing…{:else}Install <Icon name="download" size={13} />{/if}
                   {:else}
-                    Open page ↗
+                    Open page <Icon name="external" size={13} />
                   {/if}
                 </button>
               </div>
@@ -181,7 +182,7 @@
           <span>Already in your library</span>
           {#if d.techName && onFindInLibrary}
             <button class="find-lib-btn" onclick={() => onFindInLibrary?.(d.techName!)}>
-              ⌕ Find in Library ↗
+              <Icon name="search" size={13} /> Find in Library <Icon name="external" size={13} />
             </button>
           {/if}
         </div>

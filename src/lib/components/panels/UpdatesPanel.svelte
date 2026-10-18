@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../../ui/Icon.svelte";
   import type { UpdateRow } from "../../types";
   import { checkedDate, type CheckYourselfRow } from "../../sources";
 
@@ -79,7 +80,7 @@
             </div>
           </div>
           <div class="up-acts">
-            <button class="sg-make" onclick={() => onOpenSource(s)}>Open page ↗</button>
+            <button class="sg-make" onclick={() => onOpenSource(s)}>Open page <Icon name="external" size={12} /></button>
             <button class="sg-make" onclick={() => onMarkChecked(s)}>I checked it</button>
           </div>
         </div>

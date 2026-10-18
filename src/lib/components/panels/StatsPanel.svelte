@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../../ui/Icon.svelte";
   import type { ModEntry } from "../../types";
   import { fmtSize } from "../../format";
 
@@ -43,7 +44,7 @@
     <div class="st-tile"><b class="tnum">{libStats.tagged}</b><span>tagged</span></div>
     <div class="st-tile">
       <b class="tnum">{libStats.avgRating ? libStats.avgRating.toFixed(1) : "–"}</b>
-      <span>avg ★ ({libStats.rated})</span>
+      <span>avg <Icon name="favorite" size={11} filled /> ({libStats.rated})</span>
     </div>
   </div>
 

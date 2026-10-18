@@ -1,6 +1,7 @@
 <script lang="ts">
   // "Where it came from" (#196): the page the user downloaded this mod from. Silo only keeps
   // the address. It never requests the page; Open page hands it to the user's browser.
+  import Icon from "../ui/Icon.svelte";
   import type { ModEntry, SourceRow } from "../types";
   import { setModSource, getModSources, markSourceChecked, openExternal } from "../api";
   import { sourceHost, checkedDate } from "../sources";
@@ -108,7 +109,7 @@
       <button class="src-host" title={source.url} onclick={() => openExternal(source.url)}>
         {sourceHost(source.url)}
       </button>
-      <button class="src-open" onclick={() => openExternal(source.url)}>Open page ↗</button>
+      <button class="src-open" onclick={() => openExternal(source.url)}>Open page <Icon name="external" size={12} /></button>
       <button class="src-btn" onclick={startChange}>Change</button>
       <button class="src-btn" onclick={remove}>Remove</button>
     </div>

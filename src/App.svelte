@@ -145,6 +145,7 @@
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
   import ArchiveMoveBanner from "./lib/components/ArchiveMoveBanner.svelte";
   import BlockedFolderBanner from "./lib/components/BlockedFolderBanner.svelte";
+  import Icon from "./lib/ui/Icon.svelte";
   import { fmtSize } from "./lib/format";
   import {
     rootsFor,
@@ -976,18 +977,18 @@
     const items: ContextMenuItem[] = [
       {
         label: isActive ? "Park (deactivate)" : "Activate",
-        icon: isActive ? "○" : "●",
+        icon: isActive ? "circle" : "dot",
         onClick: () => toggleActive(mod.techName),
       },
-      { label: "Open details", icon: "⊞", onClick: () => (detailMod = mod) },
-      { label: "Find in Browse", icon: "⌕", onClick: () => openInBrowse(mod) },
+      { label: "Open details", icon: "info", onClick: () => (detailMod = mod) },
+      { label: "Find in Browse", icon: "search", onClick: () => openInBrowse(mod) },
       { separator: true },
-      { label: "Change category…", icon: "🏷", onClick: () => openEditor(mod.techName, ev) },
+      { label: "Change category…", icon: "tag", onClick: () => openEditor(mod.techName, ev) },
     ];
     if (settingsModsSet.has(mod.techName)) {
       items.push({
         label: "Edit settings…",
-        icon: "⚙",
+        icon: "modSettings",
         onClick: () =>
           (settingsMod = { techName: mod.techName, title: mod.title ?? mod.techName }),
       });
@@ -996,17 +997,18 @@
       { separator: true },
       {
         label: c.favorite ? "Remove favorite" : "Favorite",
-        icon: c.favorite ? "★" : "☆",
+        icon: "favorite",
+        iconFilled: c.favorite,
         onClick: () => toggleCuration(mod.techName, "favorite"),
       },
       {
         label: c.hidden ? "Unhide" : "Hide",
-        icon: "⊘",
+        icon: "hidden",
         onClick: () => toggleCuration(mod.techName, "hidden"),
       },
       {
         label: c.broken ? "Clear broken flag" : "Mark broken",
-        icon: "⚠",
+        icon: "problem",
         danger: !c.broken,
         onClick: () => toggleCuration(mod.techName, "broken"),
       },
@@ -2312,15 +2314,15 @@
 
   {#if infoMsg}
     <div class="cloud-notice">
-      <span class="cn-ico">ⓘ</span>
+      <span class="cn-ico"><Icon name="info" /></span>
       <div class="cn-text">{infoMsg}</div>
-      <button class="cn-x" onclick={() => (infoMsg = null)} title="Dismiss">✕</button>
+      <button class="cn-x" onclick={() => (infoMsg = null)} title="Dismiss" aria-label="Dismiss"><Icon name="close" size={14} /></button>
     </div>
   {/if}
 
   {#if cloudNoticeOpen}
     <div class="cloud-notice">
-      <span class="cn-ico">☁</span>
+      <span class="cn-ico"><Icon name="cloud" /></span>
       <div class="cn-text">
         <b>Your mods folder is synced by a cloud service</b> (OneDrive, Google Drive, or Proton
         Drive), which doesn't support hardlinks. Silo will project your active mods as
@@ -2328,13 +2330,13 @@
         deactivate slower. For the best performance, exclude
         <span class="tnum">…\My Games\FarmingSimulator2025</span> from your cloud sync.
       </div>
-      <button class="cn-x" onclick={dismissCloudNotice} title="Dismiss">✕</button>
+      <button class="cn-x" onclick={dismissCloudNotice} title="Dismiss" aria-label="Dismiss"><Icon name="close" size={14} /></button>
     </div>
   {/if}
 
   {#if modsStatus && modsStatus.source === "user" && !modsStatus.available}
     <div class="cloud-notice">
-      <span class="cn-ico">⚠</span>
+      <span class="cn-ico"><Icon name="problem" /></span>
       <div class="cn-text">
         <b>Your mods folder isn't available:</b> <span class="tnum">{modsStatus.path}</span>.
         Nothing was scanned. Reconnect the drive, or pick another folder.
@@ -2352,14 +2354,14 @@
     />
   {:else if modsStatus?.modsFolderMissing}
     <div class="cloud-notice">
-      <span class="cn-ico">ⓘ</span>
+      <span class="cn-ico"><Icon name="info" /></span>
       <div class="cn-text">Farming Simulator hasn't created its <b>mods</b> folder yet.</div>
       <button class="cn-act" onclick={makeModsFolder}>Create it</button>
       <button class="cn-act" onclick={changeModsFolder}>Choose a folder</button>
     </div>
   {:else if modsStatus?.mismatch}
     <div class="cloud-notice">
-      <span class="cn-ico">⚠</span>
+      <span class="cn-ico"><Icon name="problem" /></span>
       <div class="cn-text">
         <b>FS25 is reading a different mods folder</b>
         {#if modsStatus.gameReads}(<span class="tnum">{modsStatus.gameReads}</span>){/if} — mods
@@ -2391,11 +2393,11 @@
 
   {#if overrideNoticeOpen && modsStatus?.path && !modsStatus.layoutProblem}
     <div class="cloud-notice">
-      <span class="cn-ico">ⓘ</span>
+      <span class="cn-ico"><Icon name="info" /></span>
       <div class="cn-text">
         Silo now uses the mods folder FS25 is set to: <span class="tnum">{modsStatus.path}</span>.
       </div>
-      <button class="cn-x" onclick={dismissOverrideNotice} title="Dismiss">✕</button>
+      <button class="cn-x" onclick={dismissOverrideNotice} title="Dismiss" aria-label="Dismiss"><Icon name="close" size={14} /></button>
     </div>
   {/if}
 
@@ -2441,13 +2443,13 @@
       <!-- Library-only filters (they have no Browse equivalent). -->
       <div class="lib-toggles">
         <button class="lib-tog" class:on={favoritesOnly} onclick={() => (favoritesOnly = !favoritesOnly)}>
-          {favoritesOnly ? "★" : "☆"} Favorites
+          <Icon name="favorite" size={13} filled={favoritesOnly} /> Favorites
         </button>
         <button class="lib-tog" class:on={showHidden} onclick={() => (showHidden = !showHidden)}>
           Hidden
         </button>
         <button class="lib-tog" class:on={flaggedOnly} onclick={() => (flaggedOnly = !flaggedOnly)}>
-          ⚑ Flagged
+          <Icon name="flagged" size={13} /> Flagged
         </button>
         <button
           class="lib-tog"
@@ -2455,10 +2457,10 @@
           disabled={conflictedSet.size === 0}
           onclick={() => (conflictedOnly = !conflictedOnly)}
         >
-          ⚠ In conflict{conflictedSet.size > 0 ? ` (${conflictedSet.size})` : ""}
+          <Icon name="problem" size={13} /> In conflict{conflictedSet.size > 0 ? ` (${conflictedSet.size})` : ""}
         </button>
         <button class="lib-tog" class:on={hasSettingsOnly} onclick={() => (hasSettingsOnly = !hasSettingsOnly)}>
-          ⚙ Has settings
+          <Icon name="modSettings" size={13} /> Has settings
         </button>
         <button
           class="lib-tog lib-upd"
@@ -2467,10 +2469,11 @@
           title="Show only mods with a newer version available — checks for updates the first time"
           onclick={toggleNeedsUpdate}
         >
-          {updateChecking ? "⬆ Checking…" : `⬆ Needs update${availableUpdates.length > 0 ? ` (${availableUpdates.length})` : ""}`}
+          <Icon name="update" size={13} />
+          {updateChecking ? "Checking…" : `Needs update${availableUpdates.length > 0 ? ` (${availableUpdates.length})` : ""}`}
         </button>
         {#if libFilterCount > 0}
-          <button class="lib-clear" onclick={clearLibFilters}>Clear all ✕</button>
+          <button class="lib-clear" onclick={clearLibFilters}>Clear all <Icon name="close" size={13} /></button>
         {/if}
       </div>
 

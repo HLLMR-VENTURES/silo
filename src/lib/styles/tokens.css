@@ -142,6 +142,10 @@
   --warn-text: #94560a;
   --danger: #a63d2c;
   --on-danger: #ffffff;
+  --earth: #8a6a45;
+  --earth-strong: #5e472e;
+  --earth-text: #5e472e;
+  --on-earth: #fcfaf4;
   --focus: #2f5a1d;
   --scrim: rgb(20 22 16 / 0.45);
   color-scheme: light;
@@ -170,6 +174,10 @@
     --warn-text: #f0b45c;
     --danger: #ee9481;
     --on-danger: #1a0e0b;
+    --earth: #8a6a45;
+    --earth-strong: #6e5437;
+    --earth-text: #d2b48c;
+    --on-earth: #fcfaf4;
     --focus: #f2d26b;
     --scrim: rgb(20 22 16 / 0.6);
     color-scheme: dark;
@@ -197,6 +205,10 @@
   --warn-text: #f0b45c;
   --danger: #ee9481;
   --on-danger: #1a0e0b;
+  --earth: #8a6a45;
+  --earth-strong: #6e5437;
+  --earth-text: #d2b48c;
+  --on-earth: #fcfaf4;
   --focus: #f2d26b;
   --scrim: rgb(20 22 16 / 0.6);
   color-scheme: dark;

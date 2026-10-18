@@ -1,6 +1,7 @@
 <script lang="ts">
   // Filltype compatibility bridge: generate a companion mod that adds a custom fill type
   // into the categories your equipment accepts — the "nothing can haul my sugar beets" fix.
+  import Icon from "../ui/Icon.svelte";
   import { generateBridge } from "../api";
 
   interface Props {
@@ -93,7 +94,7 @@
         mod that adds it to the categories your equipment accepts — no editing other mods.
       </p>
     </div>
-    <button class="x" title="Close" onclick={onClose}>✕</button>
+    <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
   </div>
 
   {#if done}
@@ -129,7 +130,7 @@
         <div class="opts">
           {#each g.cats as c (c.id)}
             <button class="opt" class:on={selected.has(c.id)} onclick={() => toggle(c.id)}>
-              {selected.has(c.id) ? "✓" : "+"} {c.label}
+              {#if selected.has(c.id)}<Icon name="check" size={13} />{:else}+{/if} {c.label}
             </button>
           {/each}
         </div>
@@ -252,7 +253,7 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.75rem;
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--soil-700);
+    color: var(--earth-text);
     padding: 2px 8px;
     border-radius: 999px;
   }

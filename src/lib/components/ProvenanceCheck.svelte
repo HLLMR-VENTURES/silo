@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { ModEntry, VerifyResult } from "../types";
   import { verifyMod } from "../api";
   import { getVerdict, setVerdict } from "../provenanceCache.svelte";
@@ -84,7 +85,7 @@
     {@const r = result}
     {#if r.status === "verified"}
       <div class="verdict ok">
-        <span class="dot">✓</span>
+        <span class="dot"><Icon name="verifiedBuild" /></span>
         <div>
           <div class="v-label">Verified</div>
           <div class="v-sub">
@@ -94,7 +95,7 @@
       </div>
     {:else if r.status === "modified"}
       <div class="verdict warn">
-        <span class="dot">⚠</span>
+        <span class="dot"><Icon name="modified" /></span>
         <div>
           <div class="v-label">Modified from the published build</div>
           <div class="v-sub">

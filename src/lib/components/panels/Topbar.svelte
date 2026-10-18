@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../../ui/Icon.svelte";
   let {
     topbarH = $bindable(),
     view,
@@ -108,7 +109,7 @@
         {#if updating}
           {updatePct != null ? `Updating… ${updatePct}%` : "Updating…"}
         {:else}
-          ⬆ Update to {update.version}
+          <Icon name="update" size={14} /> Update to {update.version}
         {/if}
       </button>
     {/if}
@@ -130,7 +131,7 @@
         onclick={onCheckUpdates}
         disabled={!!busy || updateChecking}
       >
-        {updateChecking ? "Checking…" : "⟳ Updates"}
+        {#if updateChecking}Checking…{:else}<Icon name="update" size={14} /> Updates{/if}
       </button>
     {/if}
     <button class="btn" onclick={onRescan} disabled={scanning || !!busy}>
@@ -145,7 +146,7 @@
         onclick={onLaunch}
         disabled={!!busy || launchBlocked}
       >
-        ▶ Launch{activeCount ? ` (${activeCount})` : ""}
+        <Icon name="play" size={14} /> Launch{activeCount ? ` (${activeCount})` : ""}
       </button>
     {/if}
     <button
@@ -156,7 +157,7 @@
       onclick={onToggleSettings}
       disabled={!!busy}
     >
-      ⚙
+      <Icon name="settings" size={18} />
     </button>
   </div>
 
@@ -175,7 +176,7 @@
       disabled={!!busy}
     >
       {#if activeLoadoutName !== null}
-        ● {activeLoadoutName}
+        <Icon name="dot" size={12} /> {activeLoadoutName}
       {:else}
         Loadouts
       {/if}
@@ -322,8 +323,8 @@
   }
   .icon-btn {
     padding: 9px 12px;
-    font-size: 1rem;
-    line-height: 1;
+    display: inline-grid;
+    place-items: center;
   }
   .icon-btn.on {
     color: var(--primary-text);

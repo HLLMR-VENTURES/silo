@@ -1,6 +1,7 @@
 <script lang="ts">
   // The mods folder is blocked (`layoutProblem`, #220): it shares files with another layout,
   // so Silo neither scans nor writes it. Says why, and offers the ways out.
+  import Icon from "../ui/Icon.svelte";
   import type { ModsRootStatus } from "../api";
 
   let {
@@ -20,7 +21,7 @@
 </script>
 
 <div class="cloud-notice">
-  <span class="cn-ico">⚠</span>
+  <span class="cn-ico"><Icon name="problem" /></span>
   <div class="cn-text">
     <b>Silo won't change files in this mods folder:</b>
     <span class="tnum">{status.path}</span>. {status.layoutProblem}

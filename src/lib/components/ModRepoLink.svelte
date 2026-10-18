@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { ModEntry, UpdateInfo } from "../types";
   import { setModRepo, guessRepo, checkModUpdate, downloadUpdate, openExternal, confirmDialog } from "../api";
 
@@ -111,7 +112,7 @@
         {checking ? "Checking…" : "Check for update"}
       </button>
       <button class="gh-open" onclick={() => openExternal(`https://github.com/${repo.owner}/${repo.repo}`)}>
-        Open repo ↗
+        Open repo <Icon name="external" size={12} />
       </button>
     </div>
   {/if}
@@ -127,7 +128,7 @@
       {/if}
       {#if update.release.htmlUrl}
         <button class="gh-open" onclick={() => openExternal(update!.release.htmlUrl!)}>
-          View release ↗
+          View release <Icon name="external" size={12} />
         </button>
       {/if}
       {#if update.hasUpdate && update.release.assetUrl}

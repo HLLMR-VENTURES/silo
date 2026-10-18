@@ -2,6 +2,7 @@
   // Crash / log triage: read FS25's log.txt and tell the user, in plain terms, whether
   // the last run crashed and which mods are actually at fault — separating real breakage
   // from cosmetic noise. The thing no other FS25 manager does.
+  import Icon from "../ui/Icon.svelte";
   import { onMount } from "svelte";
   import { scanLog, revealInFolder, userDirPath } from "../api";
   import type { LogReport, LogModHealth } from "../types";
@@ -90,10 +91,10 @@
     <div class="lt-head-actions">
       {#if mode === "report"}
         <button class="btn" onclick={scan} disabled={loading}>
-          {loading ? "Reading…" : "↻ Re-read log"}
+          {#if loading}Reading…{:else}<Icon name="rescan" size={14} /> Re-read log{/if}
         </button>
       {/if}
-      <button class="x" title="Close" onclick={onClose}>✕</button>
+      <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
     </div>
   </div>
 
@@ -131,7 +132,7 @@
           onclick={() => (mode = "bisect")}
           title={canBisect ? "" : "Need at least 2 active non-map mods to bisect"}
         >
-          ◆ Run guided bisection ({pool.length} mods)
+          <Icon name="diagnose" size={14} /> Run guided bisection ({pool.length} mods)
         </button>
       {/if}
     {:else if culprits.length > 0}
@@ -165,7 +166,7 @@
 
     {#if cosmeticOnly.length > 0}
       <button class="disclosure" onclick={() => (showCosmetic = !showCosmetic)}>
-        {showCosmetic ? "▾" : "▸"}
+        <Icon name={showCosmetic ? "chevronDown" : "chevronRight"} size={14} />
         {cosmeticOnly.length} mod{cosmeticOnly.length === 1 ? "" : "s"} with cosmetic warnings
         only — safe to ignore
       </button>

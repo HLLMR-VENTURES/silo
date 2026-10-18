@@ -65,6 +65,12 @@ button {
   outline: none;
 }
 
+/* Lucide icons (Icon.svelte): never shrink in flex rows; sit on the text baseline inline. */
+.lucide {
+  flex: 0 0 auto;
+  vertical-align: -0.125em;
+}
+
 /* Tabular numerals wherever we show data */
 .tnum {
   font-variant-numeric: tabular-nums;
@@ -102,7 +108,7 @@ button {
   background: var(--primary);
 }
 
-/* Notice banners (ⓘ / ⚠ / ⇄ strips under the toolbar): App.svelte and the banner components
+/* Notice banners (info / problem / archive strips under the toolbar): App.svelte and the banner components
    (ArchiveMoveBanner, BlockedFolderBanner) share them, so they live here, not scoped. */
 .cloud-notice {
   display: flex;

@@ -7,6 +7,7 @@
   //
   // Top line:    category (parent · child) · search · sort · direction
   // Bottom line: facets (in `facetOrder`) · year · Clear all
+  import Icon from "../ui/Icon.svelte";
 
   export interface CatChild {
     name: string;
@@ -164,7 +165,7 @@
         : "Sort direction — coming with a catalog update (silo-api)"}
       aria-label="Toggle sort direction"
     >
-      {sortDir === "desc" ? "↓" : "↑"}
+      <Icon name={sortDir === "desc" ? "arrowDown" : "arrowUp"} size={14} />
     </button>
   </div>
 
@@ -198,7 +199,7 @@
         />
       {/if}
       {#if showClear && filterCount > 0}
-        <button class="clear-filters" onclick={() => onClear?.()}>Clear all ✕</button>
+        <button class="clear-filters" onclick={() => onClear?.()}>Clear all <Icon name="close" size={13} /></button>
       {/if}
     </div>
   {/if}

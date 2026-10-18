@@ -2,6 +2,7 @@
   // Multiplayer mod-set sync: export a manifest of your active set to share, or verify
   // your set against a friend's — turning FS's "mod mismatch" join error into a fix-list.
   // (Sharing curated mod sets as a link lives in Collections, a separate panel.)
+  import Icon from "../ui/Icon.svelte";
   import { mpExport, mpVerify } from "../api";
   import type { MpModRef, MpVerifyReport } from "../types";
 
@@ -59,7 +60,7 @@
         that's the #1 "can't join" cause. Match sets here instead of guessing.
       </p>
     </div>
-    <button class="x" title="Close" onclick={onClose}>✕</button>
+    <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
   </div>
 
   {#if busy}<div class="busy">{busy}</div>{/if}

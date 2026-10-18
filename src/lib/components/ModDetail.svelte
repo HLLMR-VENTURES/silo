@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { ModEntry, CurationRow, Conflict, CatalogModDetail, SourceRow } from "../types";
   import type { ForeignFile } from "../api";
   import { getModIcon, revealInFolder, catalogDetailByTech, openExternal } from "../api";
@@ -186,7 +187,7 @@
       </div>
       <div class="d-tech tnum">{mod.techName}</div>
     </div>
-    <button class="d-x" onclick={onClose} aria-label="Close">✕</button>
+    <button class="d-x" onclick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
   </div>
 
   {#if foreign}
@@ -202,7 +203,7 @@
       </div>
       <div class="d-foreign-actions">
         <button class="d-adopt" onclick={onAdoptForeign}>
-          ⬆ Adopt v{foreign.flatVersion ?? ""}
+          <Icon name="update" size={13} /> Adopt v{foreign.flatVersion ?? ""}
         </button>
         <button class="d-restore" onclick={onRestoreForeign}>
           Keep Silo's v{foreign.managedVersion ?? ""}
@@ -219,31 +220,32 @@
 
   <div class="d-actions">
     <button class="d-act" class:on={active} onclick={onToggleActive}>
-      {active ? "● Active" : "○ Parked"}
+      <Icon name={active ? "dot" : "circle"} size={13} />
+      {active ? "Active" : "Parked"}
     </button>
     <button class="d-act" class:on={curation.favorite} onclick={() => onToggle("favorite")}>
-      {curation.favorite ? "★" : "☆"} Favorite
+      <Icon name="favorite" size={13} filled={curation.favorite} /> Favorite
     </button>
     <button class="d-act" class:on={curation.broken} onclick={() => onToggle("broken")}>
-      ⚠ Broken
+      <Icon name="problem" size={13} /> Broken
     </button>
     <button class="d-act" class:on={curation.hidden} onclick={() => onToggle("hidden")}>
-      ⊘ Hidden
+      <Icon name="hidden" size={13} /> Hidden
     </button>
     {#if hasSettings}
-      <button class="d-act" onclick={onOpenSettings}>⚙ Settings</button>
+      <button class="d-act" onclick={onOpenSettings}><Icon name="modSettings" size={13} /> Settings</button>
     {:else if mod.hasSettings}
       <button
         class="d-act"
         disabled
         title="Silo edits these once they're written to modSettings/ — usually after you launch the mod once."
       >
-        ⚙ Has settings
+        <Icon name="modSettings" size={13} /> Has settings
       </button>
     {/if}
-    <button class="d-act" onclick={onFindInBrowse}>⌕ Find in Browse</button>
+    <button class="d-act" onclick={onFindInBrowse}><Icon name="search" size={13} /> Find in Browse</button>
     <button class="d-act" onclick={() => revealInFolder(mod.path).catch(() => {})}>
-      📂 Reveal
+      <Icon name="showFile" size={13} /> Reveal
     </button>
   </div>
 
@@ -251,13 +253,13 @@
     <div class="d-cat-info">
       {#if catalogNewer && !foreign}
         <div class="d-upd">
-          <span>⬆ Update available — catalog has <b>v{catalog.latestVersion}</b>{mod.version ? ` (you have v${mod.version})` : ""}</span>
+          <span><Icon name="update" size={13} /> Update available — catalog has <b>v{catalog.latestVersion}</b>{mod.version ? ` (you have v${mod.version})` : ""}</span>
           {#if catalog.pageUrl}
-            <button class="d-upd-link" onclick={() => openExternal(catalog!.pageUrl!)}>View source ↗</button>
+            <button class="d-upd-link" onclick={() => openExternal(catalog!.pageUrl!)}>View source <Icon name="external" size={12} /></button>
           {/if}
         </div>
       {:else if catalog.latestVersion}
-        <div class="d-uptodate">✓ Up to date <span class="d-mut">· catalog latest v{catalog.latestVersion}</span></div>
+        <div class="d-uptodate"><Icon name="ok" size={13} /> Up to date <span class="d-mut">· catalog latest v{catalog.latestVersion}</span></div>
       {/if}
 
       {#if summaryText}
@@ -272,7 +274,7 @@
           <span class="d-src-label">Available on</span>
           {#each catalog.sources as s (s.source + s.sourceUrl)}
             <button class="d-src" onclick={() => openExternal(s.sourceUrl)}>
-              {sourceLabel(s.source)}{s.version ? ` · ${s.version}` : ""} ↗
+              {sourceLabel(s.source)}{s.version ? ` · ${s.version}` : ""} <Icon name="external" size={12} />
             </button>
           {/each}
         </div>
@@ -305,7 +307,7 @@
         Save
       </button>
       {#if isOverridden}
-        <button class="d-cat-reset" onclick={onResetCategory}>↺ Reset to auto</button>
+        <button class="d-cat-reset" onclick={onResetCategory}><Icon name="undo" size={13} /> Reset to auto</button>
       {/if}
     </div>
   </div>
@@ -369,7 +371,7 @@
   <div class="fd-modal">
     <div class="fd-head">
       <span class="fd-title">{label}</span>
-      <button class="d-x" onclick={() => (showFullDesc = false)} aria-label="Close">✕</button>
+      <button class="d-x" onclick={() => (showFullDesc = false)} title="Close" aria-label="Close"><Icon name="close" /></button>
     </div>
     <div class="fd-body">{catalog.descriptionFull || catalog.description}</div>
   </div>
@@ -437,7 +439,8 @@
     width: 30px;
     height: 30px;
     border-radius: var(--radius-sm);
-    font-size: 0.875rem;
+    display: inline-grid;
+    place-items: center;
   }
   .d-x:hover {
     background: color-mix(in srgb, var(--primary) 12%, transparent);

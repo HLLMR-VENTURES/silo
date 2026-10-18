@@ -4,6 +4,7 @@
   // never handles Giants credentials or automates a review; the rating shown comes from
   // the catalog aggregate (SiloAPI ingests it politely, server-side), and the action
   // sends the user to the real page to log in and rate. This is the ethical line.
+  import Icon from "../ui/Icon.svelte";
   import { openExternal } from "../api";
 
   let {
@@ -26,14 +27,14 @@
   <div class="src-head">
     <span class="src-name">ModHub</span>
     <button class="src-link" onclick={() => openExternal(sourceUrl)} title="Open on ModHub">
-      farming-simulator.com ↗
+      farming-simulator.com <Icon name="external" size={12} />
     </button>
   </div>
 
   <div class="src-nums tnum">
     {#if rating != null}
       <span title="Community rating on ModHub">
-        ⭐ {rating.toFixed(1)}{#if ratingCount}<span class="sub">&nbsp;({fmt(ratingCount)})</span>{/if}
+        <Icon name="favorite" size={13} filled /> {rating.toFixed(1)}{#if ratingCount}<span class="sub">&nbsp;({fmt(ratingCount)})</span>{/if}
       </span>
     {:else}
       <span class="muted">Rating not synced yet</span>
@@ -41,7 +42,7 @@
   </div>
 
   <div class="src-actions">
-    <button class="act" onclick={() => openExternal(sourceUrl)}>Rate on ModHub ↗</button>
+    <button class="act" onclick={() => openExternal(sourceUrl)}>Rate on ModHub <Icon name="external" size={12} /></button>
   </div>
   <p class="why">Reviews are left on ModHub — Silo links you there to sign in and rate.</p>
 </div>

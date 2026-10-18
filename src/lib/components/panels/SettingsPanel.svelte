@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../../ui/Icon.svelte";
   import { onMount } from "svelte";
   import type { GameInfo } from "../../types";
   import { openKnownFolder, secretStorageSecure } from "../../api";
@@ -144,7 +145,7 @@
       <div class="set-label">Mods folder</div>
       {#if roots.length}
         <button class="set-link" onclick={() => openFolder("modsFolder")}>
-          Open ↗
+          Open <Icon name="external" size={12} />
         </button>
       {/if}
       <button class="set-link" disabled={locked} title={lockTitle} onclick={onChangeModsFolder}>
@@ -194,7 +195,7 @@
       <div class="set-label">Library archive</div>
       {#if archive?.path && archive.available}
         <button class="set-link" onclick={() => openFolder("archive")}>
-          Open ↗
+          Open <Icon name="external" size={12} />
         </button>
       {/if}
       <button class="set-link" disabled={locked || !archive?.path} title={lockTitle} onclick={onChangeArchive}>
@@ -235,7 +236,7 @@
       <div class="set-label">Game</div>
       {#if gameInfo}
         <button class="set-link" onclick={() => openFolder("gameInstall")}>
-          Open ↗
+          Open <Icon name="external" size={12} />
         </button>
       {/if}
     </div>
@@ -253,7 +254,7 @@
     <div class="set-section">
       <div class="set-row">
         <div class="set-label">Graphics &amp; performance</div>
-        <button class="set-link" onclick={onOpenGameGraphics}>Edit game.xml ↗</button>
+        <button class="set-link" onclick={onOpenGameGraphics}>Edit game.xml <Icon name="external" size={12} /></button>
       </div>
       <div class="set-hint">
         Tune graphics settings (presets: Performance / Balanced / Quality) without launching the game.
@@ -264,7 +265,7 @@
   {#if !keychainOk}
     <div class="set-section">
       <div class="keychain-warn">
-        ⚠ No OS keychain is available on this machine, so a connected GitHub token
+        <Icon name="problem" size={13} /> No OS keychain is available on this machine, so a connected GitHub token
         would be stored <strong>unencrypted</strong> in Silo's local database. Connect an account
         only if you're comfortable with that; disconnecting removes the stored token.
       </div>
@@ -279,7 +280,7 @@
   <div class="set-section">
     <div class="set-row">
       <div class="set-label">Diagnostics</div>
-      <button class="set-link" onclick={onExportReport}>Export report ↗</button>
+      <button class="set-link" onclick={onExportReport}>Export report <Icon name="external" size={12} /></button>
       <button class="set-link" onclick={onCopyDiagnostics}>Copy diagnostics</button>
     </div>
     <div class="set-hint">
@@ -321,7 +322,7 @@
         Organize {unorganizedCount > 0 ? unorganizedCount : "library"}
       </button>
       <button class="set-btn" onclick={onRebuild} disabled={!!busy || scanning}>
-        ↻ Rebuild categories
+        <Icon name="rescan" size={13} /> Rebuild categories
       </button>
     </div>
     <div class="set-hint" style="margin-top:8px">
@@ -330,7 +331,7 @@
     </div>
     {#if organizedCount > 0 && cloudSynced}
       <div class="set-hint" style="margin-top:10px">
-        ☁ Your mods folder is on a cloud-synced drive (OneDrive / Google Drive / Proton Drive),
+        <Icon name="cloud" size={13} /> Your mods folder is on a cloud-synced drive (OneDrive / Google Drive / Proton Drive),
         which doesn't support hardlinks — so Silo projects active mods as <b>copies</b>. That works,
         but uses more disk. Excluding this folder from cloud sync lets Silo use hardlinks instead
         (no duplication).
@@ -343,7 +344,7 @@
         disabled={locked}
         title={lockTitle}
       >
-        ⛓ Optimize links (reclaim space)
+        Optimize links (reclaim space)
       </button>
       <div class="set-hint" style="margin-top:8px">
         Collapses any active mod that was projected as a full copy (rather than a hardlink) back

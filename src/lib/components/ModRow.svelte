@@ -5,6 +5,7 @@
 </script>
 
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { ModEntry, CurationRow } from "../types";
   import { getModIcon } from "../api";
   import { getVerdict } from "../provenanceCache.svelte";
@@ -109,7 +110,7 @@
     <div class="titleline">
       <span class="title">{mod.title ?? mod.techName}</span>
       {#if mod.version}<span class="ver tnum">v{mod.version.replace(/^v/i, "")}</span>{/if}
-      {#if curation.rating > 0}<span class="rating">{"★".repeat(curation.rating)}</span>{/if}
+      {#if curation.rating > 0}<span class="rating" role="img" aria-label={`${curation.rating} of 5 stars`}>{#each Array.from({ length: curation.rating }) as _, i (i)}<Icon name="favorite" size={11} filled />{/each}</span>{/if}
     </div>
     <div class="sub">
       <span class="author">{mod.author ?? "Unknown author"}</span>
@@ -136,9 +137,9 @@
     {/if}
     {#if organized && !active}<span class="badge parked">parked</span>{/if}
     {#if verdict?.status === "verified"}
-      <span class="badge verified" title="Verified against the published build">✓ Verified</span>
+      <span class="badge verified" title="Verified against the published build"><Icon name="verifiedBuild" size={12} /> Verified</span>
     {:else if verdict?.status === "modified"}
-      <span class="badge modded" title="Modified from the published build">⚠ Modified</span>
+      <span class="badge modded" title="Modified from the published build"><Icon name="modified" size={12} /> Modified</span>
     {/if}
     {#if mod.isMap}<span class="badge map">Map</span>{/if}
     {#if mod.mpSupported}<span class="badge mp">MP</span>{/if}
@@ -170,34 +171,38 @@
       <button
         class="act on"
         title="Edit this mod's settings"
+        aria-label="Edit this mod's settings"
         onclick={onOpenSettings}
       >
-        ⚙
+        <Icon name="modSettings" />
       </button>
     {/if}
     <button
       class="act star"
       class:on={curation.favorite}
       title={curation.favorite ? "Remove favorite" : "Favorite"}
+      aria-label={curation.favorite ? "Remove favorite" : "Favorite"}
       onclick={() => onToggle("favorite")}
     >
-      {curation.favorite ? "★" : "☆"}
+      <Icon name="favorite" filled={curation.favorite} />
     </button>
     <button
       class="act"
       class:on={curation.hidden}
       title={curation.hidden ? "Unhide" : "Hide"}
+      aria-label={curation.hidden ? "Unhide" : "Hide"}
       onclick={() => onToggle("hidden")}
     >
-      ⊘
+      <Icon name="hidden" />
     </button>
     <button
       class="act warn"
       class:on={curation.broken}
       title={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
+      aria-label={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
       onclick={() => onToggle("broken")}
     >
-      ⚠
+      <Icon name="problem" />
     </button>
   </div>
 
@@ -252,7 +257,8 @@
     box-shadow: var(--shadow-1);
   }
   .tile.map {
-    background: linear-gradient(135deg, var(--soil-500), var(--soil-700));
+    background: linear-gradient(135deg, var(--earth), var(--earth-strong));
+    color: var(--on-earth);
   }
   .tile.img {
     object-fit: cover;
@@ -333,8 +339,8 @@
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   }
   .badge.map {
-    color: var(--soil-500);
-    border-color: color-mix(in srgb, var(--soil-500) 40%, var(--border));
+    color: var(--earth-text);
+    border-color: color-mix(in srgb, var(--earth) 40%, var(--border));
   }
   .badge.verified {
     color: var(--primary-text);
@@ -388,8 +394,8 @@
     border: none;
     background: transparent;
     color: var(--text-muted);
-    font-size: 0.9375rem;
-    line-height: 1;
+    display: inline-grid;
+    place-items: center;
     width: 26px;
     height: 26px;
     border-radius: var(--radius-sm);

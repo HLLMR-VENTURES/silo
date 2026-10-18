@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import { getConfig, setConfig } from "../api";
   import type { CfgField, CfgPreset } from "../configSchemas";
 
@@ -64,7 +65,7 @@
       <div class="ms-title">{title}</div>
       <div class="ms-sub tnum">{path}</div>
     </div>
-    <button class="ms-x" onclick={onClose} aria-label="Close">✕</button>
+    <button class="ms-x" onclick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
   </div>
 
   {#if loading}
@@ -114,7 +115,7 @@
 
     <div class="ce-foot">
       <button class="ms-save" onclick={save} disabled={!dirty}>Save changes</button>
-      {#if saved}<span class="ms-saved">saved ✓</span>{/if}
+      {#if saved}<span class="ms-saved">saved <Icon name="check" size={13} /></span>{/if}
     </div>
     {#if footnote}<div class="ms-foot">{footnote} Silo keeps the original and the three versions before your latest edit as <code>.bak</code> files.</div>{/if}
   {/if}
@@ -161,7 +162,8 @@
     width: 30px;
     height: 30px;
     border-radius: var(--radius-sm);
-    font-size: 0.9375rem;
+    display: inline-grid;
+    place-items: center;
   }
   .ms-x:hover {
     background: color-mix(in srgb, var(--primary) 12%, transparent);

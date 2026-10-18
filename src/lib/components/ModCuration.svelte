@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { CurationRow } from "../types";
   import { setCuration, setTags } from "../api";
 
@@ -58,7 +59,7 @@
   <div class="d-label">Rating</div>
   <div class="d-stars">
     {#each [1, 2, 3, 4, 5] as s (s)}
-      <button class="star" class:on={curation.rating >= s} onclick={() => setRating(s)} aria-label={`${s} stars`}>★</button>
+      <button class="star" class:on={curation.rating >= s} onclick={() => setRating(s)} aria-label={`${s} stars`}><Icon name="favorite" size={22} filled={curation.rating >= s} /></button>
     {/each}
   </div>
 </div>
@@ -69,7 +70,7 @@
     {#each tags as t (t)}
       <span class="d-tag">
         <button class="d-tag-name" onclick={() => onFilterTag(t)} title="Filter by this tag">{t}</button>
-        <button class="d-tag-x" onclick={() => removeTag(t)} aria-label="Remove tag">✕</button>
+        <button class="d-tag-x" onclick={() => removeTag(t)} title="Remove tag" aria-label="Remove tag"><Icon name="close" size={12} /></button>
       </span>
     {/each}
     <input
@@ -108,8 +109,8 @@
     border: none;
     background: transparent;
     color: var(--border);
-    font-size: 1.375rem;
-    line-height: 1;
+    display: inline-grid;
+    place-items: center;
     padding: 0 2px;
   }
   .star.on {

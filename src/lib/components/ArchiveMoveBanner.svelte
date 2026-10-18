@@ -1,6 +1,7 @@
 <script lang="ts">
   // The library archive banners (#166): an unfinished move (running or paused, with
   // Pause / Resume / Retry / Cancel), or else a custom archive whose folder isn't available.
+  import Icon from "../ui/Icon.svelte";
   import type { ArchiveStatus, MoveProgress } from "../api";
   import { fmtSize } from "../format";
   import { capList, modsCount, sentence, unDot } from "../archiveMoveLogic";
@@ -40,7 +41,7 @@
 
 {#if moveUnfinished}
   <div class="cloud-notice">
-    <span class="cn-ico">⇄</span>
+    <span class="cn-ico"><Icon name="archive" /></span>
     <div class="cn-text">
       {#if moveRunning}
         <b>{moveCancelling ? "Moving your library back" : "Moving your library"}</b>
@@ -83,7 +84,7 @@
   </div>
 {:else if archive?.path && !archive.available}
   <div class="cloud-notice">
-    <span class="cn-ico">⚠</span>
+    <span class="cn-ico"><Icon name="problem" /></span>
     <div class="cn-text">
       <b>Your library archive isn't available:</b> <span class="tnum">{archive.path}</span>. Parked
       mods are hidden until it's back; active mods linked from it won't load in-game.

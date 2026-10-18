@@ -4,6 +4,7 @@
 </script>
 
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { ModEntry, CurationRow } from "../types";
   import { getModIcon } from "../api";
   import { getVerdict } from "../provenanceCache.svelte";
@@ -108,7 +109,7 @@
     {#if organized && !active}<span class="tc-parked">parked</span>{/if}
     <span class="tc-sp"></span>
     {#if hasSettings}
-      <button class="tc-gear" onclick={stop(onOpenSettings)} title="Edit this mod's settings">⚙</button>
+      <button class="tc-gear" onclick={stop(onOpenSettings)} title="Edit this mod's settings" aria-label="Edit this mod's settings"><Icon name="modSettings" /></button>
     {/if}
   </div>
 
@@ -127,18 +128,18 @@
       <div class="tc-meta tnum">
         {#if mod.version}<span>v{mod.version.replace(/^v/i, "")}</span><span class="dot">·</span>{/if}
         <span>{sizeLabel}</span>
-        {#if curation.rating > 0}<span class="rating">{"★".repeat(curation.rating)}</span>{/if}
+        {#if curation.rating > 0}<span class="rating" role="img" aria-label={`${curation.rating} of 5 stars`}>{#each Array.from({ length: curation.rating }) as _, i (i)}<Icon name="favorite" size={12} filled />{/each}</span>{/if}
       </div>
       <div class="tc-flags">
         {#if verdict?.status === "verified"}
-          <span class="tc-flag ok" title="Verified against the published build">✓ Verified</span>
+          <span class="tc-flag ok" title="Verified against the published build"><Icon name="verifiedBuild" size={12} /> Verified</span>
         {:else if verdict?.status === "modified"}
-          <span class="tc-flag mod" title="Modified from the published build">⚠ Modified</span>
+          <span class="tc-flag mod" title="Modified from the published build"><Icon name="modified" size={12} /> Modified</span>
         {/if}
-        {#if hasUpdate}<span class="tc-flag upd" title="An update is available">⬆ Update</span>{/if}
+        {#if hasUpdate}<span class="tc-flag upd" title="An update is available"><Icon name="update" size={12} /> Update</span>{/if}
       </div>
       <div class="tc-links">
-        <button class="tc-link" onclick={stop(onFindInBrowse)}>Find in Browse ↗</button>
+        <button class="tc-link" onclick={stop(onFindInBrowse)}>Find in Browse <Icon name="external" size={12} /></button>
       </div>
     </div>
 
@@ -147,25 +148,28 @@
         class="tc-act star"
         class:on={curation.favorite}
         title={curation.favorite ? "Remove favorite" : "Favorite"}
+        aria-label={curation.favorite ? "Remove favorite" : "Favorite"}
         onclick={stop(() => onToggle("favorite"))}
       >
-        {curation.favorite ? "★" : "☆"}
+        <Icon name="favorite" filled={curation.favorite} />
       </button>
       <button
         class="tc-act"
         class:on={curation.hidden}
         title={curation.hidden ? "Unhide" : "Hide"}
+        aria-label={curation.hidden ? "Unhide" : "Hide"}
         onclick={stop(() => onToggle("hidden"))}
       >
-        ⊘
+        <Icon name="hidden" />
       </button>
       <button
         class="tc-act warn"
         class:on={curation.broken}
         title={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
+        aria-label={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
         onclick={stop(() => onToggle("broken"))}
       >
-        ⚠
+        <Icon name="problem" />
       </button>
     </div>
   </div>
@@ -296,9 +300,9 @@
     border: none;
     background: transparent;
     color: var(--primary-text);
-    font-size: 0.9375rem;
     cursor: pointer;
-    line-height: 1;
+    display: inline-grid;
+    place-items: center;
   }
 
   .tc-main {
@@ -326,7 +330,8 @@
     box-shadow: var(--shadow-1);
   }
   .tc-icon.map {
-    background: linear-gradient(135deg, var(--soil-500), var(--soil-700));
+    background: linear-gradient(135deg, var(--earth), var(--earth-strong));
+    color: var(--on-earth);
   }
   .tc-icon.img {
     object-fit: cover;
@@ -423,8 +428,8 @@
     border: none;
     background: transparent;
     color: var(--text-muted);
-    font-size: 0.9375rem;
-    line-height: 1;
+    display: inline-grid;
+    place-items: center;
     width: 26px;
     height: 26px;
     border-radius: var(--radius-sm);
@@ -481,8 +486,8 @@
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   }
   .pill.map {
-    color: var(--soil-500);
-    border-color: color-mix(in srgb, var(--soil-500) 40%, var(--border));
+    color: var(--earth-text);
+    border-color: color-mix(in srgb, var(--earth) 40%, var(--border));
   }
   .pill.mp {
     color: var(--info);

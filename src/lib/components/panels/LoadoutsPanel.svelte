@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../../ui/Icon.svelte";
   import type { Loadout } from "../../types";
 
   let {
@@ -48,20 +49,27 @@
       <button
         class="lp-icon"
         title="Overwrite with current active set"
-        onclick={() => onOverwrite(l)}>⭯</button
+        aria-label="Overwrite with current active set"
+        onclick={() => onOverwrite(l)}><Icon name="rescan" size={14} /></button
       >
-      <button class="lp-icon" title="Export to a .silo file" onclick={() => onExport(l)}
-        >⇪</button
+      <button
+        class="lp-icon"
+        title="Export to a .silo file"
+        aria-label="Export to a .silo file"
+        onclick={() => onExport(l)}><Icon name="share" size={14} /></button
       >
-      <button class="lp-icon danger" title="Delete loadout" onclick={() => onRemove(l)}
-        >✕</button
+      <button
+        class="lp-icon danger"
+        title="Delete loadout"
+        aria-label="Delete loadout"
+        onclick={() => onRemove(l)}><Icon name="close" size={14} /></button
       >
     </div>
   {/each}
   <button class="lp-save" onclick={onSaveCurrent} disabled={activeCount === 0}>
     + Save current active set as a loadout
   </button>
-  <button class="lp-import" onclick={onImport}>↧ Import a .silo file</button>
+  <button class="lp-import" onclick={onImport}><Icon name="download" size={13} /> Import a .silo file</button>
 </div>
 
 <style>
@@ -161,7 +169,8 @@
     width: 28px;
     height: 30px;
     border-radius: var(--radius-sm);
-    font-size: 0.875rem;
+    display: inline-grid;
+    place-items: center;
   }
   .lp-icon:hover {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
