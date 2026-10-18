@@ -757,7 +757,7 @@ async fn download_update(
     app: tauri::AppHandle,
     path: String,
     asset_url: String,
-) -> Result<UpdateOutcome, String> {
+) -> Result<UpdateOutcome, error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<UpdateOutcome, String> {
@@ -820,6 +820,7 @@ async fn download_update(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 fn log_recovery(r: &update::Recovery) {
@@ -1081,7 +1082,7 @@ async fn install_remote_mod(
     id: String,
     source: Option<String>,
     root: Option<String>,
-) -> Result<String, String> {
+) -> Result<String, error::AppError> {
     ensure_no_move()?;
     let base = siloapi_base(&app)?;
     let root = primary_root(root)?;
@@ -1118,6 +1119,7 @@ async fn install_remote_mod(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// Downloads whose `.zip.part` is in use, by `same_file_key`. Downloads run outside the
@@ -1832,11 +1834,11 @@ fn primary_root(root: Option<String>) -> Result<PathBuf, String> {
 async fn plan_organize(
     root: Option<String>,
     mods: Vec<organize::ModInput>,
-) -> Result<Vec<organize::PlannedMove>, String> {
+) -> Result<Vec<organize::PlannedMove>, error::AppError> {
     let root = primary_root(root)?;
     tauri::async_runtime::spawn_blocking(move || organize::plan_organize(&root, &mods))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| error::AppError::from(e.to_string()))
 }
 
 #[tauri::command]
@@ -1844,7 +1846,7 @@ async fn apply_organize(
     app: tauri::AppHandle,
     root: Option<String>,
     mods: Vec<organize::ModInput>,
-) -> Result<organize::Report, String> {
+) -> Result<organize::Report, error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<organize::Report, String> {
@@ -1861,6 +1863,7 @@ async fn apply_organize(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// Adopt the file the user swapped into the mods folder as the mod's new canonical version
@@ -1870,7 +1873,7 @@ async fn adopt_foreign_file(
     app: tauri::AppHandle,
     root: Option<String>,
     file_name: String,
-) -> Result<(), String> {
+) -> Result<(), error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
@@ -1882,6 +1885,7 @@ async fn adopt_foreign_file(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// Restore Silo's managed copy over a file the user swapped in (their file kept under
@@ -1891,7 +1895,7 @@ async fn restore_foreign_file(
     app: tauri::AppHandle,
     root: Option<String>,
     file_name: String,
-) -> Result<(), String> {
+) -> Result<(), error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
@@ -1903,6 +1907,7 @@ async fn restore_foreign_file(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 #[tauri::command]
@@ -1910,7 +1915,7 @@ async fn set_active(
     app: tauri::AppHandle,
     root: Option<String>,
     active: Vec<String>,
-) -> Result<organize::Report, String> {
+) -> Result<organize::Report, error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<organize::Report, String> {
@@ -1923,6 +1928,7 @@ async fn set_active(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// Whether the mods folder supports hardlinks. False on cloud-synced folders (OneDrive / Google
@@ -1942,7 +1948,7 @@ async fn hardlink_support(root: Option<String>) -> Result<bool, String> {
 async fn relink_projections(
     app: tauri::AppHandle,
     root: Option<String>,
-) -> Result<organize::RelinkReport, String> {
+) -> Result<organize::RelinkReport, error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
     let emitter = app.clone();
@@ -1961,10 +1967,14 @@ async fn relink_projections(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 #[tauri::command]
-async fn flatten(app: tauri::AppHandle, root: Option<String>) -> Result<organize::Report, String> {
+async fn flatten(
+    app: tauri::AppHandle,
+    root: Option<String>,
+) -> Result<organize::Report, error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<organize::Report, String> {
@@ -1976,6 +1986,7 @@ async fn flatten(app: tauri::AppHandle, root: Option<String>) -> Result<organize
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 // ── Mods folder selection (#162) ──
@@ -2335,10 +2346,13 @@ async fn mods_root_status(app: tauri::AppHandle) -> Result<ModsRootStatus, Strin
 
 /// Use `path` as the mods folder (remembered, added to the known list). Never moves files.
 #[tauri::command]
-async fn set_mods_root(app: tauri::AppHandle, path: String) -> Result<ModsRootStatus, String> {
+async fn set_mods_root(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<ModsRootStatus, error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<ModsRootStatus, String> {
         let conn = db::open(&db)?;
         let p = std::path::Path::new(&path);
         let default = fsgame::user_dir().map(|d| d.join("mods"));
@@ -2356,6 +2370,7 @@ async fn set_mods_root(app: tauri::AppHandle, path: String) -> Result<ModsRootSt
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// `set_mods_root` without the picker and the status: refuse a folder that wasn't picked and
@@ -2395,25 +2410,26 @@ fn apply_mods_root_choice(
 
 /// Forget the user's choice and follow the folder FS25 reads.
 #[tauri::command]
-async fn clear_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus, String> {
+async fn clear_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus, error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<ModsRootStatus, String> {
         let conn = db::open(&db)?;
         db::set_app_setting(&conn, modsroot::CHOICE_KEY, None)?;
         Ok(compute_mods_root_status(&conn))
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// Point FS25 at the folder Silo currently manages — or at the folder the user chose, while
 /// FS25's own setting is what blocks it (`game_point_target`).
 #[tauri::command]
-async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus, String> {
+async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus, error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<ModsRootStatus, String> {
         config_write_refusal(gamelaunch::fs25_running())?;
         let folder = game_point_target(
             modsroot::active().as_ref(),
@@ -2425,13 +2441,14 @@ async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// Create `<user dir>/mods` when FS25 hasn't made it yet.
 #[tauri::command]
-async fn create_mods_folder(app: tauri::AppHandle) -> Result<ModsRootStatus, String> {
+async fn create_mods_folder(app: tauri::AppHandle) -> Result<ModsRootStatus, error::AppError> {
     let db = db_path(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<ModsRootStatus, String> {
         let loc = fsgame::locate().ok_or_else(|| "FS25 user folder not found".to_string())?;
         std::fs::create_dir_all(loc.user_dir.join("mods")).map_err(|e| e.to_string())?;
         let conn = db::open(&db)?;
@@ -2439,6 +2456,7 @@ async fn create_mods_folder(app: tauri::AppHandle) -> Result<ModsRootStatus, Str
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// True when a folder holds no mods yet (no `.zip`, no folder with a `modDesc.xml`, no
@@ -3135,7 +3153,7 @@ async fn archive_status(app: tauri::AppHandle) -> Result<ArchiveStatus, error::A
 async fn archive_move_preflight(
     app: tauri::AppHandle,
     path: String,
-) -> Result<relocate::Preflight, String> {
+) -> Result<relocate::Preflight, error::AppError> {
     let db = db_path(&app)?;
     let app_data = app.path().app_data_dir().ok();
     tauri::async_runtime::spawn_blocking(move || {
@@ -3193,9 +3211,9 @@ async fn archive_move_preflight(
 async fn archive_move_start(
     app: tauri::AppHandle,
     path: String,
-) -> Result<Option<relocate::MoveMarker>, String> {
+) -> Result<Option<relocate::MoveMarker>, error::AppError> {
     let db = db_path(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Option<relocate::MoveMarker>, String> {
         let new = modsroot::real_folder(std::path::Path::new(&path))?;
         if !picked::allows(picked::Purpose::Archive, &new) {
             return Err(picked::NOT_PICKED.into());
@@ -3207,19 +3225,21 @@ async fn archive_move_start(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// Resume the paused move (in whichever direction it was going).
 #[tauri::command]
 async fn archive_move_resume(
     app: tauri::AppHandle,
-) -> Result<Option<relocate::MoveMarker>, String> {
+) -> Result<Option<relocate::MoveMarker>, error::AppError> {
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         with_move_ctx(&app, &db, "resume", |ctx, _| relocate::resume(ctx))
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// Ask the running move to pause at the next mod boundary.
@@ -3233,7 +3253,7 @@ fn archive_move_pause() {
 #[tauri::command]
 async fn archive_move_cancel(
     app: tauri::AppHandle,
-) -> Result<Option<relocate::MoveMarker>, String> {
+) -> Result<Option<relocate::MoveMarker>, error::AppError> {
     // A move holds the library lock; reach it through the request flag instead.
     if move_in_progress() {
         return Ok(request_turn_around());
@@ -3249,6 +3269,7 @@ async fn archive_move_cancel(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// Pure: a cancel refused because a move holds the library lock becomes a request to that move.
@@ -3267,7 +3288,7 @@ fn request_turn_around() -> Option<relocate::MoveMarker> {
 #[tauri::command]
 async fn archive_use_default(
     app: tauri::AppHandle,
-) -> Result<Option<relocate::MoveMarker>, String> {
+) -> Result<Option<relocate::MoveMarker>, error::AppError> {
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         ensure_no_move()?;
@@ -3282,6 +3303,7 @@ async fn archive_use_default(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// Any mod (zip, or folder with a `modDesc.xml`) filed in one of the archive's category
@@ -3320,7 +3342,10 @@ fn repoint_refusal(
 /// folder are welcome — adopting them is the point. Republishes the layout; the frontend then
 /// rescans so the library reconciles against the new archive.
 #[tauri::command]
-async fn archive_repoint(app: tauri::AppHandle, path: Option<String>) -> Result<(), String> {
+async fn archive_repoint(
+    app: tauri::AppHandle,
+    path: Option<String>,
+) -> Result<(), error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
     let app_data = app.path().app_data_dir().ok();
@@ -3364,6 +3389,7 @@ async fn archive_repoint(app: tauri::AppHandle, path: Option<String>) -> Result<
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 #[derive(serde::Serialize)]
@@ -3457,9 +3483,9 @@ fn adopt_candidates(
 /// Loose mods at the archive's top level (e.g. a folder that already held mods) that could be
 /// filed into it. Read-only.
 #[tauri::command]
-async fn archive_adopt_preview(app: tauri::AppHandle) -> Result<AdoptPreview, String> {
+async fn archive_adopt_preview(app: tauri::AppHandle) -> Result<AdoptPreview, error::AppError> {
     let db = db_path(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<AdoptPreview, String> {
         let (layout, key) = active_layout()?;
         let conn = db::open(&db)?;
         let (inputs, duplicates) = adopt_candidates(&conn, &layout, &key);
@@ -3471,6 +3497,7 @@ async fn archive_adopt_preview(app: tauri::AppHandle) -> Result<AdoptPreview, St
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// File the loose mods the user picked (by file name, from the preview) into the archive's
@@ -3479,10 +3506,10 @@ async fn archive_adopt_preview(app: tauri::AppHandle) -> Result<AdoptPreview, St
 async fn archive_adopt_apply(
     app: tauri::AppHandle,
     file_names: Vec<String>,
-) -> Result<organize::Report, String> {
+) -> Result<organize::Report, error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || -> Result<organize::Report, String> {
         let _write = library_write()?;
         ensure_archive_available()?;
         let (layout, key) = active_layout()?;
@@ -3506,6 +3533,7 @@ async fn archive_adopt_apply(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 // ── Loadouts (named active-mod sets) ──
@@ -3521,23 +3549,25 @@ async fn save_loadout(
     id: Option<i64>,
     name: String,
     mods: Vec<String>,
-) -> Result<i64, String> {
+) -> Result<i64, error::AppError> {
     let db = db_path(&app)?;
     off_main(move || {
         let mut conn = db::open(&db)?;
         db::save_loadout(&mut conn, id, &name, &mods)
     })
     .await
+    .map_err(error::AppError::from)
 }
 
 #[tauri::command]
-async fn delete_loadout(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+async fn delete_loadout(app: tauri::AppHandle, id: i64) -> Result<(), error::AppError> {
     let db = db_path(&app)?;
     off_main(move || {
         let mut conn = db::open(&db)?;
         db::delete_loadout(&mut conn, id)
     })
     .await
+    .map_err(error::AppError::from)
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -3602,13 +3632,14 @@ async fn detect_game() -> Result<Option<gamelaunch::GameInfo>, String> {
 }
 
 #[tauri::command]
-async fn launch_game() -> Result<(), String> {
+async fn launch_game() -> Result<(), error::AppError> {
     if relocate::is_running() {
         return Err("Silo is moving your library archive — pause the move to play.".into());
     }
     tauri::async_runtime::spawn_blocking(gamelaunch::launch)
         .await
         .map_err(|e| e.to_string())?
+        .map_err(error::AppError::from)
 }
 
 /// Write text to a user-chosen path (used by the diagnostics report export). Confined to a
@@ -3814,7 +3845,7 @@ async fn collection_export(
     created_at: Option<String>,
     public: Option<bool>,
     mods: Vec<mpsync::ModRef>,
-) -> Result<ExportResult, String> {
+) -> Result<ExportResult, error::AppError> {
     let base = siloapi_base(&app)?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<ExportResult, String> {
@@ -3902,6 +3933,7 @@ async fn collection_export(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// Update an existing collection in place: re-pin `mods` (the current active set) and write
@@ -3912,7 +3944,7 @@ async fn collection_update(
     app: tauri::AppHandle,
     reference: String,
     mods: Vec<mpsync::ModRef>,
-) -> Result<ExportResult, String> {
+) -> Result<ExportResult, error::AppError> {
     let base = siloapi_base(&app)?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<ExportResult, String> {
@@ -3981,6 +4013,7 @@ async fn collection_update(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// Resolve a pasted collection link — a gist (P1) or a public repo (P2) — and read +
@@ -4131,7 +4164,7 @@ async fn collection_delete(
     app: tauri::AppHandle,
     kind: String,
     reference: String,
-) -> Result<(), String> {
+) -> Result<(), error::AppError> {
     // Validate the reference before any request: a gist id must be a real gist id, and a
     // repo reference a real `owner/repo` (repos are refused below, but never on bad input).
     match kind.as_str() {
@@ -4158,6 +4191,7 @@ async fn collection_delete(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// One mod in an import plan, tagged with what the importer would do about it.
@@ -4200,7 +4234,7 @@ async fn collection_import_preview(
     app: tauri::AppHandle,
     url_or_id: String,
     installed: Vec<LocalMod>,
-) -> Result<ImportPlan, String> {
+) -> Result<ImportPlan, error::AppError> {
     let base = siloapi_base(&app)?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<ImportPlan, String> {
@@ -4265,6 +4299,7 @@ async fn collection_import_preview(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// The outcome for one mod in an apply run.
@@ -4320,7 +4355,7 @@ async fn collection_apply(
     installed: Vec<LocalMod>,
     fingerprint: String,
     root: Option<String>,
-) -> Result<ApplyReport, String> {
+) -> Result<ApplyReport, error::AppError> {
     ensure_no_move()?;
     let base = siloapi_base(&app)?;
     let db = db_path(&app)?;
@@ -4492,6 +4527,7 @@ async fn collection_apply(
     })
     .await
     .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// A collection download that finished and waits to be placed under the library lock.
@@ -4780,6 +4816,15 @@ fn app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+/// One frontend error (or warning / note) into the persistent log, as a single line prefixed
+/// `[frontend]` (`error::format_frontend_log`). Async so the file write never runs on the
+/// main thread; never fails. Callers must not pass secrets: the log is shared via diagnostics.
+#[tauri::command]
+async fn log_frontend_error(level: String, message: String, context: Option<String>) {
+    let (level, line) = error::format_frontend_log(&level, &message, context.as_deref());
+    log::log!(level, "{line}");
+}
+
 /// Notices from startup work, each returned once (see `notices`).
 #[tauri::command]
 async fn take_startup_notices() -> Vec<String> {
@@ -5021,6 +5066,7 @@ pub fn run() {
             save_mod_settings,
             save_mod_settings_raw,
             app_version,
+            log_frontend_error,
             take_startup_notices,
             secret_storage_secure,
             detect_foreign_files,
