@@ -49,8 +49,8 @@ export const HELP_TOPICS: HelpTopic[] = [
   {
     id: "crash",
     title: "When the game crashes",
-    body: "Diagnose → Last run reads the game's log.txt and names the mod that most likely broke. If the log can't tell, Run guided bisection switches half your mods off at a time until it finds the one, and puts your mods back afterwards.",
-    aliases: ["crash", "log", "bisect", "error", "broken", "won't start"],
+    body: "When your last game ended unexpectedly, Silo tells you as soon as you come back and names the mod that most likely broke it, with Park it. Diagnose → Last run shows the whole log reading. If the log can't tell, Find the problem mod parks half your mods at a time until it finds the one, and puts your mods back afterwards.",
+    aliases: ["crash", "log", "bisect", "bisection", "find the problem mod", "error", "broken", "won't start"],
   },
   {
     id: "mods-folder",

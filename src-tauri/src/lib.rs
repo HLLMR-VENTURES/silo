@@ -4679,6 +4679,44 @@ async fn scan_log() -> Result<logscan::LogReport, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Crash detection's cheap check (Diagnose, #260): where log.txt is, when it last changed,
+/// whether the game is running, and the change time Silo last looked at. A stat and a process
+/// list, off the main thread; the frontend calls it on focus and every 5 s after a launch.
+#[tauri::command]
+async fn log_status(app: tauri::AppHandle) -> Result<logscan::LogStatus, String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let path = fsgame::user_dir().map(|d| d.join("log.txt"));
+        let modified_ms = path.as_deref().and_then(logscan::modified_ms);
+        let conn = db::open(&db)?;
+        let last_seen_ms =
+            logscan::parse_last_seen(db::get_app_setting(&conn, logscan::LAST_SEEN_KEY).as_deref());
+        Ok(logscan::LogStatus {
+            path: path.map(|p| p.to_string_lossy().into_owned()),
+            modified_ms,
+            game_running: gamelaunch::fs25_running(),
+            last_seen_ms,
+        })
+    })
+    .await
+}
+
+/// Remember that Silo looked at the log as of `modified_ms`, so the same run isn't announced
+/// again (on the next focus or the next start).
+#[tauri::command]
+async fn mark_log_seen(app: tauri::AppHandle, modified_ms: i64) -> Result<(), String> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let conn = db::open(&db)?;
+        db::set_app_setting(
+            &conn,
+            logscan::LAST_SEEN_KEY,
+            Some(&modified_ms.to_string()),
+        )
+    })
+    .await
+}
+
 /// Parse inputBinding.xml into a per-device binding map (read-only).
 #[tauri::command]
 async fn scan_bindings() -> Result<bindings::BindingReport, String> {
@@ -5088,6 +5126,8 @@ pub fn run() {
             user_dir_path,
             clear_scan_cache,
             scan_log,
+            log_status,
+            mark_log_seen,
             scan_bindings,
             mp_export,
             mp_verify_file,

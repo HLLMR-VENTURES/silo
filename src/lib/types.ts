@@ -159,11 +159,17 @@ export interface ConflictInput {
 }
 
 export interface Conflict {
+  /** Stable identity from Rust (kind, name, sorted tech names): use it as the list key. */
+  id: string;
+  /** Wire values; the UI says Problem / Review / Note (`conflictSeverityLabel`). */
   severity: "critical" | "warning" | "info";
   kind: string;
   name: string;
   explanation: string;
+  /** Display labels of the mods involved. */
   mods: string[];
+  /** The same mods' tech names, in the same order as `mods`. */
+  techNames: string[];
 }
 
 export interface GameInfo {
@@ -375,6 +381,16 @@ export interface LogModHealth {
   benign: number;
   sample: string;
   sampleLine: number;
+}
+
+/** `log_status`: where log.txt is, when it changed, whether FS25 runs, and what Silo last saw. */
+export interface LogStatus {
+  path: string | null;
+  /** Epoch ms, or null when there's no log yet. */
+  modifiedMs: number | null;
+  gameRunning: boolean;
+  /** The change time Silo last looked at (stored in the DB), or null if never. */
+  lastSeenMs: number | null;
 }
 
 export interface LogReport {

@@ -17,6 +17,10 @@ describe("libraryStatusCounts", () => {
     expect(libraryStatusCounts(none)).toEqual({ problems: 0, review: 0 });
   });
 
+  it("an unresolved crash is one problem", () => {
+    expect(libraryStatusCounts({ ...none, crash: 1 })).toEqual({ problems: 1, review: 0 });
+  });
+
   it("critical conflicts and mods that can't load are problems", () => {
     expect(
       libraryStatusCounts({ ...none, criticalConflicts: 1, missingDeps: 2, corrupt: 3, ignored: 4 }),
@@ -72,13 +76,19 @@ describe("stripItemSpecs", () => {
   it("orders critical conflicts first, then unfiled mods, then updates", () => {
     const items = stripItemSpecs({ criticalConflicts: 2, unfiled: 5, updates: 1 });
     expect(items.map((i) => i.id)).toEqual(["critical", "unfiled", "updates"]);
-    expect(items[0]).toEqual({ id: "critical", text: "2 critical conflicts", action: "See why" });
+    expect(items[0]).toEqual({ id: "critical", text: "2 conflicts need fixing", action: "See why" });
     expect(items[1]).toEqual({ id: "unfiled", text: "5 new mods aren't filed", action: "Review" });
     expect(items[2]).toEqual({ id: "updates", text: "1 update", action: "See updates" });
   });
 
   it("singular copy", () => {
     const items = stripItemSpecs({ criticalConflicts: 1, unfiled: 1, updates: 3 });
-    expect(items.map((i) => i.text)).toEqual(["1 critical conflict", "1 new mod isn't filed", "3 updates"]);
+    expect(items.map((i) => i.text)).toEqual(["1 conflict needs fixing", "1 new mod isn't filed", "3 updates"]);
+  });
+
+  it("puts an unresolved crash first", () => {
+    const items = stripItemSpecs({ crash: true, criticalConflicts: 1, unfiled: 0, updates: 2 });
+    expect(items.map((i) => i.id)).toEqual(["crash", "critical", "updates"]);
+    expect(items[0]).toEqual({ id: "crash", text: "Your last game ended unexpectedly", action: "See details" });
   });
 });

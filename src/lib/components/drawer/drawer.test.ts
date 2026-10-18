@@ -126,7 +126,7 @@ describe("drawer header badges", () => {
     const mod = entry(2, { path: "C:/mods/badges2.zip" });
     setVerdict(mod, { status: "verified", how: "exact", changed: [], added: [], removed: [], matchedVersion: null, note: null });
     const conflicts: Conflict[] = [
-      { severity: "critical", kind: "map", name: "two maps", explanation: "", mods: ["FS25_Mod2", "FS25_Other"] },
+      { id: "uniqueType:seedSlot:FS25_Mod2,FS25_Other", severity: "critical", kind: "uniqueType", name: "seedSlot", explanation: "", mods: ["FS25_Mod2", "FS25_Other"], techNames: ["FS25_Mod2", "FS25_Other"] },
     ];
     render(ModDetail, props(mod, { hasUpdate: true, conflicts }));
     await settle();
@@ -135,9 +135,9 @@ describe("drawer header badges", () => {
     expect(words).toEqual(["Problem", "Verified build", "Update available"]);
     expect(h.getByText("Problem")).toBeInTheDocument();
     // The pills are hover-explained; a screen reader gets the explanations as text.
-    expect(h.getByText(/Problem: In a critical conflict/)).toBeInTheDocument();
+    expect(h.getByText(/Problem: In a conflict that needs fixing/)).toBeInTheDocument();
     // Conflict kinds are named in plain words.
-    expect(screen.getByText(/Map “two maps”, with FS25_Other/)).toBeInTheDocument();
+    expect(screen.getByText(/Exclusive slot “seedSlot”, with FS25_Other/)).toBeInTheDocument();
     // The conflict banner names the other mod and links to Diagnose.
     expect(screen.getByText(/Conflicts with 1 active mod/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "See conflicts" })).toBeInTheDocument();

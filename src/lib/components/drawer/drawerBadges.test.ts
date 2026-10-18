@@ -12,7 +12,7 @@ function verify(status: VerifyResult["status"], files: Partial<Pick<VerifyResult
   return { status, how: null, changed: [], added: [], removed: [], matchedVersion: null, note: null, ...files };
 }
 function conflict(severity: Conflict["severity"], mods: string[]): Conflict {
-  return { severity, kind: "uniqueType", name: "slot", explanation: "", mods };
+  return { id: `uniqueType:slot:${mods.join(",")}`, severity, kind: "uniqueType", name: "slot", explanation: "", mods, techNames: mods };
 }
 function report(crashed: boolean, errors: number): LogReport {
   return {

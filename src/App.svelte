@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick, untrack } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
   import { get } from "svelte/store";
   import {
     DialogHost,
@@ -56,6 +56,9 @@
     userDirPath,
     bisectSnapshotGet,
     bisectSnapshotClear,
+    logStatus,
+    markLogSeen,
+    scanLog,
     appVersion,
     takeStartupNotices,
     detectForeignFiles,
@@ -205,7 +208,7 @@
   import BindingsView from "./lib/components/BindingsView.svelte";
   import BridgeTool from "./lib/components/BridgeTool.svelte";
   import ConflictsPanel from "./lib/components/panels/ConflictsPanel.svelte";
-  import HealthPanel from "./lib/components/panels/HealthPanel.svelte";
+  import ProblemsPanel from "./lib/components/panels/ProblemsPanel.svelte";
   import StatsPanel from "./lib/components/panels/StatsPanel.svelte";
   import UpdatesPanel from "./lib/components/panels/UpdatesPanel.svelte";
   import MySetsTab from "./lib/components/modsets/MySetsTab.svelte";
@@ -251,6 +254,11 @@
   import { installShortcuts, shortcutsBlocked, type ShortcutAction } from "./lib/state/shortcuts";
   import { layerCount, modalOpen } from "./lib/ui/overlayStack";
   import StatusChip from "./lib/components/shell/StatusChip.svelte";
+  import BisectStatus from "./lib/components/shell/BisectStatus.svelte";
+  import { createCrashWatch, type LogRun } from "./lib/diagnose/crashWatch";
+  import { crashNoticeModel, likelyCulprit, type CrashCulprit } from "./lib/diagnose/crashNotice";
+  import { severityLabel } from "./lib/diagnose/conflictCopy";
+  import { latestOnly } from "./lib/diagnose/latest";
   import { libraryReadState } from "./lib/components/shell/status";
   import PlayButton, { type PlayMenuItem } from "./lib/components/shell/PlayButton.svelte";
   import type { StatusStripItem } from "./lib/components/shell/StatusStrip.svelte";
@@ -476,6 +484,102 @@
   let bisecting = $state(false);
   /** Diagnose → Last run's slot while that tab is on screen (DiagnoseView binds it), else null. */
   let diagnoseLastRunSlot = $state<HTMLElement | null>(null);
+  /** The running bisection's round, for the header's mini-status (null before the first). */
+  let bisectRoundNo = $state<number | null>(null);
+  /** A test round is set up and waiting for the user to play it (Play says "Launch test round"). */
+  let bisectLaunching = $state(false);
+  /** Play is launching a test round of Find the problem mod. */
+  const testRound = $derived(bisecting && bisectLaunching);
+  /** The crash notice's "Find the problem mod": Last run opens the flow, then clears this. */
+  let bisectRequested = $state(false);
+
+  // ── Crash detection (Diagnose, #260) ──
+  // The last game's crash, until a clean run or Dismiss: the notice shows it and the status chip
+  // counts it as one problem. `parked` is set once the user parked the culprit from the notice.
+  let lastCrash = $state<{ run: LogRun; culprit: CrashCulprit | null; parked: boolean } | null>(null);
+  /** Bumped whenever crash detection read a new log, so Last run re-reads it. */
+  let logReadKey = $state(0);
+  const CRASH_KEY = "crash";
+  /** Mods Find the problem mod would test: the active ones that aren't maps. */
+  const bisectSuspects = $derived(mods.filter((m) => activeSet.has(m.techName) && !m.isMap).length);
+  /** The library's title and active state for a log name (a tech name). */
+  function libraryLookup(techName: string): { title: string; active: boolean } | null {
+    const m = mods.find((x) => x.techName === techName);
+    return m ? { title: m.title ?? m.techName, active: activeSet.has(m.techName) } : null;
+  }
+
+  const crashWatch = createCrashWatch({
+    status: logStatus,
+    scan: scanLog,
+    markSeen: markLogSeen,
+    quiet: () => bisecting || bisectRecovery !== null,
+    onRun: (run) => {
+      logReadKey++;
+      if (!run.report.crashed) {
+        // A clean run settles an earlier crash.
+        lastCrash = null;
+        return;
+      }
+      lastCrash = { run, culprit: likelyCulprit(run.report, libraryLookup), parked: false };
+    },
+  });
+  onDestroy(() => crashWatch.stop());
+
+  /** Park a library mod if it's active (with the switch's Undo toast). */
+  async function parkMod(techName: string) {
+    if (activeSet.has(techName)) await toggleActive(techName);
+  }
+
+  async function parkCrashCulprit() {
+    const c = lastCrash?.culprit;
+    if (!c) return;
+    await parkMod(c.modName);
+    if (lastCrash?.culprit === c && !activeSet.has(c.modName)) lastCrash = { ...lastCrash, parked: true };
+  }
+
+  function findProblemMod() {
+    bisectRequested = true;
+    go("diagnose", "lastRun");
+  }
+
+  // The crash notice follows lastCrash: shown while there's an unresolved crash (hidden while Find
+  // the problem mod runs, which owns it until it ends), cleared after. The words and offers come
+  // from crashNoticeModel; the culprit is matched to the library as it is now.
+  const fgReason = $derived(fgLock.reason);
+  $effect(() => {
+    const crash = lastCrash;
+    const model =
+      crash &&
+      crashNoticeModel({
+        culprit: crash.culprit,
+        live: crash.culprit ? libraryLookup(crash.culprit.modName) : null,
+        parked: crash.parked,
+        suspects: bisectSuspects,
+        libraryKnown: libraryScanned || scanFailed,
+        bisecting,
+        recoveryPending: bisectRecovery !== null,
+      });
+    if (!model) {
+      untrack(() => syncNotice(CRASH_KEY, null));
+      return;
+    }
+    const off = fgReason ? { disabled: true, title: fgReason } : {};
+    untrack(() =>
+      syncNotice(CRASH_KEY, {
+        level: "warning",
+        icon: "problem",
+        title: model.title,
+        body: model.body,
+        actions: [
+          ...(model.park ? [{ label: `Park ${model.park}`, run: parkCrashCulprit, primary: true, ...off }] : []),
+          ...(model.find ? [{ label: "Find the problem mod", run: findProblemMod, primary: true, ...off }] : []),
+          { label: "See details", run: () => go("diagnose", "lastRun") },
+        ],
+        dismissible: true,
+        onDismiss: () => (lastCrash = null),
+      }),
+    );
+  });
   // The current view is nav.view (lib/state/nav). The mod drawer belongs to the Library: leaving
   // it closes the drawer, as switching to Browse did. The Browse drawer lives inside ModBrowser,
   // which unmounts on switch, so it closes itself.
@@ -611,17 +715,24 @@
   let settingsMod = $state<{ techName: string; title: string } | null>(null);
 
   async function launch() {
+    // Only Problems ask first (Review and Note never do; more than one map is a Note). A test
+    // round of Find the problem mod launches on purpose with whatever half is on.
     if (
       criticalCount > 0 &&
+      !testRound &&
       !(await ask({
-        title: `Launch with ${criticalCount} critical conflict${criticalCount === 1 ? "" : "s"}?`,
-        body: "The game may crash or misbehave with these mods together. Launching changes nothing in your library; you can fix the conflicts after you quit.",
+        title:
+          criticalCount === 1
+            ? "Launch with a conflict that needs fixing?"
+            : `Launch with ${criticalCount} conflicts that need fixing?`,
+        body: "The game may crash or misbehave with these mods together. Launching changes nothing in your library, and you can fix the conflicts after you quit.",
         confirm: "Launch anyway",
       }))
     )
       return;
     try {
       await launchGame();
+      crashWatch.afterLaunch(); // look at the log when the game exits
     } catch (e) {
       reportError(e, "Launching the game");
     }
@@ -664,31 +775,47 @@
     return s;
   });
 
+  // Only the newest check's answer lands: a slow check of an earlier active set must not
+  // overwrite the check of the set that's active now (#260: after a mod set switch the chip
+  // said "All good" while the new set had a conflict open).
+  const conflictsLatest = latestOnly<Conflict[]>();
+  /** Only the lock's on/off: fgLock is a new object on every op start, end or label change. */
+  const fgBlocked = $derived(fgLock.blocked);
   async function runConflictCheck() {
     const active = mods.filter((m) => activeSet.has(m.techName));
     if (active.length < 2) {
+      conflictsLatest.cancel();
       conflicts = [];
       return;
     }
     try {
-      conflicts = await detectConflicts(
-        active.map((m) => ({
-          techName: m.techName,
-          title: m.title,
-          path: m.path,
-          kind: m.kind,
-        })),
+      await conflictsLatest.run(
+        () =>
+          detectConflicts(
+            active.map((m) => ({
+              techName: m.techName,
+              title: m.title,
+              path: m.path,
+              kind: m.kind,
+            })),
+          ),
+        (c) => (conflicts = c),
       );
     } catch (e) {
       reportError(e, "Checking for conflicts", { background: true });
     }
   }
 
-  // Re-check conflicts (debounced) whenever the active set or library changes.
+  // Re-check conflicts (debounced) whenever the active set or library changes. While a library
+  // write runs (a mod set switch, a bisection round) the files are moving, so the check waits
+  // for it to end: fgLock is reactive, and its release re-runs this effect.
   $effect(() => {
     void activeSet;
     void mods;
+    const writing = fgBlocked;
     clearTimeout(conflictTimer);
+    conflictsLatest.cancel(); // a check of the set before this change mustn't land
+    if (writing) return;
     conflictTimer = setTimeout(runConflictCheck, 400);
   });
 
@@ -722,9 +849,10 @@
     const st = setStore.state;
     const setPart = st.kind === "none" ? "" : `, mod set “${st.name}”${st.kind === "custom" ? ` with ${st.changes} changes` : ""}`;
     L.push(`## Active set${setPart} (${activeSet.size} mods)`, "");
-    L.push(`## Conflicts (${criticalCount} critical, ${conflicts.length} total)`);
+    const reviewCount = conflicts.filter((c) => c.severity === "warning").length;
+    L.push(`## Conflicts (${criticalCount} problems, ${reviewCount} to review, ${conflicts.length} total)`);
     for (const c of conflicts.filter((x) => x.severity !== "info")) {
-      L.push(`- [${c.severity}] ${c.kind} “${c.name}”: ${c.mods.join(", ")}`);
+      L.push(`- [${severityLabel(c.severity)}] ${c.kind} “${c.name}”: ${c.mods.join(", ")}`);
     }
     L.push("");
     L.push(`## Health (${healthCount} issues)`);
@@ -901,6 +1029,10 @@
     const wasRunning = bisecting;
     bisecting = active;
     if (active) return;
+    bisectRoundNo = null;
+    bisectLaunching = false;
+    // The test rounds' logs are the flow's, not news: don't announce the last round's crash.
+    if (wasRunning) void crashWatch.markCurrentSeen();
     try {
       bisectRecovery = await bisectSnapshotGet();
     } catch {
@@ -2873,12 +3005,16 @@
       } catch {
         /* non-critical */
       }
+      // Did the game crash since Silo last looked (e.g. Silo was closed meanwhile)?
+      void crashWatch.check();
       // Auto-refresh on window focus: a mod downloaded in a browser lands while Silo is in the
       // background, so pick it up when the user returns instead of waiting for a manual rescan.
       // Throttled (skip during a library write or scan, or scanned <4s ago) so alt-tabbing doesn't thrash; the
       // scan cache (path+mtime+size) makes an unchanged rescan cheap anyway.
       try {
         focusUnlisten = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+          // Back from the game (or anywhere): did the last run crash? A cheap stat first.
+          if (focused) void crashWatch.check();
           if (
             focused &&
             !scanning &&
@@ -3028,6 +3164,7 @@
     const corrupt = activeOf(health.corrupt);
     const ignored = activeOf(health.ignored);
     return libraryStatusCounts({
+      crash: lastCrash ? 1 : 0,
       criticalConflicts: criticalCount,
       warningConflicts: conflicts.filter((c) => c.severity === "warning").length,
       missingDeps,
@@ -3109,11 +3246,13 @@
   );
   const libraryStripItems = $derived.by((): StatusStripItem[] => {
     const run: Record<string, () => void> = {
+      crash: () => go("diagnose", "lastRun"),
       critical: () => go("diagnose", "conflicts"),
       unfiled: () => (organizeOffReason ? refuse(organizeOffReason) : void organizeNew()),
       updates: () => go("updates"),
     };
     return stripItemSpecs({
+      crash: !!lastCrash,
       criticalConflicts: criticalCount,
       // Where the old "Organize N" button showed: loose mods, with auto-file off.
       unfiled: autoFileNew ? 0 : unorganizedCount,
@@ -3275,12 +3414,16 @@
       onsearchsubmit={submitHeaderSearch}
     >
       {#snippet status()}
-        <StatusChip
-          problems={statusCounts.problems}
-          review={statusCounts.review}
-          library={libraryRead}
-          onclick={() => go("diagnose")}
-        />
+        {#if bisecting}
+          <BisectStatus round={bisectRoundNo} onopen={() => go("diagnose", "lastRun")} />
+        {:else}
+          <StatusChip
+            problems={statusCounts.problems}
+            review={statusCounts.review}
+            library={libraryRead}
+            onclick={() => go("diagnose")}
+          />
+        {/if}
       {/snippet}
       {#snippet play()}
         {#if gameInfo}
@@ -3289,6 +3432,7 @@
             disabled={!!playOffReason}
             disabledReason={playOffReason}
             onplay={launch}
+            label={testRound ? "Launch test round" : "Play"}
             menuItems={playMenuItems}
             onmenuselect={playMenuSelect}
             activeSetLine={activeSetLine(setState)}
@@ -3585,14 +3729,24 @@
           <ViewBoundary name="Conflicts" bodyText="Your mods weren't changed.">
             <ConflictsPanel
               {conflicts}
-              {criticalCount}
+              onOpen={openInLibrary}
+              onPark={(t) => void parkMod(t)}
+              lockReason={fgReason}
               activeCount={activeSet.size}
             />
           </ViewBoundary>
         {/snippet}
         {#snippet problemsTab()}
-          <ViewBoundary name="Library health">
-            <HealthPanel {health} {healthCount} onResolveForeign={resolveForeign} />
+          <ViewBoundary name="Problems">
+            <ProblemsPanel
+              {health}
+              isActive={(t) => activeSet.has(t)}
+              onFindInBrowse={(t) => findInBrowse(t)}
+              onShowFile={(path) => revealInFolder(path).catch((e) => reportError(e, "Showing the file"))}
+              onPark={(t) => void parkMod(t)}
+              onResolveForeign={resolveForeign}
+              lockReason={fgLock.reason}
+            />
           </ViewBoundary>
         {/snippet}
       </DiagnoseView>
@@ -3769,6 +3923,22 @@
           onApply={bisectRound}
           onBisecting={(v) => void bisectingChanged(v)}
           recoveryPending={bisectRecovery !== null}
+          lookup={libraryLookup}
+          onPark={(t) => void parkMod(t)}
+          onShow={openInLibrary}
+          onBisectProgress={(p) => {
+            bisectRoundNo = p.round;
+            bisectLaunching = p.launching;
+          }}
+          lockReason={fgReason}
+          onBisectFinished={(parked) => {
+            lastCrash = null; // the search settled the crash it was started for
+            if (parked) success(`Your mods are back, and ${libraryLookup(parked)?.title ?? parked} stays parked. Play again to check.`);
+            else success("Your mods are back as they were.");
+          }}
+          {bisectRequested}
+          onBisectRequestTaken={() => (bisectRequested = false)}
+          refreshKey={logReadKey}
         />
       </div>
     </ViewBoundary>
