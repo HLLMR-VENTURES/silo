@@ -300,6 +300,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (nanoid, postcss and source-map-js updated). Nothing in the shipped app changes. (#234)
 
 ### Fixed
+- A link that isn't a Silo set link now just says so, without "Something went wrong" in front. (#256)
 - Checking for updates works again on libraries with more than 500 mods; Silo now asks its catalog in batches. When the catalog refuses a check, Silo says so instead of claiming it's offline, and keeps the last good "Last checked" time. (#252)
 
 - **Filing after a partial failure.** When some mods couldn't be filed, the ones that were filed
