@@ -26,14 +26,14 @@ closes the app). A packaged build is `npm run tauri:build`.
 
 ## 0. Launch & shell
 - [x] `[app]` App launches, no error dialog, window renders the Library view.
-- [x] `[app]` Library/Browse tabs switch cleanly; theme toggle (Settings) cycles system/light/dark and both themes are legible.
+- [x] `[app]` The sidebar switches views cleanly (Library, Browse, Mod sets, Diagnose, Updates, Tools, Settings, Help); theme toggle (Settings) cycles system/light/dark and both themes are legible.
 - [x] `[app]` Resize the window — no horizontal scroll, panels stay centered.
 
 ## 1. Library scan & organize  _(auto-verified: scan/organize/moddesc engines)_
-- [x] `[app]` Initial scan lists the full library; counts (mods/maps/scripts/DLC) look right; "scanned in N ms" shows.
-- [x] `[app]` Rescan re-reads without error; warm scan is fast.
+- [x] `[app]` Initial scan lists the full library; counts (the status strip's "N of M active", the toolbar's maps / script mods) look right; Settings → About shows the last scan time.
+- [x] `[app]` Library → **⋯** → Rescan re-reads without error; warm scan is fast.
 - [x] `[app]` Organize moves loose zips into `mods/archive/<Category>/`; dev **folder** mods are left untouched (zip-only).
-- [ ] `[app]` **Organize preview**: clicking **Organize N** (auto-file OFF) opens a dry-run preview grouping the planned moves by category **before** anything moves; **Cancel** touches nothing; **Organize N** applies it. Ticking **"Don't preview next time"** and confirming makes the next Organize skip straight to applying (clear `localStorage silo.organizePreviewSkip` to re-enable).
+- [ ] `[app]` **Organize preview**: the Library status strip's **N new mods aren't filed → Review** (auto-file OFF; Settings → Library layout → **Organize** works too) opens a dry-run preview grouping the planned moves by category **before** anything moves; **Cancel** touches nothing; **Organize N** applies it. Ticking **"Don't preview next time"** and confirming makes the next Organize skip straight to applying (clear `localStorage silo.organizePreviewSkip` to re-enable).
 - [x] `[app]` Category rail filters; search filters by title/author/tech name; Favorites/Hidden toggles work.
 - [x] `[app]` Select-all checkbox activates/deactivates the filtered set.
 
@@ -81,19 +81,19 @@ shipping; macOS and Linux are experimental platforms, verified by testers as the
 - [ ] `[app]` Reveal opens the file in Explorer; activate/deactivate toggles the active dot.
 
 ## 3. Loadouts & savegames  _(auto-verified: loadout/savegame parse)_
-- [ ] `[app]` Save current active set as a loadout; apply/overwrite/delete; active loadout name shows in the toolbar.
+- [ ] `[app]` Save current active set as a loadout; apply/overwrite/delete (Mod sets → My sets); the matching loadout's name shows in the Library status strip and at the top of the Play menu ("…, unchanged").
 - [ ] `[app]` Export a loadout to `.silo`, re-import it as a new loadout.
-- [ ] `[game]` Savegames panel lists real saves with map + mod list; "→ Loadout" builds a loadout from a save's mods (warns on missing).
+- [ ] `[game]` Mod sets → Savegames lists real saves with map + mod list; "→ Loadout" builds a loadout from a save's mods (warns on missing).
 - [ ] `[app]` Savegame backup copies to `SiloBackups/`.
 
 ## 4. Conflicts  _(auto-verified: conflict engine incl. map + fillType)_
-- [ ] `[app]` Conflicts stat shows count; panel lists uniqueType / specialization / script collisions with severity + involved mods.
+- [ ] `[app]` Diagnose → Conflicts (its tab badge shows the count) lists uniqueType / specialization / script collisions with severity + involved mods.
 - [ ] `[app]` **Duplicate-map**: enable 2+ maps → a critical "N maps enabled" conflict appears; drop to one → it clears.
 - [ ] `[app]` **fillType override**: if two active mods declare the same `<fillType name>`, a warning appears naming both; distinct filltypes do NOT flag.
 
 ## 5. Health & launch
-- [ ] `[app]` "Need attention" panel: missing deps, corrupt mods, digit-prefix names.
-- [ ] `[game]` Launch button starts FS25 (Steam) with the active set projected.
+- [ ] `[app]` Diagnose → Problems: missing deps, corrupt mods, digit-prefix names. The header status chip counts them (and critical conflicts) as problems; clicking it opens Diagnose.
+- [ ] `[game]` **Play** in the header starts FS25 (Steam) with the active set projected.
 
 ## 6. Browse (catalog)  _(auto-verified: adapters, /mods shape)_
 - [ ] `[net]` Browse loads the catalog; header shows total; **scroll works** (regression-fixed).
@@ -103,37 +103,37 @@ shipping; macOS and Linux are experimental platforms, verified by testers as the
 - [ ] `[net]` Details opens the drawer: cover image, facts, full source list with per-source versions + open-page links.
 
 ## 7. Updates
-- [ ] `[net]` "⟳ Updates" checks the whole library via the catalog; rows show current→latest with source badge; Install works.
+- [ ] `[net]` Updates (sidebar) → **Check for updates** checks the whole library via the catalog; rows show current→latest with source badge; Install works.
 - [ ] `[net]` Detail-drawer GitHub link: paste owner/repo (or accept the auto-suggestion), Check, Install — backs up `.bak`.
 
 ## 8. Crash & log triage  _(auto-verified: log parser on real 713-mod log)_
-- [ ] `[app]` "◆ diagnose" → verdict banner: healthy / crashed / errors-worth-a-look, matching your last run.
+- [ ] `[app]` Diagnose → Last run → verdict banner: healthy / crashed / errors-worth-a-look, matching your last run.
 - [ ] `[app]` Culprit mods ranked; cosmetic-only mods behind the "safe to ignore" disclosure; unattributed count + Open log.txt.
 - [ ] `[app]` Re-read log after a new FS25 run updates the report.
 
 ## 9. Guided bisection  _(auto-verified: stepper convergence 1..64)_
-- [ ] `[app]` From triage (crash, no culprit) or the footer link → intro shows suspect count + ~launches.
+- [ ] `[app]` From Diagnose → Last run (crash, no culprit) or the footer link → intro shows suspect count + ~launches.
 - [ ] `[game]` Full loop: Start → Silo applies half → Launch FS25 → reproduce → quit → "still broken?" (crash auto-detected) → narrows → repeats → names a culprit (or "interaction").
 - [ ] `[app]` Finish/cancel restores your original active set exactly.
 - [ ] `[app]` **Crash-safety**: start a bisection, force-quit Silo mid-run, relaunch → the interrupted-diagnosis notice offers to restore your set; Restore my mod set works.
 
 ## 10. Bindings map  _(auto-verified: parser on real inputBinding.xml)_
-- [ ] `[app]` "⌨ bindings" lists devices; every action↔key shown; search filters; "inputs bound to more than one action" section highlights reuse (as review, not error).
+- [ ] `[app]` Tools → Controls map lists devices; every action↔key shown; search filters; "inputs bound to more than one action" section highlights reuse (as review, not error).
 
 ## 11. Multiplayer sync  _(auto-verified: manifest diff + md5 vs md5sum)_
-- [ ] `[app]` "Multiplayer" → Export active set → saves a `.silomp`.
+- [ ] `[app]` Mod sets → Multiplayer → Export active set → saves a `.silomp`.
 - [ ] `[app]` Round-trip: Verify against your own just-exported manifest → "your set matches."
 - [ ] `[app]` Negative: deactivate a mod, re-verify the same manifest → it shows under "get these" (and reactivating clears it). Change a version → "wrong version". An extra active mod → "turn these off".
 
 ## 12. Filltype bridge  _(auto-verified: generator XML vs real mods)_
-- [ ] `[app]` "⛓ bridge" → enter a filltype name, pick categories, Generate → `.zip` appears in mods folder + rescan; it shows in the library.
+- [ ] `[app]` Tools → Fill type bridge → enter a filltype name, pick categories, Generate → `.zip` appears in mods folder + rescan; it shows in the library.
 - [ ] `[game]` **The real test**: enable the bridge + the map, load a save → the filltype now works with the checked equipment (haul/store/sell). If off, delete the zip (reversible).
 
 ## 13. Config editors & diagnostics  _(auto-verified: xmlconfig/settings_form)_
-- [ ] `[game]` game.xml graphics editor: apply a preset, relaunch → setting took; `.bak` written.
-- [ ] `[game]` Savegame config editor: change difficulty/growth etc., load save → applied; `.bak` written.
+- [ ] `[game]` Tools → Graphics settings → **Edit game.xml**: apply a preset, relaunch → setting took; `.bak` written.
+- [ ] `[game]` Savegame config editor (Mod sets → Savegames → Configure): change difficulty/growth etc., load save → applied; `.bak` written.
 - [ ] `[app]` Per-mod settings form (for a mod that has settings) edits + saves with `.bak`; raw-XML fallback works.
-- [ ] `[app]` Diagnostics report exports a markdown summary.
+- [ ] `[app]` Diagnostics report exports a markdown summary (Settings → Diagnostics).
 
 ---
 
@@ -153,29 +153,24 @@ shipping; macOS and Linux are experimental platforms, verified by testers as the
 
 The frontend was split into ~20 new components, so this section exists to **touch every
 interactive surface at least once** and catch a wiring regression that compiles fine.
-For each item: it **opens/toggles without error, renders its content, and closes cleanly**
-(via its ✕, the backdrop, or Esc), and re-opening works. **Keep the devtools console open
-(if available) and confirm no red errors appear** as you open/close each — a broken prop
-or `$effect` in an extracted component shows up there first. None of these should cover the
-top header bar (the drawer/backdrop must start below it).
+For each item: it **opens/toggles without error and renders its content**; overlays close
+cleanly (their ✕ or Esc) and re-opening works. **Keep the devtools console open
+(if available) and confirm no red errors appear** as you go — a broken prop or `$effect` in
+an extracted component shows up there first. Nothing should cover the header (the drawers
+start below it).
 
-**Top bar (always visible):**
-- [ ] `[app]` Library ↔ Browse tabs switch; switching **closes an open detail drawer** (no overlap).
-- [ ] `[app]` **Savegames** button opens the Savegames panel; closes.
-- [ ] `[app]` **Loadouts** button opens the Loadouts panel; closes.
-- [ ] `[app]` **Multiplayer** button opens the MP-sync panel; closes.
-- [ ] `[net]` **Updates** (⟳) opens the Updates panel; closes.
-- [ ] `[app]` **Rescan** runs a scan (spinner → counts refresh).
-- [ ] `[app]` **Settings** (gear) opens; closes.
-- [ ] `[game]` **Launch** is present (don't have to run it here).
+**Sidebar and header (always visible; see §19 for the full map):**
+- [ ] `[app]` Every sidebar item opens its view; leaving the Library **closes an open detail drawer**.
+- [ ] `[app]` **Mod sets** → My sets (loadouts), Share (collections), Multiplayer (MP sync), Savegames tabs each render.
+- [ ] `[net]` **Updates** opens the Updates page; **Check for updates** in its header runs the check.
+- [ ] `[app]` Library → **⋯** → **Rescan** runs a scan (progress bar → counts refresh).
+- [ ] `[app]` **Settings** opens as a page.
+- [ ] `[game]` **Play** is present (don't have to run it here); its chevron opens the launch menu.
 
-**Library stat/filter bar:**
-- [ ] `[app]` **mods** tile opens the library **Stats** panel; closes.
-- [ ] `[app]` **conflicts** tile opens the **Conflicts** panel; closes.
-- [ ] `[app]` **need attention** tile opens the **Health** panel; closes.
-- [ ] `[app]` **◆ diagnose** opens Crash/Log triage; **⌨ bindings** opens the bindings map; **⛓ bridge** opens the bridge tool. Each closes.
-- [ ] `[app]` Filter toggles each flip and re-filter the list: **Favorites**, **Hidden**, **⚑ Flagged**, **⚠ In conflict** (disabled when 0). Combine two, then clear.
-- [ ] `[app]` **Search** box filters live; clearing restores the list.
+**Library status strip, toolbar and filters:**
+- [ ] `[app]` Tools → **Library stats** shows the stats; Diagnose → **Conflicts** and **Problems** list conflicts and health issues; Diagnose → **Last run** is the crash/log triage; Tools → **Controls map** and **Fill type bridge** open their tools.
+- [ ] `[app]` Filter toggles each flip and re-filter the list: **Favorites**, **Hidden**, **⚑ Flagged**, **⚠ In conflict** (disabled when 0). Combine two, then clear. The toolbar's **maps / script mods / uniqueType / active** counts scope the list one at a time (click again to clear).
+- [ ] `[app]` The header **search** filters the Library live; clearing (Esc) restores the list.
 
 **Library toolbar + rail:**
 - [ ] `[app]` **Category rail**: click a category and a subcategory → list narrows; "All mods" resets.
@@ -184,7 +179,7 @@ top header bar (the drawer/backdrop must start below it).
 - [ ] `[app]` **Select-all** checkbox activates/deactivates the filtered set (indeterminate state renders when partial).
 
 **Library detail drawer (click a mod row) — every sub-section:**
-- [ ] `[app]` Header (icon/title/author/version/tech name) + **✕ closes**; **drag the left edge to resize** (persists); backdrop click closes.
+- [ ] `[app]` Header (icon/title/author/version/tech name) + **✕ closes** (Esc too); **drag the left edge to resize** (persists); the drawer docks beside the list, which stays clickable (clicking another mod switches the drawer).
 - [ ] `[app]` Action buttons all respond: **Active/Parked**, **Favorite**, **Broken**, **Hidden**, **Reveal**, and **Settings** (only when the mod has settings).
 - [ ] `[app]` **Category editor**: change the dropdown/subcategory → **Save** enables; **Reset to auto** shows for an overridden mod.
 - [ ] `[app]` **Last run** + **Catalog** status render (the `ModStatus` component).
@@ -192,10 +187,11 @@ top header bar (the drawer/backdrop must start below it).
 - [ ] `[net]` **GitHub link** (`ModRepoLink`): the owner/repo field, Check, and Install controls render.
 - [ ] `[app]` **Dependencies**, **uniqueType**, and **Conflicts** sub-sections render when present.
 
-**Settings panel — every control:**
+**Settings page — every control:**
 - [ ] `[app]` **Theme** System/Light/Dark switch (both themes legible).
 - [ ] `[app]` **GitHub account**: Connect / **Enable actions** / **Use a Personal Access Token** / Disconnect all render (see §14 for the real connect).
 - [ ] `[app]` **Library layout**: **Organize**, **Rebuild categories**, **Restore vanilla**, and the **auto-file toggle** are present. Confirm auto-file is **OFF by default** on a fresh profile.
+- [ ] `[app]` **About**: the version and the last scan time; with a Silo update ready, **Restart to update** (the same action as the update notice).
 
 **Browse tab — every surface:**
 - [ ] `[net]` **Sort** dropdown (Popular / Most downloaded / Top rated / Newest / Name) and **category** dropdown both re-query.
@@ -204,15 +200,15 @@ top header bar (the drawer/backdrop must start below it).
 - [ ] `[net]` **Read more** opens the **description modal** (full body + "Open full mod page"); closes.
 
 **Every remaining modal opens + closes cleanly:**
-- [ ] `[app]` Crash triage · Guided bisection intro · Bindings map · Multiplayer sync · Filltype bridge · Savegame config editor · Per-mod settings form · Updates · Diagnostics "Export report".
+- [ ] `[app]` Savegame config editor · game.xml editor · Per-mod settings form · Organize preview · Category menu · Row context menu · Diagnostics "Export report".
 
 ## 16. Look, type & accessibility (design foundations, #224)
-- [ ] `[app]` **Focus ring.** Press Tab through the top bar and then a mod row (the active toggle button, name, row actions) → a visible outline is on every control as you reach it, in both the light and dark themes. Clicking a button with the mouse shows no outline (text fields show it, as they should).
-- [ ] `[app]` **UI size.** Settings → Appearance → UI size: switch to 90%, 110% and 125% → text and icons scale together; nothing clips or overlaps (top bar, rail, mod rows, drawer, Settings). Back to 100% restores the original look, and the choice survives a restart.
+- [ ] `[app]` **Focus ring.** Press Tab through the sidebar, the header and then a mod row (the active toggle button, name, row actions) → a visible outline is on every control as you reach it, in both the light and dark themes. Clicking a button with the mouse shows no outline (text fields show it, as they should).
+- [ ] `[app]` **UI size.** Settings → Appearance → UI size: switch to 90%, 110% and 125% → text and icons scale together; nothing clips or overlaps (header, sidebar, mod rows, drawer, Settings). Back to 100% restores the original look, and the choice survives a restart.
 - [ ] `[app]` **Fonts.** Headings (the "Silo" title, panel titles) render in Fraunces and body text in Hanken Grotesk — not Georgia or Segoe UI. Works with the network off.
-- [ ] `[app]` **Icons.** Icons sit beside their words (top bar, Settings, drawer actions); every icon-only button shows a tooltip on hover. No leftover symbol characters (⛓ ⟳ ⚑ ◆ and the like) where an icon should be.
+- [ ] `[app]` **Icons.** Icons sit beside their words (sidebar, Settings, drawer actions); every icon-only button shows a tooltip on hover. No leftover symbol characters (⛓ ⟳ ⚑ ◆ and the like) where an icon should be.
 - [ ] `[app]` **Both themes readable.** In light and in dark, secondary (muted) text, warning text and links are easy to read on their backgrounds; gold is never used for text in the light theme.
-- [ ] `[app]` **Silo mark.** The top bar shows the silo mark (green tile, cream silo, gold sun) in place of the old "S" box, the same size as before, and it looks the same in both themes.
+- [ ] `[app]` **Silo mark.** The sidebar shows the silo mark (green tile, cream silo, gold sun) and it looks the same in both themes.
 
 ## 17. Dialogs, menus and loadout safety (#226)  _(auto-verified: dialog/menu/toast component tests, loadout name check + switch diff, confirm build guard)_
 **Keyboard, in every in-app dialog:**
@@ -246,19 +242,39 @@ top header bar (the drawer/backdrop must start below it).
 
 ## 18. Notices, toasts and activity (#228)  _(auto-verified: notice keys, notice builders, write lock on a control, background vs foreground ops, the queued rescan, error copy body rule, toast slots, activity trimming, dialog fallback)_
 
-One notice area under the top bar replaces the stacked banners; one-off results and failures are toasts; the bell next to Settings lists both.
+One notice area under the header replaces the stacked banners; one-off results and failures are toasts; the bell in the header lists both.
 
 - [ ] `[app]` **Archive drive unplugged.** With a custom library archive, close Silo, unplug the archive's drive, relaunch → one red notice "Your library archive isn't available: …" with **Try again** and **Choose another**, and no close button. Reconnect → **Try again** → the notice goes and the library lists the parked mods again.
 - [ ] `[app]` **A rescan keeps other warnings.** With a notice up (unplugged archive, or a mods folder FS25 doesn't read), press **Rescan** twice and alt-tab away and back → the notice is still there. Several notices at once show the most important one, every red one and any with a progress bar, with "+N more" for the rest.
 - [ ] `[app]` **A failed organize says why in plain words.** Open a loose mod zip in 7-Zip (keep it open), then **Organize** → a red toast "Silo couldn't move FS25_….zip because another program is using it. …" with **Try again** and **Copy details**; it stays until closed. Close 7-Zip → **Try again** → the mod is filed. **Copy details** puts the version, time, operation, code and raw message on the clipboard.
-- [ ] `[app]` **The activity bell.** After the failed organize the bell next to Settings has a red dot; open it → the failure is listed (with Copy details) along with recent toasts and finished operations, and the dot clears. While a move or a long Optimize links runs, the bell shows a blue dot and the running operation.
-- [ ] `[app]` **One library change at a time.** Run **Optimize links** and, while it runs, look at Organize, Rescan, Launch, Settings and a mod's Install button → they're off, and pointing at one says what Silo is doing ("Silo is optimizing links."). Trying a second change some other way (a mod's toggle) is refused with a warning toast giving the same reason; nothing changes.
-- [ ] `[app]` **A library move leaves the rest of Silo usable.** Start a library move and, while it runs, open Settings (**Copy diagnostics** works), Savegames (**Back up** works), Loadouts, Collections, Multiplayer and Updates, and press **Rescan** → all open and work; Launch and Organize stay off. A change (a mod's toggle, a loadout apply, an update's Install) is refused with a warning toast "Silo is moving your library. Try again when it's done."; nothing changes.
+- [ ] `[app]` **The activity bell.** After the failed organize the bell in the header has a red dot; open it → the failure is listed (with Copy details) along with recent toasts and finished operations, and the dot clears. While a move or a long Optimize links runs, the bell shows a blue dot and the running operation.
+- [ ] `[app]` **One library change at a time.** Run **Optimize links** and, while it runs, look at Library → ⋯ → Rescan, Play, Settings' folder and layout controls and a mod's Install button → they're off, and pointing at Play (or a Settings control) says what Silo is doing ("Silo is optimizing links."); the strip's **Review** (unfiled mods) is refused with that reason. Trying a second change some other way (a mod's toggle) is refused with a warning toast giving the same reason; nothing changes.
+- [ ] `[app]` **A library move leaves the rest of Silo usable.** Start a library move and, while it runs, open Settings (**Copy diagnostics** works), Mod sets → Savegames (**Back up** works), My sets, Share, Multiplayer and Updates, and use Library → ⋯ → **Rescan** → all open and work; Play stays off and the strip's **Review** is refused. A change (a mod's toggle, a loadout apply, an update's Install) is refused with a warning toast "Silo is moving your library. Try again when it's done."; nothing changes.
 - [ ] `[app]` **A paused move refuses changes plainly.** Pause the move, then toggle a mod or apply a loadout → a warning toast "Finish or cancel the library move first. You can resume or cancel it from the notice at the top."; nothing changes. Resume or cancel from the notice → changes work again.
 - [ ] `[app]` **Try again waits for a running change.** With a red mods-folder notice up (a chosen mods folder on an unplugged drive), start a change that runs a while → the notice's **Try again** is off and pointing at it says what Silo is doing; when the change ends it's on again, and using it rescans and lists the folder's mods. (A scan asked for while a change runs is queued and runs once it ends; auto-verified.)
 - [ ] `[app]` **Startup messages stay.** When Silo restored its database (or reports something else at startup), it shows as an info notice with a close button that stays until dismissed, not a toast that fades.
-- [ ] `[app]` **Results are toasts, not timed bars.** With every mod current, press **Needs update** → an "All mods are up to date" toast (no strip that disappears on its own). Settings → **Optimize links** → the status line under the top bar shows "Optimizing links… n/N" while it runs, then a toast with the result.
+- [ ] `[app]` **Results are toasts, not timed bars.** With every mod current, press **Needs update** → an "All mods are up to date" toast (no strip that disappears on its own). Settings → **Optimize links** → the status line under the header shows "Optimizing links… n/N" while it runs, then a toast with the result.
 - [ ] `[app]` **A view's crash stays in that view.** In normal use no "This part of Silo hit a problem." panel ever appears. (Dev build only: make a panel throw while rendering → only that panel shows the fallback, as a card centred in the window with **Reload this view**, **Close** and **Copy details**; the rest of Silo keeps working. If the dialog host itself fails, confirmations fall back to the system dialog.)
+
+## 19. Navigation (#230)  _(auto-verified: view outlet routing, tabbed views follow nav, status chip / strip / Play menu copy, toolbar facets)_
+
+Sidebar: Library · Browse · Mod sets · Diagnose · Updates, then Tools · Settings · Help. Header: search, status chip, activity bell, Play.
+
+- [ ] `[app]` **Every sidebar item opens its view** with its title; the last view is remembered across a restart. Below 1200 px the sidebar collapses to icons (each has a tooltip) and its toggle pins it.
+- [ ] `[app]` **Everything is still reachable** (old place → new place):
+  - Library / Browse tabs → sidebar **Library** / **Browse**.
+  - Savegames, Loadouts, Collections, Multiplayer buttons → **Mod sets** → Savegames / My sets / Share / Multiplayer. A `silo://collection?url=…` link opens **Mod sets → Share** pre-filled.
+  - ⟳ Updates → sidebar **Updates** (badge = updates found) → **Check for updates**; the strip's **N updates → See updates**.
+  - Organize N → the strip's **N new mods aren't filed → Review** (and Settings → Library layout → Organize).
+  - Rescan → Library **⋯** → Rescan; Settings' Rebuild → Library **⋯** → Re-read every mod (also still in Settings).
+  - Launch → **Play** (header); Settings (gear) → sidebar **Settings**; activity bell → header.
+  - Self-update button → the **Silo X is ready → Restart to update** notice, and Settings → About.
+  - Stat bar: mods → Tools → Library stats; conflicts → Diagnose → Conflicts; need attention → Diagnose → Problems; diagnose → Diagnose → Last run; bindings → Tools → Controls map; bridge → Tools → Fill type bridge; maps / script mods / uniqueType / active filters → the Library toolbar; scanned in N ms → Settings → About.
+  - Settings → Graphics (game.xml) → **Tools → Graphics settings** (Settings links there).
+- [ ] `[app]` **The drawer docks.** Open a mod's details → the drawer sits right of the list, which stays scrollable and clickable; clicking another mod switches it; ✕ / Esc closes it; leaving the Library closes it.
+- [ ] `[app]` **Play guards still apply.** During a foreground change (Optimize links) and while a library move is copying, Play is off and pointing at it says why; with a critical conflict, Play asks "Launch with N critical conflicts?" first. The chevron opens the launch menu (active set line, Open the game folder, savegames missing mods → Mod sets → Savegames, Manage mod sets) even while Play is off.
+- [ ] `[app]` **Status chip.** "All good" with nothing to report; critical conflicts or mods that can't load show "N problems" (red); warning conflicts or foreign files show "N to review"; clicking it opens Diagnose.
+- [ ] `[app]` **Header search follows the view.** In the Library it filters the list; in Browse it searches the catalog; elsewhere Enter takes the text to the Library.
 
 ## Sign-off
 - [ ] All `[app]` items pass.

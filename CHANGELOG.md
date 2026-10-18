@@ -9,15 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **An activity list.** The bell next to Settings lists what Silo is doing right now and what it
+- **Help page.** Help in the sidebar links to GitHub Discussions and the Discord, and Report a
+  problem copies Silo's diagnostics and opens a new issue. (#230)
+
+- **An activity list.** The bell in the header lists what Silo is doing right now and what it
   said recently: results, warnings and errors, each error with Copy details. A dot on the bell
   shows when something is running or an error came in. (#228)
 
 - **UI size setting.** Settings → Appearance lets you make text and icons smaller or larger
   (90%, 100%, 110% or 125%). (#224)
 
-- **The silo mark.** Silo's own logo, a grain silo with the sun rising behind it, now sits in the
-  top bar. (#224)
+- **The silo mark.** Silo's own logo, a grain silo with the sun rising behind it, now sits at the
+  top of the sidebar. (#224)
 
 - **Undo for loadout switches, replacements and deletes.** After you switch to a loadout, use a
   savegame's mods, replace a loadout's mods with your current ones or delete a loadout, a notice
@@ -28,9 +31,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A new layout.** A sidebar takes you to Library, Browse, Mod sets, Diagnose and Updates, with
+  Tools, Settings and Help below. The header holds the search (it searches your mods, or the
+  catalog on Browse), a status chip that says whether anything needs a look and opens Diagnose,
+  the activity bell, and Play with a menu for the game folder and your mod sets. Loadouts,
+  collections, multiplayer sync and savegames live together under Mod sets; crash triage,
+  conflicts and library health under Diagnose. A mod's details now sit beside the list, so you
+  can keep clicking through mods. (#230)
+
+- **Settings is a full page,** with an About section for the version, the last scan time and a
+  ready Silo update. A ready update also shows as a notice with Restart to update. (#230)
+
+- **Library statistics, the controls map, the fill type bridge and the graphics settings
+  (game.xml) moved to Tools.** The library's map, script mod, uniqueType and active counts are
+  now quick filters above the list, and Rescan is in the Library's More menu. (#230)
+
 - **One notice area instead of stacked banners.** Warnings like "your mods folder isn't
   available", a library move in progress or an interrupted diagnosis now share one strip under
-  the top bar, most important first, with "+N more" for the rest (red warnings and anything
+  the header, most important first, with "+N more" for the rest (red warnings and anything
   with a progress bar always show). Results and one-off problems appear as short notices in the
   corner instead of a coloured line; errors never push an Undo notice out of view. Messages from
   startup, such as "your library database was restored", stay until you close them. (#228)
