@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Open log folder.** Settings → Diagnostics opens the folder that holds Silo's log
+  (`silo.log`), for when a bug report asks for it. (#238)
+
 - **Keyboard shortcuts.** Ctrl+K or / jumps to search, F5 rescans your library, Alt+1 to Alt+5
   open Library, Browse, Mod sets, Diagnose and Updates, Ctrl+, opens Settings and Alt+← goes back.
   F6 and Shift+F6 move between the sidebar, header, notices, page and mod details. Press ? (or
@@ -36,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running. (#226)
 
 ### Changed
+
+- **Wider Library and Browse on large screens.** On a wide window the Library and Browse grow to
+  1920px instead of 1280px: the Library shows three tiles across and Browse more cards per row,
+  instead of wide empty margins. Other pages keep their width. (#238)
+
+- **Clearer status text.** Messages, hints and tooltips read as plain sentences ("Links are
+  already optimized. Nothing to reclaim."), and what Silo says it's doing matches the Settings
+  names: "Reclaiming disk space…" and "Undoing organizing". (#238)
 
 - **Settings is organized into tabs, like Tools:** General, Mods folder, Library, Accounts,
   Diagnostics, Maintenance and About. Each group of settings sits in its own card, folder paths
@@ -133,6 +144,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   your library, with the list of mods. Cancel changes nothing. (#226)
 
 ### Fixed
+
+- **Tooltips no longer linger after their button disappears.** Pointing at a loadout's Delete
+  button and then deleting it could leave "Delete loadout" floating on screen. Icon buttons now
+  use Silo's own tooltips, which go away with the button, or as soon as it turns off. (#238)
+
+- **One name for flagged mods.** The mod details said "Broken" and the row menu "Mark broken",
+  while the Library filter says "Flagged". It's **Flag** / **Flagged** everywhere now. (#238)
+
+- **A parked mod's card says "parked" once.** Library cards showed a second "parked" pill under
+  the switch that already says Parked. (#238)
 
 - **A rescan no longer hides a warning.** Rescanning (including the automatic rescan when you
   come back to Silo) used to clear whatever problem was showing, such as a mods folder FS25
