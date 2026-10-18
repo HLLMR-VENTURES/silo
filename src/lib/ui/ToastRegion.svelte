@@ -1,7 +1,8 @@
 <script lang="ts">
   // Bottom-right live region for toast(). Mount once, at the app root. It portals to <body> and is
   // exempt from dialog inertness, so announcements still reach screen readers while a dialog is open.
-  // Shows the first MAX_VISIBLE_TOASTS; the rest appear as those leave.
+  // Shows visibleToasts() (up to MAX_VISIBLE_TOASTS errors plus the newest other toast); the rest
+  // appear as those leave.
   import { portal } from "./portal";
   import Toast from "./Toast.svelte";
   import { visibleToasts } from "./toasts.svelte";

@@ -1,4 +1,4 @@
-import type { Notice } from "./state/notify.svelte";
+import type { Notice, NoticeAction } from "./state/notify.svelte";
 import type { ModsRootStatus } from "./api";
 
 /**
@@ -63,6 +63,14 @@ export interface ModsFolderActions {
   createFolder: () => void | Promise<void>;
   /** The "Silo now follows FS25's folder" notice was dismissed. */
   dismissFollowed: () => void;
+  /** Why "Try again" is off right now (a library write is running); empty or absent when it's on. */
+  retryBlocked?: string;
+}
+
+/** "Try again" for the mods folder, off (titled with the reason) while a write runs. */
+function retryAction(a: ModsFolderActions): NoticeAction {
+  const action: NoticeAction = { label: "Try again", run: a.retry, primary: true };
+  return a.retryBlocked ? { ...action, disabled: true, title: a.retryBlocked } : action;
 }
 
 export interface ModsFolderNotices {
@@ -89,7 +97,7 @@ export function modsFolderNotices(
       title: `Your mods folder isn't available: ${st.path}.`,
       body: "Nothing was scanned. Reconnect the drive, or pick another folder.",
       actions: [
-        { label: "Try again", run: a.retry, primary: true },
+        retryAction(a),
         { label: "Choose another", run: a.chooseAnother },
         { label: "Use the game's folder", run: a.useGameFolder },
       ],
@@ -103,7 +111,7 @@ export function modsFolderNotices(
       body: st.layoutProblem + (st.layoutConflict ? ` (${st.layoutConflict})` : ""),
       actions: [
         ...(st.layoutProblemCause === "readError"
-          ? [{ label: "Try again", run: a.retry, primary: true }]
+          ? [retryAction(a)]
           : []),
         ...(st.mismatch && st.canWriteGameSetting
           ? [{ label: "Point FS25 here", run: a.pointGameHere }]

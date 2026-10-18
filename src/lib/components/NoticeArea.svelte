@@ -1,7 +1,8 @@
 <script lang="ts">
   // Standing conditions (setNotice in src/lib/state/notify.svelte.ts), full width under the top
-  // bar. Shows the most important notice; "+N more" expands the rest in place. Only blocking
-  // notices are alerts; the others sit in a polite status region.
+  // bar. Always shows the most important notice, every blocking notice and every notice with
+  // progress; "+N more" expands the rest in place. Only blocking notices are alerts; the others
+  // sit in a polite status region.
   import Button from "../ui/Button.svelte";
   import Icon from "../ui/Icon.svelte";
   import IconButton from "../ui/IconButton.svelte";
@@ -17,9 +18,14 @@
 
   let expanded = $state(false);
   const all = $derived(sortedNotices());
-  const top = $derived(all[0] ?? null);
-  const rest = $derived(all.slice(1));
+  /** Shown at all times: the top one, blocking ones, ones with progress. */
+  const pinned = $derived(all.filter((n, i) => i === 0 || n.level === "blocking" || !!n.progress));
+  const rest = $derived(all.filter((n) => !pinned.includes(n)));
   const showRest = $derived(expanded && rest.length > 0);
+  // Nothing left behind "+N more": the next notice that lands there starts collapsed.
+  $effect(() => {
+    if (rest.length === 0) expanded = false;
+  });
   const uid = $props.id();
   const restId = `notice-more-${uid}`;
 
@@ -75,9 +81,9 @@
   </div>
 {/snippet}
 
-{#if top}
+{#if pinned.length > 0}
   <section class="notice-area" aria-label="Notices">
-    {@render strip(top)}
+    {#each pinned as n (n.key)}{@render strip(n)}{/each}
     {#if rest.length > 0}
       <button
         type="button"

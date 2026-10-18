@@ -154,20 +154,32 @@ export function info(message: string, opts: MessageOptions = {}): ToastHandle {
   return toast({ message, tone: "neutral", ...opts });
 }
 
+/** A short, stable hash of a string (FNV-1a, hex), so distinct raw messages dedupe apart. */
+function hashText(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+
 /**
  * An error toast: the copy from describeError, "Try again" when `retry` is given and retrying can
- * help, and "Copy details". Errors stay until dismissed; a repeat of one on screen bumps its
- * count. Silent codes (STILL_LOADING) show nothing.
+ * help, and "Copy details". Errors stay until dismissed; a repeat of the same error (same code,
+ * copy and raw message) on screen bumps its count. Silent codes (STILL_LOADING) show nothing
+ * when `background` is set; a user's own action still says "Silo is still loading...".
  * @param e the thrown value
- * @param opts `op` = what Silo was doing ("Moving mods"); `retry` reruns it
+ * @param opts `op` = what Silo was doing ("Moving mods"); `retry` reruns it; `background` = no
+ *   one asked for this (startup loads, scans)
  * @returns the toast's handle, or null when nothing was shown
  */
 export function error(
   e: unknown,
-  opts: { op?: string; retry?: () => void | Promise<void> } = {},
+  opts: { op?: string; retry?: () => void | Promise<void>; background?: boolean } = {},
 ): ToastHandle | null {
   const d = describeError(e, opts.op);
-  if (d.silent) {
+  if (d.silent && opts.background) {
     console.info("[Silo] silent error", d.code, d.detail.message);
     return null;
   }
@@ -178,7 +190,7 @@ export function error(
     tone: "danger",
     sticky: true,
     detail: formatDetail(d.detail),
-    dedupeKey: `${d.code}\u0000${d.title}\u0000${d.body ?? ""}`,
+    dedupeKey: `${d.code}\u0000${d.title}\u0000${d.body ?? ""}\u0000${hashText(d.detail.message)}`,
     action:
       retry && d.retryable
         ? { label: "Try again", ariaLabel: `Try again: ${d.title}`, run: retry }
@@ -190,17 +202,18 @@ export function error(
  * Report a failure: log it to Silo's log file and tell the user.
  * @param e the thrown value
  * @param op what Silo was doing ("Moving mods")
- * @param opts `retry` offers "Try again"; `quiet` logs it and adds an activity entry, no toast
+ * @param opts `retry` offers "Try again"; `quiet` logs it and adds an activity entry, no toast;
+ *   `background` = no one asked for this, so silent codes (STILL_LOADING) say nothing
  */
 export function reportError(
   e: unknown,
   op: string,
-  opts: { retry?: () => void | Promise<void>; quiet?: boolean } = {},
+  opts: { retry?: () => void | Promise<void>; quiet?: boolean; background?: boolean } = {},
 ): void {
   const d = describeError(e, op);
   console.error(`[Silo] ${op} failed:`, e);
   void logFrontendError("error", `${op}: ${d.detail.message}`, d.detail.code);
-  if (d.silent) return;
+  if (d.silent && (opts.background || opts.quiet)) return;
   if (opts.quiet) {
     pushActivity({
       kind: "toast",
@@ -210,13 +223,13 @@ export function reportError(
     });
     return;
   }
-  error(e, { op, retry: opts.retry });
+  error(e, { op, retry: opts.retry, background: opts.background });
 }
 
 /**
  * For a failure a view shows in place (its own error line) instead of as a toast: logs it like
  * `reportError(e, op, { quiet: true })` (the activity list keeps the details) and returns the
- * copy to show. Empty for silent codes.
+ * copy to show. Empty for silent codes (views mostly load in the background).
  *   } catch (e) { error = inlineError(e, "Loading the catalog"); }
  * @param e the thrown value
  * @param op what Silo was doing ("Loading the catalog")

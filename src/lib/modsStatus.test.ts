@@ -105,6 +105,18 @@ describe("modsFolderNotices (#228)", () => {
   });
   const labels = (n: { actions?: { label: string }[] } | null) => n?.actions?.map((a) => a.label);
 
+  it("Try again is off, saying why, while a library write runs", () => {
+    const busy = { ...acts(), retryBlocked: "Silo is filing 3 mods into the library." };
+    const retry = modsFolderNotices(status({ available: false }), false, busy).modsFolder?.actions?.[0];
+    expect(retry).toMatchObject({
+      label: "Try again",
+      disabled: true,
+      title: "Silo is filing 3 mods into the library.",
+    });
+    const idle = modsFolderNotices(status({ available: false }), false, { ...acts(), retryBlocked: "" });
+    expect(idle.modsFolder?.actions?.[0].disabled).toBeUndefined();
+  });
+
   it("says nothing for a healthy folder, or before the first status", () => {
     expect(modsFolderNotices(status(), false, acts())).toEqual({
       modsFolder: null,

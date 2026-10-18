@@ -20,7 +20,7 @@
       }[];
     };
     healthCount: number;
-    onResolveForeign: (fileName: string, action: "adopt" | "restore") => Promise<void>;
+    onResolveForeign: (fileName: string, action: "adopt" | "restore") => Promise<unknown>;
     onClose: () => void;
   } = $props();
 

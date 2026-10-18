@@ -107,6 +107,16 @@ describe("the library-write lock on a control", () => {
     expect(install).not.toHaveAttribute("title");
   });
 
+  it("a background op (the archive move) leaves the panel usable", async () => {
+    render(LockHarness, { row, onInstall: () => {} });
+    await act(() => {
+      start("Moving your library", { exclusive: "library-write", background: true });
+    });
+    expect(screen.getByRole("button", { name: "Install" })).toBeEnabled();
+    // ...but a write still can't start beside it.
+    expect(tryStart("Installing Big Tractor", { exclusive: "library-write" })).toBeNull();
+  });
+
   it("a plain (read) op doesn't lock anything", async () => {
     render(LockHarness, { row, onInstall: () => {} });
     await act(() => {

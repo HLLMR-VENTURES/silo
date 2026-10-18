@@ -6,8 +6,10 @@ import {
   ERROR_CODES,
   fileNameIn,
   formatDetail,
+  HUMAN_COPY_MAX,
   looksLikeHumanCopy,
   rememberAppVersion,
+  truncateWords,
 } from "./errorCopy";
 
 afterEach(() => {
@@ -23,6 +25,7 @@ describe("describeError copy", () => {
     ["FILE_IN_USE", "Silo couldn't change a file because another program is using it. Close Farming Simulator 25 or the program that has it open, then try again.", true],
     ["GAME_RUNNING", "Close Farming Simulator 25 first, then try again.", true],
     ["LIBRARY_BUSY", "Silo is finishing another change to your library. Try again in a moment.", true],
+    ["MOVE_UNFINISHED", "Finish or cancel the library move first. You can resume or cancel it from the notice at the top.", false],
     ["ARCHIVE_UNAVAILABLE", "Your library archive isn't available. Connect the drive, or choose another folder.", true],
     ["PERMISSION_DENIED", "Windows didn't let Silo change this file. If it's in a protected folder, choose a mods folder in your Documents.", false],
     ["DISK_FULL", "There isn't enough space on the drive for this. Free some space and try again.", true],
@@ -57,9 +60,26 @@ describe("describeError copy", () => {
     }
   });
 
-  it("STILL_LOADING is silent with no title", () => {
+  it("STILL_LOADING is silent for background work, with copy for a user's own action", () => {
     const d = describeError(new AppError("STILL_LOADING", "Silo is still loading"));
-    expect(d).toMatchObject({ code: "STILL_LOADING", title: "", silent: true, retryable: false });
+    expect(d).toMatchObject({
+      code: "STILL_LOADING",
+      title: "Silo is still loading your library. Try again in a moment.",
+      silent: true,
+      retryable: true,
+    });
+  });
+
+  it("classifies archive-move refusals without a code as MOVE_UNFINISHED", () => {
+    for (const msg of [
+      "Finish or cancel the archive move first.",
+      "An archive move is already running.",
+      "An archive move is already unfinished — resume or cancel it first.",
+      "Silo is moving your library archive — pause the move to play.",
+    ]) {
+      expect(classifyMessage(msg)).toBe("MOVE_UNFINISHED");
+      expect(describeError(msg).retryable).toBe(false);
+    }
   });
 
   it("OTHER and codes this build doesn't know read as UNKNOWN, keeping the raw code in detail", () => {
@@ -184,7 +204,6 @@ describe("body line for errors without copy (#228)", () => {
       "boom\n    at foo (bar.js:1:2)",
       "C:\\Users\\me\\mods\\FS25_X.zip",
       "/home/me/mods/FS25_X.zip",
-      "x".repeat(241),
     ];
     for (const msg of cases) expect(describeError(msg, "Saving").body).toBeUndefined();
   });
@@ -195,9 +214,30 @@ describe("body line for errors without copy (#228)", () => {
     expect(describeError("Access is denied. (os error 5)").body).toBeUndefined();
   });
 
+  it("a long human message keeps its body, cut on a word boundary (the full text is in detail)", () => {
+    const words = "Silo couldn't finish linking these mods because the folder changed while it worked ";
+    const long = words.repeat(5).trim();
+    expect(long.length).toBeGreaterThan(HUMAN_COPY_MAX);
+    const d = describeError(long, "Saving");
+    expect(d.body!.endsWith("…")).toBe(true);
+    expect(d.body!.length).toBeLessThanOrEqual(HUMAN_COPY_MAX + 1);
+    // Cut between words: what's kept is a prefix of the message ending in a whole word.
+    const kept = d.body!.slice(0, -1);
+    expect(long.startsWith(kept)).toBe(true);
+    expect(long[kept.length]).toBe(" ");
+    expect(d.detail.message).toBe(long);
+  });
+
+  it("truncateWords: short text unchanged, no space to cut at falls back to a hard cut", () => {
+    expect(truncateWords("Short.")).toBe("Short.");
+    expect(truncateWords("x".repeat(300))).toBe(`${"x".repeat(HUMAN_COPY_MAX)}…`);
+    expect(truncateWords("aaaa bbbb, cccc", 11)).toBe("aaaa bbbb…");
+  });
+
   it("looksLikeHumanCopy: the rule on its own", () => {
     expect(looksLikeHumanCopy("Couldn't link FS25_X: the file changed.")).toBe(true);
     expect(looksLikeHumanCopy("x".repeat(240))).toBe(true);
+    expect(looksLikeHumanCopy("word ".repeat(100))).toBe(true);
     expect(looksLikeHumanCopy("   ")).toBe(false);
     expect(looksLikeHumanCopy("C:\\mods")).toBe(false);
   });

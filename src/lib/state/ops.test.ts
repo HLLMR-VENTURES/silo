@@ -1,9 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { activity, clearActivity } from "./activity.svelte";
-import { blocked, current, running, start, tryStart } from "./ops.svelte";
+import {
+  blocked,
+  blockedForeground,
+  current,
+  onIdle,
+  resetIdleWaiters,
+  running,
+  start,
+  statusLineOp,
+  tryStart,
+} from "./ops.svelte";
 
 afterEach(() => {
   running.length = 0;
+  resetIdleWaiters();
   clearActivity();
   vi.useRealTimers();
 });
@@ -75,5 +86,65 @@ describe("ops", () => {
     vi.setSystemTime(1_002_500);
     op.end();
     expect(activity[0]).toMatchObject({ kind: "op", level: "info", message: "Organizing", durationMs: 2500 });
+  });
+
+  it("a background op refuses writes but doesn't block the foreground (navigation, scans)", () => {
+    const move = start("Moving your library", { exclusive: "library-write", background: true });
+    expect(blocked("library-write")).toEqual({ blocked: true, reason: "Silo is moving your library." });
+    expect(blockedForeground("library-write")).toEqual({ blocked: false, reason: "" });
+    // A second write still can't start while the move holds the class.
+    expect(tryStart("Filing 3 mods", { exclusive: "library-write" })).toBeNull();
+    // A foreground write held beside it does count.
+    const backup = start("Backing up Save 1", { exclusive: "library-write" });
+    expect(blockedForeground("library-write").reason).toBe("Silo is backing up Save 1.");
+    backup.end();
+    expect(blockedForeground("library-write").blocked).toBe(false);
+    move.end();
+    expect(blocked("library-write").blocked).toBe(false);
+  });
+
+  it("quiet and background ops stay out of the activity log and the status line", () => {
+    const scan = start("Rescanning your library", { quiet: true });
+    const move = start("Moving your library", { exclusive: "library-write", background: true, quiet: true });
+    const check = start("Checking for updates");
+    expect(statusLineOp()?.label).toBe("Checking for updates");
+    scan.end();
+    move.end();
+    check.end();
+    expect(activity.map((a) => a.message)).toEqual(["Checking for updates"]);
+    expect(statusLineOp()).toBeNull();
+  });
+
+  it("statusLineOp prefers the newest non-quiet library write", () => {
+    start("Checking for updates");
+    start("Filing 3 mods", { exclusive: "library-write" });
+    start("Rescanning", { quiet: true });
+    expect(statusLineOp()?.label).toBe("Filing 3 mods");
+  });
+
+  it("onIdle runs once the last foreground holder ends, not for a background one", async () => {
+    const fn = vi.fn();
+    const move = start("Moving your library", { exclusive: "library-write", background: true });
+    const write = start("Filing 3 mods", { exclusive: "library-write" });
+    onIdle("library-write", fn);
+    await Promise.resolve();
+    expect(fn).not.toHaveBeenCalled();
+    write.end();
+    expect(fn).not.toHaveBeenCalled(); // on a microtask, after the ending write's own follow-up
+    await Promise.resolve();
+    expect(fn).toHaveBeenCalledTimes(1);
+    // One-shot: a later write ending doesn't run it again.
+    start("Again", { exclusive: "library-write" }).end();
+    await Promise.resolve();
+    expect(fn).toHaveBeenCalledTimes(1);
+    move.end();
+  });
+
+  it("onIdle with the class already free runs on the next microtask", async () => {
+    const fn = vi.fn();
+    onIdle("library-write", fn);
+    expect(fn).not.toHaveBeenCalled();
+    await Promise.resolve();
+    expect(fn).toHaveBeenCalledTimes(1);
   });
 });

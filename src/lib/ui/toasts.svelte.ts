@@ -4,8 +4,9 @@
 //   t.dismiss();
 // Toasts never take focus, and their buttons are inert while a dialog is open. Their timer pauses
 // while hovered or focused and while the window is in the background, so nobody misses one by
-// alt-tabbing. At most MAX_VISIBLE_TOASTS show at once; the rest wait their turn (FIFO). A toast
-// with the same `dedupeKey` as one already waiting or showing bumps its count ("×3") instead.
+// alt-tabbing. At most MAX_VISIBLE_TOASTS errors show at once, plus at least one other toast (the
+// newest always shows); the rest wait their turn (FIFO). A toast with the same `dedupeKey` as one
+// already waiting or showing bumps its count ("×3") instead.
 // Every toast is also written to the activity log. Errors go through `error()` in
 // src/lib/state/notify.svelte.ts, which sets `sticky`, `detail` and `dedupeKey`.
 
@@ -56,7 +57,10 @@ export interface ToastHandle {
   dismiss(): void;
 }
 
-/** Most toasts on screen at once. */
+/**
+ * Most sticky (error) toasts on screen at once. Non-sticky toasts fill the slots errors leave
+ * free, and always get at least one, so up to MAX_VISIBLE_TOASTS + 1 can show.
+ */
 export const MAX_VISIBLE_TOASTS = 3;
 
 const LEVEL: Record<ToastTone, ActivityLevel> = {
@@ -71,9 +75,20 @@ let nextId = 1;
 /** Toasts on screen or waiting, oldest first. Reactive; mutate only through `toast()` / `dismissToast()`. */
 export const toasts: ToastItem[] = $state([]);
 
-/** The toasts on screen now (the first MAX_VISIBLE_TOASTS). Reactive. */
+/**
+ * The toasts on screen now, oldest first: the first MAX_VISIBLE_TOASTS sticky ones, and
+ * non-sticky ones in the slots left (at least one). The newest non-sticky toast is always among
+ * them, so errors on screen never hide an Undo. Reactive.
+ */
 export function visibleToasts(): ToastItem[] {
-  return toasts.slice(0, MAX_VISIBLE_TOASTS);
+  const sticky = toasts.filter((t) => t.sticky).slice(0, MAX_VISIBLE_TOASTS);
+  const plain = toasts.filter((t) => !t.sticky);
+  const slots = Math.max(1, MAX_VISIBLE_TOASTS - sticky.length);
+  let shownPlain = plain.slice(0, slots);
+  const newest = plain.at(-1);
+  if (newest && !shownPlain.includes(newest)) shownPlain = [...shownPlain.slice(0, slots - 1), newest];
+  const shown = new Set([...sticky, ...shownPlain]);
+  return toasts.filter((t) => shown.has(t));
 }
 
 /**
@@ -86,7 +101,7 @@ export function toast(opts: ToastOptions): ToastHandle {
     const same = toasts.find((t) => t.dedupeKey === opts.dedupeKey);
     if (same) {
       same.count += 1;
-      bumpActivity(same.activityId);
+      same.activityId = bumpActivity(same.activityId);
       const sameId = same.id;
       return { dismiss: () => dismissToast(sameId) };
     }

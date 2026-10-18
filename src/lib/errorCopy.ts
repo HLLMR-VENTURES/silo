@@ -24,19 +24,21 @@ export interface DescribedError {
   /** The sentence shown to the user. Empty when `silent`. */
   title: string;
   /** A second line under the title: the raw message, when an error Silo has no copy for
-   *  (UNKNOWN) already reads as a sentence meant for people. Otherwise absent (the raw text
-   *  stays behind "Copy details"). */
+   *  (UNKNOWN) already reads as a sentence meant for people, cut to about HUMAN_COPY_MAX
+   *  characters on a word boundary. Otherwise absent (the raw text stays behind "Copy details"). */
   body?: string;
   detail: ErrorDetail;
   /** Trying the same thing again can work (show "Try again" when a retry is offered). */
   retryable: boolean;
-  /** Never shown to the user (STILL_LOADING: the UI simply waits). Still logged. */
+  /** Background work says nothing about it (STILL_LOADING: the UI simply waits); a user's own
+   *  action still shows the title. Always logged. */
   silent: boolean;
 }
 
 export const ERROR_CODES = [
   "STILL_LOADING",
   "LIBRARY_BUSY",
+  "MOVE_UNFINISHED",
   "GAME_RUNNING",
   "UNKNOWN",
   "FILE_IN_USE",
@@ -56,6 +58,7 @@ export const ERROR_CODES = [
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
 const RETRYABLE: ReadonlySet<string> = new Set([
+  "STILL_LOADING",
   "FILE_IN_USE",
   "GAME_RUNNING",
   "LIBRARY_BUSY",
@@ -96,6 +99,13 @@ export function classifyMessage(msg: string): ErrorCode {
   if (os) {
     const code = OS_ERRORS[Number(os[1])];
     if (code) return code;
+  }
+  if (
+    /finish or cancel the (?:archive|library) move first|archive move is already|already unfinished|pause the move to play/i.test(
+      msg,
+    )
+  ) {
+    return "MOVE_UNFINISHED";
   }
   if (/rate limit/i.test(msg)) return "GITHUB_RATE_LIMIT";
   if (/bad credentials/i.test(msg) || (/\b401\b/.test(msg) && /github/i.test(msg))) {
@@ -147,6 +157,8 @@ function copyFor(code: ErrorCode, message: string, op: string): string {
       return "Close Farming Simulator 25 first, then try again.";
     case "LIBRARY_BUSY":
       return "Silo is finishing another change to your library. Try again in a moment.";
+    case "MOVE_UNFINISHED":
+      return MOVE_UNFINISHED_COPY;
     case "ARCHIVE_UNAVAILABLE":
       return "Your library archive isn't available. Connect the drive, or choose another folder.";
     case "PERMISSION_DENIED":
@@ -172,26 +184,44 @@ function copyFor(code: ErrorCode, message: string, op: string): string {
     case "DB_NEWER":
       return "This library was used by a newer Silo. Install the latest Silo to open it.";
     case "STILL_LOADING":
-      return "";
+      return "Silo is still loading your library. Try again in a moment.";
     case "UNKNOWN":
       return `Something went wrong while ${op ? lowerFirst(op) : "doing that"}.`;
   }
 }
 
+/** What Silo says when a library write is refused because an archive move is paused/unfinished. */
+export const MOVE_UNFINISHED_COPY =
+  "Finish or cancel the library move first. You can resume or cancel it from the notice at the top.";
+
 const KNOWN: ReadonlySet<string> = new Set(ERROR_CODES);
 
-/** Longest raw message shown as a body line. */
+/** Longest raw message shown as a body line; longer ones are cut (the rest stays in Copy details). */
 export const HUMAN_COPY_MAX = 240;
+
+/**
+ * Cut `text` to about `max` characters, on a word boundary when there is one, adding "…".
+ * @param text the text
+ * @param max the most characters kept before the ellipsis
+ */
+export function truncateWords(text: string, max: number = HUMAN_COPY_MAX): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  // The cut already ends a word when the next character is a space.
+  const space = /\s/.test(text[max]) ? max : cut.search(/\s\S*$/);
+  const kept = space >= max * 0.6 ? cut.slice(0, space) : cut;
+  return `${kept.replace(/[\s,;:.\-]+$/, "")}…`;
+}
 
 /**
  * Whether a raw error message reads as copy written for people ("Close FS25 first.") rather
  * than technical text: no OS error number, no `Error:` prefix, no stack-trace lines, not just a
- * path, at most HUMAN_COPY_MAX characters.
+ * path. Long ones still count; describeError cuts them with truncateWords.
  * @param msg the raw message
  */
 export function looksLikeHumanCopy(msg: string): boolean {
   const m = msg.trim();
-  if (!m || m.length > HUMAN_COPY_MAX) return false;
+  if (!m) return false;
   if (/\(os error\b/i.test(m)) return false;
   if (/^[\w.]*error:/i.test(m)) return false;
   if (/^\s*at\s/m.test(m)) return false;
@@ -217,7 +247,9 @@ export function describeError(e: unknown, op?: string): DescribedError {
   // a bug's own words ("Cannot read properties of undefined"), never shown as copy.
   const fromCode = !(e instanceof Error) || e instanceof AppError;
   const body =
-    code === "UNKNOWN" && fromCode && looksLikeHumanCopy(err.message) ? err.message.trim() : undefined;
+    code === "UNKNOWN" && fromCode && looksLikeHumanCopy(err.message)
+      ? truncateWords(err.message.trim())
+      : undefined;
   return {
     code,
     title: copyFor(code, err.message, opText),

@@ -116,16 +116,20 @@
   import { parseUiScale, type UiScale } from "./lib/uiScale";
   import {
     blocked,
+    blockedForeground,
     current as currentOp,
-    running,
     start,
+    statusLineOp,
     tryStart,
     type OpToken,
   } from "./lib/state/ops.svelte";
-  import { describeError } from "./lib/errorCopy";
+  import { rescanGate } from "./lib/state/rescanGate";
+  import { describeError, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
   import {
     info,
+    inlineError,
     reportError,
+    setNotice,
     success,
     syncNotice,
   } from "./lib/state/notify.svelte";
@@ -241,31 +245,57 @@
   let editing = $state<{ techName: string; x: number; y: number } | null>(null);
   let activeSet = $state<Set<string>>(new Set());
   // Library writes hold the "library-write" op class, one at a time: a second is refused with the
-  // reason, and the controls that start one are off (titled with that reason) while it's held.
+  // reason. `writeLock` counts every holder (the archive move too) and turns off the controls
+  // that write; `fgLock` leaves out background ops (the archive move), so navigation, Settings,
+  // read-only panels and scans stay usable during a move. Writes started from those still refuse
+  // in beginWrite.
   const writeLock = $derived(blocked("library-write"));
-  /** Ops whose progress shows elsewhere (the scan bar, the move notice), not in the status line. */
-  const quietOps = new Set<number>();
-  /** The op the status line under the top bar names: the newest library write, else the newest op. */
-  const statusOp = $derived.by(() => {
-    const shown = running.filter((o) => !quietOps.has(o.id));
-    return shown.findLast((o) => o.exclusive) ?? shown.at(-1) ?? null;
-  });
-  /**
-   * Start a library write, or say why it can't start now.
-   * @param label what Silo is doing, fits "Silo is …" ("Filing 3 mods into the library")
-   * @return the op's token (end it before rescanning), or null when another write holds the class
-   */
-  function beginWrite(label: string, progress = false): OpToken | null {
-    const op = tryStart(label, { exclusive: "library-write", progress });
-    if (!op) info(`${blocked("library-write").reason} Try again when it's done.`);
-    return op;
-  }
+  const fgLock = $derived(blockedForeground("library-write"));
+  /** The op the status line under the top bar names (quiet ops show their progress elsewhere). */
+  const statusOp = $derived(statusLineOp());
   /** Say why something the user asked for can't happen right now (nothing failed). */
   function refuse(why: string) {
     toast({ message: why, tone: "warn" });
   }
+  /**
+   * Start a library write, or say why it can't start now.
+   * @param label what Silo is doing, fits "Silo is …" ("Filing 3 mods into the library")
+   * @param progress show a progress bar for it
+   * @param opts `silent`: refuse without a toast (background work that retries on its own);
+   *   `duringMove`: it doesn't touch the library archive (a savegame backup), so a running or
+   *   paused archive move doesn't stop it; only a foreground write does
+   * @return the op's token (end it before rescanning), or null when refused
+   */
+  function beginWrite(
+    label: string,
+    progress = false,
+    opts: { silent?: boolean; duringMove?: boolean } = {},
+  ): OpToken | null {
+    const say = (why: string) => {
+      if (!opts.silent) refuse(why);
+    };
+    if (opts.duringMove) {
+      const fg = blockedForeground("library-write");
+      if (fg.blocked) {
+        say(`${fg.reason} Try again when it's done.`);
+        return null;
+      }
+      return start(label, { exclusive: "library-write", progress });
+    }
+    // A paused (or otherwise unfinished) move: nothing changes the library until it's resumed
+    // and finished, or cancelled. A running one holds the class itself (below).
+    if (archiveMove.unfinished && !archiveMove.running) {
+      say(MOVE_UNFINISHED_COPY);
+      return null;
+    }
+    const op = tryStart(label, { exclusive: "library-write", progress });
+    if (!op) say(`${blocked("library-write").reason} Try again when it's done.`);
+    return op;
+  }
   /** The scan's own notice (it failed, or recovery left problems). A scan touches no other key. */
   const SCAN_KEY = "scan";
+  /** What Silo did while starting (e.g. restored the database), until dismissed. */
+  const STARTUP_KEY = "startup";
   // Mods folder is on a cloud-sync filesystem that can't do hardlinks → Silo uses copies.
   let cloudSynced = $state(false);
   let cloudNoticeOpen = $state(false);
@@ -585,7 +615,7 @@
         })),
       );
     } catch (e) {
-      reportError(e, "Checking for conflicts");
+      reportError(e, "Checking for conflicts", { background: true });
     }
   }
 
@@ -613,7 +643,7 @@
     try {
       savegames = await getSavegames();
     } catch (e) {
-      reportError(e, "Reading your savegames");
+      reportError(e, "Reading your savegames", { background: true });
     }
   }
 
@@ -670,8 +700,9 @@
   }
 
   async function backupSave(s: Savegame) {
-    // Held as a write like before (it copies files): nothing else changes them meanwhile.
-    const op = beginWrite(`Backing up ${s.name}`);
+    // Held as a write like before (it copies files): nothing else changes them meanwhile. It
+    // never touches the library archive, so an archive move doesn't stop it.
+    const op = beginWrite(`Backing up ${s.name}`, false, { duringMove: true });
     if (!op) return;
     try {
       await backupSavegame(s.folder);
@@ -845,7 +876,7 @@
     try {
       loadouts = await getLoadouts();
     } catch (e) {
-      reportError(e, "Loading your loadouts", { retry: loadLoadouts });
+      reportError(e, "Loading your loadouts", { retry: loadLoadouts, background: true });
     }
   }
 
@@ -1057,13 +1088,16 @@
     }
     const op = beginWrite(turningOff ? "Parking a mod" : "Activating a mod");
     if (!op) return;
+    const before = activeSet;
     const next = new Set(activeSet);
     if (next.has(techName)) next.delete(techName);
     else next.add(techName);
-    activeSet = next;
+    activeSet = next; // optimistic: the switch moves at once
     try {
       await applyActive([...next]);
     } catch (e) {
+      // Nothing was applied: put the switch back (unless something else set the mods since).
+      if (activeSet === next) activeSet = before;
       reportError(e, "Changing which mods are active");
     } finally {
       op.end();
@@ -1073,12 +1107,16 @@
   // Resolve a foreign file (a mod-folder file that isn't Silo's projection — typically a newer
   // build the user dropped in to update). Adopt = promote it to the managed copy; restore = put
   // Silo's copy back. Shared by the health panel and the mod drawer's "you dropped an update" banner.
-  async function resolveForeign(fileName: string, action: "adopt" | "restore") {
+  // Returns true when it worked; false when it was refused (another write) or failed, so the
+  // drawer stays open.
+  async function resolveForeign(fileName: string, action: "adopt" | "restore"): Promise<boolean> {
     const op = beginWrite(action === "adopt" ? "Adopting the dropped build" : "Restoring Silo's copy");
-    if (!op) return;
+    if (!op) return false;
+    let done = false;
     try {
       if (action === "adopt") await adoptForeignFile(fileName);
       else await restoreForeignFile(fileName);
+      done = true;
     } catch (e) {
       reportError(e, action === "adopt" ? "Adopting the dropped build" : "Restoring Silo's copy");
     } finally {
@@ -1086,6 +1124,7 @@
     }
     await runScan(false);
     foreignFiles = await detectForeignFiles(roots[0]).catch(() => []);
+    return done;
   }
 
   // Build the organize inputs for every loose (unorganized) zip currently in view.
@@ -1104,10 +1143,18 @@
   }
 
   // Apply a prepared set of organize inputs. `keepActive` re-projects them so their
-  // loaded state is preserved (used by both the auto-filer and the manual button).
-  async function applyLoose(inputs: ModInput[], techNames: string[], keepActive: boolean) {
+  // loaded state is preserved (used by both the auto-filer and the manual button). `auto`: the
+  // auto-filer, which says nothing when another write is running (the next scan retries).
+  async function applyLoose(
+    inputs: ModInput[],
+    techNames: string[],
+    keepActive: boolean,
+    auto = false,
+  ) {
     if (inputs.length === 0) return;
-    const op = beginWrite(`Filing ${modsCount(inputs.length)} into the library`);
+    const op = beginWrite(`Filing ${modsCount(inputs.length)} into the library`, false, {
+      silent: auto,
+    });
     if (!op) return;
     /** What went wrong: the thrown error (keeps its code), or the report's problems. */
     let problem: unknown = null;
@@ -1144,7 +1191,7 @@
   // Auto-filer (opt-in): file new mods and keep them active — no prompt, they chose it.
   async function autoFile() {
     const { inputs, techNames } = looseInputs();
-    await applyLoose(inputs, techNames, true);
+    await applyLoose(inputs, techNames, true, true);
   }
 
   // ── Manual "Organize N" button → dry-run preview → confirm ───────────────────
@@ -1211,16 +1258,20 @@
   async function rebuildLibrary() {
     const op = beginWrite("Clearing the scan cache");
     if (!op) return;
+    // The write is held through the rescan, so nothing changes the library until it has been
+    // read again. The status line names it: it re-reads every mod, so it takes a while.
     try {
-      await clearScanCache();
-    } catch (e) {
-      reportError(e, "Clearing the scan cache", { retry: rebuildLibrary });
-      return;
+      try {
+        await clearScanCache();
+      } catch (e) {
+        reportError(e, "Clearing the scan cache", { retry: rebuildLibrary });
+        return;
+      }
+      op.setLabel("Rebuilding your library (re-scanning every mod)");
+      await runScan(false, undefined, true);
     } finally {
       op.end();
     }
-    // The scan names itself in the status line: it re-reads every mod, so it takes a while.
-    await runScan(false, "Rebuilding your library (re-scanning every mod)");
   }
 
   async function restoreVanilla() {
@@ -1391,7 +1442,7 @@
       for (const r of rows) (m[r.techName] ??= []).push(r.tag);
       tagMap = m;
     } catch (e) {
-      reportError(e, "Loading your tags");
+      reportError(e, "Loading your tags", { background: true });
     }
   }
 
@@ -1402,7 +1453,7 @@
       const rows = await getModRepos();
       repoMap = Object.fromEntries(rows.map((r) => [r.techName, { owner: r.owner, repo: r.repo }]));
     } catch (e) {
-      reportError(e, "Loading linked GitHub repos");
+      reportError(e, "Loading linked GitHub repos", { background: true });
     }
   }
 
@@ -1414,7 +1465,7 @@
       const rows = await getModSources();
       sourceMap = Object.fromEntries(rows.map((r) => [r.techName, r]));
     } catch (e) {
-      reportError(e, "Loading saved source pages");
+      reportError(e, "Loading saved source pages", { background: true });
     }
   }
   function setSource(techName: string, row: SourceRow | null) {
@@ -1504,7 +1555,7 @@
         row.source = "github";
         row.error = undefined;
       } catch (e) {
-        if (!rows.has(techName)) row.error = String(e);
+        if (!rows.has(techName)) row.error = inlineError(e, "Checking for an update");
       }
       rows.set(techName, row);
       updateResults = [...rows.values()];
@@ -1962,19 +2013,24 @@
     },
   });
 
-  // A running move holds the library-write class, so other writes wait and say why. It ends as
-  // soon as the move stops running (finished or paused), before the move's settle rescans.
-  // The move's own notice shows its progress, so the status line leaves it out.
+  // A running move holds the library-write class, so other writes refuse and say why. It ends
+  // as soon as the move stops running (finished or paused), before the move's settle rescans.
+  // It's a background op: navigation, Settings, read-only panels and scans stay usable while it
+  // runs (fgLock leaves it out). The move's own notice shows its progress, so it's quiet too
+  // (no status line, no activity entry).
   let moveOp: OpToken | null = null;
   $effect(() => {
     const isRunning = archiveMove.running;
     untrack(() => {
       if (isRunning && !moveOp) {
-        moveOp = start("Moving your library", { exclusive: "library-write", progress: true });
-        quietOps.add(moveOp.id);
+        moveOp = start("Moving your library", {
+          exclusive: "library-write",
+          progress: true,
+          background: true,
+          quiet: true,
+        });
       } else if (!isRunning && moveOp) {
         moveOp.end();
-        quietOps.delete(moveOp.id);
         moveOp = null;
       }
     });
@@ -2200,6 +2256,7 @@
   // the one-time "Silo now follows FS25's folder".
   $effect(() => {
     const n = modsFolderNotices(modsStatus, overrideNoticeOpen, {
+      retryBlocked: fgLock.reason,
       retry: retryModsFolder,
       chooseAnother: changeModsFolder,
       useGameFolder,
@@ -2253,17 +2310,24 @@
     );
   });
 
+  /** Scans skipped behind a foreground write collapse into one rescan when it ends. */
+  const scanGate = rescanGate((auto) => void runScan(auto));
+
   /**
-   * Rescan the library. Skipped (not queued) while a library write runs: every write rescans
-   * once it's done. A scan doesn't hold the write class itself, so the controls don't flicker
-   * off on every focus rescan; the ones that must wait for a scan check `scanning`.
+   * Rescan the library. While a foreground library write runs, one rescan is queued for when it
+   * ends instead (writes rescan once they're done; the queued one covers startup, folder
+   * switches and the like). A background op (the archive move) never holds a scan back. A scan
+   * doesn't hold the write class itself, so the controls don't flicker off on every focus
+   * rescan; the ones that must wait for a scan check `scanning`.
    * @param auto allow auto-filing afterwards
    * @param label names the scan in the status line (a plain rescan only shows the progress bar)
+   * @param heldByCaller the caller holds the write class for this scan (rebuild, bisect
+   *   restore): don't wait for it
    */
-  async function runScan(auto = true, label?: string) {
-    if (scanning || writeLock.blocked) return;
-    const op = start(label ?? "Rescanning your library");
-    if (!label) quietOps.add(op.id);
+  async function runScan(auto = true, label?: string, heldByCaller = false) {
+    if (scanning) return;
+    if (!scanGate.admit(auto, heldByCaller)) return; // queued until the write ends
+    const op = start(label ?? "Rescanning your library", { quiet: !label });
     scanOp = op;
     scanning = true;
     progress = { done: 0, total: 0 };
@@ -2315,7 +2379,6 @@
       scanning = false;
       lastScanAt = Date.now();
       op.end();
-      quietOps.delete(op.id);
       scanOp = null;
     }
     // Auto-file any mods still loose in the flat root (e.g. freshly downloaded),
@@ -2368,7 +2431,7 @@
         checkUpdate().then((u) => (update = u));
         settingsModsSet = new Set(await modsWithSettings());
       } catch (e) {
-        reportError(e, "Starting Silo");
+        reportError(e, "Starting Silo", { background: true });
       }
       try {
         modsStatus = await modsRootStatus();
@@ -2379,7 +2442,7 @@
           overrideNoticeOpen = true;
         }
       } catch (e) {
-        reportError(e, "Reading the mods folder setting", { retry: retryModsFolder });
+        reportError(e, "Reading the mods folder setting", { retry: retryModsFolder, background: true });
       }
       // Where the library archive lives, and any unfinished move (paused before a restart).
       // Awaited when there is a folder to scan, so the first scan's auto-file guard sees a move
@@ -2388,8 +2451,11 @@
       const archiveReady = archiveMove.load();
       if (roots.length) await archiveReady;
       try {
+        // e.g. the library database was restored from a backup: worth reading, so it stays up
+        // until dismissed.
         const notes = await takeStartupNotices();
-        if (notes.length) info(notes.join(" "), { duration: 15_000 });
+        if (notes.length)
+          setNotice({ key: STARTUP_KEY, level: "info", title: notes.join(" "), dismissible: true });
       } catch {
         /* non-critical */
       }
@@ -2482,20 +2548,23 @@
     if (!bisectRecovery) return;
     const op = beginWrite("Restoring your mod set");
     if (!op) return;
-    let restored = false;
+    // Held through the rescan, so the library shows the restored set before anything else runs.
     try {
-      // Clears even if the report lists errors (applyActive shows them): this banner is the
-      // escape hatch, and keeping the snapshot would block every new bisection for good.
-      await applyActive(bisectRecovery);
-      await bisectSnapshotClear();
-      bisectRecovery = null;
-      restored = true;
-    } catch (e) {
-      reportError(e, "Restoring your mod set", { retry: restoreBisect });
+      let restored = false;
+      try {
+        // Clears even if the report lists errors (applyActive shows them): this banner is the
+        // escape hatch, and keeping the snapshot would block every new bisection for good.
+        await applyActive(bisectRecovery);
+        await bisectSnapshotClear();
+        bisectRecovery = null;
+        restored = true;
+      } catch (e) {
+        reportError(e, "Restoring your mod set", { retry: restoreBisect });
+      }
+      if (restored) await runScan(false, undefined, true);
     } finally {
       op.end();
     }
-    if (restored) await runScan(false);
   }
 
   /** Forget an interrupted bisection without restoring it (asked first: it can't be undone). */
@@ -2540,7 +2609,7 @@
     hasMods={mods.length > 0}
     {updateChecking}
     {scanning}
-    lockReason={writeLock.reason}
+    lockReason={fgLock.reason}
     launchBlocked={archiveMove.running}
     organizeBlocked={archiveMove.unfinished}
     hasGame={!!gameInfo}
@@ -2559,7 +2628,7 @@
   />
 
   {#if loadoutsOpen}
-    <ViewBoundary name="Loadouts">
+    <ViewBoundary name="Loadouts" overlay onClose={() => (loadoutsOpen = false)}>
       <LoadoutsPanel
         {loadouts}
         activeCount={activeSet.size}
@@ -2576,10 +2645,10 @@
   {/if}
 
   {#if savesOpen}
-    <ViewBoundary name="Savegames">
+    <ViewBoundary name="Savegames" overlay onClose={() => (savesOpen = false)}>
       <SavegamesPanel
         rows={saveRows}
-        lockReason={writeLock.reason}
+        lockReason={fgLock.reason}
         onConfigure={openSaveConfig}
         onBackup={backupSave}
         onLoadout={loadoutFromSave}
@@ -2589,7 +2658,7 @@
   {/if}
 
   {#if conflictsOpen}
-    <ViewBoundary name="Conflicts">
+    <ViewBoundary name="Conflicts" overlay onClose={() => (conflictsOpen = false)} bodyText="Your mods weren't changed.">
       <ConflictsPanel
         {conflicts}
         {criticalCount}
@@ -2600,7 +2669,7 @@
   {/if}
 
   {#if settingsOpen}
-    <ViewBoundary name="Settings">
+    <ViewBoundary name="Settings" overlay onClose={() => (settingsOpen = false)}>
       <SettingsPanel
         {theme}
         {uiScale}
@@ -2612,7 +2681,7 @@
         {organizedCount}
         {unorganizedCount}
         {cloudSynced}
-        lockReason={writeLock.reason}
+        lockReason={fgLock.reason}
         {scanning}
         onSetTheme={setTheme}
         onSetUiScale={setUiScale}
@@ -2645,7 +2714,7 @@
   {/if}
 
   {#if settingsMod}
-    <ViewBoundary name="Mod settings">
+    <ViewBoundary name="Mod settings" overlay onClose={() => (settingsMod = null)}>
       <ModSettings
         modName={settingsMod.techName}
         title={settingsMod.title}
@@ -2655,7 +2724,7 @@
   {/if}
 
   {#if configEditor}
-    <ViewBoundary name="the settings editor">
+    <ViewBoundary name="the settings editor" overlay onClose={() => (configEditor = null)}>
       <ConfigEditor
         title={configEditor.title}
         path={configEditor.path}
@@ -2670,7 +2739,7 @@
   {#if detailMod}
     {@const dm = detailMod}
     {@const fgn = foreignFiles.find((f) => f.techName === dm.techName) ?? null}
-    <ViewBoundary name="the mod details">
+    <ViewBoundary name="the mod details" overlay onClose={() => (detailMod = null)}>
       <ModDetail
         mod={dm}
         curation={cur(dm.techName)}
@@ -2680,16 +2749,10 @@
         hasSettings={settingsModsSet.has(dm.techName)}
         foreign={fgn}
         onAdoptForeign={async () => {
-          if (fgn) {
-            await resolveForeign(fgn.fileName, "adopt");
-            detailMod = null;
-          }
+          if (fgn && (await resolveForeign(fgn.fileName, "adopt"))) detailMod = null;
         }}
         onRestoreForeign={async () => {
-          if (fgn) {
-            await resolveForeign(fgn.fileName, "restore");
-            detailMod = null;
-          }
+          if (fgn && (await resolveForeign(fgn.fileName, "restore"))) detailMod = null;
         }}
         {libraryTechNames}
         {conflicts}
@@ -2727,12 +2790,12 @@
   {/if}
 
   {#if updatesOpen}
-    <ViewBoundary name="Updates">
+    <ViewBoundary name="Updates" overlay onClose={() => (updatesOpen = false)}>
       <UpdatesPanel
         {updateResults}
         {availableUpdates}
         {updateChecking}
-        lockReason={writeLock.reason}
+        lockReason={fgLock.reason}
         {checkYourself}
         onInstall={installFromRow}
         onOpenSource={(s) => openExternal(s.url)}
@@ -2743,7 +2806,7 @@
   {/if}
 
   {#if statsOpen}
-    <ViewBoundary name="Library stats">
+    <ViewBoundary name="Library stats" overlay onClose={() => (statsOpen = false)} bodyText="Your mods weren't changed.">
       <StatsPanel
         modCount={mods.length}
         {organizedCount}
@@ -2756,7 +2819,7 @@
   {/if}
 
   {#if healthOpen}
-    <ViewBoundary name="Library health">
+    <ViewBoundary name="Library health" overlay onClose={() => (healthOpen = false)}>
       <HealthPanel
         {health}
         {healthCount}
@@ -2767,7 +2830,12 @@
   {/if}
 
   {#if logOpen}
-    <ViewBoundary name="Diagnose">
+    <ViewBoundary
+      name="Diagnose"
+      overlay
+      onClose={() => (logOpen = false)}
+      bodyText="Your mods are as they were before this view failed. If a diagnosis was running, Silo keeps your place."
+    >
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <div class="backdrop" onclick={() => (logOpen = false)}></div>
       <div class="log-panel">
@@ -2784,7 +2852,7 @@
   {/if}
 
   {#if bindingsOpen}
-    <ViewBoundary name="Bindings">
+    <ViewBoundary name="Bindings" overlay onClose={() => (bindingsOpen = false)} bodyText="Your mods weren't changed.">
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <div class="backdrop" onclick={() => (bindingsOpen = false)}></div>
       <div class="log-panel">
@@ -2794,7 +2862,7 @@
   {/if}
 
   {#if mpOpen}
-    <ViewBoundary name="Multiplayer">
+    <ViewBoundary name="Multiplayer" overlay onClose={() => (mpOpen = false)}>
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <div class="backdrop" onclick={() => (mpOpen = false)}></div>
       <div class="log-panel">
@@ -2804,7 +2872,14 @@
   {/if}
 
   {#if collectionsOpen}
-    <ViewBoundary name="Collections">
+    <ViewBoundary
+      name="Collections"
+      overlay
+      onClose={() => {
+        collectionsOpen = false;
+        collImportUrl = null;
+      }}
+    >
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <div class="backdrop" onclick={() => (collectionsOpen = false)}></div>
       <div class="log-panel">
@@ -2823,7 +2898,7 @@
   {/if}
 
   {#if bridgeOpen}
-    <ViewBoundary name="the filltype bridge">
+    <ViewBoundary name="the filltype bridge" overlay onClose={() => (bridgeOpen = false)}>
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <div class="backdrop" onclick={() => (bridgeOpen = false)}></div>
       <div class="log-panel">
@@ -2843,7 +2918,7 @@
   {/if}
 
   {#if organizePreview}
-    <ViewBoundary name="the Organize preview">
+    <ViewBoundary name="the Organize preview" overlay onClose={() => (organizePreview = null)}>
       <OrganizePreview
         plan={organizePreview.plan}
         loading={organizePreview.loading}
@@ -3068,7 +3143,7 @@
   {/if}
 </div>
 
-<ViewBoundary name="the dialog">
+<ViewBoundary name="the dialog" overlay>
   <DialogHost />
 </ViewBoundary>
 <ToastRegion />

@@ -3,9 +3,13 @@
 //   if (await ask({ title: "Delete mod set?", body: "...", confirm: "Delete", tone: "danger" })) ...
 //   const name = await askText({ title: "Rename", label: "Name", value: old, confirm: "Rename" });
 // Deliberately not named `confirm`, so it never shadows the global (see scripts/check-confirm.mjs).
-// Before the host mounts, requests wait in the queue; check `dialogHostMounted()` to fall back to
-// the OS dialog (`confirmDialog` in api.ts) in code that can run that early.
+// Before the host first mounts, requests wait in the queue; check `dialogHostMounted()` to fall
+// back to the OS dialog (`askOrOs` in confirm.ts) in code that can run that early. If the host
+// was mounted and then went away (its view boundary caught a failure), `ask()` uses the OS dialog
+// and `askText()` gives null with an error toast, so nothing waits on a dialog that can't show.
 import type { Snippet } from "svelte";
+import { confirmDialog } from "../api";
+import { toast } from "./toasts.svelte";
 
 export interface ConfirmFact {
   label: string;
@@ -48,6 +52,8 @@ export type DialogRequest =
 let nextId = 1;
 let queue = $state.raw<DialogRequest[]>([]);
 let hosts = 0;
+/** A host has mounted at least once: no host now means it failed, not that startup is early. */
+let everMounted = false;
 
 /**
  * How long (ms) a confirm or prompt dialog ignores its verb button (click, Enter, Space) after it
@@ -61,6 +67,11 @@ let armDelay = ARM_MS;
 /** The current arm delay in ms (ARM_MS unless a test changed it). */
 export function dialogArmDelay(): number {
   return armDelay;
+}
+
+/** Tests only: forget that a host ever mounted (back to the startup state). */
+export function resetDialogHostHistory(): void {
+  everMounted = false;
 }
 
 /**
@@ -102,13 +113,52 @@ export function dialogHostMounted(): boolean {
   return hosts > 0;
 }
 
+/** The host mounted once and is gone now (its view boundary caught a failure). */
+function hostLost(): boolean {
+  return everMounted && hosts === 0;
+}
+
+/**
+ * The OS-dialog text for a confirmation: title, body, facts and list as plain lines.
+ * A Snippet body can't be shown by the OS dialog and is left out.
+ * @param opts the in-app confirm options
+ * @returns the message for `confirmDialog`
+ */
+export function osConfirmText(opts: ConfirmOptions): string {
+  const parts: string[] = [opts.title];
+  if (typeof opts.body === "string" && opts.body) parts.push(opts.body);
+  if (opts.facts?.length) parts.push(opts.facts.map((f) => `${f.label}: ${f.value}`).join("\n"));
+  if (opts.list?.length) parts.push(opts.list.join("\n"));
+  return parts.join("\n\n");
+}
+
+/**
+ * Ask with the OS dialog, with the same text and labels as the in-app one.
+ * @param opts the in-app confirm options
+ * @returns true only when the confirm (verb) button is pressed; false if the dialog fails
+ */
+export async function askOs(opts: ConfirmOptions): Promise<boolean> {
+  try {
+    return await confirmDialog(osConfirmText(opts), {
+      okLabel: opts.confirm,
+      cancelLabel: opts.cancel ?? "Cancel",
+      kind: opts.tone === "danger" ? "warning" : "info",
+    });
+  } catch (e) {
+    console.error("[Silo] the OS confirm dialog failed", e);
+    return false;
+  }
+}
+
 /**
  * Ask the user to confirm an action.
  * @param opts title, body, facts, list, verb label and tone
- * @returns true only when the confirm button is pressed; Esc, scrim, Cancel or host unmount give false
+ * @returns true only when the confirm button is pressed; Esc, scrim, Cancel or host unmount give
+ *   false. After the host failed, the OS dialog asks instead.
  */
-export function ask(opts: ConfirmOptions): Promise<boolean> {
-  return new Promise((resolve) => {
+export async function ask(opts: ConfirmOptions): Promise<boolean> {
+  if (hostLost()) return await askOs(opts);
+  return await new Promise((resolve) => {
     queue = [...queue, { id: nextId++, kind: "confirm", opts, resolve }];
   });
 }
@@ -119,10 +169,19 @@ export const confirmAction = ask;
 /**
  * Ask the user for a line of text.
  * @param opts title, field label, initial value, verb label, optional validation
- * @returns the trimmed value, or null when cancelled
+ * @returns the trimmed value, or null when cancelled (or, with an error toast, when the host failed)
  */
-export function askText(opts: PromptOptions): Promise<string | null> {
-  return new Promise((resolve) => {
+export async function askText(opts: PromptOptions): Promise<string | null> {
+  if (hostLost()) {
+    toast({
+      message: `Silo couldn't open the "${opts.title}" dialog.`,
+      body: "Reload it from the problem card, then try again.",
+      tone: "danger",
+      sticky: true,
+    });
+    return null;
+  }
+  return await new Promise((resolve) => {
     queue = [...queue, { id: nextId++, kind: "prompt", opts, resolve }];
   });
 }
@@ -145,6 +204,7 @@ export function settleDialog(req: DialogRequest, value: boolean | string | null)
  */
 export function registerDialogHost(): () => void {
   hosts++;
+  everMounted = true;
   return () => {
     hosts--;
     if (hosts > 0) return;

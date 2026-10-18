@@ -108,6 +108,34 @@ describe("NoticeArea", () => {
     const shown = screen.getAllByRole("status").map((s) => s.querySelector(".title")?.textContent);
     expect(shown).toEqual(["Archive drive missing", "Scan finished", "Update available"]);
   });
+
+  it("every blocking notice and every notice with progress stays visible; '+N more' resets", async () => {
+    const user = userEvent.setup();
+    render(NoticeArea);
+    await act(() => {
+      setNotice({ key: "a", level: "blocking", title: "Mods folder missing", dismissible: false });
+      setNotice({ key: "b", level: "blocking", title: "A diagnosis was interrupted", dismissible: false });
+      setNotice({
+        key: "c",
+        level: "info",
+        title: "Moving your library",
+        progress: { done: 1, total: 4, label: "1 of 4 mods" },
+        dismissible: false,
+      });
+      setNotice({ key: "d", level: "info", title: "Database restored", dismissible: true });
+    });
+    expect(screen.getAllByRole("alert")).toHaveLength(2);
+    expect(screen.getByText("Moving your library")).toBeVisible();
+    expect(screen.getByText("Database restored")).not.toBeVisible();
+    await user.click(screen.getByRole("button", { name: "+1 more" }));
+    expect(screen.getByText("Database restored")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Dismiss: Database restored" }));
+    expect(screen.queryByRole("button", { name: /more|Show less/ })).toBeNull();
+    // The next notice to land behind "+N more" starts collapsed.
+    await act(() => setNotice({ key: "e", level: "info", title: "Scan finished", dismissible: true }));
+    expect(screen.getByRole("button", { name: "+1 more" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("Scan finished")).not.toBeVisible();
+  });
 });
 
 describe("ActivityButton", () => {
@@ -169,7 +197,10 @@ describe("ViewBoundary", () => {
     failing.now = true;
     render(BoundaryHarness);
     expect(screen.getByRole("heading", { name: "This part of Silo hit a problem." })).toBeInTheDocument();
-    expect(screen.getByText("Your mods weren't changed.")).toBeInTheDocument();
+    // No claim about the mods unless the view says it can't change any.
+    expect(screen.getByText("Something went wrong showing this part of Silo.")).toBeInTheDocument();
+    expect(screen.queryByText("Your mods weren't changed.")).toBeNull();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(screen.getByRole("button", { name: "Copy details" })).toBeInTheDocument();
     expect(toasts).toEqual([]);
     expect(activity[0]).toMatchObject({ level: "error", message: "Something went wrong while showing Library." });
@@ -181,6 +212,24 @@ describe("ViewBoundary", () => {
     failing.now = false;
     await user.click(screen.getByRole("button", { name: "Reload this view" }));
     expect(screen.getByText("Library content")).toBeInTheDocument();
+  });
+});
+
+describe("ViewBoundary as an overlay", () => {
+  it("shows the failure as a fixed card with Close and Reload, and its own body text", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    failing.now = true;
+    render(BoundaryHarness, { overlay: true, onClose, bodyText: "Your mods weren't changed." });
+    const card = screen.getByRole("alertdialog", { name: "Library hit a problem" });
+    expect(card).toHaveClass("boundary-overlay");
+    expect(within(card).getByText("Your mods weren't changed.")).toBeInTheDocument();
+    await user.click(within(card).getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    failing.now = false;
+    await user.click(within(card).getByRole("button", { name: "Reload this view" }));
+    expect(screen.getByText("Library content")).toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 });
 
@@ -213,9 +262,11 @@ describe("ToastRegion with the message model", () => {
     await act(() => {
       for (let i = 1; i <= 4; i++) info(`Toast ${i}`);
     });
-    expect(screen.queryByText("Toast 4")).toBeNull();
-    await user.click(screen.getAllByRole("button", { name: "Dismiss" })[0]);
+    // The newest always shows; the one before it waits.
     expect(screen.getByText("Toast 4")).toBeInTheDocument();
+    expect(screen.queryByText("Toast 3")).toBeNull();
+    await user.click(screen.getAllByRole("button", { name: "Dismiss" })[0]);
+    expect(screen.getByText("Toast 3")).toBeInTheDocument();
   });
 
   it("errors stay, count repeats, offer Try again and Copy details, in the polite region", async () => {

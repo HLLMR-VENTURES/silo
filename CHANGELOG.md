@@ -30,8 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **One notice area instead of stacked banners.** Warnings like "your mods folder isn't
   available", a library move in progress or an interrupted diagnosis now share one strip under
-  the top bar, most important first, with "+N more" for the rest. Results and one-off problems
-  appear as short notices in the corner instead of a coloured line. (#228)
+  the top bar, most important first, with "+N more" for the rest (red warnings and anything
+  with a progress bar always show). Results and one-off problems appear as short notices in the
+  corner instead of a coloured line; errors never push an Undo notice out of view. Messages from
+  startup, such as "your library database was restored", stay until you close them. (#228)
 
 - **Plain-English error messages.** When something fails, Silo says what went wrong and what to
   do about it ("another program is using FS25_X.zip, close it and try again") instead of the raw
@@ -41,7 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Controls say why they're unavailable.** While Silo is changing your library, the buttons that
   would start another change are off and, when you point at them, say what Silo is busy with. A
   second change started some other way is refused with the same reason instead of overlapping
-  the first. (#228)
+  the first. A library move only blocks other changes: Settings, Savegames (including Back up),
+  Loadouts, Collections, Multiplayer, Updates and Rescan stay usable while it runs, and a paused
+  move says "Finish or cancel the library move first" when you try a change. (#228)
 
 - **Sharper text and better contrast.** Secondary text, warnings, links and buttons are easier to
   read in both the light and dark themes, and nothing is smaller than 12 px. (#224)

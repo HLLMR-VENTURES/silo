@@ -6,7 +6,7 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
 }));
 import { invoke as rawInvoke } from "@tauri-apps/api/core";
 import { AppError } from "../errors";
-import { dismissToast, MAX_VISIBLE_TOASTS, toasts, visibleToasts } from "../ui/toasts.svelte";
+import { dismissToast, MAX_VISIBLE_TOASTS, toast, toasts, visibleToasts } from "../ui/toasts.svelte";
 import {
   action,
   activity,
@@ -127,18 +127,66 @@ describe("toasts", () => {
     expect(toasts).toHaveLength(2);
   });
 
-  it("silent codes show nothing", () => {
+  it("STILL_LOADING: silent for background work, a retryable toast for a user's action", () => {
     vi.spyOn(console, "info").mockImplementation(() => {});
-    expect(error(new AppError("STILL_LOADING", "loading"))).toBeNull();
+    expect(error(new AppError("STILL_LOADING", "loading"), { background: true })).toBeNull();
     expect(toasts).toEqual([]);
     expect(activity).toEqual([]);
+    const retry = vi.fn();
+    expect(error(new AppError("STILL_LOADING", "loading"), { op: "Activating a mod", retry })).not.toBeNull();
+    expect(toasts[0]).toMatchObject({
+      message: "Silo is still loading your library. Try again in a moment.",
+      action: { label: "Try again" },
+    });
   });
 
-  it(`shows at most ${MAX_VISIBLE_TOASTS}; the rest queue in order`, () => {
+  it("distinct raw messages behind the same copy don't merge; the same one does", () => {
+    error("weird failure (os error 1234)", { op: "Saving" });
+    error("other failure (os error 4321)", { op: "Saving" });
+    expect(toasts).toHaveLength(2);
+    error("weird failure (os error 1234)", { op: "Saving" });
+    expect(toasts).toHaveLength(2);
+    expect(toasts[0].count).toBe(2);
+  });
+
+  it("a repeat of an error already seen lights the bell again", () => {
+    error(new AppError("DISK_FULL", "full"));
+    expect(unseenErrorCount()).toBe(1);
+    markActivitySeen();
+    expect(unseenErrorCount()).toBe(0);
+    error(new AppError("DISK_FULL", "full"));
+    expect(toasts[0].count).toBe(2);
+    expect(unseenErrorCount()).toBe(1);
+    expect(activity).toHaveLength(1);
+    // Later repeats still find the same entry.
+    error(new AppError("DISK_FULL", "full"));
+    expect(activity).toHaveLength(1);
+    expect(activity[0].count).toBe(3);
+  });
+
+  it(`shows at most ${MAX_VISIBLE_TOASTS}, the newest always among them; the rest queue in order`, () => {
     for (let i = 1; i <= 5; i++) info(`Toast ${i}`);
-    expect(visibleToasts().map((t) => t.message)).toEqual(["Toast 1", "Toast 2", "Toast 3"]);
-    dismissToast(toasts[1].id);
-    expect(visibleToasts().map((t) => t.message)).toEqual(["Toast 1", "Toast 3", "Toast 4"]);
+    expect(visibleToasts().map((t) => t.message)).toEqual(["Toast 1", "Toast 2", "Toast 5"]);
+    dismissToast(toasts[0].id);
+    expect(visibleToasts().map((t) => t.message)).toEqual(["Toast 2", "Toast 3", "Toast 5"]);
+  });
+
+  it(`up to ${MAX_VISIBLE_TOASTS} errors never hide the newest other toast (an Undo)`, () => {
+    for (let i = 1; i <= 4; i++) toast({ message: `Error ${i}`, tone: "danger", sticky: true });
+    info("Older note");
+    const undo = toast({ message: "Switched to Harvest.", action: { label: "Undo", run: () => {} } });
+    expect(visibleToasts().map((t) => t.message)).toEqual([
+      "Error 1",
+      "Error 2",
+      "Error 3",
+      "Switched to Harvest.",
+    ]);
+    undo.dismiss();
+    expect(visibleToasts().map((t) => t.message)).toEqual(["Error 1", "Error 2", "Error 3", "Older note"]);
+    // With one error up, the other toasts get the slots it leaves.
+    for (const t of toasts.filter((t) => t.sticky).slice(1)) dismissToast(t.id);
+    info("Newest note");
+    expect(visibleToasts().map((t) => t.message)).toEqual(["Error 1", "Older note", "Newest note"]);
   });
 });
 
@@ -162,12 +210,21 @@ describe("reportError", () => {
     expect(rawInvoke).toHaveBeenCalledTimes(1);
   });
 
-  it("silent codes are logged but never shown", () => {
+  it("silent codes from background work are logged but never shown", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    reportError(new AppError("STILL_LOADING", "loading"), "Scanning");
-    expect(rawInvoke).toHaveBeenCalledTimes(1);
+    reportError(new AppError("STILL_LOADING", "loading"), "Scanning", { background: true });
+    reportError(new AppError("STILL_LOADING", "loading"), "Scanning", { quiet: true });
+    expect(rawInvoke).toHaveBeenCalledTimes(2);
     expect(toasts).toEqual([]);
     expect(activity).toEqual([]);
+  });
+
+  it("STILL_LOADING from a user's action says so", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    reportError(new AppError("STILL_LOADING", "loading"), "Activating a mod");
+    expect(toasts.map((t) => t.message)).toEqual(["Silo is still loading your library. Try again in a moment."]);
+    await action("Organizing", () => Promise.reject(new AppError("STILL_LOADING", "loading")));
+    expect(toasts[0].count).toBe(2);
   });
 
   it("a failing log call is swallowed", async () => {
@@ -226,5 +283,18 @@ describe("activity", () => {
     expect(unseenErrorCount()).toBe(1);
     markActivitySeen();
     expect(unseenErrorCount()).toBe(0);
+  });
+
+  it("past the limit, the oldest non-error entries go first, so errors survive a flood", () => {
+    pushActivity({ kind: "toast", level: "error", message: "first error" });
+    for (let i = 0; i < ACTIVITY_LIMIT + 20; i++) pushActivity({ kind: "op", level: "info", message: `op ${i}` });
+    expect(activity).toHaveLength(ACTIVITY_LIMIT);
+    expect(activity.at(-1)?.message).toBe("first error");
+    expect(activity[0].message).toBe(`op ${ACTIVITY_LIMIT + 19}`);
+    // Only errors left past the limit: the oldest error goes.
+    clearActivity();
+    for (let i = 0; i < ACTIVITY_LIMIT + 1; i++) pushActivity({ kind: "toast", level: "error", message: `e${i}` });
+    expect(activity).toHaveLength(ACTIVITY_LIMIT);
+    expect(activity.at(-1)?.message).toBe("e1");
   });
 });
