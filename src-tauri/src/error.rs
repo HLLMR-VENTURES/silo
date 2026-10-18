@@ -20,6 +20,8 @@ pub mod code {
     /// resumed or cancelled before this can run.
     pub const MOVE_UNFINISHED: &str = "MOVE_UNFINISHED";
     pub const GAME_RUNNING: &str = "GAME_RUNNING";
+    /// Text pasted into "Open a shared set" isn't a Silo set link or a GitHub gist.
+    pub const NOT_A_SET_LINK: &str = "NOT_A_SET_LINK";
     /// Another program (often the game, an antivirus scan or a sync client) has the file open.
     pub const FILE_IN_USE: &str = "FILE_IN_USE";
     pub const PERMISSION_DENIED: &str = "PERMISSION_DENIED";
@@ -168,6 +170,7 @@ fn known_phrase(lower: &str) -> Option<&'static str> {
         ),
         ("saved by a newer version of silo", code::DB_NEWER),
         ("isn't a farming simulator mod", code::NOT_A_MOD),
+        ("doesn't look like a silo set link", code::NOT_A_SET_LINK),
         ("not a valid .zip", code::NOT_A_MOD),
         ("isn't a valid .zip", code::NOT_A_MOD),
         ("invalid zip archive", code::NOT_A_MOD),
@@ -393,6 +396,14 @@ fn log_safe_char(c: char) -> char {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_pasted_non_link_has_its_own_code() {
+        assert_eq!(
+            classify("That doesn't look like a Silo set link. Links look like https://silo.hllmr.com/c/… or a GitHub gist."),
+            code::NOT_A_SET_LINK
+        );
+    }
     use super::*;
 
     #[test]

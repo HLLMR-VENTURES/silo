@@ -40,6 +40,7 @@ export const ERROR_CODES = [
   "LIBRARY_BUSY",
   "MOVE_UNFINISHED",
   "GAME_RUNNING",
+  "NOT_A_SET_LINK",
   "UNKNOWN",
   "FILE_IN_USE",
   "PERMISSION_DENIED",
@@ -107,6 +108,7 @@ export function classifyMessage(msg: string): ErrorCode {
   ) {
     return "MOVE_UNFINISHED";
   }
+  if (/doesn't look like a silo set link/i.test(msg)) return "NOT_A_SET_LINK";
   if (/rate limit/i.test(msg)) return "GITHUB_RATE_LIMIT";
   if (/bad credentials/i.test(msg) || (/\b401\b/.test(msg) && /github/i.test(msg))) {
     return "GITHUB_AUTH";
@@ -155,6 +157,8 @@ function copyFor(code: ErrorCode, message: string, op: string): string {
     }
     case "GAME_RUNNING":
       return "Close Farming Simulator 25 first, then try again.";
+    case "NOT_A_SET_LINK":
+      return "That doesn't look like a Silo set link. Links look like https://silo.hllmr.com/c/… or a GitHub gist.";
     case "LIBRARY_BUSY":
       return "Silo is finishing another change to your library. Try again in a moment.";
     case "MOVE_UNFINISHED":

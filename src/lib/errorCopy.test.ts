@@ -24,6 +24,7 @@ describe("describeError copy", () => {
   const table: [code: string, title: string, retryable: boolean][] = [
     ["FILE_IN_USE", "Silo couldn't change a file because another program is using it. Close Farming Simulator 25 or the program that has it open, then try again.", true],
     ["GAME_RUNNING", "Close Farming Simulator 25 first, then try again.", true],
+    ["NOT_A_SET_LINK", "That doesn't look like a Silo set link. Links look like https://silo.hllmr.com/c/… or a GitHub gist.", false],
     ["LIBRARY_BUSY", "Silo is finishing another change to your library. Try again in a moment.", true],
     ["MOVE_UNFINISHED", "Finish or cancel the library move first. You can resume or cancel it from the notice at the top.", false],
     ["ARCHIVE_UNAVAILABLE", "Your library archive isn't available. Connect the drive, or choose another folder.", true],
