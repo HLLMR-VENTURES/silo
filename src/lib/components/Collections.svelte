@@ -4,6 +4,7 @@
   // Unlike Multiplayer sync (which matches your ACTIVE set to a host's for a session),
   // Collections are about sharing groups of mods, independent of any session.
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import {
     collectionExport,
     collectionImportPreview,
@@ -18,6 +19,7 @@
     copyText,
   } from "../api";
   import { ask } from "../ui";
+  import { blocked, tryStart } from "../state/ops.svelte";
   import type { CollectionSummary } from "../api";
   import type {
     MpModRef,
@@ -91,7 +93,7 @@
     try {
       myColls = await collectionsList();
     } catch (e) {
-      myErr = String(e);
+      myErr = inlineError(e, "Loading your collections");
     } finally {
       myLoading = false;
     }
@@ -132,7 +134,7 @@
         updatedNote = null;
       }, 4000);
     } catch (e) {
-      myErr = String(e);
+      myErr = inlineError(e, "Updating the collection");
     } finally {
       updatingRef = null;
     }
@@ -155,7 +157,7 @@
       await collectionDelete(c.kind, c.reference);
       myColls = myColls.filter((x) => x.reference !== c.reference);
     } catch (e) {
-      myErr = String(e);
+      myErr = inlineError(e, "Deleting the collection");
     } finally {
       deletingRef = null;
     }
@@ -171,7 +173,7 @@
       shareResult = await collectionExport(collName.trim(), null, sharePublic, active);
       void loadMyCollections();
     } catch (e) {
-      shareErr = String(e);
+      shareErr = inlineError(e, "Sharing the collection");
     } finally {
       shareBusy = false;
     }
@@ -251,7 +253,7 @@
       plan = await collectionImportPreview(importUrl.trim(), installed);
       await computePreflight(plan);
     } catch (e) {
-      importErr = String(e);
+      importErr = inlineError(e, "Opening the collection link");
     } finally {
       importBusy = false;
     }
@@ -267,21 +269,34 @@
     // Only apply what was previewed: apply refuses if the collection changed since.
     if (!plan) return;
     const fingerprint = plan.fingerprint;
+    // It downloads mods into the library: a library write, one at a time.
+    const op = tryStart("Adding a collection's mods", { exclusive: "library-write", progress: true });
+    if (!op) {
+      importErr = `${blocked("library-write").reason} Try again when it's done.`;
+      return;
+    }
     applyBusy = true;
     importErr = null;
     applyProgress = null;
-    unlisten = await onCollectionProgress((p) => (applyProgress = p));
+    let applied = false;
     try {
+      unlisten = await onCollectionProgress((p) => {
+        applyProgress = p;
+        op.progress(p.done, p.total, p.current);
+      });
       applyReport = await collectionApply(importUrl.trim(), installed, fingerprint);
-      onImported?.();
+      applied = true;
     } catch (e) {
-      importErr = String(e);
+      importErr = inlineError(e, "Adding the collection's mods");
     } finally {
       applyBusy = false;
       applyProgress = null;
       unlisten?.();
       unlisten = undefined;
+      op.end();
     }
+    // After the op ends: the rescan it triggers skips while a library write is running.
+    if (applied) onImported?.();
   }
 
   onDestroy(() => unlisten?.());

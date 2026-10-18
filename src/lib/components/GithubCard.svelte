@@ -4,6 +4,7 @@
   // land on GitHub's servers — Silo only reflects the state back. Nothing is stored on
   // our side. See SiloAPI docs/ENRICHMENT.md "scope boundary".
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import { ghRepoStats, ghStar, ghWatch, openExternal } from "../api";
   import type { RepoStats } from "../types";
 
@@ -24,7 +25,8 @@
   let stats = $state<RepoStats | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
-  let busy = $state<"" | "star" | "watch">("");
+  /** The GitHub toggle waiting on its request (its button is off meanwhile). */
+  let pending = $state<"" | "star" | "watch">("");
 
   async function load() {
     loading = true;
@@ -32,7 +34,7 @@
     try {
       stats = await ghRepoStats(owner, repo);
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Loading GitHub stats");
     } finally {
       loading = false;
     }
@@ -52,7 +54,7 @@
   async function toggleStar() {
     if (!stats) return;
     if (!connected || !canWrite) return onConnect?.();
-    busy = "star";
+    pending = "star";
     error = null;
     const next = !stats.youStarred;
     try {
@@ -61,16 +63,16 @@
       stats.youStarred = next;
       stats.stars += next ? 1 : -1;
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Starring the repo");
     } finally {
-      busy = "";
+      pending = "";
     }
   }
 
   async function toggleWatch() {
     if (!stats) return;
     if (!connected || !canWrite) return onConnect?.();
-    busy = "watch";
+    pending = "watch";
     error = null;
     const next = !stats.youWatching;
     try {
@@ -78,9 +80,9 @@
       stats.youWatching = next;
       stats.watchers += next ? 1 : -1;
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Watching the repo");
     } finally {
-      busy = "";
+      pending = "";
     }
   }
 </script>
@@ -120,7 +122,7 @@
         <button
           class="act"
           class:on={stats.youStarred}
-          disabled={busy === "star"}
+          disabled={pending === "star"}
           onclick={toggleStar}
         >
           <Icon name="favorite" size={13} filled={!!stats.youStarred} />
@@ -129,7 +131,7 @@
         <button
           class="act"
           class:on={stats.youWatching}
-          disabled={busy === "watch"}
+          disabled={pending === "watch"}
           onclick={toggleWatch}
         >
           <Icon name="visible" size={13} />

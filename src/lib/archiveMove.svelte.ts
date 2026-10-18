@@ -1,7 +1,7 @@
 // The library archive move (#166): its reactive state, the status poll, and the drive/settle
 // cycle. A move can run for hours: its invoke stays pending the whole time, so the UI is driven
 // by `archive_status` (polled while running) and `archive-move-progress` events, not the return.
-// App-level side effects (the error banner, mods-folder status, rescans, the adopt offer) are
+// App-level side effects (reporting problems, mods-folder status, rescans, the adopt offer) are
 // injected, so this owns only the move. Pure decisions live in `archiveMoveLogic.ts`.
 
 import {
@@ -28,11 +28,11 @@ import {
 } from "./archiveMoveLogic";
 
 export interface ArchiveMoveDeps {
-  /** Show a message in the app's error banner. */
-  setError: (msg: string) => void;
+  /** Report a problem the move ran into (a message, or the thrown error). */
+  setError: (problem: unknown) => void;
   /** Re-read the mods-folder status (keeping the last one if that fails). */
   refreshModsStatus: () => Promise<void>;
-  /** Rescan the library (auto-filing allowed). Clears the error banner. */
+  /** Rescan the library (auto-filing allowed). Touches only the scan's own notice. */
   runScan: () => Promise<void>;
   /** A move ended cleanly: offer to file in loose mods found in the archive folder. */
   offerAdopt: () => Promise<void>;
@@ -264,7 +264,7 @@ export class ArchiveMove {
       await archiveMovePause();
     } catch (e) {
       this.pauseRequested = false;
-      this.#deps.setError(String(e));
+      this.#deps.setError(e);
     }
     void this.refresh();
   }

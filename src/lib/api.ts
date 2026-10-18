@@ -220,6 +220,19 @@ export function appVersion(): Promise<string> {
   return invoke<string>("app_version");
 }
 
+/** Write a frontend error to Silo's log file. Never throws: logging must not cause new errors. */
+export async function logFrontendError(
+  level: "error" | "warn" | "info",
+  message: string,
+  context?: string,
+): Promise<void> {
+  try {
+    await invoke("log_frontend_error", { level, message, context: context ?? null });
+  } catch {
+    // No backend (tests, a broken bridge); the console line from the caller is all there is.
+  }
+}
+
 /** One-time notices from startup work (a database restored, an archive found again). */
 export function takeStartupNotices(): Promise<string[]> {
   return invoke<string[]>("take_startup_notices");

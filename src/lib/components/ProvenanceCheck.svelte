@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import type { ModEntry, VerifyResult } from "../types";
   import { verifyMod } from "../api";
   import { getVerdict, setVerdict } from "../provenanceCache.svelte";
@@ -37,7 +38,7 @@
       setVerdict(mod, r);
       phase = "done";
     } catch (e) {
-      err = String(e);
+      err = inlineError(e, "Checking the mod's integrity");
       phase = "error";
     }
   }

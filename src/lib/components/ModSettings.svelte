@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import {
     getModSettings,
     saveModSettings,
@@ -31,7 +32,7 @@
       values = v;
       rawText = Object.fromEntries(files.map((f) => [f.path, f.raw]));
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Reading the mod's settings");
     }
     loading = false;
   }
@@ -47,7 +48,7 @@
       flashSaved(file.path);
       await load();
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Saving the mod's settings");
     }
   }
 
@@ -58,7 +59,7 @@
       await load();
       rawMode[file.path] = false;
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Saving the mod's settings");
     }
   }
 

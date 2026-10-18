@@ -3,8 +3,10 @@
   // your set against a friend's — turning FS's "mod mismatch" join error into a fix-list.
   // (Sharing curated mod sets as a link lives in Collections, a separate panel.)
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import { mpExport, mpVerify } from "../api";
   import type { MpModRef, MpVerifyReport } from "../types";
+  import { start } from "../state/ops.svelte";
 
   interface Props {
     /** The active set as (techName, path, kind, version) refs. */
@@ -13,7 +15,20 @@
   }
   let { active, onClose }: Props = $props();
 
-  let busy = $state<string | null>(null);
+  /** What's running (also shown in the activity list), or null. */
+  let working = $state<string | null>(null);
+
+  /** Run one hashing job as a tracked op; `working` names it while it runs. */
+  async function track(label: string, fn: () => Promise<void>) {
+    working = label;
+    const op = start(label);
+    try {
+      await fn();
+    } finally {
+      op.end();
+      working = null;
+    }
+  }
   let note = $state<string | null>(null);
   let error = $state<string | null>(null);
   let report = $state<MpVerifyReport | null>(null);
@@ -22,32 +37,30 @@
   const dirCount = $derived(active.length - zipCount);
 
   async function doExport() {
-    busy = "Hashing & saving…";
     error = null;
     note = null;
     report = null;
-    try {
-      const n = await mpExport(active);
-      if (n != null) note = `Saved a manifest of ${n} mods. Share the .silomp file with your group.`;
-    } catch (e) {
-      error = String(e);
-    } finally {
-      busy = null;
-    }
+    await track("Hashing and saving your mod set", async () => {
+      try {
+        const n = await mpExport(active);
+        if (n != null) note = `Saved a manifest of ${n} mods. Share the .silomp file with your group.`;
+      } catch (e) {
+        error = inlineError(e, "Saving the multiplayer manifest");
+      }
+    });
   }
 
   async function doVerify() {
-    busy = "Hashing your set & comparing…";
     error = null;
     note = null;
     report = null;
-    try {
-      report = await mpVerify(active);
-    } catch (e) {
-      error = String(e);
-    } finally {
-      busy = null;
-    }
+    await track("Hashing your mod set and comparing", async () => {
+      try {
+        report = await mpVerify(active);
+      } catch (e) {
+        error = inlineError(e, "Comparing mod sets");
+      }
+    });
   }
 </script>
 
@@ -63,7 +76,7 @@
     <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
   </div>
 
-  {#if busy}<div class="busy">{busy}</div>{/if}
+  {#if working}<div class="busy">{working}…</div>{/if}
   {#if error}<div class="err">{error}</div>{/if}
   {#if note}<div class="ok-note">{note}</div>{/if}
 
@@ -74,7 +87,7 @@
         Exports a manifest of your {active.length} active mods (name, version, content
         hash). Send the file to whoever's joining.
       </p>
-      <button class="btn primary" onclick={doExport} disabled={!!busy || active.length === 0}>
+      <button class="btn primary" onclick={doExport} disabled={!!working || active.length === 0}>
         Export active set →
       </button>
     </div>
@@ -84,7 +97,7 @@
         Open the host's manifest; Silo compares it to your active set and tells you
         exactly what to add, update, or turn off.
       </p>
-      <button class="btn" onclick={doVerify} disabled={!!busy || active.length === 0}>
+      <button class="btn" onclick={doVerify} disabled={!!working || active.length === 0}>
         Verify against a manifest…
       </button>
     </div>

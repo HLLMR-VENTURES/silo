@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import {
     ghStatus,
     ghSetClientId,
@@ -31,7 +32,7 @@
       status = await ghStatus();
       clientIdInput = status.clientId ?? "";
     } catch (e) {
-      message = String(e);
+      message = inlineError(e, "Checking your GitHub connection");
     }
   }
   refresh();
@@ -42,7 +43,7 @@
       await refresh();
       message = null;
     } catch (e) {
-      message = String(e);
+      message = inlineError(e, "Saving the GitHub app ID");
     }
   }
 
@@ -77,12 +78,12 @@
           poller = setTimeout(tick, interval * 1000);
         } catch (e) {
           flow = null;
-          message = String(e);
+          message = inlineError(e, "Waiting for GitHub to confirm");
         }
       };
       poller = setTimeout(tick, interval * 1000);
     } catch (e) {
-      message = String(e);
+      message = inlineError(e, "Starting GitHub sign-in");
     }
   }
 
@@ -94,7 +95,7 @@
       showPat = false;
       await refresh();
     } catch (e) {
-      message = String(e);
+      message = inlineError(e, "Saving your GitHub token");
     }
   }
 
@@ -103,7 +104,7 @@
       await ghLogout();
       await refresh();
     } catch (e) {
-      message = String(e);
+      message = inlineError(e, "Disconnecting GitHub");
     }
   }
 

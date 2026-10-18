@@ -50,8 +50,10 @@ export type { MenuItem, Placement, PopoverCloseReason } from "./overlayTypes";
 export { portal } from "./portal";
 export {
   dismissToast,
+  MAX_VISIBLE_TOASTS,
   toast,
   toasts,
+  visibleToasts,
   type ToastAction,
   type ToastHandle,
   type ToastItem,

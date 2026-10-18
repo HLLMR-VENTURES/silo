@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import {
     DialogHost,
     ToastRegion,
@@ -112,9 +112,28 @@
     SourceRow,
   } from "./lib/types";
   import { checkYourselfList, type CheckYourselfRow } from "./lib/sources";
-  import { appendInfo } from "./lib/info";
   import { copyOrSave } from "./lib/clipboard";
   import { parseUiScale, type UiScale } from "./lib/uiScale";
+  import {
+    blocked,
+    blockedForeground,
+    current as currentOp,
+    start,
+    statusLineOp,
+    tryStart,
+    type OpToken,
+  } from "./lib/state/ops.svelte";
+  import { rescanGate } from "./lib/state/rescanGate";
+  import { describeError, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
+  import {
+    info,
+    inlineError,
+    reportError,
+    setNotice,
+    success,
+    syncNotice,
+  } from "./lib/state/notify.svelte";
+  import { archiveNotice, ARCHIVE_MOVE_KEY, ARCHIVE_UNAVAILABLE_KEY } from "./lib/archiveMoveNotice";
 
   const CATEGORIES = [
     "Maps",
@@ -159,11 +178,15 @@
   import StatBar from "./lib/components/panels/StatBar.svelte";
   import LibraryToolbar from "./lib/components/panels/LibraryToolbar.svelte";
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
-  import ArchiveMoveBanner from "./lib/components/ArchiveMoveBanner.svelte";
-  import BlockedFolderBanner from "./lib/components/BlockedFolderBanner.svelte";
+  import NoticeArea from "./lib/components/NoticeArea.svelte";
+  import ViewBoundary from "./lib/components/ViewBoundary.svelte";
   import Icon from "./lib/ui/Icon.svelte";
   import { fmtSize } from "./lib/format";
   import {
+    MODS_FOLDER_KEY,
+    OVERRIDE_FOLLOWED_KEY,
+    OVERRIDE_KEY,
+    modsFolderNotices,
     rootsFor,
     showOverrideNotice,
     switchBlockReason as switchGate,
@@ -181,12 +204,27 @@
   // Epoch-ms of the last scan attempt — throttles the auto-rescan-on-focus so alt-tabbing
   // doesn't re-scan on every focus.
   let lastScanAt = 0;
+  /** The running scan's op (progress events report into it). */
+  let scanOp: OpToken | null = null;
   let progress = $state({ done: 0, total: 0 });
   let result = $state<ScanResult | null>(null);
   let query = $state("");
+  // applyActive() and bisectApply() still report through these two names, so their bodies stay
+  // exactly as they were. Nothing else writes them: this adapter hands each message on (an
+  // error toast or an info toast) and empties the channel again.
   let errorMsg = $state<string | null>(null);
-  /** A neutral, dismissible notice (not an error). */
   let infoMsg = $state<string | null>(null);
+  $effect(() => {
+    const err = errorMsg;
+    const note = infoMsg;
+    if (err === null && note === null) return;
+    untrack(() => {
+      errorMsg = null;
+      infoMsg = null;
+      if (err !== null) reportError(err, "Applying your mods");
+      if (note !== null) info(note, { duration: 10_000 });
+    });
+  });
   // Library category filter, driven by the shared FilterBar's parent/child dropdowns
   // ("" = all). Replaces the old category rail + `selected`.
   let libCat = $state("");
@@ -206,7 +244,58 @@
   let statFilter = $state<"" | "maps" | "scripts" | "unique" | "active">("");
   let editing = $state<{ techName: string; x: number; y: number } | null>(null);
   let activeSet = $state<Set<string>>(new Set());
-  let busy = $state<string | null>(null);
+  // Library writes hold the "library-write" op class, one at a time: a second is refused with the
+  // reason. `writeLock` counts every holder (the archive move too) and turns off the controls
+  // that write; `fgLock` leaves out background ops (the archive move), so navigation, Settings,
+  // read-only panels and scans stay usable during a move. Writes started from those still refuse
+  // in beginWrite.
+  const writeLock = $derived(blocked("library-write"));
+  const fgLock = $derived(blockedForeground("library-write"));
+  /** The op the status line under the top bar names (quiet ops show their progress elsewhere). */
+  const statusOp = $derived(statusLineOp());
+  /** Say why something the user asked for can't happen right now (nothing failed). */
+  function refuse(why: string) {
+    toast({ message: why, tone: "warn" });
+  }
+  /**
+   * Start a library write, or say why it can't start now.
+   * @param label what Silo is doing, fits "Silo is …" ("Filing 3 mods into the library")
+   * @param progress show a progress bar for it
+   * @param opts `silent`: refuse without a toast (background work that retries on its own);
+   *   `duringMove`: it doesn't touch the library archive (a savegame backup), so a running or
+   *   paused archive move doesn't stop it; only a foreground write does
+   * @return the op's token (end it before rescanning), or null when refused
+   */
+  function beginWrite(
+    label: string,
+    progress = false,
+    opts: { silent?: boolean; duringMove?: boolean } = {},
+  ): OpToken | null {
+    const say = (why: string) => {
+      if (!opts.silent) refuse(why);
+    };
+    if (opts.duringMove) {
+      const fg = blockedForeground("library-write");
+      if (fg.blocked) {
+        say(`${fg.reason} Try again when it's done.`);
+        return null;
+      }
+      return start(label, { exclusive: "library-write", progress });
+    }
+    // A paused (or otherwise unfinished) move: nothing changes the library until it's resumed
+    // and finished, or cancelled. A running one holds the class itself (below).
+    if (archiveMove.unfinished && !archiveMove.running) {
+      say(MOVE_UNFINISHED_COPY);
+      return null;
+    }
+    const op = tryStart(label, { exclusive: "library-write", progress });
+    if (!op) say(`${blocked("library-write").reason} Try again when it's done.`);
+    return op;
+  }
+  /** The scan's own notice (it failed, or recovery left problems). A scan touches no other key. */
+  const SCAN_KEY = "scan";
+  /** What Silo did while starting (e.g. restored the database), until dismissed. */
+  const STARTUP_KEY = "startup";
   // Mods folder is on a cloud-sync filesystem that can't do hardlinks → Silo uses copies.
   let cloudSynced = $state(false);
   let cloudNoticeOpen = $state(false);
@@ -343,7 +432,7 @@
       /* the check failed; the state below still guards */
     }
     return !!(
-      busy ||
+      writeLock.blocked ||
       archiveMove.running ||
       archiveMove.unfinished ||
       bisecting ||
@@ -356,7 +445,7 @@
     if (updating) return;
     // Installing relaunches Silo: never in the middle of a change to the library.
     if (await changingFiles()) {
-      errorMsg = FINISH_FIRST;
+      refuse(FINISH_FIRST);
       return;
     }
     updating = true;
@@ -373,7 +462,7 @@
         },
       );
       if (!installed) {
-        errorMsg = FINISH_FIRST;
+        refuse(FINISH_FIRST);
         await setSelfUpdating(false);
         blocking = false;
         updating = false;
@@ -381,7 +470,7 @@
       }
       // Installed: Silo relaunches; if we're still here, it was a no-op.
     } catch (e) {
-      errorMsg = `Update failed: ${String(e)}`;
+      reportError(e, "Updating Silo", { retry: applyUpdate });
       if (blocking) await setSelfUpdating(false).catch(() => {});
       updating = false;
       updatePct = null;
@@ -469,7 +558,7 @@
     try {
       await launchGame();
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Launching the game");
     }
   }
 
@@ -526,7 +615,7 @@
         })),
       );
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Checking for conflicts", { background: true });
     }
   }
 
@@ -554,7 +643,7 @@
     try {
       savegames = await getSavegames();
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Reading your savegames", { background: true });
     }
   }
 
@@ -594,7 +683,7 @@
     try {
       await saveTextFile("silo-report.md", await diagnosticsBundle(buildReport(), false));
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Exporting the report");
     }
   }
 
@@ -602,28 +691,33 @@
     try {
       const text = await diagnosticsBundle(buildReport(), true);
       const out = await copyOrSave(text, "silo-diagnostics.md", copyText, saveTextFile);
-      if (out === "copied") infoMsg = "Diagnostics copied. Paste them into your bug report.";
+      if (out === "copied") success("Diagnostics copied. Paste them into your bug report.");
       else if (out === "saved")
-        infoMsg = "Silo couldn't use the clipboard, so it saved the diagnostics to a file instead.";
+        info("Silo couldn't use the clipboard, so it saved the diagnostics to a file instead.");
     } catch (e) {
-      errorMsg = `Couldn't copy diagnostics: ${e}`;
+      reportError(e, "Copying diagnostics");
     }
   }
 
   async function backupSave(s: Savegame) {
-    busy = `Backing up “${s.name}”…`;
+    // Held as a write like before (it copies files): nothing else changes them meanwhile. It
+    // never touches the library archive, so an archive move doesn't stop it.
+    const op = beginWrite(`Backing up ${s.name}`, false, { duringMove: true });
+    if (!op) return;
     try {
       await backupSavegame(s.folder);
+      success(`Backed up ${s.name}.`);
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, `Backing up ${s.name}`);
+    } finally {
+      op.end();
     }
-    busy = null;
   }
 
   async function loadoutFromSave(s: Savegame) {
     const { present, missing } = saveStats(s);
     if (present.length === 0) {
-      errorMsg = `None of “${s.name}”'s mods are in your library yet.`;
+      refuse(`None of ${s.name}'s mods are in your library yet.`);
       return;
     }
     const target = present.map((m) => m.modName);
@@ -653,7 +747,7 @@
       if (diff.on.length + diff.off.length === 0) toast({ message: `Already using ${name}` });
       else await switchTo(name, target);
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Switching to the save's mods");
     }
   }
 
@@ -680,18 +774,21 @@
   }
 
   /** Set the active set through the loadout apply path (optimistic set, then project it).
-   *  @return true when it applied without errors (failures go to the error banner) */
-  async function setActiveSetTo(techNames: string[], label: string): Promise<boolean> {
-    busy = label;
+   *  @return true when it applied without errors (failures are reported), null when another
+   *  library write was running so nothing changed */
+  async function setActiveSetTo(techNames: string[], label: string): Promise<boolean | null> {
+    const op = beginWrite(label);
+    if (!op) return null;
     activeSet = new Set(techNames);
     let clean = false;
     try {
       const rep = await applyActive(techNames);
       clean = rep.errors.length === 0;
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Applying your mods");
+    } finally {
+      op.end();
     }
-    busy = null;
     return clean;
   }
 
@@ -710,12 +807,13 @@
   }
 
   /** Switch to a loadout's mods (already confirmed), then offer to switch back. Errors the
-   *  apply reports stay in the error banner; the toast still shows so Undo is reachable. */
+   *  apply reports are reported on their own; the switch toast still shows so Undo is reachable. */
   async function switchTo(name: string, techNames: string[]) {
     switchUndo?.dismiss();
     switchUndo = null;
     const previous = [...activeSet];
-    const clean = await setActiveSetTo(techNames, `Applying loadout “${name}”…`);
+    const clean = await setActiveSetTo(techNames, `Switching to ${name}`);
+    if (clean === null) return; // refused: another write is running, nothing changed
     const switched = [...techNames];
     switchUndo = toast({
       message: clean ? `Switched to ${name}.` : `Switch to ${name} finished with problems.`,
@@ -728,7 +826,7 @@
             toast({ message: why, tone: "warn" });
             return;
           }
-          await setActiveSetTo(previous, "Switching back…");
+          await setActiveSetTo(previous, "Switching back");
         },
       },
     });
@@ -754,7 +852,7 @@
             await saveLoadout(prev.id, prev.name, prev.mods);
             await loadLoadouts();
           } catch (e) {
-            errorMsg = String(e);
+            reportError(e, "Undoing the loadout change");
           }
         },
       },
@@ -778,7 +876,7 @@
     try {
       loadouts = await getLoadouts();
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Loading your loadouts", { retry: loadLoadouts, background: true });
     }
   }
 
@@ -831,7 +929,7 @@
         await loadLoadouts();
       }
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Saving the loadout");
     }
   }
 
@@ -854,7 +952,7 @@
       await loadLoadouts();
       offerOverwriteUndo(prev, current);
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Saving the loadout");
     }
   }
 
@@ -882,13 +980,13 @@
               await saveLoadout(null, copy.name, copy.mods);
               await loadLoadouts();
             } catch (e) {
-              errorMsg = String(e);
+              reportError(e, "Restoring the loadout");
             }
           },
         },
       });
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Deleting the loadout");
     }
   }
 
@@ -896,7 +994,7 @@
     try {
       await exportLoadoutFile(l.id, l.name);
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Exporting the loadout");
     }
   }
 
@@ -908,7 +1006,7 @@
         loadoutsOpen = true;
       }
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Importing a loadout");
     }
   }
 
@@ -936,6 +1034,18 @@
     });
     // A plain string, which BisectFlow's String(e) shows as is.
     if (rep.errors.length) throw rep.errors.slice(0, 3).join("; ");
+  }
+
+  /** One bisection round (or its final restore) as a library write. Refused, it rejects with
+   *  the reason, so the flow stops and keeps its snapshot. */
+  async function bisectRound(techNames: string[]) {
+    const op = tryStart("Applying the next test set", { exclusive: "library-write" });
+    if (!op) throw blocked("library-write").reason;
+    try {
+      await bisectApply(techNames);
+    } finally {
+      op.end();
+    }
   }
 
   // When a bisection ends, a snapshot still on disk means the restore didn't finish (or
@@ -976,31 +1086,45 @@
       );
       return;
     }
+    const op = beginWrite(turningOff ? "Parking a mod" : "Activating a mod");
+    if (!op) return;
+    const before = activeSet;
     const next = new Set(activeSet);
     if (next.has(techName)) next.delete(techName);
     else next.add(techName);
-    activeSet = next;
+    activeSet = next; // optimistic: the switch moves at once
     try {
       await applyActive([...next]);
     } catch (e) {
-      errorMsg = String(e);
+      // Nothing was applied: put the switch back (unless something else set the mods since).
+      if (activeSet === next) activeSet = before;
+      reportError(e, "Changing which mods are active");
+    } finally {
+      op.end();
     }
   }
 
   // Resolve a foreign file (a mod-folder file that isn't Silo's projection — typically a newer
   // build the user dropped in to update). Adopt = promote it to the managed copy; restore = put
   // Silo's copy back. Shared by the health panel and the mod drawer's "you dropped an update" banner.
-  async function resolveForeign(fileName: string, action: "adopt" | "restore") {
-    busy = action === "adopt" ? "Adopting the dropped build…" : "Restoring Silo's copy…";
+  // Returns true when it worked; false when it was refused (another write) or failed, so the
+  // drawer stays open.
+  async function resolveForeign(fileName: string, action: "adopt" | "restore"): Promise<boolean> {
+    const op = beginWrite(action === "adopt" ? "Adopting the dropped build" : "Restoring Silo's copy");
+    if (!op) return false;
+    let done = false;
     try {
       if (action === "adopt") await adoptForeignFile(fileName);
       else await restoreForeignFile(fileName);
+      done = true;
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, action === "adopt" ? "Adopting the dropped build" : "Restoring Silo's copy");
+    } finally {
+      op.end();
     }
-    busy = null;
     await runScan(false);
     foreignFiles = await detectForeignFiles(roots[0]).catch(() => []);
+    return done;
   }
 
   // Build the organize inputs for every loose (unorganized) zip currently in view.
@@ -1019,11 +1143,21 @@
   }
 
   // Apply a prepared set of organize inputs. `keepActive` re-projects them so their
-  // loaded state is preserved (used by both the auto-filer and the manual button).
-  async function applyLoose(inputs: ModInput[], techNames: string[], keepActive: boolean) {
+  // loaded state is preserved (used by both the auto-filer and the manual button). `auto`: the
+  // auto-filer, which says nothing when another write is running (the next scan retries).
+  async function applyLoose(
+    inputs: ModInput[],
+    techNames: string[],
+    keepActive: boolean,
+    auto = false,
+  ) {
     if (inputs.length === 0) return;
-    busy = `Filing ${inputs.length} mod${inputs.length > 1 ? "s" : ""} into the library…`;
-    let problem: string | null = null;
+    const op = beginWrite(`Filing ${modsCount(inputs.length)} into the library`, false, {
+      silent: auto,
+    });
+    if (!op) return;
+    /** What went wrong: the thrown error (keeps its code), or the report's problems. */
+    let problem: unknown = null;
     try {
       const rep = await applyOrganize(inputs);
       if (rep.errors.length) {
@@ -1031,22 +1165,33 @@
       } else if (keepActive) {
         const next = new Set([...activeSet, ...techNames]);
         activeSet = next;
-        const act = await applyActive([...next]);
-        if (act.errors.length) problem = act.errors.slice(0, 3).join("; ");
+        await applyActive([...next]); // reports its own problems
       }
     } catch (e) {
-      problem = String(e);
+      problem = e;
+    } finally {
+      op.end();
     }
-    busy = null;
     await runScan(false);
-    // runScan clears errorMsg: show what filing said after the scan's own problems.
-    if (problem) errorMsg = appendInfo(errorMsg, [problem]);
+    if (problem !== null) {
+      // Try again files whichever of these mods are still loose, as they are now.
+      const wanted = new Set(techNames);
+      const retry = () => {
+        const fresh = looseInputs();
+        return applyLoose(
+          fresh.inputs.filter((i) => wanted.has(i.techName)),
+          fresh.techNames.filter((t) => wanted.has(t)),
+          keepActive,
+        );
+      };
+      reportError(problem, "Filing mods into the library", { retry });
+    }
   }
 
   // Auto-filer (opt-in): file new mods and keep them active — no prompt, they chose it.
   async function autoFile() {
     const { inputs, techNames } = looseInputs();
-    await applyLoose(inputs, techNames, true);
+    await applyLoose(inputs, techNames, true, true);
   }
 
   // ── Manual "Organize N" button → dry-run preview → confirm ───────────────────
@@ -1077,7 +1222,7 @@
       const plan = await planOrganize(inputs);
       if (organizePreview) organizePreview = { ...organizePreview, plan, loading: false };
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Previewing what Organize moves");
       organizePreview = null;
     }
   }
@@ -1086,17 +1231,21 @@
     if (!organizePreview) return;
     if (organizePreview.adopt) {
       const fileNames = organizePreview.inputs.map((m) => m.fileName);
+      const op = beginWrite(`Filing ${modsCount(fileNames.length)} into the library`);
+      if (!op) return;
       organizePreview = { ...organizePreview, applying: true };
-      let problem: string | null = null;
+      let problem: unknown = null;
       try {
         const rep = await archiveAdoptApply(fileNames);
         if (rep.errors.length) problem = rep.errors.slice(0, 3).join("; ");
       } catch (e) {
-        problem = String(e);
+        problem = e;
+      } finally {
+        op.end();
       }
       organizePreview = null;
       await runScan(false);
-      if (problem) errorMsg = problem; // runScan clears errorMsg
+      if (problem !== null) reportError(problem, "Filing mods from the archive folder");
       return;
     }
     if (skipNext) localStorage.setItem(PREVIEW_SKIP_KEY, "true");
@@ -1107,15 +1256,22 @@
   }
 
   async function rebuildLibrary() {
-    busy = "Rebuilding library (re-scanning every mod)…";
-    errorMsg = null;
+    const op = beginWrite("Clearing the scan cache");
+    if (!op) return;
+    // The write is held through the rescan, so nothing changes the library until it has been
+    // read again. The status line names it: it re-reads every mod, so it takes a while.
     try {
-      await clearScanCache();
-      await runScan(false);
-    } catch (e) {
-      errorMsg = String(e);
+      try {
+        await clearScanCache();
+      } catch (e) {
+        reportError(e, "Clearing the scan cache", { retry: rebuildLibrary });
+        return;
+      }
+      op.setLabel("Rebuilding your library (re-scanning every mod)");
+      await runScan(false, undefined, true);
+    } finally {
+      op.end();
     }
-    busy = null;
   }
 
   async function restoreVanilla() {
@@ -1127,15 +1283,18 @@
       }))
     )
       return;
-    busy = "Restoring vanilla layout…";
+    const op = beginWrite("Restoring a flat mods folder");
+    if (!op) return;
     try {
       const rep = await flatten();
-      if (rep.errors.length) errorMsg = rep.errors.slice(0, 3).join("; ");
-      if (rep.notices?.length) infoMsg = rep.notices.join(" ");
+      if (rep.errors.length)
+        reportError(rep.errors.slice(0, 3).join("; "), "Restoring a flat mods folder");
+      if (rep.notices?.length) info(rep.notices.join(" "), { duration: 10_000 });
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Restoring a flat mods folder");
+    } finally {
+      op.end();
     }
-    busy = null;
     await runScan();
   }
 
@@ -1233,7 +1392,7 @@
     try {
       await setOverride({ techName, category, subcategory });
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Saving the category");
     }
   }
 
@@ -1245,7 +1404,7 @@
     try {
       await setOverride({ techName, category: "", subcategory: null });
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Resetting the category");
     }
   }
 
@@ -1283,7 +1442,7 @@
       for (const r of rows) (m[r.techName] ??= []).push(r.tag);
       tagMap = m;
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Loading your tags", { background: true });
     }
   }
 
@@ -1294,7 +1453,7 @@
       const rows = await getModRepos();
       repoMap = Object.fromEntries(rows.map((r) => [r.techName, { owner: r.owner, repo: r.repo }]));
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Loading linked GitHub repos", { background: true });
     }
   }
 
@@ -1306,7 +1465,7 @@
       const rows = await getModSources();
       sourceMap = Object.fromEntries(rows.map((r) => [r.techName, r]));
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Loading saved source pages", { background: true });
     }
   }
   function setSource(techName: string, row: SourceRow | null) {
@@ -1321,7 +1480,7 @@
       const s = sourceMap[row.techName];
       if (s) setSource(row.techName, { ...s, lastChecked: at });
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Saving the check date");
     }
   }
 
@@ -1345,8 +1504,7 @@
     if (availableUpdates.length > 0) {
       needsUpdateOnly = true;
     } else {
-      busy = "All mods are up to date";
-      setTimeout(() => (busy = null), 1600);
+      success("All mods are up to date");
     }
   }
 
@@ -1397,7 +1555,7 @@
         row.source = "github";
         row.error = undefined;
       } catch (e) {
-        if (!rows.has(techName)) row.error = String(e);
+        if (!rows.has(techName)) row.error = inlineError(e, "Checking for an update");
       }
       rows.set(techName, row);
       updateResults = [...rows.values()];
@@ -1408,24 +1566,31 @@
 
   async function installFromRow(row: UpdateRow) {
     if (!row.assetUrl) return;
-    busy = `Installing ${row.title}…`;
-    let warning: string | null = null;
+    const op = beginWrite(`Installing ${row.title}`);
+    if (!op) return;
+    /** What went wrong: the thrown error (keeps its code), or the install's problems. */
+    let warning: unknown = null;
+    let failed = false;
     try {
       const out = await downloadUpdate(row.path, row.assetUrl);
       if (out.backup) {
-        infoMsg = `Updated ${row.title}. The previous version is kept in ${out.backup}.`;
+        success(`Updated ${row.title}. The previous version is kept in ${out.backup}.`, {
+          duration: 10_000,
+        });
       }
       if (out.problems.length) warning = out.problems.join(" ");
       updateResults = updateResults.map((r) =>
         r.techName === row.techName ? { ...r, hasUpdate: false, current: r.latest } : r,
       );
     } catch (e) {
-      warning = String(e);
+      warning = e;
+      failed = true;
+    } finally {
+      op.end();
     }
-    busy = null;
     await runScan(false);
-    // After the rescan, which clears the error banner.
-    if (warning) errorMsg = warning;
+    if (warning !== null)
+      reportError(warning, `Installing ${row.title}`, failed ? { retry: () => installFromRow(row) } : {});
   }
 
   const availableUpdates = $derived(updateResults.filter((r) => r.hasUpdate));
@@ -1441,7 +1606,7 @@
     try {
       await setCuration(next);
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Saving your mod flags");
     }
   }
 
@@ -1621,45 +1786,49 @@
       )
         return;
     }
+    const op = beginWrite(active ? "Activating mods" : "Deactivating mods");
+    if (!op) return;
     const next = new Set(activeSet);
     for (const m of filtered) {
       if (active) next.add(m.techName);
       else next.delete(m.techName);
     }
     activeSet = next;
-    busy = active ? "Activating…" : "Deactivating…";
-    let problem: string | null = null;
+    let problem: unknown = null;
     try {
-      const rep = await applyActive([...next]);
-      if (rep.errors.length) problem = rep.errors.slice(0, 3).join("; ");
+      await applyActive([...next]); // reports its own problems
     } catch (e) {
-      problem = String(e);
+      problem = e;
+    } finally {
+      op.end();
     }
-    busy = null;
     // Reconcile the optimistic set against what's actually on disk — a partial/failed projection
     // (e.g. a file Silo couldn't prove was its own) leaves the two out of sync otherwise.
     await runScan(false);
-    if (problem) errorMsg = problem; // runScan clears errorMsg — restore what the projection said
+    if (problem !== null) reportError(problem, active ? "Activating mods" : "Deactivating mods");
   }
 
   // Repair copy-projections into hardlinks: reclaims the duplicated space and makes future
   // activate/deactivate O(1) instead of a full-library content hash. Progress-reported so a
   // large one-time pass shows a bar instead of looking frozen.
   async function optimizeLinks() {
+    const op = beginWrite("Optimizing links", true);
+    if (!op) return;
     settingsOpen = false;
     let unlisten: (() => void) | null = null;
     let done = "";
-    let problem: string | null = null;
+    /** `done` explains why nothing changed (an info toast), not a result (a success toast). */
+    let explained = false;
+    let problem: unknown = null;
     try {
-      unlisten = await onRelinkProgress((d, total) => {
-        busy = `Optimizing links… ${d}/${total}`;
-      });
-      busy = "Optimizing links…";
+      unlisten = await onRelinkProgress((d, total) => op.progress(d, total));
       const rep = await relinkProjections();
       if (rep.crossDriveCopies) {
+        explained = true;
         done =
           "Your library archive is on another drive and Windows can't link across drives without Developer Mode — active mods stay as copies.";
       } else if (rep.hardlinksUnsupported) {
+        explained = true;
         cloudSynced = true;
         done = "Mods folder is cloud-synced — hardlinks aren't available, so there's nothing to optimize";
       } else {
@@ -1673,19 +1842,17 @@
             : "Links already optimized — nothing to reclaim";
       }
     } catch (e) {
-      problem = String(e);
+      problem = e;
     } finally {
       unlisten?.();
+      op.end();
     }
-    await runScan(false); // reconcile + refresh sizes; also clears errorMsg
-    if (problem) errorMsg = problem;
-    if (done) {
-      busy = done;
-      // Long enough to read: the cross-drive explanation is a full sentence.
-      setTimeout(() => (busy = null), Math.max(2600, done.length * 50));
-    } else {
-      busy = null;
-    }
+    await runScan(false); // reconcile + refresh sizes
+    if (problem !== null) reportError(problem, "Optimizing links");
+    // Long enough to read: the cross-drive explanation is a full sentence.
+    const duration = Math.max(6000, done.length * 50);
+    if (done && explained) info(done, { duration });
+    else if (done) success(done, { duration });
   }
 
   const stats = $derived.by(() => {
@@ -1712,7 +1879,7 @@
       {
         moveUnfinished: archiveMove.unfinished,
         scanning,
-        busy,
+        busy: writeLock.blocked ? (currentOp()?.label ?? null) : null,
         blocked: !!modsStatus?.layoutProblem,
       },
       async () => !!(await bisectSnapshotGet().catch(() => null)),
@@ -1743,7 +1910,7 @@
   async function switchModsFolder(path: string) {
     const why = await switchBlockReason();
     if (why) {
-      errorMsg = why;
+      refuse(why);
       return;
     }
     try {
@@ -1780,14 +1947,14 @@
         await pointGameHere();
       }
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Switching mods folders");
     }
   }
 
   async function changeModsFolder() {
     const why = await switchBlockReason();
     if (why) {
-      errorMsg = why;
+      refuse(why);
       return;
     }
     const path = await pickFolderFor("modsFolder");
@@ -1797,13 +1964,13 @@
   async function useGameFolder() {
     const why = await switchBlockReason();
     if (why) {
-      errorMsg = why;
+      refuse(why);
       return;
     }
     try {
       await applyModsStatus(await clearModsRoot());
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Switching to the game's mods folder");
     }
   }
 
@@ -1811,7 +1978,7 @@
     try {
       await applyModsStatus(await pointGameAtModsRoot());
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Updating FS25's mods folder setting");
     }
   }
 
@@ -1819,7 +1986,7 @@
     try {
       await applyModsStatus(await modsRootStatus());
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Checking the mods folder", { retry: retryModsFolder });
     }
   }
 
@@ -1827,7 +1994,7 @@
     try {
       await applyModsStatus(await createModsFolder());
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Creating the mods folder");
     }
   }
 
@@ -1835,7 +2002,7 @@
   // The move's state, poll and drive/settle cycle live in archiveMove.svelte.ts; App supplies
   // the side effects that reach beyond the move.
   const archiveMove = new ArchiveMove({
-    setError: (msg) => (errorMsg = msg),
+    setError: (msg) => reportError(msg, "Moving your library"),
     refreshModsStatus: async () => {
       modsStatus = await modsRootStatus().catch(() => modsStatus);
     },
@@ -1844,6 +2011,61 @@
     offerAdopt: async () => {
       if (!organizePreview) await offerAdopt();
     },
+  });
+
+  // A running move holds the library-write class, so other writes refuse and say why. It ends
+  // as soon as the move stops running (finished or paused), before the move's settle rescans.
+  // It's a background op: navigation, Settings, read-only panels and scans stay usable while it
+  // runs (fgLock leaves it out). The move's own notice shows its progress, so it's quiet too
+  // (no status line, no activity entry).
+  let moveOp: OpToken | null = null;
+  $effect(() => {
+    const isRunning = archiveMove.running;
+    untrack(() => {
+      if (isRunning && !moveOp) {
+        moveOp = start("Moving your library", {
+          exclusive: "library-write",
+          progress: true,
+          background: true,
+          quiet: true,
+        });
+      } else if (!isRunning && moveOp) {
+        moveOp.end();
+        moveOp = null;
+      }
+    });
+  });
+  $effect(() => {
+    const p = archiveMove.progress;
+    if (p && p.total > 0) untrack(() => moveOp?.progress(p.done, p.total));
+  });
+  $effect(() => () => moveOp?.end());
+
+  // The archive's notice: an unfinished move (with Pause / Resume / Cancel), else an archive
+  // whose folder isn't available.
+  $effect(() => {
+    const n = archiveNotice(
+      {
+        archive: archiveMove.archive,
+        progress: archiveMove.progress,
+        running: archiveMove.running,
+        unfinished: archiveMove.unfinished,
+        cancelling: archiveMove.cancelling,
+        pauseRequested: archiveMove.pauseRequested,
+      },
+      {
+        pause: () => archiveMove.pause(),
+        resume: () => archiveMove.resume(),
+        cancel: () => archiveMove.cancel(),
+        retry: async () => {
+          await archiveMove.refresh();
+          await runScan();
+        },
+        chooseAnother: changeArchive,
+      },
+    );
+    syncNotice(ARCHIVE_MOVE_KEY, n?.key === ARCHIVE_MOVE_KEY ? n : null);
+    syncNotice(ARCHIVE_UNAVAILABLE_KEY, n?.key === ARCHIVE_UNAVAILABLE_KEY ? n : null);
   });
 
   // The startup read gave up: try once more whenever Settings opens.
@@ -1891,25 +2113,26 @@
     );
     if (!ok) return;
     try {
-      busy = "Pointing Silo at the archive…";
+      const op = beginWrite("Pointing Silo at the archive");
+      if (!op) return;
       try {
         await archiveRepoint(path);
       } finally {
-        busy = null;
+        op.end();
       }
       settingsOpen = false;
       await archiveMove.refresh();
       modsStatus = await modsRootStatus().catch(() => modsStatus);
       await runScan();
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Pointing Silo at the archive");
     }
   }
 
   async function changeArchive() {
     const why = await switchBlockReason();
     if (why) {
-      errorMsg = why;
+      refuse(why);
       return;
     }
     const path = await pickFolderFor("archive");
@@ -1919,18 +2142,24 @@
       return;
     }
     try {
-      busy = "Checking the folder…";
+      const check = start("Checking the folder"); // a read: it changes nothing
       let pf: ArchivePreflight;
       try {
         pf = await archiveMovePreflight(path);
       } finally {
-        busy = null;
+        check.end();
       }
       if (pf.problems.length) {
         // Nothing to move and the folder clears every path check: offer to use it as the
         // library as it is.
         if (pf.canRepoint) await repointArchive(path, "empty", pf.problems[0]);
-        else errorMsg = problemLines(pf.problems);
+        else
+          toast({
+            message: "Silo can't move your library there.",
+            body: problemLines(pf.problems),
+            tone: "warn",
+            sticky: true,
+          });
         return;
       }
       let body =
@@ -1963,14 +2192,14 @@
       archiveMove.startTracking();
       await archiveMove.drive(() => archiveMoveStart(path));
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Moving your library");
     }
   }
 
   async function archiveDefault() {
     const why = await switchBlockReason();
     if (why) {
-      errorMsg = why;
+      refuse(why);
       return;
     }
     if (archiveMove.missing) {
@@ -2003,7 +2232,7 @@
       ? `${modsCount(n)} in that folder ${n === 1 ? "is" : "are"} already in your library and ${n === 1 ? "was" : "were"} left untouched: ${capList(pv.duplicates)}.`
       : null;
     if (pv.inputs.length === 0) {
-      if (dupNote) infoMsg = dupNote;
+      if (dupNote) info(dupNote, { duration: 10_000 });
       return;
     }
     organizePreview = {
@@ -2021,10 +2250,86 @@
     localStorage.setItem("silo.overrideNoticeShown", "1");
   }
 
-  async function runScan(auto = true) {
+  // ── Notices: each condition raises and clears its own key (a rescan touches only `scan`) ──
+
+  // The mods folder: unavailable / blocked / not created yet, FS25 reading another folder, and
+  // the one-time "Silo now follows FS25's folder".
+  $effect(() => {
+    const n = modsFolderNotices(modsStatus, overrideNoticeOpen, {
+      retryBlocked: fgLock.reason,
+      retry: retryModsFolder,
+      chooseAnother: changeModsFolder,
+      useGameFolder,
+      pointGameHere,
+      createFolder: makeModsFolder,
+      dismissFollowed: dismissOverrideNotice,
+    });
+    syncNotice(MODS_FOLDER_KEY, n.modsFolder);
+    syncNotice(OVERRIDE_KEY, n.override);
+    syncNotice(OVERRIDE_FOLLOWED_KEY, n.followed);
+  });
+
+  // A cloud-synced mods folder (copies instead of hardlinks). Dismissing it is remembered.
+  $effect(() =>
+    syncNotice(
+      "cloud",
+      cloudNoticeOpen
+        ? {
+            level: "warning",
+            icon: "cloud",
+            title:
+              "Your mods folder is synced by a cloud service (OneDrive, Google Drive, or Proton Drive), which doesn't support hardlinks.",
+            body:
+              "Silo projects your active mods as file copies instead. That works, but uses more disk and makes bulk activate and deactivate slower. For the best performance, exclude …\\My Games\\FarmingSimulator2025 from your cloud sync.",
+            dismissible: true,
+            onDismiss: dismissCloudNotice,
+          }
+        : null,
+    ),
+  );
+
+  // An interrupted guided bisection: the active set may be partly applied.
+  $effect(() => {
+    const lock = writeLock;
+    const off = { disabled: lock.blocked, title: lock.reason || undefined };
+    syncNotice(
+      "bisect-recovery",
+      bisectRecovery
+        ? {
+            level: "blocking",
+            title: "A guided diagnosis was interrupted.",
+            body: "Your active mods may be partially applied.",
+            actions: [
+              { label: "Restore my mod set", run: restoreBisect, primary: true, ...off },
+              { label: "Discard", run: discardBisect, ...off },
+              { label: "Later", run: () => void (bisectRecovery = null), ...off },
+            ],
+            dismissible: false,
+          }
+        : null,
+    );
+  });
+
+  /** Scans skipped behind a foreground write collapse into one rescan when it ends. */
+  const scanGate = rescanGate((auto) => void runScan(auto));
+
+  /**
+   * Rescan the library. While a foreground library write runs, one rescan is queued for when it
+   * ends instead (writes rescan once they're done; the queued one covers startup, folder
+   * switches and the like). A background op (the archive move) never holds a scan back. A scan
+   * doesn't hold the write class itself, so the controls don't flicker off on every focus
+   * rescan; the ones that must wait for a scan check `scanning`.
+   * @param auto allow auto-filing afterwards
+   * @param label names the scan in the status line (a plain rescan only shows the progress bar)
+   * @param heldByCaller the caller holds the write class for this scan (rebuild, bisect
+   *   restore): don't wait for it
+   */
+  async function runScan(auto = true, label?: string, heldByCaller = false) {
     if (scanning) return;
+    if (!scanGate.admit(auto, heldByCaller)) return; // queued until the write ends
+    const op = start(label ?? "Rescanning your library", { quiet: !label });
+    scanOp = op;
     scanning = true;
-    errorMsg = null;
     progress = { done: 0, total: 0 };
     try {
       const r = await scanMods(roots.length ? roots : undefined);
@@ -2032,10 +2337,20 @@
       mods = r.mods;
       libraryScanned = true;
       activeSet = new Set(r.mods.filter((m) => m.active).map((m) => m.techName));
-      // Interrupted mod updates Silo finished or rolled back before scanning. Added to the
-      // banner, so a startup notice (a database restored) isn't wiped by the first scan.
-      if (r.notices?.length) infoMsg = appendInfo(infoMsg, r.notices);
-      if (r.problems?.length) errorMsg = r.problems.join(" ");
+      // Interrupted mod updates Silo finished or rolled back before scanning. The scan owns
+      // only the `scan` notice: other producers' notices stay up across rescans.
+      if (r.notices?.length) info(r.notices.join(" "), { duration: 10_000 });
+      syncNotice(
+        SCAN_KEY,
+        r.problems?.length
+          ? {
+              level: "warning",
+              title: "Silo couldn't finish an interrupted mod update.",
+              body: r.problems.join(" "),
+              dismissible: true,
+            }
+          : null,
+      );
       // Filesystem-level check (Rust): files at a managed name that aren't Silo's projection.
       detectForeignFiles(roots[0])
         .then((f) => (foreignFiles = f))
@@ -2049,10 +2364,22 @@
       // otherwise only loaded once on startup). Fire-and-forget; it handles its own errors.
       void loadSavegames();
     } catch (e) {
-      errorMsg = String(e);
+      // The library wasn't read: a standing condition until a scan works, so a notice.
+      reportError(e, "Scanning your library", { quiet: true });
+      const d = describeError(e, "Scanning your library");
+      if (!d.silent)
+        syncNotice(SCAN_KEY, {
+          level: "warning",
+          title: d.title,
+          body: d.body,
+          actions: [{ label: "Try again", run: () => runScan(false), primary: true }],
+          dismissible: true,
+        });
     } finally {
       scanning = false;
       lastScanAt = Date.now();
+      op.end();
+      scanOp = null;
     }
     // Auto-file any mods still loose in the flat root (e.g. freshly downloaded),
     // keeping them active so filing is transparent to the game.
@@ -2080,7 +2407,10 @@
     };
     window.addEventListener("contextmenu", onCtx);
     (async () => {
-      unlisten = await onScanProgress((p) => (progress = p));
+      unlisten = await onScanProgress((p) => {
+        progress = p;
+        scanOp?.progress(p.done, p.total);
+      });
       moveUnlisten = await archiveMove.listen();
       try {
         const rows = await getCuration();
@@ -2101,7 +2431,7 @@
         checkUpdate().then((u) => (update = u));
         settingsModsSet = new Set(await modsWithSettings());
       } catch (e) {
-        errorMsg = String(e);
+        reportError(e, "Starting Silo", { background: true });
       }
       try {
         modsStatus = await modsRootStatus();
@@ -2112,7 +2442,7 @@
           overrideNoticeOpen = true;
         }
       } catch (e) {
-        errorMsg = String(e);
+        reportError(e, "Reading the mods folder setting", { retry: retryModsFolder, background: true });
       }
       // Where the library archive lives, and any unfinished move (paused before a restart).
       // Awaited when there is a folder to scan, so the first scan's auto-file guard sees a move
@@ -2121,8 +2451,11 @@
       const archiveReady = archiveMove.load();
       if (roots.length) await archiveReady;
       try {
+        // e.g. the library database was restored from a backup: worth reading, so it stays up
+        // until dismissed.
         const notes = await takeStartupNotices();
-        if (notes.length) infoMsg = appendInfo(infoMsg, notes);
+        if (notes.length)
+          setNotice({ key: STARTUP_KEY, level: "info", title: notes.join(" "), dismissible: true });
       } catch {
         /* non-critical */
       }
@@ -2161,14 +2494,14 @@
       }
       // Auto-refresh on window focus: a mod downloaded in a browser lands while Silo is in the
       // background, so pick it up when the user returns instead of waiting for a manual rescan.
-      // Throttled (skip if busy/scanning or scanned <4s ago) so alt-tabbing doesn't thrash; the
+      // Throttled (skip during a library write or scan, or scanned <4s ago) so alt-tabbing doesn't thrash; the
       // scan cache (path+mtime+size) makes an unchanged rescan cheap anyway.
       try {
         focusUnlisten = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
           if (
             focused &&
             !scanning &&
-            !busy &&
+            !writeLock.blocked &&
             !archiveMove.running &&
             !bisecting &&
             roots.length &&
@@ -2213,18 +2546,25 @@
 
   async function restoreBisect() {
     if (!bisectRecovery) return;
-    busy = "Restoring your mod set…";
+    const op = beginWrite("Restoring your mod set");
+    if (!op) return;
+    // Held through the rescan, so the library shows the restored set before anything else runs.
     try {
-      // Clears even if the report lists errors (applyActive shows them): this banner is the
-      // escape hatch, and keeping the snapshot would block every new bisection for good.
-      await applyActive(bisectRecovery);
-      await bisectSnapshotClear();
-      bisectRecovery = null;
-      await runScan(false);
-    } catch (e) {
-      errorMsg = String(e);
+      let restored = false;
+      try {
+        // Clears even if the report lists errors (applyActive shows them): this banner is the
+        // escape hatch, and keeping the snapshot would block every new bisection for good.
+        await applyActive(bisectRecovery);
+        await bisectSnapshotClear();
+        bisectRecovery = null;
+        restored = true;
+      } catch (e) {
+        reportError(e, "Restoring your mod set", { retry: restoreBisect });
+      }
+      if (restored) await runScan(false, undefined, true);
+    } finally {
+      op.end();
     }
-    busy = null;
   }
 
   /** Forget an interrupted bisection without restoring it (asked first: it can't be undone). */
@@ -2242,7 +2582,7 @@
       await bisectSnapshotClear();
       bisectRecovery = null;
     } catch (e) {
-      errorMsg = String(e);
+      reportError(e, "Discarding the interrupted diagnosis");
     }
   }
 </script>
@@ -2269,7 +2609,7 @@
     hasMods={mods.length > 0}
     {updateChecking}
     {scanning}
-    {busy}
+    lockReason={fgLock.reason}
     launchBlocked={archiveMove.running}
     organizeBlocked={archiveMove.unfinished}
     hasGame={!!gameInfo}
@@ -2287,268 +2627,287 @@
     onToggleSettings={() => (settingsOpen = !settingsOpen)}
   />
 
-  {#if bisectRecovery}
-    <div class="recover-banner">
-      <span>
-        A guided diagnosis was interrupted — your active mods may be partially applied.
-      </span>
-      <div class="recover-actions">
-        <button class="btn primary" onclick={restoreBisect} disabled={!!busy}>
-          Restore my mod set
-        </button>
-        <button class="btn" onclick={discardBisect} disabled={!!busy}>Discard</button>
-        <button class="btn" onclick={() => (bisectRecovery = null)} disabled={!!busy}>
-          Later
-        </button>
-      </div>
-    </div>
-  {/if}
-
   {#if loadoutsOpen}
-    <LoadoutsPanel
-      {loadouts}
-      activeCount={activeSet.size}
-      {activeLoadoutId}
-      onApply={applyLoadout}
-      onOverwrite={overwriteLoadout}
-      onExport={exportLoadout}
-      onRemove={removeLoadout}
-      onSaveCurrent={saveCurrentLoadout}
-      onImport={importLoadout}
-      onClose={() => (loadoutsOpen = false)}
-    />
+    <ViewBoundary name="Loadouts" overlay onClose={() => (loadoutsOpen = false)}>
+      <LoadoutsPanel
+        {loadouts}
+        activeCount={activeSet.size}
+        {activeLoadoutId}
+        onApply={applyLoadout}
+        onOverwrite={overwriteLoadout}
+        onExport={exportLoadout}
+        onRemove={removeLoadout}
+        onSaveCurrent={saveCurrentLoadout}
+        onImport={importLoadout}
+        onClose={() => (loadoutsOpen = false)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if savesOpen}
-    <SavegamesPanel
-      rows={saveRows}
-      {busy}
-      onConfigure={openSaveConfig}
-      onBackup={backupSave}
-      onLoadout={loadoutFromSave}
-      onClose={() => (savesOpen = false)}
-    />
+    <ViewBoundary name="Savegames" overlay onClose={() => (savesOpen = false)}>
+      <SavegamesPanel
+        rows={saveRows}
+        lockReason={fgLock.reason}
+        onConfigure={openSaveConfig}
+        onBackup={backupSave}
+        onLoadout={loadoutFromSave}
+        onClose={() => (savesOpen = false)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if conflictsOpen}
-    <ConflictsPanel
-      {conflicts}
-      {criticalCount}
-      activeCount={activeSet.size}
-      onClose={() => (conflictsOpen = false)}
-    />
+    <ViewBoundary name="Conflicts" overlay onClose={() => (conflictsOpen = false)} bodyText="Your mods weren't changed.">
+      <ConflictsPanel
+        {conflicts}
+        {criticalCount}
+        activeCount={activeSet.size}
+        onClose={() => (conflictsOpen = false)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if settingsOpen}
-    <SettingsPanel
-      {theme}
-      {uiScale}
-      {roots}
-      {gameInfo}
-      {userDir}
-      {appVer}
-      {autoFileNew}
-      {organizedCount}
-      {unorganizedCount}
-      {cloudSynced}
-      {busy}
-      {scanning}
-      onSetTheme={setTheme}
-      onSetUiScale={setUiScale}
-      onOpenGameGraphics={openGameGraphics}
-      onExportReport={exportReport}
-      onCopyDiagnostics={copyDiagnostics}
-      onSetAutoFile={setAutoFile}
-      onOrganize={() => {
-        settingsOpen = false;
-        organizeNew();
-      }}
-      onRebuild={rebuildLibrary}
-      onRestoreVanilla={() => {
-        settingsOpen = false;
-        restoreVanilla();
-      }}
-      onOptimizeLinks={optimizeLinks}
-      onClose={() => (settingsOpen = false)}
-      {modsStatus}
-      onChangeModsFolder={changeModsFolder}
-      onUseGameFolder={useGameFolder}
-      onSwitchModsFolder={switchModsFolder}
-      archive={archiveMove.archive}
-      moveUnfinished={archiveMove.unfinished}
-      archiveLoadFailed={archiveMove.loadFailed}
-      onChangeArchive={changeArchive}
-      onArchiveDefault={archiveDefault}
-    />
+    <ViewBoundary name="Settings" overlay onClose={() => (settingsOpen = false)}>
+      <SettingsPanel
+        {theme}
+        {uiScale}
+        {roots}
+        {gameInfo}
+        {userDir}
+        {appVer}
+        {autoFileNew}
+        {organizedCount}
+        {unorganizedCount}
+        {cloudSynced}
+        lockReason={fgLock.reason}
+        {scanning}
+        onSetTheme={setTheme}
+        onSetUiScale={setUiScale}
+        onOpenGameGraphics={openGameGraphics}
+        onExportReport={exportReport}
+        onCopyDiagnostics={copyDiagnostics}
+        onSetAutoFile={setAutoFile}
+        onOrganize={() => {
+          settingsOpen = false;
+          organizeNew();
+        }}
+        onRebuild={rebuildLibrary}
+        onRestoreVanilla={() => {
+          settingsOpen = false;
+          restoreVanilla();
+        }}
+        onOptimizeLinks={optimizeLinks}
+        onClose={() => (settingsOpen = false)}
+        {modsStatus}
+        onChangeModsFolder={changeModsFolder}
+        onUseGameFolder={useGameFolder}
+        onSwitchModsFolder={switchModsFolder}
+        archive={archiveMove.archive}
+        moveUnfinished={archiveMove.unfinished}
+        archiveLoadFailed={archiveMove.loadFailed}
+        onChangeArchive={changeArchive}
+        onArchiveDefault={archiveDefault}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if settingsMod}
-    <ModSettings
-      modName={settingsMod.techName}
-      title={settingsMod.title}
-      onClose={() => (settingsMod = null)}
-    />
+    <ViewBoundary name="Mod settings" overlay onClose={() => (settingsMod = null)}>
+      <ModSettings
+        modName={settingsMod.techName}
+        title={settingsMod.title}
+        onClose={() => (settingsMod = null)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if configEditor}
-    <ConfigEditor
-      title={configEditor.title}
-      path={configEditor.path}
-      fields={configEditor.fields}
-      presets={configEditor.presets}
-      footnote={configEditor.footnote}
-      onClose={() => (configEditor = null)}
-    />
+    <ViewBoundary name="the settings editor" overlay onClose={() => (configEditor = null)}>
+      <ConfigEditor
+        title={configEditor.title}
+        path={configEditor.path}
+        fields={configEditor.fields}
+        presets={configEditor.presets}
+        footnote={configEditor.footnote}
+        onClose={() => (configEditor = null)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if detailMod}
     {@const dm = detailMod}
     {@const fgn = foreignFiles.find((f) => f.techName === dm.techName) ?? null}
-    <ModDetail
-      mod={dm}
-      curation={cur(dm.techName)}
-      tags={tagsOf(dm.techName)}
-      active={activeSet.has(dm.techName)}
-      organized={dm.organized}
-      hasSettings={settingsModsSet.has(dm.techName)}
-      foreign={fgn}
-      onAdoptForeign={async () => {
-        if (fgn) {
-          await resolveForeign(fgn.fileName, "adopt");
+    <ViewBoundary name="the mod details" overlay onClose={() => (detailMod = null)}>
+      <ModDetail
+        mod={dm}
+        curation={cur(dm.techName)}
+        tags={tagsOf(dm.techName)}
+        active={activeSet.has(dm.techName)}
+        organized={dm.organized}
+        hasSettings={settingsModsSet.has(dm.techName)}
+        foreign={fgn}
+        onAdoptForeign={async () => {
+          if (fgn && (await resolveForeign(fgn.fileName, "adopt"))) detailMod = null;
+        }}
+        onRestoreForeign={async () => {
+          if (fgn && (await resolveForeign(fgn.fileName, "restore"))) detailMod = null;
+        }}
+        {libraryTechNames}
+        {conflicts}
+        categories={CATEGORIES}
+        isOverridden={overrideMap[dm.techName] != null}
+        onSetCategory={(c, s) => setCategory(dm.techName, c, s)}
+        onResetCategory={() => resetCategory(dm.techName)}
+        onClose={() => (detailMod = null)}
+        onToggle={(flag) => toggleCuration(dm.techName, flag)}
+        onToggleActive={() => toggleActive(dm.techName)}
+        onOpenSettings={() =>
+          (settingsMod = { techName: dm.techName, title: dm.title ?? dm.techName })}
+        onFindInBrowse={() => openInBrowse(dm)}
+        onCurationChange={(row) => (curationMap = { ...curationMap, [dm.techName]: row })}
+        onTagsChange={(t) => (tagMap = { ...tagMap, [dm.techName]: t })}
+        onFilterTag={(t) => {
+          selectedTag = t;
           detailMod = null;
-        }
-      }}
-      onRestoreForeign={async () => {
-        if (fgn) {
-          await resolveForeign(fgn.fileName, "restore");
+        }}
+        repo={repoMap[dm.techName] ?? null}
+        onRepoChange={(r) => {
+          const next = { ...repoMap };
+          if (r) next[dm.techName] = r;
+          else delete next[dm.techName];
+          repoMap = next;
+        }}
+        source={sourceMap[dm.techName] ?? null}
+        onSourceChange={(row) => setSource(dm.techName, row)}
+        onInstalled={() => {
           detailMod = null;
-        }
-      }}
-      {libraryTechNames}
-      {conflicts}
-      categories={CATEGORIES}
-      isOverridden={overrideMap[dm.techName] != null}
-      onSetCategory={(c, s) => setCategory(dm.techName, c, s)}
-      onResetCategory={() => resetCategory(dm.techName)}
-      onClose={() => (detailMod = null)}
-      onToggle={(flag) => toggleCuration(dm.techName, flag)}
-      onToggleActive={() => toggleActive(dm.techName)}
-      onOpenSettings={() =>
-        (settingsMod = { techName: dm.techName, title: dm.title ?? dm.techName })}
-      onFindInBrowse={() => openInBrowse(dm)}
-      onCurationChange={(row) => (curationMap = { ...curationMap, [dm.techName]: row })}
-      onTagsChange={(t) => (tagMap = { ...tagMap, [dm.techName]: t })}
-      onFilterTag={(t) => {
-        selectedTag = t;
-        detailMod = null;
-      }}
-      repo={repoMap[dm.techName] ?? null}
-      onRepoChange={(r) => {
-        const next = { ...repoMap };
-        if (r) next[dm.techName] = r;
-        else delete next[dm.techName];
-        repoMap = next;
-      }}
-      source={sourceMap[dm.techName] ?? null}
-      onSourceChange={(row) => setSource(dm.techName, row)}
-      onInstalled={() => {
-        detailMod = null;
-        runScan(false);
-      }}
-    />
+          runScan(false);
+        }}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if updatesOpen}
-    <UpdatesPanel
-      {updateResults}
-      {availableUpdates}
-      {updateChecking}
-      {busy}
-      {checkYourself}
-      onInstall={installFromRow}
-      onOpenSource={(s) => openExternal(s.url)}
-      onMarkChecked={markChecked}
-      onClose={() => (updatesOpen = false)}
-    />
+    <ViewBoundary name="Updates" overlay onClose={() => (updatesOpen = false)}>
+      <UpdatesPanel
+        {updateResults}
+        {availableUpdates}
+        {updateChecking}
+        lockReason={fgLock.reason}
+        {checkYourself}
+        onInstall={installFromRow}
+        onOpenSource={(s) => openExternal(s.url)}
+        onMarkChecked={markChecked}
+        onClose={() => (updatesOpen = false)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if statsOpen}
-    <StatsPanel
-      modCount={mods.length}
-      {organizedCount}
-      activeCount={activeSet.size}
-      mapsCount={stats.maps}
-      {libStats}
-      onClose={() => (statsOpen = false)}
-    />
+    <ViewBoundary name="Library stats" overlay onClose={() => (statsOpen = false)} bodyText="Your mods weren't changed.">
+      <StatsPanel
+        modCount={mods.length}
+        {organizedCount}
+        activeCount={activeSet.size}
+        mapsCount={stats.maps}
+        {libStats}
+        onClose={() => (statsOpen = false)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if healthOpen}
-    <HealthPanel
-      {health}
-      {healthCount}
-      onResolveForeign={resolveForeign}
-      onClose={() => (healthOpen = false)}
-    />
+    <ViewBoundary name="Library health" overlay onClose={() => (healthOpen = false)}>
+      <HealthPanel
+        {health}
+        {healthCount}
+        onResolveForeign={resolveForeign}
+        onClose={() => (healthOpen = false)}
+      />
+    </ViewBoundary>
   {/if}
 
   {#if logOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="backdrop" onclick={() => (logOpen = false)}></div>
-    <div class="log-panel">
-      <LogTriage
-        onClose={() => (logOpen = false)}
-        activeMods={[...activeSet]}
-        activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
-        onApply={bisectApply}
-        onBisecting={(v) => void bisectingChanged(v)}
-        recoveryPending={bisectRecovery !== null}
-      />
-    </div>
+    <ViewBoundary
+      name="Diagnose"
+      overlay
+      onClose={() => (logOpen = false)}
+      bodyText="Your mods are as they were before this view failed. If a diagnosis was running, Silo keeps your place."
+    >
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="backdrop" onclick={() => (logOpen = false)}></div>
+      <div class="log-panel">
+        <LogTriage
+          onClose={() => (logOpen = false)}
+          activeMods={[...activeSet]}
+          activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
+          onApply={bisectRound}
+          onBisecting={(v) => void bisectingChanged(v)}
+          recoveryPending={bisectRecovery !== null}
+        />
+      </div>
+    </ViewBoundary>
   {/if}
 
   {#if bindingsOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="backdrop" onclick={() => (bindingsOpen = false)}></div>
-    <div class="log-panel">
-      <BindingsView onClose={() => (bindingsOpen = false)} />
-    </div>
+    <ViewBoundary name="Bindings" overlay onClose={() => (bindingsOpen = false)} bodyText="Your mods weren't changed.">
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="backdrop" onclick={() => (bindingsOpen = false)}></div>
+      <div class="log-panel">
+        <BindingsView onClose={() => (bindingsOpen = false)} />
+      </div>
+    </ViewBoundary>
   {/if}
 
   {#if mpOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="backdrop" onclick={() => (mpOpen = false)}></div>
-    <div class="log-panel">
-      <MpSync active={activeModRefs} onClose={() => (mpOpen = false)} />
-    </div>
+    <ViewBoundary name="Multiplayer" overlay onClose={() => (mpOpen = false)}>
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="backdrop" onclick={() => (mpOpen = false)}></div>
+      <div class="log-panel">
+        <MpSync active={activeModRefs} onClose={() => (mpOpen = false)} />
+      </div>
+    </ViewBoundary>
   {/if}
 
   {#if collectionsOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="backdrop" onclick={() => (collectionsOpen = false)}></div>
-    <div class="log-panel">
-      <Collections
-        active={activeModRefs}
-        library={mods}
-        initialImportUrl={collImportUrl}
-        onImported={() => runScan(false)}
-        onClose={() => {
-          collectionsOpen = false;
-          collImportUrl = null;
-        }}
-      />
-    </div>
+    <ViewBoundary
+      name="Collections"
+      overlay
+      onClose={() => {
+        collectionsOpen = false;
+        collImportUrl = null;
+      }}
+    >
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="backdrop" onclick={() => (collectionsOpen = false)}></div>
+      <div class="log-panel">
+        <Collections
+          active={activeModRefs}
+          library={mods}
+          initialImportUrl={collImportUrl}
+          onImported={() => runScan(false)}
+          onClose={() => {
+            collectionsOpen = false;
+            collImportUrl = null;
+          }}
+        />
+      </div>
+    </ViewBoundary>
   {/if}
 
   {#if bridgeOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="backdrop" onclick={() => (bridgeOpen = false)}></div>
-    <div class="log-panel">
-      <BridgeTool
-        onGenerated={() => runScan(true)}
-        onClose={() => (bridgeOpen = false)}
-      />
-    </div>
+    <ViewBoundary name="the filltype bridge" overlay onClose={() => (bridgeOpen = false)}>
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="backdrop" onclick={() => (bridgeOpen = false)}></div>
+      <div class="log-panel">
+        <BridgeTool
+          onGenerated={() => runScan(true)}
+          onClose={() => (bridgeOpen = false)}
+        />
+      </div>
+    </ViewBoundary>
   {/if}
 
   {#if scanning}
@@ -2559,127 +2918,44 @@
   {/if}
 
   {#if organizePreview}
-    <OrganizePreview
-      plan={organizePreview.plan}
-      loading={organizePreview.loading}
-      applying={organizePreview.applying}
-      adopt={organizePreview.adopt ?? null}
-      onConfirm={confirmOrganize}
-      onCancel={() => (organizePreview = null)}
-    />
+    <ViewBoundary name="the Organize preview" overlay onClose={() => (organizePreview = null)}>
+      <OrganizePreview
+        plan={organizePreview.plan}
+        loading={organizePreview.loading}
+        applying={organizePreview.applying}
+        adopt={organizePreview.adopt ?? null}
+        onConfirm={confirmOrganize}
+        onCancel={() => (organizePreview = null)}
+      />
+    </ViewBoundary>
   {/if}
 
-  {#if busy}
-    <div class="busy">{busy}</div>
-  {/if}
-
-  {#if errorMsg}
-    <div class="error">{errorMsg}</div>
-  {/if}
-
-  {#if infoMsg}
-    <div class="cloud-notice">
-      <span class="cn-ico"><Icon name="info" /></span>
-      <div class="cn-text">{infoMsg}</div>
-      <button class="cn-x" onclick={() => (infoMsg = null)} title="Dismiss" aria-label="Dismiss"><Icon name="close" size={14} /></button>
+  {#if statusOp}
+    <div class="busy" role="status">
+      {statusOp.label}…{#if statusOp.progress && statusOp.progress.total > 0}
+        <span class="tnum">{statusOp.progress.done}/{statusOp.progress.total}</span>{/if}
     </div>
   {/if}
 
-  {#if cloudNoticeOpen}
-    <div class="cloud-notice">
-      <span class="cn-ico"><Icon name="cloud" /></span>
-      <div class="cn-text">
-        <b>Your mods folder is synced by a cloud service</b> (OneDrive, Google Drive, or Proton
-        Drive), which doesn't support hardlinks. Silo will project your active mods as
-        <b>file copies</b> instead — this works fine, but uses more disk and makes bulk activate /
-        deactivate slower. For the best performance, exclude
-        <span class="tnum">…\My Games\FarmingSimulator2025</span> from your cloud sync.
-      </div>
-      <button class="cn-x" onclick={dismissCloudNotice} title="Dismiss" aria-label="Dismiss"><Icon name="close" size={14} /></button>
-    </div>
-  {/if}
-
-  {#if modsStatus && modsStatus.source === "user" && !modsStatus.available}
-    <div class="cloud-notice">
-      <span class="cn-ico"><Icon name="problem" /></span>
-      <div class="cn-text">
-        <b>Your mods folder isn't available:</b> <span class="tnum">{modsStatus.path}</span>.
-        Nothing was scanned. Reconnect the drive, or pick another folder.
-      </div>
-      <button class="cn-act" onclick={retryModsFolder}>Retry</button>
-      <button class="cn-act" onclick={changeModsFolder}>Choose another</button>
-      <button class="cn-act" onclick={useGameFolder}>Use the game's folder</button>
-    </div>
-  {:else if modsStatus?.layoutProblem}
-    <BlockedFolderBanner
-      status={modsStatus}
-      onRetry={retryModsFolder}
-      onPointGameHere={pointGameHere}
-      onChooseAnother={changeModsFolder}
-    />
-  {:else if modsStatus?.modsFolderMissing}
-    <div class="cloud-notice">
-      <span class="cn-ico"><Icon name="info" /></span>
-      <div class="cn-text">Farming Simulator hasn't created its <b>mods</b> folder yet.</div>
-      <button class="cn-act" onclick={makeModsFolder}>Create it</button>
-      <button class="cn-act" onclick={changeModsFolder}>Choose a folder</button>
-    </div>
-  {:else if modsStatus?.mismatch}
-    <div class="cloud-notice">
-      <span class="cn-ico"><Icon name="problem" /></span>
-      <div class="cn-text">
-        <b>FS25 is reading a different mods folder</b>
-        {#if modsStatus.gameReads}(<span class="tnum">{modsStatus.gameReads}</span>){/if} — mods
-        you activate here won't load in-game.
-      </div>
-      {#if modsStatus.canWriteGameSetting}
-        <button class="cn-act" onclick={pointGameHere}>Point FS25 here</button>
-      {/if}
-      <button class="cn-act" onclick={useGameFolder}>Switch Silo to the game's folder</button>
-    </div>
-  {/if}
-
-  <ArchiveMoveBanner
-    archive={archiveMove.archive}
-    moveProgress={archiveMove.progress}
-    moveRunning={archiveMove.running}
-    moveUnfinished={archiveMove.unfinished}
-    moveCancelling={archiveMove.cancelling}
-    pauseRequested={archiveMove.pauseRequested}
-    onPause={() => archiveMove.pause()}
-    onResume={() => archiveMove.resume()}
-    onCancel={() => archiveMove.cancel()}
-    onRetry={async () => {
-      await archiveMove.refresh();
-      await runScan();
-    }}
-    onChooseAnother={changeArchive}
-  />
-
-  {#if overrideNoticeOpen && modsStatus?.path && !modsStatus.layoutProblem}
-    <div class="cloud-notice">
-      <span class="cn-ico"><Icon name="info" /></span>
-      <div class="cn-text">
-        Silo now uses the mods folder FS25 is set to: <span class="tnum">{modsStatus.path}</span>.
-      </div>
-      <button class="cn-x" onclick={dismissOverrideNotice} title="Dismiss" aria-label="Dismiss"><Icon name="close" size={14} /></button>
-    </div>
-  {/if}
+  <NoticeArea />
 
   {#if view === "browse"}
     <!-- Own scroll region: the library scrolls via its inner VirtualList, but Browse
          is plain flow content, so it needs a flex-fill scroll container of its own. -->
     <div class="browse-scroll">
-      <ModBrowser
-        installed={libraryTechNames}
-        onInstalled={() => runScan(true)}
-        onNeedAuth={() => (settingsOpen = true)}
-        onFindInLibrary={openInLibrary}
-        seed={browseSeed}
-        seedTech={browseSeedTech}
-      />
+      <ViewBoundary name="Browse">
+        <ModBrowser
+          installed={libraryTechNames}
+          onInstalled={() => runScan(true)}
+          onNeedAuth={() => (settingsOpen = true)}
+          onFindInLibrary={openInLibrary}
+          seed={browseSeed}
+          seedTech={browseSeedTech}
+        />
+      </ViewBoundary>
     </div>
   {:else}
+  <ViewBoundary name="the library">
   <div class="lib">
     <div class="lib-inner">
       <FilterBar
@@ -2747,7 +3023,8 @@
         shownCount={filtered.length}
         allActive={allFilteredActive}
         activeInFilter={filteredActiveCount}
-        disabled={!!busy || filtered.length === 0}
+        disabled={writeLock.blocked || filtered.length === 0}
+        disabledReason={writeLock.reason}
         bind:libView
         onSelectAll={setActiveForFiltered}
         onClearTag={() => (selectedTag = null)}
@@ -2842,6 +3119,7 @@
       </div>
     </div>
   </div>
+  </ViewBoundary>
   {/if}
 
   {#if editing}
@@ -2865,7 +3143,9 @@
   {/if}
 </div>
 
-<DialogHost />
+<ViewBoundary name="the dialog" overlay>
+  <DialogHost />
+</ViewBoundary>
 <ToastRegion />
 
 <style>
@@ -2873,31 +3153,6 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-  }
-  .btn {
-    border: 1px solid var(--border);
-    background: var(--surface-raised);
-    color: var(--text);
-    padding: 9px 18px;
-    border-radius: var(--radius);
-    font-weight: 600;
-    transition: background 0.15s ease, border-color 0.15s ease;
-  }
-  .btn.primary {
-    background: var(--primary);
-    border-color: var(--primary);
-    color: var(--on-primary);
-  }
-  .btn.primary:hover:not(:disabled) {
-    background: var(--primary-hover);
-  }
-  .btn:hover:not(:disabled):not(.primary) {
-    color: var(--text);
-    border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
-  }
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: default;
   }
   .busy {
     padding: 8px 20px;
@@ -2923,33 +3178,7 @@
     font-size: var(--fs-xs);
     color: var(--text-muted);
   }
-  .error {
-    padding: 10px 20px;
-    background: color-mix(in srgb, var(--danger) 12%, var(--surface));
-    color: var(--danger);
-    font-size: var(--fs-sm);
-    /* Several problems arrive one per line. */
-    white-space: pre-line;
-  }
   /* Log-triage panel owns its own padding (LogTriage.svelte), so no inner padding here. */
-  .recover-banner {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin: 0 0 10px;
-    padding: 10px 14px;
-    background: color-mix(in srgb, var(--warn-text) 14%, transparent);
-    border: 1px solid color-mix(in srgb, var(--warn-text) 40%, transparent);
-    border-radius: var(--radius-sm);
-    color: var(--text);
-    font-size: 0.88rem;
-  }
-  .recover-actions {
-    display: flex;
-    gap: 8px;
-  }
   .log-panel {
     position: fixed;
     z-index: 50;

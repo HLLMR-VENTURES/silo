@@ -3,6 +3,7 @@
   // the last run crashed and which mods are actually at fault — separating real breakage
   // from cosmetic noise. The thing no other FS25 manager does.
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import { onMount } from "svelte";
   import { scanLog, revealInFolder, userDirPath } from "../api";
   import type { LogReport, LogModHealth } from "../types";
@@ -43,7 +44,7 @@
     try {
       report = await scanLog();
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Reading the game log");
       report = null;
     } finally {
       loading = false;
@@ -71,7 +72,7 @@
       const dir = await userDirPath();
       if (dir) await revealInFolder(`${dir}/log.txt`);
     } catch (e) {
-      revealError = String(e);
+      revealError = inlineError(e, "Opening the log folder");
     }
   }
 

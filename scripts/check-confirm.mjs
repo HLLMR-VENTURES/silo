@@ -3,10 +3,10 @@
 //    with an async function, so it returns an always-truthy Promise and the guarded action runs
 //    no matter what the user clicks;
 //  - `prompt(` / `window.prompt(` appears: views ask for text with `await askText(...)`;
-//  - an `ask(` / `confirmAction(` / `askText(` / `askOrOs(` / `confirmDialog(` / `pluginConfirm(`
-//    call (also as a member, `ui.ask(`) isn't awaited: an un-awaited one is a Promise, always
-//    truthy, so a `!ask(...)` guard never blocks. Also allowed: `return ask(` on a line that
-//    says `async`, and `async () => ask(` (the arrow is async, so whoever calls it awaits it);
+//  - an `ask(` / `confirmAction(` / `askText(` / `askOrOs(` / `askOs(` / `confirmDialog(` /
+//    `pluginConfirm(` call (also as a member, `ui.ask(`) isn't awaited: an un-awaited one is a
+//    Promise, always truthy, so a `!ask(...)` guard never blocks. Also allowed: `return ask(` on
+//    a line that says `async`, and `async () => ask(` (the arrow is async, so whoever calls it awaits it);
 //  - one of those helpers (or `confirm`) is imported or exported under another name
 //    (`import { ask as yes }`), which would hide its calls from this scan. The one exception is
 //    `confirm as pluginConfirm` in src/lib/api.ts, which `confirmDialog` wraps.
@@ -25,13 +25,13 @@ export const bareConfirm = /(?<![\w$])(?:window\.)?confirm\s*\(/;
 /** A `prompt(` / `window.prompt(` call (not `x.prompt(`, not `askPrompt(`). */
 export const barePrompt = /(?<![\w$.])prompt\s*\(|(?<![\w$])window\.prompt\s*\(/;
 /** Any call of the in-app confirm/prompt helpers or the OS confirm wrappers, `ui.ask(` included. */
-export const dialogCall = /(?<![\w$])(?:ask|confirmAction|askText|askOrOs|confirmDialog|pluginConfirm)\s*\(/g;
+export const dialogCall = /(?<![\w$])(?:ask|confirmAction|askText|askOrOs|askOs|confirmDialog|pluginConfirm)\s*\(/g;
 /** Directly before such a call: `await`, or `.then(` (the call is the argument). */
 export const awaitedBefore = /(?:\bawait|\.then\()\s*$/;
 /** Directly before such a call: the body of an `async` arrow, `async (x) => ask(` / `async x => ask(`. */
 export const asyncArrowBefore = /\basync\s*(?:\([^()]*\)|[\w$]+)\s*=>\s*$/;
 /** A helper imported / exported under another name. */
-export const aliasImport = /(?<![\w$])(ask|askText|askOrOs|confirmAction|confirmDialog|confirm)\s+as\s+([\w$]+)/;
+export const aliasImport = /(?<![\w$])(ask|askText|askOrOs|askOs|confirmAction|confirmDialog|confirm)\s+as\s+([\w$]+)/;
 
 /** Files allowed to define (not call) the helpers. */
 const DEFINITIONS = ["src/lib/ui/dialogs.svelte.ts", "src/lib/confirm.ts"];

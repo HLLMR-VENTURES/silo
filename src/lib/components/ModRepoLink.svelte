@@ -1,8 +1,10 @@
 <script lang="ts">
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import type { ModEntry, UpdateInfo } from "../types";
   import { setModRepo, guessRepo, checkModUpdate, downloadUpdate, openExternal } from "../api";
   import { ask } from "../ui";
+  import { blocked, tryStart } from "../state/ops.svelte";
 
   let {
     mod,
@@ -48,7 +50,7 @@
       await setModRepo(mod.techName, owner, r);
       onRepoChange(owner && r ? { owner, repo: r } : null);
     } catch (e) {
-      ghError = String(e);
+      ghError = inlineError(e, "Linking the repo");
     }
   }
 
@@ -60,7 +62,7 @@
     try {
       update = await checkModUpdate(repo.owner, repo.repo, mod.version ?? "0");
     } catch (e) {
-      ghError = String(e);
+      ghError = inlineError(e, "Checking for an update");
     }
     checking = false;
   }
@@ -75,10 +77,17 @@
       }))
     )
       return;
+    // It replaces a mod in the library: a library write, one at a time.
+    const op = tryStart("Installing an update", { exclusive: "library-write" });
+    if (!op) {
+      ghError = `${blocked("library-write").reason} Try again when it's done.`;
+      return;
+    }
     installing = true;
     ghError = null;
     installNote = null;
     const path = mod.path;
+    let installed = false;
     try {
       const out = await downloadUpdate(path, update.release.assetUrl);
       installNote = {
@@ -86,11 +95,15 @@
         backup: out.backup ? `The previous version is kept in ${out.backup}.` : null,
         warning: out.problems.length ? out.problems.join(" ") : null,
       };
-      onInstalled();
+      installed = true;
     } catch (e) {
-      ghError = String(e);
+      ghError = inlineError(e, "Installing the update");
+    } finally {
+      op.end();
     }
     installing = false;
+    // After the op ends: the rescan it triggers skips while a library write is running.
+    if (installed) onInstalled();
   }
 
   // What the last install said. Kept across the rescan `onInstalled` triggers (which hands this

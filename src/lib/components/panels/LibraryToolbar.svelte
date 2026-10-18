@@ -8,6 +8,7 @@
     allActive,
     activeInFilter,
     disabled,
+    disabledReason = "",
     libView = $bindable(),
     onSelectAll,
     onClearTag,
@@ -17,6 +18,8 @@
     allActive: boolean;
     activeInFilter: number;
     disabled: boolean;
+    /** Shown as the switch's tooltip while it's off for a reason ("Silo is moving mods."). */
+    disabledReason?: string;
     libView: "tiles" | "rows";
     onSelectAll: (checked: boolean) => void;
     onClearTag: () => void;
@@ -31,7 +34,7 @@
 </script>
 
 <div class="crumb">
-  <label class="sel-all" title="Activate / deactivate everything in this view">
+  <label class="sel-all" title={disabledReason || "Activate / deactivate everything in this view"}>
     <input
       type="checkbox"
       class="select-all"
