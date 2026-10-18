@@ -2,6 +2,8 @@
 // derived from data App already holds. Pure, so it unit-tests without the app.
 //   libraryStatusCounts({ criticalConflicts: 1, warningConflicts: 2, missingDeps: 0, ... })
 //     -> { problems: 1, review: 2 }
+// Health findings (missing dependencies, unreadable mods, mods the game skips) are problems only
+// for active mods: an inactive one can't break the next run, so it's something to review.
 import { formatCount, plural } from "../plural";
 
 export interface LibraryStatusInput {
@@ -9,12 +11,14 @@ export interface LibraryStatusInput {
   criticalConflicts: number;
   /** Conflicts with severity "warning". Info-level conflicts never count. */
   warningConflicts: number;
-  /** Mods whose dependencies aren't in the library (they fail to load). */
+  /** Active mods whose dependencies aren't in the library (they fail to load). */
   missingDeps: number;
-  /** Mods Silo couldn't read (corrupt or unreadable). */
+  /** Active mods Silo couldn't read (corrupt or unreadable). */
   corrupt: number;
-  /** Mods the game skips because their name starts with a digit. */
+  /** Active mods the game skips because their name starts with a digit. */
   ignored: number;
+  /** The same three findings on inactive mods (each finding counts once). */
+  inactiveFindings: number;
   /** Files at a managed name that aren't Silo's (left untouched; the user decides). */
   foreign: number;
 }
@@ -27,7 +31,7 @@ export interface LibraryStatusInput {
 export function libraryStatusCounts(i: LibraryStatusInput): { problems: number; review: number } {
   return {
     problems: i.criticalConflicts + i.missingDeps + i.corrupt + i.ignored,
-    review: i.warningConflicts + i.foreign,
+    review: i.warningConflicts + i.foreign + i.inactiveFindings,
   };
 }
 
@@ -41,22 +45,26 @@ export function activeSetLine(exactLoadoutName: string | null): string {
 }
 
 /**
- * The left side of the Library status strip.
- * @param s scan state, active and total counts, and the matching loadout's name if any
- * @return e.g. "Ready to play · 142 of 737 active · Harvest 2026"
+ * The left side of the Library status strip. It only says "Ready to play" when Play would work:
+ * the game was found, Play isn't blocked and there's no critical conflict.
+ * @param s scan state, whether Play is ready, active and total counts, and the matching loadout's
+ *   name if any
+ * @return e.g. "Ready to play · 142 of 737 active · Harvest 2026", or "142 of 737 active"
  */
 export function stripLeft(s: {
   scanning: boolean;
   scanned: boolean;
+  /** The game was found, Play isn't blocked and no critical conflict is open. */
+  ready: boolean;
   active: number;
   total: number;
   setName: string | null;
 }): string {
   if (!s.scanned) return s.scanning ? "Reading your library…" : "Your library hasn't been read yet";
-  const parts = [
-    s.scanning ? "Rescanning" : "Ready to play",
-    `${formatCount(s.active)} of ${formatCount(s.total)} active`,
-  ];
+  const parts: string[] = [];
+  if (s.scanning) parts.push("Rescanning");
+  else if (s.ready) parts.push("Ready to play");
+  parts.push(`${formatCount(s.active)} of ${formatCount(s.total)} active`);
   if (s.setName) parts.push(s.setName);
   return parts.join(" · ");
 }

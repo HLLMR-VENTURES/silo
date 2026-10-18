@@ -41,11 +41,16 @@
     /** Jump to an installed mod in the Library (reverse of the library's "Find in Browse"). */
     onFindInLibrary?: (techName: string) => void;
     /** Pre-seed the catalog search (e.g. from a library row's "Find in Browse").
-     *  Applied on mount; Browse remounts on every view switch, so this seeds each entry. */
+     *  Read once on mount, then `onSeedConsumed` tells the owner to forget it, so a later visit
+     *  to Browse doesn't repeat the old search. */
     seed?: string | null;
     /** techName to auto-open once results land, so "Find in Browse" lands on the mod's drawer
      *  rather than just filtering to it. */
     seedTech?: string | null;
+    /** Called once on mount, after `seed` / `seedTech` were read. */
+    onSeedConsumed?: () => void;
+    /** Show the "Browse mods" heading (off inside BrowseView, whose header already says Browse). */
+    showTitle?: boolean;
     /** The catalog search text. The app header's search binds it; a change re-queries after the
      *  same 300 ms pause typing in the old search box had. */
     query?: string;
@@ -57,6 +62,8 @@
     onFindInLibrary,
     seed = null,
     seedTech = null,
+    onSeedConsumed,
+    showTitle = true,
     query = $bindable(""),
   }: Props = $props();
 
@@ -336,6 +343,10 @@
   }
 
   onMount(async () => {
+    // Read the seed before anything awaits, then let the owner forget it.
+    const seedText = seed;
+    const seedTarget = seedTech;
+    if (seedText || seedTarget) onSeedConsumed?.();
     unlisten = await onInstallProgress((p) => {
       progress = { ...progress, [p.id]: { done: p.done, total: p.total } };
     });
@@ -358,11 +369,11 @@
     } catch {
       // Older server without /facets — the filter panel just stays empty.
     }
-    if (seed && seed.trim()) query = searchedQuery = seed.trim();
+    if (seedText && seedText.trim()) query = searchedQuery = seedText.trim();
     await load();
     // "Find in Browse" targets a specific mod — open its drawer once the seeded search lands it.
-    if (seedTech) {
-      const hit = results.find((m) => m.techName === seedTech);
+    if (seedTarget) {
+      const hit = results.find((m) => m.techName === seedTarget);
       if (hit) await openDetail(hit);
     }
   });
@@ -373,7 +384,7 @@
 <div class="browse">
   <div class="browse-head">
     <div class="bh-title">
-      <h2>Browse mods</h2>
+      {#if showTitle}<h3 class="bh-heading">Browse mods</h3>{/if}
       {#if stats}
         <span class="catalog-count">
           {stats.mods.toLocaleString()} mods from {stats.sources.toLocaleString()} ModHub and GitHub listings
@@ -505,7 +516,7 @@
     align-items: baseline;
     gap: 12px;
   }
-  .bh-title h2 {
+  .bh-heading {
     font-family: var(--font-display);
     margin: 0;
     font-size: 1.5rem;

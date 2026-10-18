@@ -30,7 +30,7 @@
     notices?: Snippet;
     /** The current view. */
     children?: Snippet;
-    /** Docked right at --drawer-w; omit when no drawer is open. */
+    /** Docked right, as wide as its content; omit when no drawer is open. */
     drawer?: Snippet;
     /** Accessible name for the drawer's <aside>. */
     drawerLabel?: string;
@@ -182,11 +182,13 @@
     flex-direction: column;
     height: 100%;
   }
+  /* No width of its own: the auto column fits the drawer's child, which sizes itself (ModDetail
+     via the resizable action). A fixed width here could disagree with the child's and spill. */
   .drawer {
     grid-area: drawer;
-    width: var(--drawer-w);
     min-height: 0;
-    overflow: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
     z-index: var(--z-drawer);
     background: var(--surface);
     border-left: 1px solid var(--border);

@@ -6,6 +6,7 @@ import { createRawSnippet, tick } from "svelte";
 import { render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import OutletHarness from "./__tests__/OutletHarness.svelte";
+import DiagnoseKeepHarness from "./__tests__/DiagnoseKeepHarness.svelte";
 import LibraryView from "./LibraryView.svelte";
 import ModSetsView from "./ModSetsView.svelte";
 import DiagnoseView from "./DiagnoseView.svelte";
@@ -99,6 +100,67 @@ describe("DiagnoseView", () => {
     go("diagnose", "problems");
     await tick();
     expect(screen.getByText("Health body")).toBeInTheDocument();
+  });
+});
+
+describe("Diagnose → Last run while a bisection runs", () => {
+  const probe = () => screen.getByRole("button", { name: /Next round/, hidden: true });
+  const panel = () => screen.getByRole("tabpanel");
+
+  it("switching tabs or views doesn't unmount it (no onBisecting(false)), and it comes back as it was", async () => {
+    const user = userEvent.setup();
+    const onBisecting = vi.fn();
+    go("diagnose");
+    render(DiagnoseKeepHarness, { bisecting: true, onBisecting });
+    await tick();
+    expect(panel()).toContainElement(probe());
+    await user.click(probe());
+    expect(probe()).toHaveTextContent("Next round (1)");
+
+    await user.click(screen.getByRole("tab", { name: "Conflicts" }));
+    await tick();
+    expect(screen.getByText("Conflicts body")).toBeInTheDocument();
+    expect(panel()).not.toContainElement(probe());
+    expect(probe()).not.toBeVisible();
+    expect(onBisecting).not.toHaveBeenCalled();
+
+    go("library");
+    await tick();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(onBisecting).not.toHaveBeenCalled();
+
+    go("diagnose", "lastRun");
+    await tick();
+    expect(panel()).toContainElement(probe());
+    expect(probe()).toBeVisible();
+    expect(probe()).toHaveTextContent("Next round (1)"); // same instance, state kept
+    expect(onBisecting).not.toHaveBeenCalled();
+  });
+
+  it("when not bisecting it mounts and unmounts with the tab", async () => {
+    const user = userEvent.setup();
+    const onBisecting = vi.fn();
+    go("diagnose");
+    render(DiagnoseKeepHarness, { bisecting: false, onBisecting });
+    await tick();
+    expect(panel()).toContainElement(probe());
+    await user.click(screen.getByRole("tab", { name: "Problems" }));
+    await tick();
+    expect(screen.queryByRole("button", { name: /Next round/, hidden: true })).toBeNull();
+    expect(onBisecting).toHaveBeenCalledWith(false);
+  });
+
+  it("once the bisection ends away from the tab, the hidden copy goes", async () => {
+    const onBisecting = vi.fn();
+    go("diagnose");
+    const { rerender } = render(DiagnoseKeepHarness, { bisecting: true, onBisecting });
+    await tick();
+    go("updates");
+    await tick();
+    expect(probe()).toBeInTheDocument();
+    await rerender({ bisecting: false, onBisecting });
+    await tick();
+    expect(screen.queryByRole("button", { name: /Next round/, hidden: true })).toBeNull();
   });
 });
 

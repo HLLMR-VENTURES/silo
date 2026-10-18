@@ -1,7 +1,7 @@
 <script lang="ts">
   // Standing conditions (setNotice in src/lib/state/notify.svelte.ts), full width under the top
-  // bar. Always shows the most important notice, every blocking notice and every notice with
-  // progress; "+N more" expands the rest in place. Only blocking notices are alerts; the others
+  // bar. Always shows the most important notice, every blocking notice, every notice with
+  // progress and every `pinned` one; "+N more" expands the rest in place. Only blocking notices are alerts; the others
   // sit in a polite status region.
   import Button from "../ui/Button.svelte";
   import Icon from "../ui/Icon.svelte";
@@ -18,8 +18,10 @@
 
   let expanded = $state(false);
   const all = $derived(sortedNotices());
-  /** Shown at all times: the top one, blocking ones, ones with progress. */
-  const pinned = $derived(all.filter((n, i) => i === 0 || n.level === "blocking" || !!n.progress));
+  /** Shown at all times: the top one, blocking ones, ones with progress, pinned ones. */
+  const pinned = $derived(
+    all.filter((n, i) => i === 0 || n.level === "blocking" || !!n.progress || !!n.pinned),
+  );
   const rest = $derived(all.filter((n) => !pinned.includes(n)));
   const showRest = $derived(expanded && rest.length > 0);
   // Nothing left behind "+N more": the next notice that lands there starts collapsed.

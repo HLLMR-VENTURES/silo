@@ -1,11 +1,13 @@
 // Where the user is in the app: the current view, each view's sub-tab, a short back history and
 // the rail pin preference.
-//   go("diagnose", "bisect")   // switch view (and that view's tab); pushes history
+//   go("diagnose", "conflicts") // switch view (and that view's tab); pushes history
 //   setTab("modSets", "share") // change a view's tab without a history entry (Tabs bindings)
 //   back()                     // returns false when there is nothing to go back to
 //   setRailPin("collapsed")    // persisted; railCollapsedFor(width, nav.rail) gives the layout
-// The last view and the rail pin persist in localStorage (silo.nav.view, silo.nav.rail). Storage
-// can be missing or throw (private mode, tests): every access is guarded and falls back to defaults.
+// The last view and the rail pin persist in localStorage (silo.nav.view, silo.nav.rail); a launch
+// never reopens Browse (that would call the catalog unasked), it starts on the Library instead.
+// Storage can be missing or throw (private mode, tests): every access is guarded and falls back
+// to defaults.
 
 export type ViewId =
   | "library"
@@ -30,7 +32,8 @@ export const VIEW_IDS: readonly ViewId[] = [
 
 /** Known sub-tabs (views store them as plain strings in nav.tab). Settings uses section ids. */
 export type ModSetsTab = "sets" | "share" | "multiplayer" | "savegames";
-export type DiagnoseTab = "lastRun" | "conflicts" | "problems" | "bisect";
+/** Guided bisection runs inside Last run, so it has no tab of its own. */
+export type DiagnoseTab = "lastRun" | "conflicts" | "problems";
 export type ToolsTab = "stats" | "controls" | "bridge" | "graphics";
 
 /** Rail preference: follow the window width, or stay expanded / collapsed. */
@@ -94,10 +97,13 @@ export function isViewId(v: unknown): v is ViewId {
   return typeof v === "string" && (VIEW_IDS as readonly string[]).includes(v);
 }
 
+/** Views a launch doesn't reopen: Browse loads the catalog, which nobody asked for yet. */
+const NOT_RESTORED: readonly ViewId[] = ["browse"];
+
 /** Load the persisted view and rail pin (called at module load; tests call it again). */
 export function restoreNav(): void {
   const view = read(NAV_VIEW_KEY);
-  nav.view = isViewId(view) ? view : DEFAULT_VIEW;
+  nav.view = isViewId(view) && !NOT_RESTORED.includes(view) ? view : DEFAULT_VIEW;
   const rail = read(NAV_RAIL_KEY);
   nav.rail = RAIL_PINS.includes(rail as RailPin) ? (rail as RailPin) : "auto";
 }

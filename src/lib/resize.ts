@@ -5,7 +5,9 @@
 // The grab handle is a fixed-position element on <body>, kept aligned to the drawer's
 // left edge — not a child of the drawer. That way it never scrolls away inside a
 // scrollable drawer and is never clipped by the drawer's overflow. Its base styling
-// lives in global.css as `.drawer-resize-handle` (top/left/height are set here).
+// lives in global.css as `.drawer-resize-handle` (top/left/height are set here). It follows the
+// drawer through a ResizeObserver (and window resizes), so it stays on the edge when a notice or
+// the rail changes the layout around the drawer.
 
 interface Opts {
   min?: number;
@@ -72,6 +74,11 @@ export function resizable(node: HTMLElement, opts: Opts = {}) {
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", onUp);
   window.addEventListener("resize", sync);
+  // The drawer moves or resizes without a window resize when the notices above it or the rail
+  // beside the list change: watch the drawer itself (and its container, whose height it fills).
+  const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => sync());
+  observer?.observe(node);
+  if (node.parentElement) observer?.observe(node.parentElement);
   // Re-align once layout has settled (fonts, wrap, transitions).
   requestAnimationFrame(sync);
 
@@ -81,6 +88,7 @@ export function resizable(node: HTMLElement, opts: Opts = {}) {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("resize", sync);
+      observer?.disconnect();
       handle.remove();
       // Drawer closed — release the reserved space.
       document.documentElement.style.setProperty("--drawer-w", "0px");

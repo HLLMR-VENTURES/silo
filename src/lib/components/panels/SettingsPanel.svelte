@@ -1,7 +1,8 @@
 <script lang="ts">
   import Icon from "../../ui/Icon.svelte";
   import { inlineError } from "../../state/notify.svelte";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
+  import { nav, setTab } from "../../state/nav.svelte";
   import type { GameInfo } from "../../types";
   import { openKnownFolder, secretStorageSecure } from "../../api";
   import type { ModsRootStatus, ArchiveStatus } from "../../api";
@@ -11,6 +12,22 @@
   // When the OS keychain is unavailable, connecting an account falls back to storing the
   // token in the local DB unencrypted — warn before the user connects rather than silently.
   let keychainOk = $state(true);
+
+  // go("settings", "accounts") (Browse's "connect GitHub" path) lands on the GitHub section:
+  // scrolled into view and focused, once. The tab is cleared so the next request does it again.
+  /** The section ids go("settings", id) can land on. */
+  const SECTION_IDS: Record<string, string> = { accounts: "settings-accounts" };
+  $effect(() => {
+    const target = nav.tab.settings;
+    if (!target || !SECTION_IDS[target]) return;
+    void tick().then(() => {
+      const el = document.getElementById(SECTION_IDS[target]);
+      if (!el) return;
+      el.scrollIntoView?.({ block: "start" });
+      el.focus({ preventScroll: true });
+      setTab("settings", undefined);
+    });
+  });
   onMount(async () => {
     try {
       keychainOk = await secretStorageSecure();
@@ -269,11 +286,11 @@
     <div class="set-section">
       <div class="set-row">
         <div class="set-label">Graphics &amp; performance</div>
-        <button class="set-link" onclick={onOpenGameGraphics}>Open in Tools</button>
+        <button class="set-link" onclick={onOpenGameGraphics}>Edit game.xml</button>
       </div>
       <div class="set-hint">
-        Tune graphics settings (presets: Performance / Balanced / Quality) without launching the game,
-        in Tools → Graphics settings.
+        Tune graphics settings (presets: Performance / Balanced / Quality) without launching the game.
+        Also in Tools → Graphics settings.
       </div>
     </div>
   {/if}
@@ -288,8 +305,8 @@
     </div>
   {/if}
 
-  <div class="set-section">
-    <div class="set-label">GitHub account</div>
+  <div class="set-section" id="settings-accounts" tabindex="-1" aria-labelledby="settings-accounts-label">
+    <div class="set-label" id="settings-accounts-label">GitHub account</div>
     <GitHubAuth />
   </div>
 
@@ -419,6 +436,13 @@
   }
   .set-section:first-of-type {
     border-top: none;
+  }
+  .set-section:focus {
+    outline: none;
+  }
+  .set-section:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
   }
   .set-label {
     font-size: var(--fs-xs);

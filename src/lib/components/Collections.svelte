@@ -314,7 +314,7 @@
 <div class="coll">
   <div class="coll-head">
     <div>
-      <h2>Collections</h2>
+      <h3 class="coll-title">Collections</h3>
       <p class="sub">
         Share a curated set of mods as a link — anyone who opens it in Silo can preview what
         they already have, install the rest, and verify they got the exact set. Only the list
@@ -585,7 +585,7 @@
     gap: 12px;
     margin-bottom: 12px;
   }
-  .coll-head h2 {
+  .coll-head .coll-title {
     margin: 0;
     font-family: var(--font-display);
     font-size: 1.35rem;

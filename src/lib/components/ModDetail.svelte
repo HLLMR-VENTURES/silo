@@ -144,6 +144,7 @@
   $effect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      if (e.defaultPrevented) return; // a menu or dialog over the drawer took this Esc
       if (showFullDesc) showFullDesc = false; // close the full-description modal first
       else onClose();
     };

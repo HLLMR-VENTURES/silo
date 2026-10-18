@@ -54,14 +54,14 @@ describe("go / back", () => {
   });
 
   it("switches views, sets the tab, and walks back", () => {
-    go("diagnose", "bisect");
+    go("diagnose", "conflicts");
     expect(nav.view).toBe("diagnose");
-    expect(nav.tab.diagnose).toBe("bisect");
+    expect(nav.tab.diagnose).toBe("conflicts");
     go("modSets", "share");
     expect(nav.view).toBe("modSets");
     expect(back()).toBe(true);
     expect(nav.view).toBe("diagnose");
-    expect(nav.tab.diagnose).toBe("bisect");
+    expect(nav.tab.diagnose).toBe("conflicts");
     expect(back()).toBe(true);
     expect(nav.view).toBe("library");
     expect(canGoBack()).toBe(false);
@@ -125,6 +125,12 @@ describe("persistence", () => {
     restoreNav();
     expect(nav.view).toBe("diagnose");
     expect(nav.rail).toBe("collapsed");
+  });
+
+  it("never reopens Browse at launch (no unasked catalog call): the Library instead", () => {
+    store.setItem(NAV_VIEW_KEY, "browse");
+    restoreNav();
+    expect(nav.view).toBe("library");
   });
 
   it("ignores junk values", () => {

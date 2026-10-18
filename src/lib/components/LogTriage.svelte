@@ -83,7 +83,7 @@
 <div class="lt">
   <div class="lt-head">
     <div>
-      <h2>Crash &amp; log triage</h2>
+      <h3 class="lt-title">Crash &amp; log triage</h3>
       {#if report}
         <p class="sub">
           FS25 {report.engineVersion ?? "?"} · {report.modCount.toLocaleString()} mods in the log
@@ -233,7 +233,7 @@
     gap: 12px;
     margin-bottom: 12px;
   }
-  .lt-head h2 {
+  .lt-head .lt-title {
     margin: 0;
     font-family: var(--font-display);
     font-size: 1.35rem;

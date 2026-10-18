@@ -21,18 +21,23 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { id: "help", label: "Help", icon: "help", group: "bottom" },
 ];
 
+/** Diagnose's badge while a guided diagnosis (bisection) runs; read out as below. */
+export const BISECT_BADGE = "•";
+
 /** A badge worth showing: a positive count or a non-empty word. */
 export function hasBadge(badge: number | string | undefined): badge is number | string {
   return typeof badge === "number" ? badge > 0 : typeof badge === "string" && badge.trim() !== "";
 }
 
 /**
- * The accessible name of a rail item: "Updates, 4 available", "Diagnose, 2", or just the label.
+ * The accessible name of a rail item: "Updates, 4 available", "Diagnose, finding the problem mod"
+ * (while a bisection runs), "Tools, 2", or just the label.
  * @param item the rail item
  * @param badge its badge, if any
  */
 export function navItemName(item: Pick<NavItem, "id" | "label">, badge?: number | string): string {
   if (!hasBadge(badge)) return item.label;
+  if (item.id === "diagnose" && badge === BISECT_BADGE) return `${item.label}, finding the problem mod`;
   if (item.id === "updates" && typeof badge === "number") return `${item.label}, ${badge} available`;
   return `${item.label}, ${badge}`;
 }

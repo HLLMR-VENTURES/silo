@@ -68,7 +68,7 @@
 <div class="mp">
   <div class="mp-head">
     <div>
-      <h2>Multiplayer mod-set sync</h2>
+      <h3 class="mp-title">Multiplayer mod-set sync</h3>
       <p class="sub">
         Everyone in an FS25 session needs the same mods, same versions, same files —
         that's the #1 "can't join" cause. Match sets here instead of guessing.
@@ -165,7 +165,7 @@
     gap: 12px;
     margin-bottom: 12px;
   }
-  .mp-head h2 {
+  .mp-head .mp-title {
     margin: 0;
     font-family: var(--font-display);
     font-size: 1.35rem;

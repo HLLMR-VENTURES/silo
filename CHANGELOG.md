@@ -46,7 +46,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the activity bell, and Play with a menu for the game folder and your mod sets. Loadouts,
   collections, multiplayer sync and savegames live together under Mod sets; crash triage,
   conflicts and library health under Diagnose. A mod's details now sit beside the list, so you
-  can keep clicking through mods. (#230)
+  can keep clicking through mods. Silo reopens the page you were on last, except Browse: a
+  launch never contacts the catalog unasked, so it starts on the Library instead. The Updates
+  page doesn't check on its own when you open it; use **Check for updates** there. (#230)
+
+- **The status chip only says "All good" once your library has been read.** Until then it says
+  "Checking…" or "Not read yet", and "Couldn't read library" when the scan failed. A mod that
+  can't load counts as a problem only when it's active; an inactive one is something to review.
+  The Library's "Ready to play" line likewise shows only when Play would work (the game was
+  found, nothing is blocking Play and there's no critical conflict). (#230)
+
+- **A guided diagnosis keeps running when you switch pages.** You can look at Conflicts or
+  another page mid-run and come back to the same round; Diagnose in the sidebar shows a dot
+  while it runs. (#230)
+
+- **GitHub sign-in keeps waiting when you leave Settings.** Start connecting GitHub, go to another
+  page, and finish on github.com: Silo says "Connected to GitHub as …" when it's done. Connecting
+  from Browse opens Settings at the GitHub account section, and the code shown there can be
+  cancelled. (#230)
+
+- **Loadouts wait for a running library change.** While Silo is changing your library, Save
+  current, Replace, Delete and Import on Mod sets → My sets are off and say what Silo is busy
+  with (a library move doesn't stop them). (#230)
+
+- **Settings → Graphics & performance opens the game.xml editor directly** (it's also in Tools →
+  Graphics settings), and a ready Silo update's notice is always shown, never folded under
+  "+N more". (#230)
 
 - **Settings is a full page,** with an About section for the version, the last scan time and a
   ready Silo update. A ready update also shows as a notice with Restart to update. (#230)

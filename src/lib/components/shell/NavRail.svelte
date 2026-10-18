@@ -5,6 +5,7 @@
   // Enter/Space activate. Collapsed, items show icons only: the label lives in aria-label and a
   // tooltip. The current item has aria-current="page" and a gold fill bar (fill, never text).
   // aria-keyshortcuts names the app-wide keys (Alt+1…Alt+5, Ctrl+,) wired in lib/state/shortcuts.
+  import { untrack } from "svelte";
   import Badge from "../../ui/Badge.svelte";
   import Icon from "../../ui/Icon.svelte";
   import SiloMark from "../../ui/SiloMark.svelte";
@@ -37,8 +38,18 @@
   const ordered = $derived([...main, ...bottom]);
 
   let buttons: HTMLButtonElement[] = $state([]);
-  /** The item that holds the tab stop; follows focus, falls back to the current view. */
+  /** The item that holds the tab stop; follows focus, falls back to the current view. Reset to
+   *  the current view when the page changes or focus leaves the rail, so Tab comes back to it. */
   let focusId = $state<ViewId | null>(null);
+  $effect(() => {
+    void current;
+    untrack(() => (focusId = null));
+  });
+  function onfocusout(e: FocusEvent) {
+    const into = e.relatedTarget;
+    const rail = e.currentTarget as HTMLElement;
+    if (!(into instanceof Node) || !rail.contains(into)) focusId = null;
+  }
   const tabStop = $derived.by(() => {
     if (focusId && ordered.some((i) => i.id === focusId)) return focusId;
     return ordered.some((i) => i.id === current) ? current : ordered[0]?.id;
@@ -101,7 +112,7 @@
   </li>
 {/snippet}
 
-<div class="rail" class:collapsed>
+<div class="rail" class:collapsed {onfocusout}>
   <div class="brand">
     {#if collapsed}
       <SiloMark variant="tile" size={32} label={false} />

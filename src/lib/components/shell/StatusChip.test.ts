@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import StatusChip from "./StatusChip.svelte";
-import { statusChipModel } from "./status";
+import { libraryReadState, statusChipModel } from "./status";
 
 describe("statusChipModel", () => {
   it("All good with nothing to report", () => {
@@ -28,6 +28,36 @@ describe("statusChipModel", () => {
   it("problems outrank review", () => {
     expect(statusChipModel(1, 5)).toMatchObject({ tone: "problem", text: "1 problem" });
   });
+
+  it("never says All good before the library has been read", () => {
+    expect(statusChipModel(0, 0, "checking")).toEqual({
+      tone: "neutral",
+      text: "Checking…",
+      label: "Library status: Checking…",
+    });
+    expect(statusChipModel(0, 0, "unread")).toMatchObject({ tone: "neutral", text: "Not read yet" });
+    expect(statusChipModel(0, 0, "failed")).toMatchObject({ tone: "warn", text: "Couldn't read library" });
+    // Counts from an older scan don't show over a failed or pending read.
+    expect(statusChipModel(3, 1, "failed").text).toBe("Couldn't read library");
+    expect(statusChipModel(3, 1, "checking").text).toBe("Checking…");
+    expect(statusChipModel(0, 0, "read").text).toBe("All good");
+  });
+});
+
+describe("libraryReadState", () => {
+  const s = (scanning: boolean, scanned: boolean, failed: boolean) =>
+    libraryReadState({ scanning, scanned, failed });
+  it("checking only while the first scan runs", () => {
+    expect(s(true, false, false)).toBe("checking");
+    expect(s(true, false, true)).toBe("checking"); // retrying after a failure
+    expect(s(true, true, false)).toBe("read"); // a rescan keeps the last counts
+  });
+  it("failed, unread, read", () => {
+    expect(s(false, false, true)).toBe("failed");
+    expect(s(false, true, true)).toBe("failed");
+    expect(s(false, false, false)).toBe("unread");
+    expect(s(false, true, false)).toBe("read");
+  });
 });
 
 describe("StatusChip", () => {
@@ -50,5 +80,19 @@ describe("StatusChip", () => {
     unmount();
     render(StatusChip, { problems: 0, review: 0 });
     expect(screen.getByRole("button", { name: "Library status: All good" })).toHaveAttribute("data-tone", "ok");
+  });
+
+  it("neutral and warn variants before the library is read", () => {
+    const { unmount } = render(StatusChip, { problems: 0, review: 0, library: "unread" });
+    expect(screen.getByRole("button", { name: "Library status: Not read yet" })).toHaveAttribute(
+      "data-tone",
+      "neutral",
+    );
+    unmount();
+    render(StatusChip, { problems: 0, review: 0, library: "failed" });
+    expect(screen.getByRole("button", { name: "Library status: Couldn't read library" })).toHaveAttribute(
+      "data-tone",
+      "warn",
+    );
   });
 });

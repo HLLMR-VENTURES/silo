@@ -1,11 +1,13 @@
 // App-wide keyboard shortcuts: which key press means which action. Pure (no DOM state) apart from
 // isTypingTarget and the listener installer, so the keymap is unit-tested on its own.
 //   resolveShortcut(e, { typing: isTypingTarget(e.target), modalOpen }) // -> { action, preventDefault }
-//   const stop = installShortcuts(window, run, () => get(modalOpen))    // one keydown listener
-// Rules: nothing fires while an IME is composing or a modal dialog is open; while typing in a field
-// only Ctrl+K, Ctrl+, , F6 and the reload keys work. The reload keys (F5, Ctrl+R, Ctrl+Shift+R)
-// are always swallowed so the webview never reloads mid-operation; they rescan instead (unless a
-// dialog is open). Bare letters and numbers are never taken: views use Alt+1…Alt+5.
+//   const stop = installShortcuts(window, run, () => get(modalOpen))    // keydown listeners
+// Rules: nothing fires while an IME is composing or a modal dialog (or another overlay App names,
+// see shortcutsBlocked) is open; while typing in a field only Ctrl+K, Ctrl+, , F6 and the reload
+// keys work. The reload keys (F5, Ctrl+R, Ctrl+Shift+R) are always swallowed so the webview never
+// reloads mid-operation; they rescan instead (unless something is open over the page). They're
+// handled in the capture phase, so a handler that stops the event's propagation can't let a
+// reload through. Bare letters and numbers are never taken: views use Alt+1…Alt+5.
 
 import type { ViewId } from "./nav.svelte";
 
@@ -84,7 +86,7 @@ function hit(action: ShortcutAction): ShortcutResolution {
 }
 
 /** F5, Ctrl+F5, Shift+F5, Ctrl+R, Ctrl+Shift+R: the webview's reload keys. */
-function isReloadKey(e: KeyInput): boolean {
+export function isReloadKey(e: KeyInput): boolean {
   if (e.altKey || e.metaKey) return false;
   if (e.key === "F5") return true;
   return !!e.ctrlKey && (e.key === "r" || e.key === "R" || e.code === "KeyR");
@@ -134,7 +136,8 @@ export function resolveShortcut(e: KeyInput, ctx: ShortcutContext): ShortcutReso
   }
 
   if (!ctrl && !alt) {
-    if (e.key === "/" && !shift) return hit({ kind: "focusSearch" });
+    // By key, not Shift: on some layouts "/" is a shifted key.
+    if (e.key === "/") return hit({ kind: "focusSearch" });
     if (e.key === "?") return hit({ kind: "help" });
   }
   return NONE;
@@ -173,22 +176,45 @@ export const SHORTCUT_DOCS: readonly ShortcutDoc[] = [
 ];
 
 /**
- * Listen for shortcuts on `target` (one keydown listener) and hand each resolved action to `run`.
+ * Whether shortcuts stand down: a modal dialog is open, or one of the overlays App draws outside
+ * the overlay stack (the Organize preview, a settings editor, the mod settings, a context or
+ * category menu) is. Reload keys are still swallowed then; they just don't rescan.
+ * @param modalOpen overlayStack's modalOpen
+ * @param overlays App's open-overlay states (null / undefined / false = closed)
+ */
+export function shortcutsBlocked(modalOpen: boolean, overlays: readonly unknown[]): boolean {
+  return modalOpen || overlays.some((o) => !!o);
+}
+
+/**
+ * Listen for shortcuts on `target` and hand each resolved action to `run`. The reload keys get a
+ * capture-phase listener (nothing nearer the target can stop them first); everything else is
+ * handled in the bubble phase, after the focused control had its chance.
  * @param target usually `window`
  * @param run performs an action
- * @param isModalOpen whether a modal dialog is open right now
- * @return removes the listener
+ * @param isModalOpen whether a modal dialog (or another blocking overlay) is open right now
+ * @return removes both listeners
  */
 export function installShortcuts(
   target: Pick<Window, "addEventListener" | "removeEventListener">,
   run: (action: ShortcutAction) => void,
   isModalOpen: () => boolean,
 ): () => void {
-  const onKeydown = (e: KeyboardEvent) => {
+  const handle = (e: KeyboardEvent) => {
     const r = resolveShortcut(e, { typing: isTypingTarget(e.target), modalOpen: isModalOpen() });
     if (r.preventDefault) e.preventDefault();
     if (r.action) run(r.action);
   };
-  target.addEventListener("keydown", onKeydown as EventListener);
-  return () => target.removeEventListener("keydown", onKeydown as EventListener);
+  const onCapture = (e: KeyboardEvent) => {
+    if (isReloadKey(e)) handle(e);
+  };
+  const onBubble = (e: KeyboardEvent) => {
+    if (!isReloadKey(e)) handle(e);
+  };
+  target.addEventListener("keydown", onCapture as EventListener, true);
+  target.addEventListener("keydown", onBubble as EventListener);
+  return () => {
+    target.removeEventListener("keydown", onCapture as EventListener, true);
+    target.removeEventListener("keydown", onBubble as EventListener);
+  };
 }

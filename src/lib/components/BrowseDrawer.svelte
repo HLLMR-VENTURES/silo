@@ -37,7 +37,8 @@
   // The drawer is non-modal (clicks fall through to the grid), so Escape is the click-away close.
   $effect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape" || e.defaultPrevented) return; // a menu or dialog took this Esc
+      onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

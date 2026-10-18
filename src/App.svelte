@@ -180,13 +180,16 @@
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
   import NoticeArea from "./lib/components/NoticeArea.svelte";
   import ViewBoundary from "./lib/components/ViewBoundary.svelte";
+  import KeepMounted from "./lib/components/KeepMounted.svelte";
   import AppShell from "./lib/components/shell/AppShell.svelte";
   import AppHeader from "./lib/components/shell/AppHeader.svelte";
   import ShortcutsDialog from "./lib/components/shell/ShortcutsDialog.svelte";
   import { cycleRegion, regionOf } from "./lib/components/shell/regions";
-  import { installShortcuts, type ShortcutAction } from "./lib/state/shortcuts";
+  import { BISECT_BADGE } from "./lib/components/shell/navItems";
+  import { installShortcuts, shortcutsBlocked, type ShortcutAction } from "./lib/state/shortcuts";
   import { modalOpen } from "./lib/ui/overlayStack";
   import StatusChip from "./lib/components/shell/StatusChip.svelte";
+  import { libraryReadState } from "./lib/components/shell/status";
   import PlayButton, { type PlayMenuItem } from "./lib/components/shell/PlayButton.svelte";
   import type { StatusStripItem } from "./lib/components/shell/StatusStrip.svelte";
   import ViewOutlet from "./lib/views/ViewOutlet.svelte";
@@ -228,6 +231,8 @@
   let libraryScanned = $state(false);
   let foreignFiles = $state<ForeignFile[]>([]);
   let scanning = $state(false);
+  // The last scan failed (its notice is up): the status chip says so instead of "All good".
+  let scanFailed = $state(false);
   // Epoch-ms of the last scan attempt — throttles the auto-rescan-on-focus so alt-tabbing
   // doesn't re-scan on every focus.
   let lastScanAt = 0;
@@ -423,6 +428,8 @@
   // True while a guided bisection is running (snapshot saved, test halves applied). The
   // focus rescan holds off meanwhile so returning from FS25 can't rewrite the active set.
   let bisecting = $state(false);
+  /** Diagnose → Last run's slot while that tab is on screen (DiagnoseView binds it), else null. */
+  let diagnoseLastRunSlot = $state<HTMLElement | null>(null);
   // The current view is nav.view (lib/state/nav). The mod drawer belongs to the Library: leaving
   // it closes the drawer, as switching to Browse did. The Browse drawer lives inside ModBrowser,
   // which unmounts on switch, so it closes itself.
@@ -912,7 +919,17 @@
     await switchTo(l.name, l.mods);
   }
 
+  /** Loadout saves, replaces, deletes and imports wait for a foreground library change (the
+   *  panel's buttons are off then too); a library move doesn't stop them. True when refused. */
+  function loadoutEditRefused(): boolean {
+    const fg = blockedForeground("library-write");
+    if (!fg.blocked) return false;
+    refuse(`${fg.reason} Try again when it's done.`);
+    return true;
+  }
+
   async function saveCurrentLoadout() {
+    if (loadoutEditRefused()) return;
     const name = await askText({
       title: "Save current mods as a loadout",
       label: "Name",
@@ -924,6 +941,7 @@
         ),
     });
     if (name === null || !name.trim()) return;
+    if (loadoutEditRefused()) return;
     // A duplicate name was accepted with "Replace": overwrite that loadout, don't add a second.
     const existing = findLoadoutByName(name, loadouts);
     const current = [...activeSet];
@@ -943,6 +961,7 @@
   }
 
   async function overwriteLoadout(l: Loadout) {
+    if (loadoutEditRefused()) return;
     const current = [...activeSet];
     const d = activeSetDiff(l.mods, current);
     if (
@@ -955,6 +974,7 @@
       }))
     )
       return;
+    if (loadoutEditRefused()) return;
     const prev = { id: l.id, name: l.name, mods: [...l.mods] };
     try {
       await saveLoadout(l.id, l.name, current);
@@ -966,6 +986,7 @@
   }
 
   async function removeLoadout(l: Loadout) {
+    if (loadoutEditRefused()) return;
     if (
       !(await ask({
         title: `Delete ${l.name}?`,
@@ -975,6 +996,7 @@
       }))
     )
       return;
+    if (loadoutEditRefused()) return;
     // Kept for Undo: saving it again recreates it with the same name and mods (under a new id).
     const copy = { name: l.name, mods: [...l.mods] };
     try {
@@ -1008,6 +1030,7 @@
   }
 
   async function importLoadout() {
+    if (loadoutEditRefused()) return;
     try {
       const id = await importLoadoutFile();
       if (id !== null) {
@@ -1903,6 +1926,7 @@
     result = null;
     mods = [];
     libraryScanned = false;
+    scanFailed = false;
     activeSet = new Set();
     foreignFiles = [];
     if (roots.length) {
@@ -2340,6 +2364,7 @@
       result = r;
       mods = r.mods;
       libraryScanned = true;
+      scanFailed = false;
       activeSet = new Set(r.mods.filter((m) => m.active).map((m) => m.techName));
       // Interrupted mod updates Silo finished or rolled back before scanning. The scan owns
       // only the `scan` notice: other producers' notices stay up across rescans.
@@ -2369,6 +2394,7 @@
       void loadSavegames();
     } catch (e) {
       // The library wasn't read: a standing condition until a scan works, so a notice.
+      scanFailed = true;
       reportError(e, "Scanning your library", { quiet: true });
       const d = describeError(e, "Scanning your library");
       if (!d.silent)
@@ -2602,6 +2628,8 @@
         ? {
             level: "info",
             icon: "update",
+            // A ready update is never folded under "+N more".
+            pinned: true,
             title: `Silo ${update.version} is ready`,
             body: updating ? (updatePct != null ? `Updating… ${updatePct}%` : "Updating…") : undefined,
             actions: [
@@ -2637,18 +2665,29 @@
     go("library");
   }
 
-  // Problems: critical conflicts and mods that can't load. To review: warning-level conflicts and
-  // files Silo left untouched. Info-level findings never count.
-  const statusCounts = $derived(
-    libraryStatusCounts({
+  // Problems: critical conflicts and active mods that can't load. To review: warning-level
+  // conflicts, files Silo left untouched and inactive mods that couldn't load. Info-level
+  // findings never count.
+  const statusCounts = $derived.by(() => {
+    const on = (m: ModEntry) => activeSet.has(m.techName);
+    const deps = health.missingDeps.map((d) => d.mod);
+    const activeOf = (list: ModEntry[]) => list.filter(on).length;
+    const all = deps.length + health.corrupt.length + health.ignored.length;
+    const missingDeps = activeOf(deps);
+    const corrupt = activeOf(health.corrupt);
+    const ignored = activeOf(health.ignored);
+    return libraryStatusCounts({
       criticalConflicts: criticalCount,
       warningConflicts: conflicts.filter((c) => c.severity === "warning").length,
-      missingDeps: health.missingDeps.length,
-      corrupt: health.corrupt.length,
-      ignored: health.ignored.length,
+      missingDeps,
+      corrupt,
+      ignored,
+      inactiveFindings: all - missingDeps - corrupt - ignored,
       foreign: health.foreign.length,
-    }),
-  );
+    });
+  });
+  // The chip's counts only mean something once a scan of this folder has succeeded.
+  const libraryRead = $derived(libraryReadState({ scanning, scanned: libraryScanned, failed: scanFailed }));
 
   const activeLoadoutName = $derived(
     activeLoadoutId !== null ? (loadouts.find((l) => l.id === activeLoadoutId)?.name ?? null) : null,
@@ -2712,6 +2751,9 @@
     stripLeft({
       scanning,
       scanned: libraryScanned,
+      // "Ready to play" only when Play would work: the game is found, Play isn't off and no
+      // critical conflict would make it ask first.
+      ready: !!gameInfo && !playOffReason && criticalCount === 0,
       active: activeSet.size,
       total: mods.length,
       setName: activeLoadoutName,
@@ -2769,7 +2811,14 @@
     }
   }
 
-  $effect(() => installShortcuts(window, runShortcut, () => get(modalOpen)));
+  // Shortcuts stand down behind a dialog and behind the overlays App draws itself (they aren't on
+  // the overlay stack): the Organize preview, a settings editor, a mod's settings, the row
+  // context menu and the category menu. Reload keys are still swallowed there, without a rescan.
+  $effect(() =>
+    installShortcuts(window, runShortcut, () =>
+      shortcutsBlocked(get(modalOpen), [organizePreview, configEditor, settingsMod, rowMenu, editing]),
+    ),
+  );
 
   // The mod drawer hands focus back when it closes (✕, Esc, Open in Browse…): to what had it in
   // the list when the drawer opened, else to the main area, so focus never drops to <body>. Left
@@ -2852,7 +2901,7 @@
 {/snippet}
 
 <AppShell
-  badges={{ updates: availableUpdates.length }}
+  badges={{ updates: availableUpdates.length, diagnose: bisecting ? BISECT_BADGE : undefined }}
   fill={nav.view === "library"}
   drawer={detailMod && nav.view === "library" ? modDrawer : undefined}
   drawerLabel="Mod details"
@@ -2868,6 +2917,7 @@
         <StatusChip
           problems={statusCounts.problems}
           review={statusCounts.review}
+          library={libraryRead}
           onclick={() => go("diagnose")}
         />
       {/snippet}
@@ -3063,10 +3113,15 @@
         <ModBrowser
           installed={libraryTechNames}
           onInstalled={() => runScan(true)}
-          onNeedAuth={() => go("settings")}
+          onNeedAuth={() => go("settings", "accounts")}
           onFindInLibrary={openInLibrary}
           seed={browseSeed}
           seedTech={browseSeedTech}
+          onSeedConsumed={() => {
+            browseSeed = null;
+            browseSeedTech = null;
+          }}
+          showTitle={false}
           bind:query={browseQuery}
         />
       </BrowseView>
@@ -3079,6 +3134,7 @@
               {loadouts}
               activeCount={activeSet.size}
               {activeLoadoutId}
+              lockReason={fgLock.reason}
               onApply={applyLoadout}
               onOverwrite={overwriteLoadout}
               onExport={exportLoadout}
@@ -3121,21 +3177,12 @@
       </ModSetsView>
     {/snippet}
     {#snippet diagnose()}
+      <!-- Last run's content is the KeepMounted below, docked into this tab's slot. -->
       <DiagnoseView
         conflictsBadge={conflicts.filter((c) => c.severity !== "info").length}
         problemsBadge={healthCount}
+        bind:lastRunSlot={diagnoseLastRunSlot}
       >
-        {#snippet lastRunTab()}
-          <div class="page-card">
-            <LogTriage
-              activeMods={[...activeSet]}
-              activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
-              onApply={bisectRound}
-              onBisecting={(v) => void bisectingChanged(v)}
-              recoveryPending={bisectRecovery !== null}
-            />
-          </div>
-        {/snippet}
         {#snippet conflictsTab()}
           <ViewBoundary name="Conflicts" bodyText="Your mods weren't changed.">
             <ConflictsPanel
@@ -3226,7 +3273,7 @@
           {scanning}
           onSetTheme={setTheme}
           onSetUiScale={setUiScale}
-          onOpenGameGraphics={() => go("tools", "graphics")}
+          onOpenGameGraphics={openGameGraphics}
           onExportReport={exportReport}
           onCopyDiagnostics={copyDiagnostics}
           onSetAutoFile={setAutoFile}
@@ -3259,6 +3306,25 @@
       />
     {/snippet}
   </ViewOutlet>
+  <!-- Diagnose → Last run (log triage and guided bisection). Mounted with its tab; while a
+       bisection runs it stays mounted (hidden) when you switch tabs or views, so the run isn't
+       cut short, and comes back where it was. -->
+  <KeepMounted target={diagnoseLastRunSlot} keep={bisecting}>
+    <ViewBoundary
+      name="Crash & log triage"
+      bodyText="Your mods are as they were before this view failed. If a diagnosis was running, Silo keeps your place."
+    >
+      <div class="page-card">
+        <LogTriage
+          activeMods={[...activeSet]}
+          activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
+          onApply={bisectRound}
+          onBisecting={(v) => void bisectingChanged(v)}
+          recoveryPending={bisectRecovery !== null}
+        />
+      </div>
+    </ViewBoundary>
+  </KeepMounted>
 </AppShell>
 
   {#if settingsMod}

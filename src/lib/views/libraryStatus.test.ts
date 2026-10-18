@@ -9,6 +9,7 @@ const none = {
   corrupt: 0,
   ignored: 0,
   foreign: 0,
+  inactiveFindings: 0,
 };
 
 describe("libraryStatusCounts", () => {
@@ -20,6 +21,13 @@ describe("libraryStatusCounts", () => {
     expect(
       libraryStatusCounts({ ...none, criticalConflicts: 1, missingDeps: 2, corrupt: 3, ignored: 4 }),
     ).toEqual({ problems: 10, review: 0 });
+  });
+
+  it("health findings on inactive mods are to review, not problems", () => {
+    expect(libraryStatusCounts({ ...none, missingDeps: 1, inactiveFindings: 4 })).toEqual({
+      problems: 1,
+      review: 4,
+    });
   });
 
   it("warning conflicts and foreign files are to review", () => {
@@ -40,7 +48,7 @@ describe("activeSetLine", () => {
 });
 
 describe("stripLeft", () => {
-  const base = { scanning: false, scanned: true, active: 142, total: 1204, setName: null };
+  const base = { scanning: false, scanned: true, ready: true, active: 142, total: 1204, setName: null };
   it("ready, with counts", () => {
     expect(stripLeft(base)).toBe("Ready to play · 142 of 1,204 active");
   });
@@ -55,6 +63,13 @@ describe("stripLeft", () => {
   });
   it("while rescanning", () => {
     expect(stripLeft({ ...base, scanning: true })).toBe("Rescanning · 142 of 1,204 active");
+  });
+  it("leads with the counts when Play isn't ready (no game, Play blocked, a critical conflict)", () => {
+    expect(stripLeft({ ...base, ready: false })).toBe("142 of 1,204 active");
+    expect(stripLeft({ ...base, ready: false, setName: "Harvest 2026" })).toBe(
+      "142 of 1,204 active · Harvest 2026",
+    );
+    expect(stripLeft({ ...base, ready: false, scanning: true })).toBe("Rescanning · 142 of 1,204 active");
   });
 });
 

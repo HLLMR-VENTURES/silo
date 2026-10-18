@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 // NavRail: aria-current, roving focus, badge text, collapsed labels and tooltips, pin toggle.
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { tick } from "svelte";
 import { render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import NavRail from "./NavRail.svelte";
-import { navItemName, NAV_ITEMS } from "./navItems";
+import { BISECT_BADGE, navItemName, NAV_ITEMS } from "./navItems";
 
 afterEach(() => {
   document.querySelectorAll("[role='tooltip']").forEach((t) => t.remove());
@@ -78,6 +79,39 @@ describe("NavRail", () => {
     expect(onnavigate).toHaveBeenLastCalledWith("help");
     await user.keyboard("{ArrowUp} ");
     expect(onnavigate).toHaveBeenLastCalledWith("settings");
+  });
+
+  it("puts the tab stop back on the current page when the page changes or focus leaves", async () => {
+    const { user, rerender } = setup({ current: "library" });
+    const outside = document.createElement("button");
+    outside.textContent = "Outside";
+    document.body.appendChild(outside);
+    await user.tab();
+    await user.keyboard("{ArrowDown}{ArrowDown}");
+    const modSets = screen.getByRole("button", { name: "Mod sets" });
+    expect(modSets.tabIndex).toBe(0);
+    outside.focus();
+    await tick();
+    expect(screen.getByRole("button", { name: "Library" }).tabIndex).toBe(0);
+    expect(modSets.tabIndex).toBe(-1);
+
+    modSets.focus();
+    await tick();
+    expect(modSets.tabIndex).toBe(0);
+    await rerender({ current: "updates" });
+    await tick();
+    expect(screen.getByRole("button", { name: "Updates" }).tabIndex).toBe(0);
+    expect(modSets.tabIndex).toBe(-1);
+    outside.remove();
+  });
+
+  it("shows a dot on Diagnose while a bisection runs, read out as finding the problem mod", () => {
+    setup({ badges: { diagnose: BISECT_BADGE } });
+    const diag = screen.getByRole("button", { name: "Diagnose, finding the problem mod" });
+    expect(diag).toHaveTextContent(BISECT_BADGE);
+    expect(navItemName({ id: "diagnose", label: "Diagnose" }, BISECT_BADGE)).toBe(
+      "Diagnose, finding the problem mod",
+    );
   });
 
   it("names the Updates badge for screen readers and shows the count", () => {

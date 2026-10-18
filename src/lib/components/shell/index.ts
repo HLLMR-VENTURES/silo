@@ -13,4 +13,10 @@ export type { PlayMenuItem } from "./PlayButton.svelte";
 export { MAX_STRIP_ITEMS, type StatusStripItem } from "./StatusStrip.svelte";
 export { hasBadge, NAV_ITEMS, navItemName, type NavItem } from "./navItems";
 export { cycleRegion, focusRegion, nextRegion, presentRegions, regionOf, REGIONS, type Region } from "./regions";
-export { statusChipModel, type StatusChipModel, type StatusTone } from "./status";
+export {
+  libraryReadState,
+  statusChipModel,
+  type LibraryReadState,
+  type StatusChipModel,
+  type StatusTone,
+} from "./status";

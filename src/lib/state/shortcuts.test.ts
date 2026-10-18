@@ -6,6 +6,7 @@ import {
   installShortcuts,
   isTypingTarget,
   resolveShortcut,
+  shortcutsBlocked,
   SHORTCUT_DOCS,
   VIEW_SHORTCUTS,
   viewKeyshortcut,
@@ -42,6 +43,11 @@ describe("resolveShortcut", () => {
     expect(resolveShortcut({ key: "a" }, idle)).toEqual({ action: null, preventDefault: false });
   });
 
+  it("takes / by its key, whether or not the layout needs Shift for it", () => {
+    expect(act({ key: "/", shiftKey: true })).toEqual({ kind: "focusSearch" });
+    expect(act({ key: "/", ctrlKey: true })).toBeNull();
+  });
+
   it("finds Alt+digit by code when the layout types a symbol", () => {
     expect(act({ key: "&", code: "Digit1", altKey: true })).toEqual({ kind: "view", view: "library" });
     expect(act({ key: "6", code: "Digit6", altKey: true })).toBeNull();
@@ -52,7 +58,6 @@ describe("resolveShortcut", () => {
     expect(act({ key: "1", code: "Digit1", altKey: true, ctrlKey: true })).toBeNull(); // AltGr
     expect(act({ key: "1", code: "Digit1", altKey: true, shiftKey: true })).toBeNull();
     expect(act({ key: "ArrowLeft" })).toBeNull();
-    expect(act({ key: "/", shiftKey: true })).toBeNull();
     expect(act({ key: "k", ctrlKey: true, altKey: true })).toBeNull();
     expect(act({ key: "k", metaKey: true })).toBeNull();
   });
@@ -172,5 +177,59 @@ describe("installShortcuts", () => {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "?" }));
     expect(run).toHaveBeenCalledWith({ kind: "help" });
     stop();
+  });
+
+  it("handles reload keys in the capture phase, so a handler that stops propagation can't let one through", () => {
+    const run = vi.fn();
+    const stop = installShortcuts(window, run, () => false);
+    const field = document.createElement("div");
+    document.body.appendChild(field);
+    field.addEventListener("keydown", (e) => e.stopPropagation());
+    const f5 = new KeyboardEvent("keydown", { key: "F5", bubbles: true, cancelable: true });
+    field.dispatchEvent(f5);
+    expect(f5.defaultPrevented).toBe(true);
+    expect(run).toHaveBeenCalledWith({ kind: "rescan" });
+    const ctrlR = new KeyboardEvent("keydown", { key: "r", ctrlKey: true, bubbles: true, cancelable: true });
+    field.dispatchEvent(ctrlR);
+    expect(ctrlR.defaultPrevented).toBe(true);
+    expect(run).toHaveBeenCalledTimes(2);
+    // Other keys still wait for the bubble phase, so the stopped one never reaches it.
+    field.dispatchEvent(new KeyboardEvent("keydown", { key: "?", bubbles: true, cancelable: true }));
+    expect(run).toHaveBeenCalledTimes(2);
+    stop();
+    field.remove();
+  });
+
+  it("runs each reload key once (capture only), and other keys once (bubble only)", () => {
+    const run = vi.fn();
+    const stop = installShortcuts(window, run, () => false);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "F5", cancelable: true }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "?" }));
+    expect(run.mock.calls).toEqual([[{ kind: "rescan" }], [{ kind: "help" }]]);
+    stop();
+  });
+
+  it("behind an open overlay, swallows a reload key without rescanning", () => {
+    const run = vi.fn();
+    let preview: object | null = { plan: [] };
+    const stop = installShortcuts(window, run, () => shortcutsBlocked(false, [null, preview, undefined]));
+    const f5 = new KeyboardEvent("keydown", { key: "F5", cancelable: true });
+    window.dispatchEvent(f5);
+    expect(f5.defaultPrevented).toBe(true);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "?" }));
+    expect(run).not.toHaveBeenCalled();
+    preview = null;
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "F5", cancelable: true }));
+    expect(run).toHaveBeenCalledWith({ kind: "rescan" });
+    stop();
+  });
+});
+
+describe("shortcutsBlocked", () => {
+  it("is true while a modal or any of App's overlays is open", () => {
+    expect(shortcutsBlocked(false, [])).toBe(false);
+    expect(shortcutsBlocked(false, [null, undefined, false])).toBe(false);
+    expect(shortcutsBlocked(true, [null])).toBe(true);
+    expect(shortcutsBlocked(false, [null, { techName: "FS25_X" }])).toBe(true);
   });
 });
