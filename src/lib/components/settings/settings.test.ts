@@ -18,9 +18,9 @@ describe("settingsLock", () => {
     });
   });
   it("names the move first, then the write, then the scan", () => {
-    const both = { lockReason: "Silo is optimizing links.", scanning: true };
+    const both = { lockReason: "Silo is reclaiming disk space.", scanning: true };
     expect(settingsLock({ ...both, moveUnfinished: true }).reason).toBe(MOVE_UNFINISHED_REASON);
-    expect(settingsLock({ ...both, moveUnfinished: false }).reason).toBe("Silo is optimizing links.");
+    expect(settingsLock({ ...both, moveUnfinished: false }).reason).toBe("Silo is reclaiming disk space.");
     expect(settingsLock({ lockReason: "", scanning: true, moveUnfinished: false })).toEqual({
       locked: true,
       reason: SCANNING_REASON,
@@ -62,13 +62,13 @@ describe("MaintenanceSettings", () => {
   });
 
   it("a disabled control shows its reason as text under it", () => {
-    const p = maintenance("Silo is optimizing links.");
+    const p = maintenance("Silo is reclaiming disk space.");
     for (const name of ["Re-read every mod", "Reclaim disk space", "Undo organizing"]) {
       const b = screen.getByRole("button", { name });
       expect(b).toBeDisabled();
-      expect(b).toHaveAttribute("title", "Silo is optimizing links.");
+      expect(b).toHaveAttribute("title", "Silo is reclaiming disk space.");
     }
-    expect(screen.getAllByText("Silo is optimizing links.")).toHaveLength(3);
+    expect(screen.getAllByText("Silo is reclaiming disk space.")).toHaveLength(3);
     expect(p.onRestoreVanilla).not.toHaveBeenCalled();
   });
 

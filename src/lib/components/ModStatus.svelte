@@ -39,7 +39,7 @@
       <div class="d-log ok">No errors or warnings from this mod in the last game log.</div>
     {:else if logHealth.errors > 0}
       <div class="d-log bad">
-        {logHealth.errors} error{logHealth.errors === 1 ? "" : "s"} in the last run —
+        {logHealth.errors} error{logHealth.errors === 1 ? "" : "s"} in the last run,
         likely the reason something's broken.
         <div class="d-log-sample">{logHealth.sample}</div>
       </div>
@@ -49,7 +49,7 @@
         <div class="d-log-sample">{logHealth.sample}</div>
       </div>
     {:else}
-      <div class="d-log ok">{logHealth.benign} cosmetic warning{logHealth.benign === 1 ? "" : "s"} only — safe to ignore.</div>
+      <div class="d-log ok">{logHealth.benign} cosmetic warning{logHealth.benign === 1 ? "" : "s"} only. Safe to ignore.</div>
     {/if}
   </div>
 {/if}

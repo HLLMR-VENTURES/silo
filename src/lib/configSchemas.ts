@@ -55,7 +55,7 @@ export const GAME_GRAPHICS_FIELDS: CfgField[] = [
       "3": "Performance",
       "4": "Ultra Performance",
     },
-    hint: "AMD upscaling — higher = more FPS, softer image",
+    hint: "AMD upscaling: higher = more FPS, softer image",
   },
   {
     path: `${G}volumetricFogQuality`,

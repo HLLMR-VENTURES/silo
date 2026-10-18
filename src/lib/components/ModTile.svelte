@@ -101,7 +101,7 @@
       class="tc-switch"
       class:on={active}
       onclick={stop(onToggleActive)}
-      use:tooltip={active ? "Active — click to park" : "Parked — click to activate"}
+      use:tooltip={active ? "Active. Click to park." : "Parked. Click to activate."}
       aria-label="Toggle active"
     >
       <span class="knob"></span>
@@ -179,7 +179,7 @@
     <button
       class="pill cat"
       class:overridden
-      title={overridden ? "Custom category — click to change" : "Click to reassign category"}
+      title={overridden ? "Custom category. Click to change." : "Click to reassign category"}
       onclick={(e) => {
         e.stopPropagation();
         onEditCategory(e);
@@ -202,7 +202,7 @@
     {/if}
     {#if mod.kind === "dir"}<span class="pill dev" title="Unpacked folder mod (dev build)">Dev</span>{/if}
     {#if mod.ignoredDigitPrefix}
-      <span class="pill warn" title="Name starts with a digit — the game ignores this mod">ignored</span>
+      <span class="pill warn" title="Name starts with a digit, so the game ignores this mod">ignored</span>
     {/if}
     {#if mod.error}<span class="pill err" title={mod.error}>error</span>{/if}
     {#each tags.slice(0, 2) as t (t)}<span class="pill tag">#{t}</span>{/each}

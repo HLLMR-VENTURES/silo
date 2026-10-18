@@ -329,7 +329,7 @@
     let filename: string | null = null;
     try {
       filename = await installRemoteMod(m.id, source);
-      installedNote = `Installed ${filename}`;
+      installedNote = `Installed ${filename}.`;
     } catch (e) {
       error = inlineError(e, "Installing the mod");
     } finally {
@@ -436,7 +436,7 @@
     <div class="error">{error}</div>
   {/if}
   {#if installedNote}
-    <div class="ok-note">{installedNote} — rescanning library…</div>
+    <div class="ok-note">{installedNote} Rescanning library…</div>
   {/if}
 
   {#if loading && results.length === 0}

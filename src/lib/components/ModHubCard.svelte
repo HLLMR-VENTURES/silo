@@ -44,7 +44,7 @@
   <div class="src-actions">
     <button class="act" onclick={() => openExternal(sourceUrl)}>Rate on ModHub <Icon name="external" size={12} /></button>
   </div>
-  <p class="why">Reviews are left on ModHub — Silo links you there to sign in and rate.</p>
+  <p class="why">Reviews are left on ModHub. Silo links you there to sign in and rate.</p>
 </div>
 
 <style>

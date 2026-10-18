@@ -41,7 +41,7 @@ export async function switchBlockReason(
   if (s.busy) return `Wait for “${s.busy}” to finish.`;
   if (s.blocked) return null;
   if (await hasBisectSnapshot())
-    return "Finish or cancel the guided bisection first — it belongs to this folder.";
+    return "Finish or cancel the guided bisection first. It belongs to this folder.";
   return null;
 }
 

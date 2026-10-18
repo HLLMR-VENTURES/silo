@@ -60,12 +60,12 @@
     {#if loading}
       <p class="muted">Working out what would move…</p>
     {:else if plan.length === 0}
-      <p class="muted">Nothing to organize — every loose mod is already filed.</p>
+      <p class="muted">Nothing to organize. Every loose mod is already filed.</p>
     {:else if adopt}
       <p class="lead">
         Your library archive{#if adopt.path}{" "}(<code>{adopt.path}</code>){/if} already holds loose
         mod zips. Silo can file them into its category folders there so they show up in your
-        library (parked — activate them as usual). Nothing is overwritten, and nothing has moved yet.
+        library (parked, so activate them as usual). Nothing is overwritten, and nothing has moved yet.
       </p>
       {#if adopt.note}<p class="muted">{adopt.note}</p>{/if}
     {:else}

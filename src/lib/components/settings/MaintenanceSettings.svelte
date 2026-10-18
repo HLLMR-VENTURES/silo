@@ -56,14 +56,14 @@
   {#if organizedCount > 0 && cloudSynced}
     <p class="hint">
       <Icon name="cloud" size={14} /> Your mods folder is on a cloud-synced drive (OneDrive / Google Drive /
-      Proton Drive), which doesn't support hardlinks — so Silo projects active mods as <b>copies</b>.
+      Proton Drive), which doesn't support hardlinks, so Silo projects active mods as <b>copies</b>.
       That works, but uses more disk. Excluding this folder from cloud sync lets Silo use hardlinks
       instead (no duplication).
     </p>
   {:else if organizedCount > 0}
     <p class="hint">
       Collapses any active mod that was projected as a full copy (rather than a hardlink) back into
-      a hardlink — frees the duplicated space and makes activating/deactivating instant. Safe: only
+      a hardlink. This frees the duplicated space and makes activating/deactivating instant. Safe: only
       touches files byte-identical to the archived copy, never a build you swapped in.
     </p>
     <div class="btnrow">

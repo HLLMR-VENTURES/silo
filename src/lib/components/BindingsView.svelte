@@ -101,7 +101,7 @@
         {#if shared.length > 0}
           <div class="sec">
             Inputs bound to more than one action
-            <span class="sec-note">— usually intentional (different contexts); review if a control feels double-booked</span>
+            <span class="sec-note">Usually intentional (different contexts). Review if a control feels double-booked.</span>
           </div>
           {#each shared as s (s.input)}
             <div class="shared-row">

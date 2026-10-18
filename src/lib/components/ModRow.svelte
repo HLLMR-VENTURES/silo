@@ -95,7 +95,7 @@
   <button
     class="active-dot"
     class:on={active}
-    use:tooltip={active ? "Active — click to park" : "Parked — click to activate"}
+    use:tooltip={active ? "Active. Click to park." : "Parked. Click to activate."}
     onclick={onToggleActive}
     aria-label="Toggle active"
   ></button>
@@ -125,7 +125,7 @@
     <button
       class="badge cat"
       class:overridden
-      title={overridden ? "Custom category — click to change" : "Click to reassign category"}
+      title={overridden ? "Custom category. Click to change." : "Click to reassign category"}
       onclick={(e) => onEditCategory(e)}
     >
       {mod.category}{mod.subcategory ? " · " + mod.subcategory : ""}
@@ -133,7 +133,7 @@
     {#if mod.kind === "dir"}
       <span
         class="badge dev"
-        title="Unpacked folder mod (dev build) — Silo shows it but leaves it unmanaged"
+        title="Unpacked folder mod (dev build). Silo shows it but leaves it unmanaged."
       >Dev</span>
     {/if}
     {#if organized && !active}<span class="badge parked">parked</span>{/if}
@@ -158,7 +158,7 @@
       </span>
     {/if}
     {#if mod.ignoredDigitPrefix}
-      <span class="badge warn" title="Name starts with a digit — the game ignores this mod">
+      <span class="badge warn" title="Name starts with a digit, so the game ignores this mod">
         ignored
       </span>
     {/if}

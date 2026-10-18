@@ -104,7 +104,7 @@
       {#if !status.canWrite}
         <div class="gha-row">
           <div class="gha-hint">
-            Enable Star / Watch on mod pages — grants the <code>public_repo</code>
+            Enable Star / Watch on mod pages. This grants the <code>public_repo</code>
             scope so actions land on your GitHub account.
           </div>
           <button class="gha-btn primary" onclick={() => connect(true, status.canGist)}>
@@ -115,7 +115,7 @@
       {#if !status.canGist}
         <div class="gha-row">
           <div class="gha-hint">
-            Enable sharing Collections — grants the <code>gist</code> scope so a shared
+            Enable sharing Collections. This grants the <code>gist</code> scope so a shared
             mod set is saved to your own GitHub as a secret (unlisted) gist.
           </div>
           <button class="gha-btn primary" onclick={() => connect(status.canWrite, true)}>
@@ -169,7 +169,7 @@
     {#if showPat}
       <div class="gha-hint">
         A fine-grained PAT scoped to only <b>Starring</b> (read/write) is the most
-        minimal-permission path — narrower than the OAuth scope.
+        minimal-permission path, narrower than the OAuth scope.
         <button
           class="gha-link"
           onclick={() => openExternal("https://github.com/settings/personal-access-tokens/new")}

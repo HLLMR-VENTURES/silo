@@ -114,7 +114,7 @@
         <button class="ms-save" onclick={() => saveRaw(file)}>Save raw XML</button>
       {:else if file.fields.length === 0}
         <div class="ms-empty small">
-          Silo couldn't model this file as a form — use “raw XML” to edit it directly.
+          Silo couldn't model this file as a form. Use “raw XML” to edit it directly.
         </div>
       {:else}
         {#each file.fields as fld (fld.id)}

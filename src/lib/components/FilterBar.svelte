@@ -170,7 +170,7 @@
       onclick={toggleDir}
       use:tooltip={dirEnabled
         ? `Sort ${sortDir === "desc" ? "descending" : "ascending"}`
-        : "Sort direction — coming with a catalog update (silo-api)"}
+        : "Sort direction is coming with a catalog update (silo-api)."}
       aria-label="Toggle sort direction"
     >
       <Icon name={sortDir === "desc" ? "arrowDown" : "arrowUp"} size={14} />
@@ -201,7 +201,7 @@
           min="1900"
           max="2100"
           placeholder="Year"
-          title="Period-correct — only machines that existed by this year (dated mods only)."
+          title="Period-correct: only machines that existed by this year (dated mods only)."
           value={availableBy ?? ""}
           onchange={(e) => setAvailableBy(e.currentTarget.value)}
         />

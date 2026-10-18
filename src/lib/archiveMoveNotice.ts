@@ -89,7 +89,7 @@ export function archiveNotice(s: ArchiveNoticeState, a: ArchiveNoticeActions): N
         level: "warning",
         icon: "archive",
         title: s.cancelling ? "Moving your library back is paused." : "Archive move paused.",
-        body: `${reason}You can play — resume when you're done.`,
+        body: `${reason}You can play, then resume when you're done.`,
         actions: [{ label: "Resume", run: a.resume, primary: true }, ...cancel],
         dismissible: false,
       };

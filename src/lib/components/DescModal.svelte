@@ -40,7 +40,7 @@
       {#if modal.source === "catalog"}
         Full body from the catalog. The source page has the original formatting.
       {:else}
-        Catalog summary — the full write-up lives on the mod's page.
+        Catalog summary. The full write-up lives on the mod's page.
       {/if}
     </span>
     {#if modal.url}

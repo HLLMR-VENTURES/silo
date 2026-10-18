@@ -91,7 +91,7 @@ export function cancelWasLost(c: CancelEvidence): boolean {
 /** Explains a lost cancel: where the library is now, and how to move it again. */
 export function lostCancelText(archivePath: string | null | undefined, homeDefault: boolean): string {
   return (
-    `The move finished before it could be cancelled — your library is now in ${archivePath ?? "its new folder"}. ` +
+    `The move finished before it could be cancelled. Your library is now in ${archivePath ?? "its new folder"}. ` +
     (homeDefault
       ? "Use 'Use default' in Settings to move it back."
       : "Use Change… in Settings to move it again.")

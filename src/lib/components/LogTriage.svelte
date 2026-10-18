@@ -122,7 +122,7 @@
     {#if r.crashed}
       <div class="verdict bad">
         <strong>The last run ended abnormally.</strong>
-        The log stops mid-session with no clean-exit marker — that's what a crash looks like.
+        The log stops mid-session with no clean-exit marker. That's what a crash looks like.
         {#if culprits.length > 0}
           The mod{culprits.length === 1 ? "" : "s"} below logged errors during that run, most errors first.
         {:else}
@@ -173,7 +173,7 @@
       <button class="disclosure" onclick={() => (showCosmetic = !showCosmetic)}>
         <Icon name={showCosmetic ? "chevronDown" : "chevronRight"} size={14} />
         {cosmeticOnly.length} mod{cosmeticOnly.length === 1 ? "" : "s"} with cosmetic warnings
-        only — safe to ignore
+        only. Safe to ignore.
       </button>
       {#if showCosmetic}
         <div class="cosmetic">
