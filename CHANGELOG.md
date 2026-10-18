@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **UI size setting.** Settings → Appearance lets you make text and icons smaller or larger
-  (90, 100, 110 or 125 %). (#224)
+  (90%, 100%, 110% or 125%). (#224)
 
 - **The silo mark.** Silo's own logo, a grain silo with the sun rising behind it, now sits in the
   top bar. (#224)

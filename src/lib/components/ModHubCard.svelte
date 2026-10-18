@@ -34,7 +34,7 @@
   <div class="src-nums tnum">
     {#if rating != null}
       <span title="Community rating on ModHub">
-        <Icon name="favorite" size={13} filled /> {rating.toFixed(1)}{#if ratingCount}<span class="sub">&nbsp;({fmt(ratingCount)})</span>{/if}
+        <Icon name="favorite" size={13} filled label="rating" /> {rating.toFixed(1)}{#if ratingCount}<span class="sub">&nbsp;({fmt(ratingCount)})</span>{/if}
       </span>
     {:else}
       <span class="muted">Rating not synced yet</span>

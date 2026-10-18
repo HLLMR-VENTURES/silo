@@ -246,10 +246,6 @@
     font: inherit;
     font-size: 0.85rem;
   }
-  .fb-search:focus {
-    outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
-    outline-offset: 1px;
-  }
   /* Sort is ordering, not filtering — contrasting tint (matches the app's primary accent). */
   .fb-sort {
     border-color: color-mix(in srgb, var(--primary) 55%, var(--border));

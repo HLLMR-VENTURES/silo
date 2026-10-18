@@ -129,7 +129,7 @@
         <div class="grp-label">{g.label}</div>
         <div class="opts">
           {#each g.cats as c (c.id)}
-            <button class="opt" class:on={selected.has(c.id)} onclick={() => toggle(c.id)}>
+            <button class="opt" class:on={selected.has(c.id)} aria-pressed={selected.has(c.id)} onclick={() => toggle(c.id)}>
               {#if selected.has(c.id)}<Icon name="check" size={13} />{:else}+{/if} {c.label}
             </button>
           {/each}

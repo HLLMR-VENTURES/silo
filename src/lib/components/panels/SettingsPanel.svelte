@@ -134,7 +134,7 @@
         onchange={(e) => onSetUiScale(parseUiScale(e.currentTarget.value))}
       >
         {#each UI_SCALES as s (s)}
-          <option value={String(s)}>{Math.round(s * 100)} %</option>
+          <option value={String(s)}>{Math.round(s * 100)}%</option>
         {/each}
       </select>
     </div>

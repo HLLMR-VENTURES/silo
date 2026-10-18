@@ -89,9 +89,9 @@
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
 
   /* Type scale (rem, so it follows the UI size setting) */
-  --fs-xs: 0.75rem;
+  --fs-xs: max(0.75rem, 12px); /* 12px floor holds at 90% UI size */
   --lh-xs: 1.35;
-  --fs-sm: 0.8125rem;
+  --fs-sm: max(0.8125rem, 12px);
   --lh-sm: 1.4;
   --fs-md: 0.875rem;
   --lh-md: 1.45;
@@ -214,15 +214,10 @@
   color-scheme: dark;
 }
 
-/* Higher contrast on request: visible borders, stronger tints. The tripled :root outranks the
-   theme blocks above (`:root[data-theme]`, `:root:not(...)`), which also set --border. */
+/* Higher contrast on request: visible borders. The tripled :root outranks the theme blocks
+   above (`:root[data-theme]`, `:root:not(...)`), which also set --border. Soft tints stay at 12%. */
 @media (prefers-contrast: more) {
   :root:root:root {
     --border: var(--border-strong);
-    --info-soft: color-mix(in srgb, var(--info) 24%, var(--surface));
-    --success-soft: color-mix(in srgb, var(--success) 24%, var(--surface));
-    --warn-soft: color-mix(in srgb, var(--warn-text) 24%, var(--surface));
-    --danger-soft: color-mix(in srgb, var(--danger) 24%, var(--surface));
-    --accent-soft: color-mix(in srgb, var(--accent) 24%, var(--surface));
   }
 }

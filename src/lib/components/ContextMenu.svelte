@@ -115,7 +115,7 @@
   }
   .ico {
     flex: 0 0 auto;
-    width: 16px;
+    width: 1rem;
     display: inline-flex;
     justify-content: center;
     opacity: 0.9;

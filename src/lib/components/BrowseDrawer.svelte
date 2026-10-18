@@ -81,7 +81,7 @@
         {#if d.rating != null}
           <dt>Rating</dt>
           <dd class="tnum">
-            <Icon name="favorite" size={13} filled /> {d.rating.toFixed(1)}{#if d.ratingCount}
+            <Icon name="favorite" size={13} filled label="rating" /> {d.rating.toFixed(1)}{#if d.ratingCount}
               &nbsp;({fmtCount(d.ratingCount)}){/if}
           </dd>
         {/if}

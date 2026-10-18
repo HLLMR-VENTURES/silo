@@ -108,10 +108,10 @@
     </div>
   {:else if stats}
     <div class="src-nums tnum">
-      <span title="Stars"><Icon name="favorite" size={13} filled /> {fmt(stats.stars)}</span>
-      <span title="Forks"><Icon name="fork" size={13} /> {fmt(stats.forks)}</span>
-      <span title="Watchers"><Icon name="visible" size={13} /> {fmt(stats.watchers)}</span>
-      <span title="Open issues"><Icon name="dot" size={13} /> {fmt(stats.openIssues)}</span>
+      <span title="Stars"><Icon name="favorite" size={13} filled label="stars" /> {fmt(stats.stars)}</span>
+      <span title="Forks"><Icon name="fork" size={13} label="forks" /> {fmt(stats.forks)}</span>
+      <span title="Watchers"><Icon name="visible" size={13} label="watchers" /> {fmt(stats.watchers)}</span>
+      <span title="Open issues"><Icon name="dot" size={13} label="open issues" /> {fmt(stats.openIssues)}</span>
       {#if stats.archived}<span class="archived" title="Archived repo">archived</span>{/if}
     </div>
 

@@ -57,13 +57,13 @@
       <div class="stats">
         {#if m.rating != null}
           <span class="stat" title="Rating">
-            <Icon name="favorite" size={12} filled /> {m.rating.toFixed(1)}{#if m.ratingCount}<span class="stat-sub"
+            <Icon name="favorite" size={12} filled label="rating" /> {m.rating.toFixed(1)}{#if m.ratingCount}<span class="stat-sub"
                 >&nbsp;({fmtCount(m.ratingCount)})</span
               >{/if}
           </span>
         {/if}
         {#if m.downloads != null}
-          <span class="stat" title="Downloads"><Icon name="download" size={12} /> {fmtCount(m.downloads)}</span>
+          <span class="stat" title="Downloads"><Icon name="download" size={12} label="downloads" /> {fmtCount(m.downloads)}</span>
         {/if}
       </div>
     {/if}

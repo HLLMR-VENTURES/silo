@@ -64,10 +64,10 @@ below, never the raw ramps, so both themes come for free.
 | `--raised` | `#FFFFFF` | `#282D24` | menus, modals |
 | `--sunken` | `#EFEADF` | `#13160F` | wells, inputs, inset areas |
 | `--border` | `#E4DECE` | `#39402F` | hairlines, dividers |
-| `--border-strong` | `#8F8875` | `#767E66` | control edges (3:1), high-contrast borders |
+| `--border-strong` | `#8F8875` | `#767E66` | ≈3:1 control edges; the border under high contrast |
 | `--text` | `#2A2A22` | `#EDEBE0` | primary text |
-| `--muted` | `#5E5D50` | `#ADAC9C` | secondary text (6:1 or better) |
-| `--primary` | `#4A7330` field | `#7FAE55` pasture | Play, primary buttons, active nav |
+| `--muted` | `#5E5D50` | `#ADAC9C` | secondary text, AA (5.5:1 or better on every surface) |
+| `--primary` | `#4A7330` field | `#7FAE55` (dark-theme primary) | Play, primary buttons, active nav |
 | `--primary-hover` | `#395A25` forest | `#9CC06E` | hover/pressed primary |
 | `--primary-text` | `#3F6529` | `#9CC06E` | green used as text |
 | `--on-primary` | `#FFFFFF` | `#12180E` | text on primary |
@@ -83,8 +83,9 @@ below, never the raw ramps, so both themes come for free.
 | `--scrim` | loam at 45 % | loam at 60 % | behind modals and drawers |
 
 Soft tints (`--info-soft`, `--success-soft`, `--warn-soft`, `--danger-soft`,
-`--accent-soft`) mix 12 % of the slot into `--surface` (24 % under
-`prefers-contrast: more`). Earth slots (`--earth`, `--earth-strong`, `--earth-text`,
+`--accent-soft`) mix 12 % of the slot into `--surface`. High-contrast mode
+(`prefers-contrast: more`) strengthens borders: `--border` becomes
+`--border-strong`. Earth slots (`--earth`, `--earth-strong`, `--earth-text`,
 `--on-earth`) carry soil-brown warmth. The rest of the system is tokens too: spacing
 `--sp-1..8` on the 8px grid, radius `--r-sm/md/lg/pill`, elevation `--e1..3`, layers
 `--z-*`, motion `--dur-1..3` + `--ease`, and the type scale `--fs-xs..3xl`.
@@ -121,9 +122,9 @@ Soft tints (`--info-soft`, `--success-soft`, `--warn-soft`, `--danger-soft`,
 - **rem type scale** `--fs-xs` (12 px) → `--fs-3xl` (36 px) at the default size.
   **12 px is the floor** — nothing smaller, anywhere.
 - **Tabular numerals** in data views (sizes, versions, counts) so columns line up.
-- **UI size setting** — Settings → Appearance offers 90 / 100 / 110 / 125 %. It
+- **UI size setting** — Settings → Appearance offers 90% / 100% / 110% / 125%. It
   scales the root size, so text, icons and the silo mark all follow; layouts must
-  not clip at 125 %.
+  not clip at 125%.
 
 ## Focus
 
@@ -142,8 +143,8 @@ should always see where they are, in both themes.
   rescan, more, controls, bridge, cloud, copy, bug, close, chevrons, tag, grid,
   list, menu, fork, swap, target, arrows, dot, circle, link. A new concept gets a
   new entry; an existing concept never gets a second icon.
-- **Sizes:** 16 px in dense UI (rows, chips, inline with text), 20 px in
-  navigation. Stroke 1.75. Icons are sized in rem so they follow UI size.
+- **Sizes:** 13–14 px inline with text, 16 px in icon buttons, 18–20 px in the
+  top bar. Stroke 1.75. Icons are sized in rem so they follow UI size.
 - Icons sit **beside their words**. An **icon-only control needs a label**
   (`aria-label`, plus a tooltip) — no exceptions.
 

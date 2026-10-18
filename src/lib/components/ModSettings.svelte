@@ -260,10 +260,6 @@
     font-family: inherit;
     font-size: var(--fs-sm);
   }
-  .ms-input:focus {
-    outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
-    outline-offset: 1px;
-  }
   .switch {
     flex: 0 0 auto;
     width: 40px;
