@@ -98,6 +98,7 @@
   import { checkYourselfList, type CheckYourselfRow } from "./lib/sources";
   import { appendInfo } from "./lib/info";
   import { copyOrSave } from "./lib/clipboard";
+  import { parseUiScale, type UiScale } from "./lib/uiScale";
 
   const CATEGORIES = [
     "Maps",
@@ -228,6 +229,20 @@
     const el = document.documentElement;
     if (theme === "system") el.removeAttribute("data-theme");
     else el.setAttribute("data-theme", theme);
+  });
+
+  // UI size: scales the root font size (rem-based tokens follow). Persisted; applied to <html>.
+  let uiScale = $state<UiScale>(
+    parseUiScale(typeof localStorage !== "undefined" ? localStorage.getItem("silo.uiScale") : null),
+  );
+  function setUiScale(s: UiScale) {
+    uiScale = s;
+    try {
+      localStorage.setItem("silo.uiScale", String(s));
+    } catch {}
+  }
+  $effect(() => {
+    document.documentElement.style.setProperty("--ui-scale", String(uiScale));
   });
 
   // Silo only organizes .zip mods (the commercial distribution format). Unpacked
@@ -2060,6 +2075,7 @@
   {#if settingsOpen}
     <SettingsPanel
       {theme}
+      {uiScale}
       {roots}
       {gameInfo}
       {userDir}
@@ -2071,6 +2087,7 @@
       {busy}
       {scanning}
       onSetTheme={setTheme}
+      onSetUiScale={setUiScale}
       onOpenGameGraphics={openGameGraphics}
       onExportReport={exportReport}
       onCopyDiagnostics={copyDiagnostics}

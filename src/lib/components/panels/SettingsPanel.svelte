@@ -4,6 +4,7 @@
   import { openKnownFolder, secretStorageSecure } from "../../api";
   import type { ModsRootStatus, ArchiveStatus } from "../../api";
   import GitHubAuth from "../GitHubAuth.svelte";
+  import { UI_SCALES, parseUiScale, type UiScale } from "../../uiScale";
 
   // When the OS keychain is unavailable, connecting an account falls back to storing the
   // token in the local DB unencrypted — warn before the user connects rather than silently.
@@ -18,6 +19,7 @@
 
   let {
     theme,
+    uiScale,
     roots,
     gameInfo,
     userDir,
@@ -29,6 +31,7 @@
     busy,
     scanning,
     onSetTheme,
+    onSetUiScale,
     onOpenGameGraphics,
     onExportReport,
     onCopyDiagnostics,
@@ -49,6 +52,7 @@
     onArchiveDefault,
   }: {
     theme: "system" | "light" | "dark";
+    uiScale: UiScale;
     roots: string[];
     gameInfo: GameInfo | null;
     userDir: string | null;
@@ -60,6 +64,7 @@
     busy: string | null;
     scanning: boolean;
     onSetTheme: (t: "system" | "light" | "dark") => void;
+    onSetUiScale: (s: UiScale) => void;
     onOpenGameGraphics: () => void;
     onExportReport: () => void;
     onCopyDiagnostics: () => void;
@@ -118,6 +123,19 @@
           {t}
         </button>
       {/each}
+    </div>
+    <div class="set-row ui-size">
+      <label class="set-label" for="set-ui-size">UI size</label>
+      <select
+        id="set-ui-size"
+        class="set-select"
+        value={String(uiScale)}
+        onchange={(e) => onSetUiScale(parseUiScale(e.currentTarget.value))}
+      >
+        {#each UI_SCALES as s (s)}
+          <option value={String(s)}>{Math.round(s * 100)} %</option>
+        {/each}
+      </select>
     </div>
   </div>
 
@@ -446,6 +464,22 @@
     font-size: 12px;
     font-weight: 600;
     text-transform: capitalize;
+  }
+  .ui-size {
+    margin-top: 10px;
+  }
+  .ui-size .set-label {
+    margin-bottom: 0;
+  }
+  .set-select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 5px 8px;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
   }
   .seg-btn.on {
     background: var(--surface-raised);

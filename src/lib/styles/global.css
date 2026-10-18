@@ -1,7 +1,13 @@
+@import "./fonts.css";
 @import "./tokens.css";
 
 * {
   box-sizing: border-box;
+}
+
+html {
+  /* UI size setting (App.svelte sets --ui-scale); rem-based tokens follow it. */
+  font-size: calc(100% * var(--ui-scale, 1));
 }
 
 html,
@@ -15,8 +21,8 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-ui);
-  font-size: 14px;
-  line-height: 1.45;
+  font-size: var(--fs-md);
+  line-height: var(--lh-md);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow: hidden; /* the app manages its own scroll regions */
@@ -28,7 +34,16 @@ h3 {
   font-family: var(--font-display);
   font-weight: 600;
   letter-spacing: -0.01em;
+  font-variation-settings: "SOFT" 50;
   margin: 0;
+}
+
+code,
+kbd,
+samp,
+pre,
+.mono {
+  font-family: var(--font-mono);
 }
 
 button {
@@ -38,7 +53,16 @@ button {
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: var(--selection);
+}
+
+/* One keyboard focus ring for every control; mouse clicks don't show it. */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+:focus:not(:focus-visible) {
+  outline: none;
 }
 
 /* Tabular numerals wherever we show data */
@@ -59,6 +83,8 @@ button {
   position: fixed;
   width: 7px;
   cursor: ew-resize;
+  /* Above the drawer it resizes (drawers are z 50 today). Literal kept: --z-drawer is 30 and
+     --z-dialog (60) means something else; retokenize when the drawers adopt --z-drawer. */
   z-index: 60;
   touch-action: none;
 }
@@ -85,12 +111,12 @@ button {
   padding: 11px 16px 11px 20px;
   background: color-mix(in srgb, var(--info) 12%, var(--surface));
   border-bottom: 1px solid color-mix(in srgb, var(--info) 30%, var(--border));
-  font-size: 12.5px;
+  font-size: var(--fs-xs);
   line-height: 1.5;
   color: var(--text);
 }
 .cn-ico {
-  font-size: 16px;
+  font-size: 1rem;
   line-height: 1.4;
   color: var(--info);
   flex: 0 0 auto;
@@ -103,7 +129,7 @@ button {
   border: 1px solid color-mix(in srgb, var(--info) 40%, transparent);
   background: transparent;
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   cursor: pointer;
   padding: 3px 8px;
   border-radius: var(--radius-sm);
@@ -116,7 +142,7 @@ button {
   border: none;
   background: transparent;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   cursor: pointer;
   padding: 2px 6px;
   border-radius: var(--radius-sm);
