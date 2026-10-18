@@ -1,7 +1,7 @@
 <script lang="ts">
   // The "Browse" tab: discover mods from the canonical SiloAPI catalog, see which
   // you already have, and install new ones straight into the library.
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
   import { inlineError } from "../state/notify.svelte";
   import {
     browseMods,
@@ -46,6 +46,9 @@
     /** techName to auto-open once results land, so "Find in Browse" lands on the mod's drawer
      *  rather than just filtering to it. */
     seedTech?: string | null;
+    /** The catalog search text. The app header's search binds it; a change re-queries after the
+     *  same 300 ms pause typing in the old search box had. */
+    query?: string;
   }
   let {
     installed,
@@ -54,6 +57,7 @@
     onFindInLibrary,
     seed = null,
     seedTech = null,
+    query = $bindable(""),
   }: Props = $props();
 
   // Source connection state, for the interactive cards in the drawer.
@@ -71,7 +75,14 @@
   }
   refreshGh();
 
-  let query = $state("");
+  // The query the last search ran for (or the mount loads), so only a real change re-queries.
+  let searchedQuery = untrack(() => query);
+  $effect(() => {
+    const q = query;
+    if (q === searchedQuery) return;
+    searchedQuery = q;
+    onSearch();
+  });
   // `category` is the API filter param, derived from the parent/child dropdowns below.
   let category = $state("");
   let parentCategory = $state("");
@@ -347,7 +358,7 @@
     } catch {
       // Older server without /facets — the filter panel just stays empty.
     }
-    if (seed && seed.trim()) query = seed.trim();
+    if (seed && seed.trim()) query = searchedQuery = seed.trim();
     await load();
     // "Find in Browse" targets a specific mod — open its drawer once the seeded search lands it.
     if (seedTech) {
@@ -376,6 +387,7 @@
     bind:parentCategory
     bind:childCategory
     bind:query
+    showSearch={false}
     searchPlaceholder="Search the catalog…"
     bind:sort
     sortOptions={[

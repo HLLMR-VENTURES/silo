@@ -201,7 +201,7 @@
   .drawer-backdrop {
     position: fixed;
     inset: 0;
-    top: var(--topbar-h, 0px);
+    top: var(--header-h);
     background: rgba(0, 0, 0, 0.15);
     /* Non-modal: let clicks fall through to the catalog grid so clicking another card switches
        the drawer to that mod. Close via the ✕ or Escape instead of clicking away. */
@@ -210,7 +210,7 @@
   }
   .drawer {
     position: fixed;
-    top: var(--topbar-h, 0px);
+    top: var(--header-h);
     right: 0;
     bottom: 0;
     width: min(420px, 92vw);

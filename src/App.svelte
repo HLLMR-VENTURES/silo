@@ -77,6 +77,7 @@
     archiveAdoptPreview,
     archiveAdoptApply,
     type ArchivePreflight,
+    openKnownFolder,
   } from "./lib/api";
   import { ArchiveMove } from "./lib/archiveMove.svelte";
   import { capList, modsCount, problemLines, unDot } from "./lib/archiveMoveLogic";
@@ -180,6 +181,22 @@
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
   import NoticeArea from "./lib/components/NoticeArea.svelte";
   import ViewBoundary from "./lib/components/ViewBoundary.svelte";
+  import AppShell from "./lib/components/shell/AppShell.svelte";
+  import AppHeader from "./lib/components/shell/AppHeader.svelte";
+  import StatusChip from "./lib/components/shell/StatusChip.svelte";
+  import PlayButton, { type PlayMenuItem } from "./lib/components/shell/PlayButton.svelte";
+  import type { StatusStripItem } from "./lib/components/shell/StatusStrip.svelte";
+  import ViewOutlet from "./lib/views/ViewOutlet.svelte";
+  import LibraryView from "./lib/views/LibraryView.svelte";
+  import BrowseView from "./lib/views/BrowseView.svelte";
+  import {
+    activeSetLine,
+    libraryStatusCounts,
+    stripItemSpecs,
+    stripLeft,
+  } from "./lib/views/libraryStatus";
+  import { go, nav, searchPlaceholderFor, searchTargetFor } from "./lib/state/nav.svelte";
+  import type { MenuItem } from "./lib/ui/overlayTypes";
   import Icon from "./lib/ui/Icon.svelte";
   import { fmtSize } from "./lib/format";
   import {
@@ -402,19 +419,14 @@
   // True while a guided bisection is running (snapshot saved, test halves applied). The
   // focus rescan holds off meanwhile so returning from FS25 can't rewrite the active set.
   let bisecting = $state(false);
-  // Top-level view: the local library, or the remote catalog browser.
-  let view = $state<"library" | "browse">("library");
-  // Measured so the fixed detail drawers can sit *below* the header instead of over it
-  // (the topbar wraps, so its height isn't constant).
-  let topbarH = $state(56);
-
-  /** Switch views and close the Library drawer so it doesn't hang over Browse. The
-   *  Browse drawer lives inside ModBrowser, which unmounts on switch, so it self-closes. */
-  function switchView(v: "library" | "browse") {
-    if (view === v) return;
-    view = v;
-    detailMod = null;
-  }
+  // Measured by the Topbar (still bound until it is removed).
+  let topbarH = $state(0);
+  // The current view is nav.view (lib/state/nav). The mod drawer belongs to the Library: leaving
+  // it closes the drawer, as switching to Browse did. The Browse drawer lives inside ModBrowser,
+  // which unmounts on switch, so it closes itself.
+  $effect(() => {
+    if (nav.view !== "library") untrack(() => (detailMod = null));
+  });
   let userDir = $state<string | null>(null);
   let appVer = $state<string | null>(null);
   let update = $state<AvailableUpdate | null>(null);
@@ -1321,7 +1333,7 @@
   function openInBrowse(mod: ModEntry) {
     browseSeed = mod.title ?? mod.techName;
     browseSeedTech = mod.techName; // so Browse can open this exact mod's drawer, not just filter to it
-    switchView("browse");
+    go("browse");
   }
 
   // The reverse of openInBrowse: jump from a Browse card to the installed mod in the Library,
@@ -1330,8 +1342,8 @@
     const mod = mods.find((m) => m.techName === techName);
     if (!mod) return;
     query = mod.title ?? mod.techName; // seed the library search so the tile surfaces behind the drawer
-    switchView("library"); // clears detailMod…
-    detailMod = mod; // …then open this mod's drawer
+    go("library");
+    detailMod = mod; // open this mod's drawer
   }
 
   function rowMenuItems(mod: ModEntry, ev: MouseEvent): ContextMenuItem[] {
@@ -2585,47 +2597,451 @@
       reportError(e, "Discarding the interrupted diagnosis");
     }
   }
+
+  // ── App shell: header search, status chip, Play, the Library strip and menu (#230) ──
+
+  /** Browse's catalog search text (the header search while Browse is open). */
+  let browseQuery = $state("");
+  /** The header search shows the current view's search: the catalog on Browse, else the library's. */
+  function getHeaderSearch(): string {
+    return searchTargetFor(nav.view) === "browse" ? browseQuery : query;
+  }
+  function setHeaderSearch(v: string) {
+    if (searchTargetFor(nav.view) === "browse") browseQuery = v;
+    else query = v;
+  }
+  /** Enter away from Library and Browse takes the search to the Library (the text is applied). */
+  function submitHeaderSearch(v: string) {
+    if (searchTargetFor(nav.view) !== "library") return;
+    query = v;
+    go("library");
+  }
+
+  // Problems: critical conflicts and mods that can't load. To review: warning-level conflicts and
+  // files Silo left untouched. Info-level findings never count.
+  const statusCounts = $derived(
+    libraryStatusCounts({
+      criticalConflicts: criticalCount,
+      warningConflicts: conflicts.filter((c) => c.severity === "warning").length,
+      missingDeps: health.missingDeps.length,
+      corrupt: health.corrupt.length,
+      ignored: health.ignored.length,
+      foreign: health.foreign.length,
+    }),
+  );
+
+  const activeLoadoutName = $derived(
+    activeLoadoutId !== null ? (loadouts.find((l) => l.id === activeLoadoutId)?.name ?? null) : null,
+  );
+
+  // Play keeps the old Launch button's guards: off during a foreground library write or while an
+  // archive move is copying (launching would race it).
+  const playOffReason = $derived(
+    archiveMove.running ? "An archive move is running — pause it to play" : fgLock.reason,
+  );
+
+  /** Saves (already loaded) that use mods the library doesn't have. */
+  const savesMissingMods = $derived(saveRows.filter((r) => r.st.missing.length > 0));
+  const playMenuItems = $derived.by((): PlayMenuItem[] => {
+    const items: PlayMenuItem[] = [];
+    if (gameInfo) items.push({ id: "game-folder", label: "Open the game folder", icon: "showFile" });
+    savesMissingMods.slice(0, 3).forEach(({ s, st }, i) => {
+      const n = st.missing.length;
+      items.push({
+        id: `save:${s.folder}`,
+        label: `${s.name} uses ${modsCount(n)} that ${n === 1 ? "isn't" : "aren't"} in your library`,
+        icon: "problem",
+        separatorBefore: i === 0 && items.length > 0,
+      });
+    });
+    items.push({
+      id: "mod-sets",
+      label: "Manage mod sets",
+      icon: "modSets",
+      separatorBefore: items.length > 0,
+    });
+    return items;
+  });
+  function playMenuSelect(id: string) {
+    if (id === "game-folder")
+      openKnownFolder("gameInstall").catch((e) => reportError(e, "Opening the game folder"));
+    else if (id.startsWith("save:")) go("modSets", "savegames");
+    else if (id === "mod-sets") go("modSets");
+  }
+
+  /** Why the old "Organize N" button was off: a library write, a scan, or an unfinished move. */
+  const organizeOffReason = $derived(
+    fgLock.reason ||
+      (scanning ? "Wait for the scan to finish." : "") ||
+      (archiveMove.unfinished ? "Finish or cancel the archive move first" : ""),
+  );
+  const libraryStripItems = $derived.by((): StatusStripItem[] => {
+    const run: Record<string, () => void> = {
+      critical: () => go("diagnose", "conflicts"),
+      unfiled: () => (organizeOffReason ? refuse(organizeOffReason) : void organizeNew()),
+      updates: () => go("updates"),
+    };
+    return stripItemSpecs({
+      criticalConflicts: criticalCount,
+      // Where the old "Organize N" button showed: loose mods, with auto-file off.
+      unfiled: autoFileNew ? 0 : unorganizedCount,
+      updates: availableUpdates.length,
+    }).map((it) => ({ ...it, run: run[it.id] }));
+  });
+  const libraryStripLeft = $derived(
+    stripLeft({
+      scanning,
+      scanned: libraryScanned,
+      active: activeSet.size,
+      total: mods.length,
+      setName: activeLoadoutName,
+    }),
+  );
+
+  // The Library's "More" menu: the old Rescan button and Settings' rebuild, with their guards.
+  const libraryMenuItems = $derived<MenuItem[]>([
+    {
+      id: "rescan",
+      label: scanning ? "Scanning…" : "Rescan",
+      icon: "rescan",
+      disabled: scanning || !!fgLock.reason,
+    },
+    { id: "rebuild", label: "Re-read every mod", disabled: !!fgLock.reason || scanning },
+  ]);
+  function libraryMenuSelect(id: string) {
+    if (id === "rescan") runScan();
+    else if (id === "rebuild") rebuildLibrary();
+  }
 </script>
 
-<div class="app" style="--topbar-h:{topbarH}px">
-  <Topbar
-    bind:topbarH
-    {view}
-    {appVer}
-    {update}
-    {updating}
-    {updatePct}
-    onApplyUpdate={applyUpdate}
-    hasSavegames={savegames.length > 0}
-    {savesOpen}
-    {loadoutsOpen}
-    activeLoadoutName={activeLoadoutId !== null
-      ? loadouts.find((l) => l.id === activeLoadoutId)?.name ?? null
-      : null}
-    {mpOpen}
-    {collectionsOpen}
-    showOrganize={unorganizedCount > 0 && !autoFileNew}
-    {unorganizedCount}
-    hasMods={mods.length > 0}
-    {updateChecking}
-    {scanning}
-    lockReason={fgLock.reason}
-    launchBlocked={archiveMove.running}
-    organizeBlocked={archiveMove.unfinished}
-    hasGame={!!gameInfo}
-    activeCount={activeSet.size}
-    {settingsOpen}
-    onSwitchView={switchView}
-    onToggleSaves={() => (savesOpen = !savesOpen)}
-    onToggleLoadouts={() => (loadoutsOpen = !loadoutsOpen)}
-    onToggleMp={() => (mpOpen = !mpOpen)}
-    onToggleCollections={() => (collectionsOpen = !collectionsOpen)}
-    onOrganize={organizeNew}
-    onCheckUpdates={checkAllUpdates}
-    onRescan={() => runScan()}
-    onLaunch={launch}
-    onToggleSettings={() => (settingsOpen = !settingsOpen)}
-  />
+{#snippet modDrawer()}
+  {#if detailMod}
+    {@const dm = detailMod}
+    {@const fgn = foreignFiles.find((f) => f.techName === dm.techName) ?? null}
+    <ViewBoundary name="the mod details" onClose={() => (detailMod = null)}>
+      <ModDetail
+        mod={dm}
+        curation={cur(dm.techName)}
+        tags={tagsOf(dm.techName)}
+        active={activeSet.has(dm.techName)}
+        organized={dm.organized}
+        hasSettings={settingsModsSet.has(dm.techName)}
+        foreign={fgn}
+        onAdoptForeign={async () => {
+          if (fgn && (await resolveForeign(fgn.fileName, "adopt"))) detailMod = null;
+        }}
+        onRestoreForeign={async () => {
+          if (fgn && (await resolveForeign(fgn.fileName, "restore"))) detailMod = null;
+        }}
+        {libraryTechNames}
+        {conflicts}
+        categories={CATEGORIES}
+        isOverridden={overrideMap[dm.techName] != null}
+        onSetCategory={(c, s) => setCategory(dm.techName, c, s)}
+        onResetCategory={() => resetCategory(dm.techName)}
+        onClose={() => (detailMod = null)}
+        onToggle={(flag) => toggleCuration(dm.techName, flag)}
+        onToggleActive={() => toggleActive(dm.techName)}
+        onOpenSettings={() =>
+          (settingsMod = { techName: dm.techName, title: dm.title ?? dm.techName })}
+        onFindInBrowse={() => openInBrowse(dm)}
+        onCurationChange={(row) => (curationMap = { ...curationMap, [dm.techName]: row })}
+        onTagsChange={(t) => (tagMap = { ...tagMap, [dm.techName]: t })}
+        onFilterTag={(t) => {
+          selectedTag = t;
+          detailMod = null;
+        }}
+        repo={repoMap[dm.techName] ?? null}
+        onRepoChange={(r) => {
+          const next = { ...repoMap };
+          if (r) next[dm.techName] = r;
+          else delete next[dm.techName];
+          repoMap = next;
+        }}
+        source={sourceMap[dm.techName] ?? null}
+        onSourceChange={(row) => setSource(dm.techName, row)}
+        onInstalled={() => {
+          detailMod = null;
+          runScan(false);
+        }}
+      />
+    </ViewBoundary>
+  {/if}
+{/snippet}
+
+<AppShell
+  badges={{ updates: availableUpdates.length }}
+  fill={nav.view === "library"}
+  drawer={detailMod && nav.view === "library" ? modDrawer : undefined}
+  drawerLabel="Mod details"
+>
+  {#snippet header()}
+    <AppHeader
+      bind:search={getHeaderSearch, setHeaderSearch}
+      searchPlaceholder={searchPlaceholderFor(nav.view)}
+      onsearchsubmit={submitHeaderSearch}
+    >
+      {#snippet status()}
+        <StatusChip
+          problems={statusCounts.problems}
+          review={statusCounts.review}
+          onclick={() => go("diagnose")}
+        />
+      {/snippet}
+      {#snippet play()}
+        {#if gameInfo}
+          <PlayButton
+            count={activeSet.size}
+            disabled={!!playOffReason}
+            disabledReason={playOffReason}
+            onplay={launch}
+            menuItems={playMenuItems}
+            onmenuselect={playMenuSelect}
+            activeSetLine={activeSetLine(activeLoadoutName)}
+          />
+        {/if}
+      {/snippet}
+    </AppHeader>
+  {/snippet}
+
+  {#snippet notices()}
+    <Topbar
+      bind:topbarH
+      view={nav.view === "browse" ? "browse" : "library"}
+      {appVer}
+      {update}
+      {updating}
+      {updatePct}
+      onApplyUpdate={applyUpdate}
+      hasSavegames={savegames.length > 0}
+      {savesOpen}
+      {loadoutsOpen}
+      activeLoadoutName={activeLoadoutId !== null
+        ? loadouts.find((l) => l.id === activeLoadoutId)?.name ?? null
+        : null}
+      {mpOpen}
+      {collectionsOpen}
+      showOrganize={unorganizedCount > 0 && !autoFileNew}
+      {unorganizedCount}
+      hasMods={mods.length > 0}
+      {updateChecking}
+      {scanning}
+      lockReason={fgLock.reason}
+      launchBlocked={archiveMove.running}
+      organizeBlocked={archiveMove.unfinished}
+      hasGame={!!gameInfo}
+      activeCount={activeSet.size}
+      {settingsOpen}
+      onSwitchView={(v) => go(v)}
+      onToggleSaves={() => (savesOpen = !savesOpen)}
+      onToggleLoadouts={() => (loadoutsOpen = !loadoutsOpen)}
+      onToggleMp={() => (mpOpen = !mpOpen)}
+      onToggleCollections={() => (collectionsOpen = !collectionsOpen)}
+      onOrganize={organizeNew}
+      onCheckUpdates={checkAllUpdates}
+      onRescan={() => runScan()}
+      onLaunch={launch}
+      onToggleSettings={() => (settingsOpen = !settingsOpen)}
+    />
+    {#if scanning}
+      <div class="progress">
+        <div class="bar" style="width: {pct}%"></div>
+        <span class="progress-text tnum">{progress.done} / {progress.total}</span>
+      </div>
+    {/if}
+    {#if statusOp}
+      <div class="busy" role="status">
+        {statusOp.label}…{#if statusOp.progress && statusOp.progress.total > 0}
+          <span class="tnum">{statusOp.progress.done}/{statusOp.progress.total}</span>{/if}
+      </div>
+    {/if}
+    <NoticeArea />
+  {/snippet}
+
+  <ViewOutlet view={nav.view}>
+    {#snippet library()}
+      <LibraryView
+        stripLeft={libraryStripLeft}
+        stripItems={libraryStripItems}
+        menuItems={libraryMenuItems}
+        onmenuselect={libraryMenuSelect}
+      >
+        {#snippet filters()}
+          <FilterBar
+            catTree={libCatTree}
+            bind:parentCategory={libCat}
+            bind:childCategory={libSub}
+            showSearch={false}
+            bind:sort={sortBy}
+            sortOptions={[
+              { value: "added", label: "Recently added" },
+              { value: "name", label: "Name" },
+              { value: "category", label: "Category" },
+              { value: "size", label: "Size" },
+              { value: "version", label: "Version" },
+              { value: "rating", label: "My rating" },
+            ]}
+            bind:sortDir
+            dirEnabled={true}
+            showYear={false}
+            showClear={false}
+            filterCount={libFilterCount}
+            onClear={clearLibFilters}
+          />
+
+          <!-- Library-only filters (they have no Browse equivalent). -->
+          <div class="lib-toggles">
+            <button class="lib-tog" class:on={favoritesOnly} onclick={() => (favoritesOnly = !favoritesOnly)}>
+              <Icon name="favorite" size={13} filled={favoritesOnly} /> Favorites
+            </button>
+            <button class="lib-tog" class:on={showHidden} onclick={() => (showHidden = !showHidden)}>
+              Hidden
+            </button>
+            <button class="lib-tog" class:on={flaggedOnly} onclick={() => (flaggedOnly = !flaggedOnly)}>
+              <Icon name="flagged" size={13} /> Flagged
+            </button>
+            <button
+              class="lib-tog"
+              class:on={conflictedOnly}
+              disabled={conflictedSet.size === 0}
+              onclick={() => (conflictedOnly = !conflictedOnly)}
+            >
+              <Icon name="problem" size={13} /> In conflict{conflictedSet.size > 0 ? ` (${conflictedSet.size})` : ""}
+            </button>
+            <button class="lib-tog" class:on={hasSettingsOnly} onclick={() => (hasSettingsOnly = !hasSettingsOnly)}>
+              <Icon name="modSettings" size={13} /> Has settings
+            </button>
+            <button
+              class="lib-tog lib-upd"
+              class:on={needsUpdateOnly}
+              disabled={updateChecking}
+              title="Show only mods with a newer version available — checks for updates the first time"
+              onclick={toggleNeedsUpdate}
+            >
+              <Icon name="update" size={13} />
+              {updateChecking ? "Checking…" : `Needs update${availableUpdates.length > 0 ? ` (${availableUpdates.length})` : ""}`}
+            </button>
+            {#if libFilterCount > 0}
+              <button class="lib-clear" onclick={clearLibFilters}>Clear all <Icon name="close" size={13} /></button>
+            {/if}
+          </div>
+
+          <LibraryToolbar
+            {selectedTag}
+            shownCount={filtered.length}
+            allActive={allFilteredActive}
+            activeInFilter={filteredActiveCount}
+            disabled={writeLock.blocked || filtered.length === 0}
+            disabledReason={writeLock.reason}
+            bind:libView
+            onSelectAll={setActiveForFiltered}
+            onClearTag={() => (selectedTag = null)}
+          />
+        {/snippet}
+        {#snippet list()}
+          <div class="list-body">
+            {#if filtered.length === 0 && !scanning}
+              <div class="empty">
+                {mods.length === 0
+                  ? "No mods found yet. Point Silo at your mods folder and rescan."
+                  : "No mods match your filter."}
+              </div>
+            {:else if libView === "tiles"}
+              <VirtualList items={visiblePairs} rowHeight={TILE_ROW_H} bottomPad={62}>
+                {#snippet row(pair)}
+                  <div class="tile-pair">
+                    {#each pair as mod (mod.techName)}
+                      <ModTile
+                        {mod}
+                        curation={cur(mod.techName)}
+                        overridden={!!overrideMap[mod.techName]}
+                        organized={mod.organized}
+                        active={activeSet.has(mod.techName)}
+                        hasSettings={settingsModsSet.has(mod.techName)}
+                        hasUpdate={updatesSet.has(mod.techName)}
+                        tags={tagsOf(mod.techName)}
+                        onToggle={(flag) => toggleCuration(mod.techName, flag)}
+                        onToggleActive={() => toggleActive(mod.techName)}
+                        onEditCategory={(ev) => openEditor(mod.techName, ev)}
+                        onOpenSettings={() =>
+                          (settingsMod = { techName: mod.techName, title: mod.title ?? mod.techName })}
+                        onOpenDetail={() => (detailMod = mod)}
+                        onFindInBrowse={() => openInBrowse(mod)}
+                        onContextMenu={(ev) => {
+                          ev.preventDefault();
+                          rowMenu = { mod, ev };
+                        }}
+                      />
+                    {/each}
+                  </div>
+                {/snippet}
+              </VirtualList>
+            {:else}
+              <VirtualList items={visible} rowHeight={76} bottomPad={62}>
+                {#snippet row(mod)}
+                  <ModRow
+                    {mod}
+                    curation={cur(mod.techName)}
+                    overridden={!!overrideMap[mod.techName]}
+                    organized={mod.organized}
+                    active={activeSet.has(mod.techName)}
+                    hasSettings={settingsModsSet.has(mod.techName)}
+                    tags={tagsOf(mod.techName)}
+                    onToggle={(flag) => toggleCuration(mod.techName, flag)}
+                    onToggleActive={() => toggleActive(mod.techName)}
+                    onEditCategory={(ev) => openEditor(mod.techName, ev)}
+                    onOpenSettings={() =>
+                      (settingsMod = { techName: mod.techName, title: mod.title ?? mod.techName })}
+                    onOpenDetail={() => (detailMod = mod)}
+                    onContextMenu={(ev) => {
+                      ev.preventDefault();
+                      rowMenu = { mod, ev };
+                    }}
+                  />
+                {/snippet}
+              </VirtualList>
+            {/if}
+          </div>
+
+          <!-- Stats + tools as a content-width footer that floats over the scrolling list. -->
+          <div class="statbar-footer">
+            <StatBar
+              modCount={mods.length}
+              mapsCount={stats.maps}
+              scriptsCount={stats.scripts}
+              uniqueCount={stats.unique}
+              activeCount={activeSet.size}
+              conflictCount={conflicts.length}
+              {criticalCount}
+              {healthCount}
+              tookMs={result ? result.tookMs : null}
+              bind:statFilter
+              onOpenStats={() => (statsOpen = !statsOpen)}
+              onOpenConflicts={() => (conflictsOpen = !conflictsOpen)}
+              onOpenHealth={() => (healthOpen = !healthOpen)}
+              onOpenLog={() => (logOpen = true)}
+              onOpenBindings={() => (bindingsOpen = true)}
+              onOpenBridge={() => (bridgeOpen = true)}
+            />
+          </div>
+        {/snippet}
+      </LibraryView>
+    {/snippet}
+    {#snippet browse()}
+      <BrowseView>
+        <ModBrowser
+          installed={libraryTechNames}
+          onInstalled={() => runScan(true)}
+          onNeedAuth={() => (settingsOpen = true)}
+          onFindInLibrary={openInLibrary}
+          seed={browseSeed}
+          seedTech={browseSeedTech}
+          bind:query={browseQuery}
+        />
+      </BrowseView>
+    {/snippet}
+  </ViewOutlet>
+</AppShell>
 
   {#if loadoutsOpen}
     <ViewBoundary name="Loadouts" overlay onClose={() => (loadoutsOpen = false)}>
@@ -2732,59 +3148,6 @@
         presets={configEditor.presets}
         footnote={configEditor.footnote}
         onClose={() => (configEditor = null)}
-      />
-    </ViewBoundary>
-  {/if}
-
-  {#if detailMod}
-    {@const dm = detailMod}
-    {@const fgn = foreignFiles.find((f) => f.techName === dm.techName) ?? null}
-    <ViewBoundary name="the mod details" overlay onClose={() => (detailMod = null)}>
-      <ModDetail
-        mod={dm}
-        curation={cur(dm.techName)}
-        tags={tagsOf(dm.techName)}
-        active={activeSet.has(dm.techName)}
-        organized={dm.organized}
-        hasSettings={settingsModsSet.has(dm.techName)}
-        foreign={fgn}
-        onAdoptForeign={async () => {
-          if (fgn && (await resolveForeign(fgn.fileName, "adopt"))) detailMod = null;
-        }}
-        onRestoreForeign={async () => {
-          if (fgn && (await resolveForeign(fgn.fileName, "restore"))) detailMod = null;
-        }}
-        {libraryTechNames}
-        {conflicts}
-        categories={CATEGORIES}
-        isOverridden={overrideMap[dm.techName] != null}
-        onSetCategory={(c, s) => setCategory(dm.techName, c, s)}
-        onResetCategory={() => resetCategory(dm.techName)}
-        onClose={() => (detailMod = null)}
-        onToggle={(flag) => toggleCuration(dm.techName, flag)}
-        onToggleActive={() => toggleActive(dm.techName)}
-        onOpenSettings={() =>
-          (settingsMod = { techName: dm.techName, title: dm.title ?? dm.techName })}
-        onFindInBrowse={() => openInBrowse(dm)}
-        onCurationChange={(row) => (curationMap = { ...curationMap, [dm.techName]: row })}
-        onTagsChange={(t) => (tagMap = { ...tagMap, [dm.techName]: t })}
-        onFilterTag={(t) => {
-          selectedTag = t;
-          detailMod = null;
-        }}
-        repo={repoMap[dm.techName] ?? null}
-        onRepoChange={(r) => {
-          const next = { ...repoMap };
-          if (r) next[dm.techName] = r;
-          else delete next[dm.techName];
-          repoMap = next;
-        }}
-        source={sourceMap[dm.techName] ?? null}
-        onSourceChange={(row) => setSource(dm.techName, row)}
-        onInstalled={() => {
-          detailMod = null;
-          runScan(false);
-        }}
       />
     </ViewBoundary>
   {/if}
@@ -2910,13 +3273,6 @@
     </ViewBoundary>
   {/if}
 
-  {#if scanning}
-    <div class="progress">
-      <div class="bar" style="width: {pct}%"></div>
-      <span class="progress-text tnum">{progress.done} / {progress.total}</span>
-    </div>
-  {/if}
-
   {#if organizePreview}
     <ViewBoundary name="the Organize preview" overlay onClose={() => (organizePreview = null)}>
       <OrganizePreview
@@ -2928,198 +3284,6 @@
         onCancel={() => (organizePreview = null)}
       />
     </ViewBoundary>
-  {/if}
-
-  {#if statusOp}
-    <div class="busy" role="status">
-      {statusOp.label}…{#if statusOp.progress && statusOp.progress.total > 0}
-        <span class="tnum">{statusOp.progress.done}/{statusOp.progress.total}</span>{/if}
-    </div>
-  {/if}
-
-  <NoticeArea />
-
-  {#if view === "browse"}
-    <!-- Own scroll region: the library scrolls via its inner VirtualList, but Browse
-         is plain flow content, so it needs a flex-fill scroll container of its own. -->
-    <div class="browse-scroll">
-      <ViewBoundary name="Browse">
-        <ModBrowser
-          installed={libraryTechNames}
-          onInstalled={() => runScan(true)}
-          onNeedAuth={() => (settingsOpen = true)}
-          onFindInLibrary={openInLibrary}
-          seed={browseSeed}
-          seedTech={browseSeedTech}
-        />
-      </ViewBoundary>
-    </div>
-  {:else}
-  <ViewBoundary name="the library">
-  <div class="lib">
-    <div class="lib-inner">
-      <FilterBar
-        catTree={libCatTree}
-        bind:parentCategory={libCat}
-        bind:childCategory={libSub}
-        bind:query
-        searchPlaceholder="Filter by title, author, or tech name…"
-        bind:sort={sortBy}
-        sortOptions={[
-          { value: "added", label: "Recently added" },
-          { value: "name", label: "Name" },
-          { value: "category", label: "Category" },
-          { value: "size", label: "Size" },
-          { value: "version", label: "Version" },
-          { value: "rating", label: "My rating" },
-        ]}
-        bind:sortDir
-        dirEnabled={true}
-        showYear={false}
-        showClear={false}
-        filterCount={libFilterCount}
-        onClear={clearLibFilters}
-      />
-
-      <!-- Library-only filters (they have no Browse equivalent). -->
-      <div class="lib-toggles">
-        <button class="lib-tog" class:on={favoritesOnly} onclick={() => (favoritesOnly = !favoritesOnly)}>
-          <Icon name="favorite" size={13} filled={favoritesOnly} /> Favorites
-        </button>
-        <button class="lib-tog" class:on={showHidden} onclick={() => (showHidden = !showHidden)}>
-          Hidden
-        </button>
-        <button class="lib-tog" class:on={flaggedOnly} onclick={() => (flaggedOnly = !flaggedOnly)}>
-          <Icon name="flagged" size={13} /> Flagged
-        </button>
-        <button
-          class="lib-tog"
-          class:on={conflictedOnly}
-          disabled={conflictedSet.size === 0}
-          onclick={() => (conflictedOnly = !conflictedOnly)}
-        >
-          <Icon name="problem" size={13} /> In conflict{conflictedSet.size > 0 ? ` (${conflictedSet.size})` : ""}
-        </button>
-        <button class="lib-tog" class:on={hasSettingsOnly} onclick={() => (hasSettingsOnly = !hasSettingsOnly)}>
-          <Icon name="modSettings" size={13} /> Has settings
-        </button>
-        <button
-          class="lib-tog lib-upd"
-          class:on={needsUpdateOnly}
-          disabled={updateChecking}
-          title="Show only mods with a newer version available — checks for updates the first time"
-          onclick={toggleNeedsUpdate}
-        >
-          <Icon name="update" size={13} />
-          {updateChecking ? "Checking…" : `Needs update${availableUpdates.length > 0 ? ` (${availableUpdates.length})` : ""}`}
-        </button>
-        {#if libFilterCount > 0}
-          <button class="lib-clear" onclick={clearLibFilters}>Clear all <Icon name="close" size={13} /></button>
-        {/if}
-      </div>
-
-      <LibraryToolbar
-        {selectedTag}
-        shownCount={filtered.length}
-        allActive={allFilteredActive}
-        activeInFilter={filteredActiveCount}
-        disabled={writeLock.blocked || filtered.length === 0}
-        disabledReason={writeLock.reason}
-        bind:libView
-        onSelectAll={setActiveForFiltered}
-        onClearTag={() => (selectedTag = null)}
-      />
-
-      <div class="list-wrap">
-        <div class="list-body">
-          {#if filtered.length === 0 && !scanning}
-            <div class="empty">
-              {mods.length === 0
-                ? "No mods found yet. Point Silo at your mods folder and rescan."
-                : "No mods match your filter."}
-            </div>
-          {:else if libView === "tiles"}
-            <VirtualList items={visiblePairs} rowHeight={TILE_ROW_H} bottomPad={62}>
-              {#snippet row(pair)}
-                <div class="tile-pair">
-                  {#each pair as mod (mod.techName)}
-                    <ModTile
-                      {mod}
-                      curation={cur(mod.techName)}
-                      overridden={!!overrideMap[mod.techName]}
-                      organized={mod.organized}
-                      active={activeSet.has(mod.techName)}
-                      hasSettings={settingsModsSet.has(mod.techName)}
-                      hasUpdate={updatesSet.has(mod.techName)}
-                      tags={tagsOf(mod.techName)}
-                      onToggle={(flag) => toggleCuration(mod.techName, flag)}
-                      onToggleActive={() => toggleActive(mod.techName)}
-                      onEditCategory={(ev) => openEditor(mod.techName, ev)}
-                      onOpenSettings={() =>
-                        (settingsMod = { techName: mod.techName, title: mod.title ?? mod.techName })}
-                      onOpenDetail={() => (detailMod = mod)}
-                      onFindInBrowse={() => openInBrowse(mod)}
-                      onContextMenu={(ev) => {
-                        ev.preventDefault();
-                        rowMenu = { mod, ev };
-                      }}
-                    />
-                  {/each}
-                </div>
-              {/snippet}
-            </VirtualList>
-          {:else}
-            <VirtualList items={visible} rowHeight={76} bottomPad={62}>
-              {#snippet row(mod)}
-                <ModRow
-                  {mod}
-                  curation={cur(mod.techName)}
-                  overridden={!!overrideMap[mod.techName]}
-                  organized={mod.organized}
-                  active={activeSet.has(mod.techName)}
-                  hasSettings={settingsModsSet.has(mod.techName)}
-                  tags={tagsOf(mod.techName)}
-                  onToggle={(flag) => toggleCuration(mod.techName, flag)}
-                  onToggleActive={() => toggleActive(mod.techName)}
-                  onEditCategory={(ev) => openEditor(mod.techName, ev)}
-                  onOpenSettings={() =>
-                    (settingsMod = { techName: mod.techName, title: mod.title ?? mod.techName })}
-                  onOpenDetail={() => (detailMod = mod)}
-                  onContextMenu={(ev) => {
-                    ev.preventDefault();
-                    rowMenu = { mod, ev };
-                  }}
-                />
-              {/snippet}
-            </VirtualList>
-          {/if}
-        </div>
-
-        <!-- Stats + tools as a content-width footer that floats over the scrolling list. -->
-        <div class="statbar-footer">
-          <StatBar
-            modCount={mods.length}
-            mapsCount={stats.maps}
-            scriptsCount={stats.scripts}
-            uniqueCount={stats.unique}
-            activeCount={activeSet.size}
-            conflictCount={conflicts.length}
-            {criticalCount}
-            {healthCount}
-            tookMs={result ? result.tookMs : null}
-            bind:statFilter
-            onOpenStats={() => (statsOpen = !statsOpen)}
-            onOpenConflicts={() => (conflictsOpen = !conflictsOpen)}
-            onOpenHealth={() => (healthOpen = !healthOpen)}
-            onOpenLog={() => (logOpen = true)}
-            onOpenBindings={() => (bindingsOpen = true)}
-            onOpenBridge={() => (bridgeOpen = true)}
-          />
-        </div>
-      </div>
-    </div>
-  </div>
-  </ViewBoundary>
   {/if}
 
   {#if editing}
@@ -3141,7 +3305,6 @@
       onClose={() => (rowMenu = null)}
     />
   {/if}
-</div>
 
 <ViewBoundary name="the dialog" overlay>
   <DialogHost />
@@ -3149,11 +3312,6 @@
 <ToastRegion />
 
 <style>
-  .app {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-  }
   .busy {
     padding: 8px 20px;
     background: color-mix(in srgb, var(--accent) 14%, var(--surface));
@@ -3195,25 +3353,7 @@
     box-shadow: var(--shadow-2);
     scrollbar-width: thin;
   }
-  /* ── Library view: content-width column, a floating footer stat bar over the list ── */
-  .lib {
-    flex: 1 1 auto;
-    min-height: 0;
-    display: flex;
-    /* Reserve room for an open detail drawer so content tucks left of it. */
-    padding-right: var(--drawer-w, 0px);
-  }
-  .lib-inner {
-    flex: 1 1 auto;
-    min-width: 0;
-    min-height: 0;
-    width: 100%;
-    max-width: 1200px;
-    margin: 0 auto;
-    padding: 0 20px;
-    display: flex;
-    flex-direction: column;
-  }
+  /* ── Library view (LibraryView lays out the column; a floating footer stat bar over the list) ── */
   .lib-toggles {
     display: flex;
     flex-wrap: wrap;
@@ -3263,11 +3403,6 @@
     color: var(--primary-text);
     text-decoration: underline;
   }
-  .list-wrap {
-    position: relative;
-    flex: 1 1 auto;
-    min-height: 0;
-  }
   .tile-pair {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -3289,14 +3424,6 @@
     border-radius: var(--radius) var(--radius) 0 0;
     overflow: hidden;
     box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.14);
-  }
-  .browse-scroll {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-    /* Reserve room for an open detail drawer (Browse content is centered, so this
-       shifts it left of the drawer instead of hiding under it). */
-    padding-right: var(--drawer-w, 0px);
   }
   .list-body {
     height: 100%;
