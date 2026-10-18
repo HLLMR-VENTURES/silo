@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Silo">
+  <defs>
+    <linearGradient id="silo-tile-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4A7330"/>
+      <stop offset="1" stop-color="#395A25"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#silo-tile-bg)"/>
+  <circle cx="44" cy="25" r="12" fill="#E3B23C"/>
+  <rect x="27" y="11" width="4" height="6" rx="1" fill="#F6F3EC"/>
+  <path d="M19 51V26a10 10 0 0 1 20 0v25z" fill="#F6F3EC"/>
+  <path d="M19 32h20v2H19zM19 39h20v2H19zM19 46h20v2H19z" fill="#E4DECE"/>
+  <rect x="15" y="51" width="28" height="3" rx="1.5" fill="#E4DECE"/>
+</svg>

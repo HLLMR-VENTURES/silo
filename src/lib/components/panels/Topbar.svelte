@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "../../ui/Icon.svelte";
+  import SiloMark from "../../ui/SiloMark.svelte";
   let {
     topbarH = $bindable(),
     view,
@@ -79,7 +80,7 @@
   <!-- Main row: identity + view tabs on the left, app actions on the right. -->
   <div class="topbar-main">
     <div class="brand">
-      <div class="logo">S</div>
+      <SiloMark variant="tile" size={40} label={false} />
       <div>
         <h1>
           Silo{#if appVer}<span class="ver" title="Silo version {appVer}">v{appVer}</span>{/if}
@@ -242,19 +243,6 @@
     display: flex;
     align-items: center;
     gap: 12px;
-  }
-  .logo {
-    width: 40px;
-    height: 40px;
-    border-radius: var(--radius);
-    display: grid;
-    place-items: center;
-    font-family: var(--font-display);
-    font-weight: 600;
-    font-size: var(--fs-xl);
-    color: var(--on-primary);
-    background: linear-gradient(135deg, var(--primary), var(--primary-hover));
-    box-shadow: var(--shadow-1);
   }
   h1 {
     font-size: var(--fs-xl);

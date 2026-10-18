@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Silo">
+  <defs>
+    <mask id="silo-glyph-sun" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32">
+      <rect width="32" height="32" fill="#fff"/>
+      <path d="M5 29V12a6 6 0 0 1 12 0v17zM9.5 3h3v4h-3z" fill="#000" stroke="#000" stroke-width="4" stroke-linejoin="round"/>
+    </mask>
+  </defs>
+  <circle cx="21.5" cy="10" r="6.5" fill="#E3B23C" mask="url(#silo-glyph-sun)"/>
+  <rect x="9.5" y="3" width="3" height="3.5" rx="0.75" fill="#4A7330"/>
+  <path d="M5 19v-7a6 6 0 0 1 12 0v7zM5 21h12v3H5zM5 26h12v3H5z" fill="#4A7330"/>
+</svg>

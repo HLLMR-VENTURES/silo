@@ -51,6 +51,7 @@ import {
   Check,
   Circle,
   CircleDot,
+  Link,
 } from "@lucide/svelte";
 
 export const ICONS = {
@@ -105,6 +106,7 @@ export const ICONS = {
   arrowDown: ArrowDown,
   dot: CircleDot,
   circle: Circle,
+  link: Link,
 } as const;
 
 export type IconName = keyof typeof ICONS;

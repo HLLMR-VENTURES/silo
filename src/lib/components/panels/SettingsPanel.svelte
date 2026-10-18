@@ -344,7 +344,7 @@
         disabled={locked}
         title={lockTitle}
       >
-        Optimize links (reclaim space)
+        <Icon name="link" size={13} /> Optimize links (reclaim space)
       </button>
       <div class="set-hint" style="margin-top:8px">
         Collapses any active mod that was projected as a full copy (rather than a hardlink) back
