@@ -2,6 +2,10 @@
   // One toast inside ToastRegion. Owns its countdown: paused while hovered, while focus is inside,
   // and while the window is in the background (`windowActive` false). While a dialog is open its
   // buttons are inert (the region itself stays exempt so its text is still announced).
+  // Sticky toasts (errors) have no countdown. `detail` adds "Copy details"; a count above 1
+  // shows as "×3".
+  import { copyText, saveTextFile } from "../api";
+  import { copyOrSave } from "../clipboard";
   import Button from "./Button.svelte";
   import Icon from "./Icon.svelte";
   import IconButton from "./IconButton.svelte";
@@ -30,7 +34,7 @@
   let remaining = item.duration;
 
   $effect(() => {
-    if (paused) return;
+    if (paused || item.sticky) return;
     const started = Date.now();
     const timer = setTimeout(() => dismissToast(item.id), remaining);
     return () => {
@@ -38,6 +42,23 @@
       remaining = Math.max(0, remaining - (Date.now() - started));
     };
   });
+
+  let copied = $state(false);
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => () => clearTimeout(copiedTimer));
+
+  async function copyDetails() {
+    if ($modalOpen || !item.detail) return;
+    try {
+      const out = await copyOrSave(item.detail, "silo-error-details.txt", copyText, saveTextFile);
+      if (out === "cancelled") return;
+      copied = true;
+      clearTimeout(copiedTimer);
+      copiedTimer = setTimeout(() => (copied = false), 2000);
+    } catch {
+      // Saving failed too; nothing more to offer here.
+    }
+  }
 
   function runAction() {
     if ($modalOpen) return; // inert already blocks it; this covers webviews without inert
@@ -72,8 +93,14 @@
   {onfocusout}
 >
   <span class="icon"><Icon name={ICON[item.tone]} size={16} /></span>
-  <p class="message">{item.message}</p>
+  <p class="message">
+    {item.message}
+    {#if item.count > 1}<span class="count" title="Happened {item.count} times">×{item.count}</span>{/if}
+  </p>
   <span class="controls" use:inertWhen={$modalOpen}>
+    {#if item.detail}
+      <Button size="sm" variant="ghost" onclick={copyDetails}>{copied ? "Copied" : "Copy details"}</Button>
+    {/if}
     {#if item.action}
       <Button size="sm" variant="ghost" aria-label={actionName} onclick={runAction}>
         {item.action.label}
@@ -133,6 +160,17 @@
     font-size: var(--fs-sm);
     line-height: var(--lh-sm);
     overflow-wrap: anywhere;
+  }
+
+  .count {
+    margin-left: var(--sp-1);
+    padding: 0 var(--sp-1);
+    border-radius: var(--r-pill);
+    background: var(--sunken);
+    color: var(--muted);
+    font-size: var(--fs-xs);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 
   @keyframes rise {

@@ -4,7 +4,12 @@
 //   t.dismiss();
 // Toasts never take focus, and their buttons are inert while a dialog is open. Their timer pauses
 // while hovered or focused and while the window is in the background, so nobody misses one by
-// alt-tabbing.
+// alt-tabbing. At most MAX_VISIBLE_TOASTS show at once; the rest wait their turn (FIFO). A toast
+// with the same `dedupeKey` as one already waiting or showing bumps its count ("×3") instead.
+// Every toast is also written to the activity log. Errors go through `error()` in
+// src/lib/state/notify.svelte.ts, which sets `sticky`, `detail` and `dedupeKey`.
+
+import { bumpActivity, pushActivity, type ActivityLevel } from "../state/activity.svelte";
 
 export type ToastTone = "neutral" | "success" | "warn" | "danger";
 
@@ -21,6 +26,12 @@ export interface ToastOptions {
   action?: ToastAction;
   /** Milliseconds on screen (time paused doesn't count). Default 6000, or 10000 with an action. */
   duration?: number;
+  /** Stays until dismissed (errors). */
+  sticky?: boolean;
+  /** Technical text; adds a "Copy details" button. */
+  detail?: string;
+  /** Toasts with the same key merge into one with a count. */
+  dedupeKey?: string;
 }
 
 export interface ToastItem {
@@ -29,16 +40,38 @@ export interface ToastItem {
   tone: ToastTone;
   action?: ToastAction;
   duration: number;
+  sticky: boolean;
+  detail?: string;
+  dedupeKey?: string;
+  /** How many times it was raised while on screen or waiting. */
+  count: number;
+  /** Its entry in the activity log. */
+  activityId: number;
 }
 
 export interface ToastHandle {
   dismiss(): void;
 }
 
+/** Most toasts on screen at once. */
+export const MAX_VISIBLE_TOASTS = 3;
+
+const LEVEL: Record<ToastTone, ActivityLevel> = {
+  neutral: "info",
+  success: "success",
+  warn: "warning",
+  danger: "error",
+};
+
 let nextId = 1;
 
-/** Toasts on screen, oldest first. Reactive; mutate only through `toast()` / `dismissToast()`. */
+/** Toasts on screen or waiting, oldest first. Reactive; mutate only through `toast()` / `dismissToast()`. */
 export const toasts: ToastItem[] = $state([]);
+
+/** The toasts on screen now (the first MAX_VISIBLE_TOASTS). Reactive. */
+export function visibleToasts(): ToastItem[] {
+  return toasts.slice(0, MAX_VISIBLE_TOASTS);
+}
 
 /**
  * Show a toast.
@@ -46,13 +79,34 @@ export const toasts: ToastItem[] = $state([]);
  * @returns a handle to dismiss it early
  */
 export function toast(opts: ToastOptions): ToastHandle {
+  if (opts.dedupeKey !== undefined) {
+    const same = toasts.find((t) => t.dedupeKey === opts.dedupeKey);
+    if (same) {
+      same.count += 1;
+      bumpActivity(same.activityId);
+      const sameId = same.id;
+      return { dismiss: () => dismissToast(sameId) };
+    }
+  }
   const id = nextId++;
+  const tone = opts.tone ?? "neutral";
+  const activityId = pushActivity({
+    kind: "toast",
+    level: LEVEL[tone],
+    message: opts.message,
+    detail: opts.detail,
+  });
   toasts.push({
     id,
     message: opts.message,
-    tone: opts.tone ?? "neutral",
+    tone,
     action: opts.action,
     duration: opts.duration ?? (opts.action ? 10_000 : 6_000),
+    sticky: opts.sticky ?? false,
+    detail: opts.detail,
+    dedupeKey: opts.dedupeKey,
+    count: 1,
+    activityId,
   });
   return { dismiss: () => dismissToast(id) };
 }

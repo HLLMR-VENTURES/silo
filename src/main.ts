@@ -2,6 +2,7 @@ import "./lib/styles/global.css";
 import { mount } from "svelte";
 import App from "./App.svelte";
 import { parseUiScale } from "./lib/uiScale";
+import { installGlobalErrorHandlers } from "./lib/state/globalErrors";
 
 // Apply the stored UI size before first paint so the app doesn't flash at 100%.
 // App.svelte keeps it in sync afterwards.
@@ -13,6 +14,8 @@ try {
 } catch {
   // localStorage unavailable; App.svelte falls back to 100%.
 }
+
+installGlobalErrorHandlers();
 
 const app = mount(App, {
   target: document.getElementById("app")!,
