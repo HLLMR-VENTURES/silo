@@ -91,17 +91,34 @@ pub struct Active {
     pub move_to: Option<PathBuf>,
 }
 
-static ACTIVE: RwLock<Option<Active>> = RwLock::new(None);
+/// The published layout and, when there is none because the folder is blocked, why. One lock
+/// for both, so no reader ever sees "no layout" without its reason (or a stale reason beside
+/// a new layout).
+struct Published {
+    active: Option<Active>,
+    blocked: Option<Blocked>,
+}
+
+static PUBLISHED: RwLock<Published> = RwLock::new(Published {
+    active: None,
+    blocked: None,
+});
 
 /// Set once the mods folder has been resolved at least once (at startup or by a mods-root
 /// command), so "no active layout" can be told apart from "not worked out yet".
 static RESOLVED: AtomicBool = AtomicBool::new(false);
 
-pub fn set_active(a: Option<Active>) {
-    if let Ok(mut g) = ACTIVE.write() {
-        *g = a;
+/// Publish the resolved layout and its block together (`blocked` is meant for `active: None`).
+pub fn publish(active: Option<Active>, blocked: Option<Blocked>) {
+    if let Ok(mut g) = PUBLISHED.write() {
+        *g = Published { active, blocked };
     }
     RESOLVED.store(true, Ordering::SeqCst);
+}
+
+/// Publish a layout (or none) with no block.
+pub fn set_active(a: Option<Active>) {
+    publish(a, None);
 }
 
 /// Whether `active()` reflects a resolution (it may still be `None`: no usable mods folder).
@@ -109,8 +126,66 @@ pub fn resolved() -> bool {
     RESOLVED.load(Ordering::SeqCst)
 }
 
+/// The published layout and block, read together.
+pub fn published() -> (Option<Active>, Option<Blocked>) {
+    PUBLISHED
+        .read()
+        .map(|g| (g.active.clone(), g.blocked.clone()))
+        .unwrap_or((None, None))
+}
+
 pub fn active() -> Option<Active> {
-    ACTIVE.read().ok().and_then(|g| g.clone())
+    published().0
+}
+
+/// The folder FS25 reads (its override, or the default), as last resolved.
+static GAME_READS: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// What makes the resolved mods folder share files with another layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BlockCause {
+    /// It overlaps another mods folder or archive Silo knows.
+    Overlap,
+    /// Only because of the folder FS25's own setting points at: pointing FS25 at this folder
+    /// clears it.
+    GameSetting,
+    /// The check couldn't read Silo's database (try again).
+    ReadError,
+}
+
+/// Why the resolved mods folder `mods` has no writable layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blocked {
+    pub reason: String,
+    pub cause: BlockCause,
+    pub mods: PathBuf,
+    /// The folder it runs into, when known.
+    pub conflict: Option<PathBuf>,
+    /// The folder's own unfinished archive move, if any: still shown, and it can still be
+    /// resumed or cancelled (nothing else is written while blocked).
+    pub moving: Option<Box<Active>>,
+}
+
+pub fn set_game_reads(p: Option<PathBuf>) {
+    if let Ok(mut g) = GAME_READS.write() {
+        *g = p;
+    }
+}
+
+pub fn game_reads() -> Option<PathBuf> {
+    GAME_READS.read().ok().and_then(|g| g.clone())
+}
+
+/// The reason the resolved folder is blocked, if it is.
+pub fn blocked() -> Option<String> {
+    blocked_detail().map(|b| b.reason)
+}
+
+/// Why the resolved mods folder has no writable layout (it shares files with another layout),
+/// as last published. `None` when nothing blocks it.
+pub fn blocked_detail() -> Option<Blocked> {
+    published().1
 }
 
 /// The known-folders list stored as a JSON array of path strings.
@@ -238,11 +313,49 @@ pub fn real_folder(p: &Path) -> Result<PathBuf, String> {
     )))
 }
 
-/// The identity key for a folder: canonicalized when it exists, then normalized. This is the
-/// value stored in the `root` column and used for every "same folder?" comparison.
+/// The identity key for a folder: canonicalized, then normalized. A folder that doesn't exist
+/// (yet, or any more) is keyed through its nearest existing parent, canonicalized, with the
+/// rest re-appended — so a link or junction on the way still yields the real path's key. This
+/// is the value stored in the `root` column and used for every "same folder?" comparison.
 pub fn canonical_key(p: &Path) -> String {
-    let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    normalize_key(&c.to_string_lossy(), cfg!(windows))
+    normalize_key(&resolve_existing(p).to_string_lossy(), cfg!(windows))
+}
+
+/// `p` canonicalized as far as it exists: the nearest existing ancestor's real path plus the
+/// missing names below it. Unchanged when its drive or share root isn't there (checked once,
+/// so an offline share isn't waited on for every ancestor), when no ancestor resolves, or when
+/// the walk up meets a `..` before an ancestor that resolves (the names below it can't be
+/// re-appended faithfully; a `..` inside the part that exists is resolved as usual).
+fn resolve_existing(p: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return c;
+    }
+    let root = path_root(p);
+    if root.as_os_str().is_empty() || !root.exists() {
+        return p.to_path_buf();
+    }
+    let mut missing = Vec::new();
+    let mut cur = p;
+    while let (Some(parent), Some(name)) = (cur.parent(), cur.file_name()) {
+        missing.push(name);
+        cur = parent;
+        if let Ok(mut c) = std::fs::canonicalize(cur) {
+            for n in missing.iter().rev() {
+                c.push(n);
+            }
+            return c;
+        }
+    }
+    p.to_path_buf()
+}
+
+/// Pure: the drive, share or `/` that `p` starts at (its prefix and root components), or
+/// empty for a relative path.
+fn path_root(p: &Path) -> PathBuf {
+    use std::path::Component;
+    p.components()
+        .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+        .collect()
 }
 
 /// True when two paths name the same folder.
@@ -552,6 +665,93 @@ mod tests {
             vec!["/a", "/b"]
         );
         assert!(parse_known(Some("not json")).is_empty());
+    }
+
+    #[test]
+    fn a_missing_folder_is_keyed_through_its_nearest_existing_parent() {
+        let base = std::env::temp_dir().join(format!("silo_key_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        // Spelled with `.` segments: the existing part is resolved, the rest re-appended.
+        assert_eq!(
+            canonical_key(&real.join(".").join("gone/deeper")),
+            canonical_key(&real.join("gone/deeper"))
+        );
+        let resolved = std::fs::canonicalize(&real)
+            .unwrap()
+            .join("gone")
+            .join("deeper");
+        assert_eq!(
+            canonical_key(&real.join("gone").join("deeper")),
+            normalize_key(&resolved.to_string_lossy(), cfg!(windows))
+        );
+        // Reached through a link (a junction on Windows): the same key as the real path.
+        let link = base.join("link");
+        #[cfg(windows)]
+        crate::organize::junction_to(&real, &link).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(
+            canonical_key(&link.join("gone/deeper")),
+            canonical_key(&real.join("gone/deeper"))
+        );
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_paths_root_is_its_drive_share_or_slash() {
+        #[cfg(windows)]
+        {
+            assert_eq!(path_root(Path::new(r"C:\a\b")), PathBuf::from(r"C:\"));
+            assert_eq!(
+                path_root(Path::new(r"\\nas\share\mods\x")),
+                PathBuf::from(r"\\nas\share\")
+            );
+        }
+        #[cfg(unix)]
+        assert_eq!(path_root(Path::new("/mnt/nas/mods")), PathBuf::from("/"));
+        assert_eq!(path_root(Path::new("relative/x")), PathBuf::new());
+    }
+
+    /// A folder on a drive (or share) that isn't there is keyed as spelled, without walking
+    /// up its parents one by one (each would wait on the missing drive).
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_on_a_missing_drive_keeps_its_raw_key() {
+        let Some(letter) = ('M'..='Z')
+            .rev()
+            .find(|l| !Path::new(&format!("{l}:\\")).exists())
+        else {
+            return; // every letter in use: nothing to test here
+        };
+        let p = PathBuf::from(format!(r"{letter}:\Games\Mods\archive"));
+        assert_eq!(canonical_key(&p), normalize_key(&p.to_string_lossy(), true));
+    }
+
+    #[test]
+    fn a_layout_and_its_block_are_published_together() {
+        let b = Blocked {
+            reason: "why".into(),
+            cause: BlockCause::Overlap,
+            mods: PathBuf::from("/m"),
+            conflict: None,
+            moving: None,
+        };
+        let a = Active {
+            layout: crate::organize::Layout::default_for(Path::new("/y")),
+            move_to: None,
+        };
+        publish(None, Some(b.clone()));
+        let (pa, pb) = published();
+        assert!(pa.is_none());
+        assert_eq!(pb, Some(b));
+        // A new layout replaces the block in the same step.
+        publish(Some(a.clone()), None);
+        assert_eq!(published(), (Some(a), None));
+        set_active(None);
     }
 
     #[test]

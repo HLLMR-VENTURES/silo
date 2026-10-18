@@ -82,7 +82,7 @@ pub enum SettingsSource {
     Runtime,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanResult {
     pub mods: Vec<ModEntry>,
@@ -154,6 +154,8 @@ pub(crate) fn is_silo_temp(name: &str) -> bool {
         || l.ends_with(crate::update::PART_SUFFIX)
         || l.ends_with(crate::update::OLD_SUFFIX)
         || (l.starts_with('.') && l.ends_with(".silo-tmp"))
+        || l.starts_with(crate::organize::HARDLINK_PROBE)
+        || l.starts_with(crate::organize::SYMLINK_PROBE)
 }
 
 /// Mods in the flat root (what the game reads) — excluding Silo's `archive/` and
@@ -940,6 +942,11 @@ mod layout_tests {
         assert!(is_silo_temp(".FS25_X.silo-tmp"));
         assert!(is_silo_temp("FS25_X.zip.silo-update.part"));
         assert!(is_silo_temp("FS25_X.zip.SILO-UPDATE-OLD"));
+        // Link probes (and their links), including the fixed-name cloud check's.
+        assert!(is_silo_temp(".silo-hardlink-probe-12-3"));
+        assert!(is_silo_temp(".silo-hardlink-probe-12-3.link"));
+        assert!(is_silo_temp(".silo-symlink-probe-12-3.link"));
+        assert!(is_silo_temp(".silo-hardlink-probe"));
         assert!(!is_silo_temp("FS25_X.silo-tmp")); // only the dot-prefixed form is organize's
         assert!(!is_silo_temp("FS25_X.zip"));
         assert!(!is_silo_temp("FS25_X"));

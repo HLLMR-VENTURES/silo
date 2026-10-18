@@ -106,6 +106,21 @@ Folder (unzipped) mods keep the symlink-else-copy logic, but inside a **Mac App 
 they are always copied: the sandboxed game can't follow a link out of its container (matched on
 `/library/containers/` in the mods path, case-insensitively).
 
+**A drive Silo can't identify** (a network share, a mount the disk list doesn't show) is
+**probed** for linking instead of guessed: `organize::same_volume_for_links` uses the disk list
+when it knows both mounts, and otherwise `hardlinks_between` (a temp file in the archive,
+hardlinked into the mods folder, both removed again). Where the probe link works it's the same
+volume; where it fails it's another one, so Optimize links doesn't try a hardlink per mod and a
+move keeps an active mod's hardlink rather than copying it onto the mods drive. Where no probe
+file can be made at all (a missing or read-only folder) the answer is inconclusive and counts as
+the same volume: hardlink first, which falls back to a copy. Probe names
+(`.silo-hardlink-probe-*`, `.silo-symlink-probe-*`) are unique per process and attempt, skip a
+name a stale probe holds, are ignored by scans, and stale ones (over ten minutes old) are swept
+from the mods folder and archive under the library lock. `LinkPolicy`,
+Optimize links (`relink_mode`) and the move preflight's `sameDrive` all decide this way. Only the
+move's **free-space check** keeps "unknown = another drive" (`known_same_mount`), so the whole
+archive must fit there.
+
 When the archive is on another drive and links aren't available, **Optimize links** reports it
 (`RelinkReport.cross_drive_copies`) instead of doing anything. Whether FS25 actually loads symlinked
 zips on each OS is a release gate — see `SMOKE_TEST.md` §1c.

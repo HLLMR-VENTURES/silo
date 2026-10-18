@@ -59,6 +59,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to Silo, no longer rewrites Silo's record of your library while another change is running.
   (#218)
 
+- **A mods folder can't share files with an archive.** Silo refuses a mods folder that is another
+  mods folder's archive, sits inside one (a category folder), holds one, or whose own archive
+  would be one. The folder Farming Simulator's own setting points at counts too: if it shares files
+  with an archive, Silo says why and won't change files there until you choose another folder (or,
+  when only that setting is the problem, point Farming Simulator at your folder).
+  Before, two layouts could share files and organizing one moved the other's mods. (#220)
+
+- **Optimize links handles an archive on a network share.** On a drive Silo can't identify, it
+  now tests once whether a hardlink works instead of assuming, so Optimize links no longer tries a
+  hardlink for each mod and fails, and the move dialog says the same as what the move does.
+  (#220)
+
+- **Cancelling an archive move leaves no empty folders behind.** Category folders Silo made in
+  the new location are removed when they're empty, also for mods whose copy was stopped partway.
+  Folders that were already there, or that hold anything, are kept. (#220)
+
 ### Security
 
 - **Stricter file-name checks.** File names with a colon, a trailing dot or space, or a reserved

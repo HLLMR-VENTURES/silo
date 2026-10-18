@@ -37,7 +37,7 @@ pub mod update;
 pub mod xmlconfig;
 pub mod xmltext;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tauri::{Emitter, Manager};
 
@@ -84,19 +84,19 @@ async fn off_main<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
-/// Scan the given roots (or the auto-detected default when omitted/empty).
+/// Scan the given roots (or the auto-detected default when omitted/empty) — only those that
+/// are trusted mods folders, so nothing at all while the folder is blocked.
 /// Runs on a blocking thread so the async runtime / UI never stalls.
 #[tauri::command]
 async fn scan_mods(
     app: tauri::AppHandle,
     roots: Option<Vec<String>>,
 ) -> Result<scan::ScanResult, String> {
-    let roots: Vec<PathBuf> = match roots {
-        Some(v) if !v.is_empty() => v.into_iter().map(PathBuf::from).collect(),
-        _ => mods_roots(),
-    };
-    // The organize manifest is per folder; scope the reconcile to the folder being scanned.
-    let scan_key = roots.first().map(|r| modsroot::canonical_key(r));
+    let supplied: Vec<PathBuf> = roots
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
 
     tauri::async_runtime::spawn_blocking(move || {
         // A mod update Silo was in the middle of when it stopped is finished or rolled back
@@ -107,10 +107,91 @@ async fn scan_mods(
         // Read after `start`: a change of archive (repoint, move) before this point is seen
         // here, and one after it moves the epoch on, so the reconcile below is refused.
         let active = modsroot::active();
+        let trusted = trusted_roots(active.clone(), modsroot::resolved(), false);
+        let plan = scan_plan(supplied, &trusted, active.as_ref());
+        let mut conn = db::open(&db_path(&app)?)?;
+        let emitter = app.clone();
+        let mut result = scan_library(
+            &mut conn,
+            &plan,
+            active.as_ref(),
+            &LIBRARY_WRITE,
+            &LIBRARY_EPOCH,
+            start,
+            move |done, total| {
+                let _ = emitter.emit("scan:progress", Progress { done, total });
+            },
+        );
+        result.notices = recovered.notices;
+        result.problems = recovered.problems;
+        Ok::<_, String>(result)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What a scan reads, and the one folder whose `organized` manifest it may rewrite.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ScanPlan {
+    roots: Vec<PathBuf>,
+    reconcile_key: Option<String>,
+}
+
+/// The supplied roots that are trusted mods folders (all of `trusted` when none are supplied;
+/// `trusted` is empty while the folder is blocked), and the first one's key only when it is the
+/// active layout's mods folder — a scan never rewrites the manifest of any other folder.
+fn scan_plan(
+    supplied: Vec<PathBuf>,
+    trusted: &[PathBuf],
+    active: Option<&modsroot::Active>,
+) -> ScanPlan {
+    let roots: Vec<PathBuf> = if supplied.is_empty() {
+        trusted.to_vec()
+    } else {
+        supplied
+            .into_iter()
+            .filter_map(|s| {
+                trusted
+                    .iter()
+                    .find(|t| modsroot::same_folder(t, &s))
+                    .cloned()
+            })
+            .collect()
+    };
+    let reconcile_key = roots
+        .first()
+        .filter(|r| active.is_some_and(|a| modsroot::same_folder(&a.layout.mods, r)))
+        .map(|r| modsroot::canonical_key(r));
+    ScanPlan {
+        roots,
+        reconcile_key,
+    }
+}
+
+/// Scan `plan.roots` with their archives, persist the parse cache, and — only for
+/// `plan.reconcile_key`, on a quiet library (`start`, `lock`, `epoch`) — rewrite that folder's
+/// `organized` manifest from what's in its archive.
+#[allow(clippy::too_many_arguments)]
+fn scan_library(
+    conn: &mut rusqlite::Connection,
+    plan: &ScanPlan,
+    active: Option<&modsroot::Active>,
+    lock: &'static std::sync::Mutex<()>,
+    epoch: &std::sync::atomic::AtomicU64,
+    start: Option<u64>,
+    progress: impl Fn(usize, usize) + Sync + Send,
+) -> scan::ScanResult {
+    // Nothing to read (a blocked folder): leave the cache and every manifest as they are —
+    // pruning against an empty scan would forget every cached mod.
+    if plan.roots.is_empty() {
+        return scan::ScanResult::default();
+    }
+    {
+        let roots = &plan.roots;
+        let scan_key = plan.reconcile_key.clone();
         // Warm cache: parsed entries persist between launches, keyed by
         // path+mtime+size, so unchanged mods skip archive parsing entirely.
-        let mut conn = db::open(&db_path(&app)?)?;
-        let cache = db::load_cache(&conn);
+        let cache = db::load_cache(conn);
 
         // Each mods folder with its archive(s), and whether the scanned folder's manifest may
         // be rewritten from what's found (see `scan_archives`).
@@ -119,7 +200,7 @@ async fn scan_mods(
             .iter()
             .enumerate()
             .map(|(i, r)| {
-                let (archives, ok) = scan_archives(&conn, r, active.as_ref());
+                let (archives, ok) = scan_archives(conn, r, active);
                 if i == 0 {
                     may_reconcile = ok;
                 }
@@ -127,10 +208,7 @@ async fn scan_mods(
             })
             .collect();
 
-        let emitter = app.clone();
-        let out = scan::scan_layouts(layouts, &cache, move |done, total| {
-            let _ = emitter.emit("scan:progress", Progress { done, total });
-        });
+        let out = scan::scan_layouts(layouts, &cache, progress);
 
         // Persist freshly-parsed rows; prune mods that vanished from disk.
         let fresh_rows: Vec<(String, u64, u64, String)> = out
@@ -144,10 +222,10 @@ async fn scan_mods(
                     .map(|json| (m.path.clone(), m.mtime_ms, m.size, json))
             })
             .collect();
-        let _ = db::upsert_many(&mut conn, &fresh_rows);
+        let _ = db::upsert_many(conn, &fresh_rows);
 
         let present: HashSet<String> = out.result.mods.iter().map(|m| m.path.clone()).collect();
-        let _ = db::prune_missing(&mut conn, &present);
+        let _ = db::prune_missing(conn, &present);
 
         // Keep the `organized` manifest in step with what's physically in `archive/`, so an
         // archived mod is always activatable even if the DB drifted from disk (e.g. a fresh
@@ -175,26 +253,13 @@ async fn scan_mods(
         // Only on a quiet library: a scan's snapshot of the archive may predate, or overlap, an
         // organize, activate, install or move, and rewriting the manifest from it would undo it.
         if let Some(key) = scan_key.as_deref().filter(|_| may_reconcile) {
-            let quiet = reconcile_if_quiet(
-                &LIBRARY_WRITE,
-                &LIBRARY_EPOCH,
-                start,
-                &mut conn,
-                key,
-                &organized_rows,
-            );
+            let quiet = reconcile_if_quiet(lock, epoch, start, conn, key, &organized_rows);
             if !quiet {
                 log::info!("scan: library changed while scanning; manifest left for the next scan");
             }
         }
-
-        let mut result = out.result;
-        result.notices = recovered.notices;
-        result.problems = recovered.problems;
-        Ok::<_, String>(result)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+        out.result
+    }
 }
 
 /// The archive(s) a scan of mods folder `root` reads, and whether that scan may rewrite the
@@ -673,7 +738,7 @@ fn update_target_problem(dest: &std::path::Path, layout: &organize::Layout) -> O
 /// paused) meanwhile comes first: the swap must not replace a file the move already copied.
 fn update_recheck(dest: &std::path::Path) -> Result<organize::Layout, String> {
     ensure_no_move()?;
-    paths::ensure_write_under(&allowed_roots(), dest)?;
+    ensure_library_write(dest)?;
     let layout = primary_layout(None)?;
     if let Some(p) = update_target_problem(dest, &layout) {
         return Err(p);
@@ -705,7 +770,7 @@ async fn download_update(
         // root or its archive, wherever that lives). An absolute path outside them — which
         // `no_traversal` alone would pass — is rejected here.
         paths::no_traversal(&dest)?;
-        paths::ensure_write_under(&allowed_roots(), &dest)?;
+        ensure_library_write(&dest)?;
         // Only a mod zip in the library, never a backup or another file under its folders.
         let layout = primary_layout(None)?;
         if let Some(p) = update_target_problem(&dest, &layout) {
@@ -786,6 +851,10 @@ fn recover_interrupted_updates() -> update::Recovery {
     let Some(_write) = take_for_write(&LIBRARY_WRITE, &LIBRARY_EPOCH) else {
         return update::Recovery::default();
     };
+    // Link probes a crash left behind (a probe running right now is younger than this).
+    for dir in [&active.layout.mods, &active.layout.archive] {
+        organize::sweep_link_probes(dir, std::time::Duration::from_secs(600));
+    }
     let r = settle_layout(&active.layout);
     log_recovery(&r);
     r
@@ -1382,23 +1451,53 @@ async fn set_override(app: tauri::AppHandle, row: db::CategoryOverride) -> Resul
 /// default. This is the single source of truth for "where may we write"; Rust, not the
 /// webview, is the authority.
 fn allowed_roots() -> Vec<PathBuf> {
-    match modsroot::active() {
-        Some(a) => {
-            let mut v = vec![a.layout.mods, a.layout.archive];
-            v.extend(a.move_to);
-            v
-        }
-        None => fsgame::default_mods_paths(),
-    }
+    trusted_roots(modsroot::active(), modsroot::resolved(), true)
 }
 
 /// The mods folder(s) only — never an archive. Frontend-supplied roots and default scans
 /// resolve against this.
 fn mods_roots() -> Vec<PathBuf> {
-    match modsroot::active() {
+    trusted_roots(modsroot::active(), modsroot::resolved(), false)
+}
+
+/// The active layout's folders (`with_archives`: its archive and a move's other archive too),
+/// or the auto-detected default before anything is `resolved`. Once resolved with no layout
+/// (the folder is unavailable, or blocked because it shares files with another layout):
+/// nothing at all — never a fallback to FS25's default folder.
+fn trusted_roots(
+    active: Option<modsroot::Active>,
+    resolved: bool,
+    with_archives: bool,
+) -> Vec<PathBuf> {
+    match active {
+        Some(a) if with_archives => {
+            let mut v = vec![a.layout.mods, a.layout.archive];
+            v.extend(a.move_to);
+            v
+        }
         Some(a) => vec![a.layout.mods],
+        None if resolved => Vec::new(),
         None => fsgame::default_mods_paths(),
     }
+}
+
+/// `then()`, unless the resolved folder is `blocked`: then its reason, so a refusal says what's
+/// really wrong rather than "no mods folder" or "outside the mods folder".
+fn blocked_first<T>(
+    blocked: Option<String>,
+    then: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    match blocked {
+        Some(why) => Err(why),
+        None => then(),
+    }
+}
+
+/// `paths::ensure_write_under` against the trusted roots, with a blocked folder's reason first.
+fn ensure_library_write(dest: &std::path::Path) -> Result<(), String> {
+    blocked_first(modsroot::blocked(), || {
+        paths::ensure_write_under(&allowed_roots(), dest)
+    })
 }
 
 /// The active layout (mods folder + archive), validated against a frontend-supplied root.
@@ -1421,10 +1520,24 @@ fn ensure_no_move() -> Result<(), String> {
     if move_in_progress() {
         return Err("Finish or cancel the archive move first.".into());
     }
-    match modsroot::active() {
-        Some(a) if a.move_to.is_some() => Err("Finish or cancel the archive move first.".into()),
+    let (active, blocked) = modsroot::published();
+    no_move_refusal(active.as_ref(), blocked.as_ref(), modsroot::resolved())
+}
+
+/// Pure: `ensure_no_move` over the published state. A blocked folder's own unfinished move
+/// counts too.
+fn no_move_refusal(
+    active: Option<&modsroot::Active>,
+    blocked: Option<&modsroot::Blocked>,
+    resolved: bool,
+) -> Result<(), String> {
+    let unfinished = active
+        .or_else(|| blocked.and_then(|b| b.moving.as_deref()))
+        .is_some_and(|a| a.move_to.is_some());
+    match active {
+        _ if unfinished => Err("Finish or cancel the archive move first.".into()),
         Some(_) => Ok(()),
-        None if !modsroot::resolved() => Err(STILL_LOADING.into()),
+        None if !resolved => Err(STILL_LOADING.into()),
         None => Ok(()),
     }
 }
@@ -1656,9 +1769,23 @@ fn try_move_lock() -> Result<MoveLock, String> {
 /// Refuse organize writes and new archive moves while a custom archive's drive is missing
 /// (nothing is deleted; the banner offers Retry / Choose another), or while no layout is known.
 fn ensure_archive_available() -> Result<(), String> {
-    match modsroot::active() {
-        None if !modsroot::resolved() => Err(STILL_LOADING.into()),
-        None => Err("No mods folder selected".into()),
+    archive_availability(
+        modsroot::active().as_ref(),
+        modsroot::resolved(),
+        modsroot::blocked().as_deref(),
+    )
+}
+
+/// Pure: `ensure_archive_available` over the published state. A blocked folder is refused
+/// with its reason.
+fn archive_availability(
+    active: Option<&modsroot::Active>,
+    resolved: bool,
+    blocked: Option<&str>,
+) -> Result<(), String> {
+    match active {
+        None if !resolved => Err(STILL_LOADING.into()),
+        None => Err(blocked.unwrap_or("No mods folder selected").to_string()),
         Some(a) if a.layout.archive_missing() => Err(archive_unavailable(&a.layout.archive)),
         Some(_) => Ok(()),
     }
@@ -1677,6 +1804,9 @@ fn archive_unavailable(archive: &std::path::Path) -> String {
 /// archive), or it's rejected — so a compromised webview can't redirect an install/organize
 /// into an arbitrary directory. Returns the matched trusted path, never the raw frontend string.
 fn primary_root(root: Option<String>) -> Result<PathBuf, String> {
+    if let Some(why) = modsroot::blocked() {
+        return Err(why);
+    }
     let allowed = mods_roots();
     match root {
         Some(r) if !r.is_empty() => {
@@ -1872,6 +2002,14 @@ struct ModsRootStatus {
     can_write_game_setting: bool,
     game_setting_problem: Option<String>,
     unresolved_override: Option<String>,
+    /// Why Silo won't change files in this folder: it shares files with another layout's
+    /// archive (`resolve_layout`). Organize, flatten and installs are refused meanwhile.
+    layout_problem: Option<String>,
+    /// What causes it: an overlap, only FS25's own setting ("Point FS25 here" clears it), or a
+    /// database read that failed ("Retry").
+    layout_problem_cause: Option<modsroot::BlockCause>,
+    /// The folder it runs into, when known.
+    layout_conflict: Option<String>,
 }
 
 fn path_map(loc: &fsgame::GameLocation) -> modsroot::PathMap {
@@ -1894,6 +2032,111 @@ fn loose_zip_count(dir: &std::path::Path) -> i64 {
                 .count() as i64
         })
         .unwrap_or(0)
+}
+
+/// The layout to publish for the resolved mods folder `mods`, whatever chose it (the user,
+/// FS25's override, the default) — or why there is none: `mods` shares files with another
+/// layout (`mods_folder_check`, with FS25's default folder `default` and the folder it reads,
+/// `game_reads`, counted as known), or the check couldn't read the database. When the clash
+/// is only with `game_reads` and `mods` is the user's choice (`chosen`), the cause is FS25's
+/// own setting: pointing FS25 at `mods` clears it. Checked before anything is published.
+fn resolve_layout(
+    conn: &rusqlite::Connection,
+    mods: &std::path::Path,
+    default: Option<&std::path::Path>,
+    game_reads: Option<&std::path::Path>,
+    chosen: bool,
+) -> Result<modsroot::Active, modsroot::Blocked> {
+    let known = |with_game: bool| {
+        let mut extra: Vec<PathBuf> = default.iter().map(PathBuf::from).collect();
+        if with_game {
+            extra.extend(game_reads.map(PathBuf::from));
+        }
+        known_mods_folders(conn, &extra)
+    };
+    let blocked = |reason: String, cause, conflict| modsroot::Blocked {
+        reason,
+        cause,
+        mods: mods.to_path_buf(),
+        conflict,
+        moving: unfinished_move(conn, mods).map(Box::new),
+    };
+    let problem = match mods_folder_check(conn, mods, &known(true)) {
+        Ok(None) => return Ok(resolve_active(conn, mods)),
+        Ok(Some(p)) => p,
+        Err(e) => {
+            return Err(blocked(
+                format!(
+                "Silo couldn't check this folder against your other mods folders ({e}). Try again."
+            ),
+                modsroot::BlockCause::ReadError,
+                None,
+            ))
+        }
+    };
+    let game = game_reads.filter(|g| chosen && !modsroot::same_folder(g, mods));
+    if let Some(g) = game {
+        if matches!(mods_folder_check(conn, mods, &known(false)), Ok(None)) {
+            return Err(blocked(
+                format!(
+                    "Farming Simulator 25's mods folder setting points at {}, which shares files with this folder. Point FS25 at this folder, or choose another one.",
+                    g.display()
+                ),
+                modsroot::BlockCause::GameSetting,
+                Some(problem.conflict),
+            ));
+        }
+    }
+    Err(blocked(
+        problem.message,
+        modsroot::BlockCause::Overlap,
+        Some(problem.conflict),
+    ))
+}
+
+/// The layout of `mods`' unfinished archive move, if it has one: the archive it started from
+/// (`Layout`'s rules, else the default) and the one it's going to. No side effects (unlike
+/// `resolve_active`, nothing is rediscovered or stored).
+fn unfinished_move(
+    conn: &rusqlite::Connection,
+    mods: &std::path::Path,
+) -> Option<modsroot::Active> {
+    let m = relocate::load_marker(conn, &modsroot::canonical_key(mods))?;
+    let layout = organize::Layout::new(mods.to_path_buf(), m.from)
+        .unwrap_or_else(|_| organize::Layout::default_for(mods));
+    Some(modsroot::Active {
+        layout,
+        move_to: Some(m.to),
+    })
+}
+
+/// The layout a move's resume or cancel runs in: the published one, or — while the folder is
+/// blocked — that folder's own unfinished move, so it can still be finished or brought home.
+fn resumable_layout(
+    active: Option<modsroot::Active>,
+    blocked: Option<modsroot::Blocked>,
+    resolved: bool,
+) -> Result<organize::Layout, String> {
+    match (active, blocked) {
+        (Some(a), _) => Ok(a.layout),
+        (None, Some(b)) => b.moving.map(|m| m.layout).ok_or(b.reason),
+        (None, None) if !resolved => Err(STILL_LOADING.into()),
+        (None, None) => Err("No mods folder selected".into()),
+    }
+}
+
+/// The folder "Point FS25 here" writes into FS25's setting: the managed folder, or — while
+/// FS25's own setting is what blocks it — the folder the user chose.
+fn game_point_target(
+    active: Option<&modsroot::Active>,
+    blocked: Option<&modsroot::Blocked>,
+) -> Result<PathBuf, String> {
+    match (active, blocked) {
+        (Some(a), _) => Ok(a.layout.mods.clone()),
+        (None, Some(b)) if b.cause == modsroot::BlockCause::GameSetting => Ok(b.mods.clone()),
+        (None, Some(b)) => Err(b.reason.clone()),
+        (None, None) => Err("No mods folder selected".into()),
+    }
 }
 
 /// The trusted layout for mods folder `mods`: during an unfinished move its archive is where
@@ -1999,11 +2242,32 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
     let mods_folder_missing = !available
         && r.source == modsroot::Source::Default
         && loc.as_ref().map(|l| l.user_dir.is_dir()).unwrap_or(false);
-    modsroot::set_active(if available {
-        r.path.as_deref().map(|p| resolve_active(conn, p))
-    } else {
-        None
-    });
+    // The folder FS25 reads counts as a known mods folder for every overlap check.
+    modsroot::set_game_reads(r.game_reads.clone());
+    let (active, blocked) = match r.path.as_deref() {
+        Some(p) if available => match resolve_layout(
+            conn,
+            p,
+            default.as_deref(),
+            r.game_reads.as_deref(),
+            r.source == modsroot::Source::User,
+        ) {
+            Ok(a) => (Some(a), None),
+            Err(b) => {
+                log::warn!("not managing {}: {}", p.display(), b.reason);
+                (None, Some(b))
+            }
+        },
+        _ => (None, None),
+    };
+    let layout_problem = blocked.as_ref().map(|b| b.reason.clone());
+    let layout_problem_cause = blocked.as_ref().map(|b| b.cause);
+    let layout_conflict = blocked
+        .as_ref()
+        .and_then(|b| b.conflict.as_ref())
+        .map(|c| c.to_string_lossy().into_owned());
+    // Together, so no command sees "no layout" without its reason.
+    modsroot::publish(active, blocked);
 
     let current_key = r.path.as_ref().map(|p| modsroot::canonical_key(p));
     let mut paths: Vec<PathBuf> =
@@ -2039,6 +2303,9 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
         can_write_game_setting: game_setting_problem.is_none(),
         game_setting_problem,
         unresolved_override: r.unresolved_override,
+        layout_problem,
+        layout_problem_cause,
+        layout_conflict,
     }
 }
 
@@ -2074,33 +2341,56 @@ async fn set_mods_root(app: tauri::AppHandle, path: String) -> Result<ModsRootSt
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db::open(&db)?;
         let p = std::path::Path::new(&path);
-        let known: Vec<PathBuf> =
-            modsroot::parse_known(db::get_app_setting(&conn, modsroot::KNOWN_KEY).as_deref())
-                .into_iter()
-                .map(PathBuf::from)
-                .collect();
         let default = fsgame::user_dir().map(|d| d.join("mods"));
-        if !mods_root_choice_allowed(
-            p,
-            picked::allows(picked::Purpose::ModsFolder, p),
-            &known,
-            default.as_deref(),
-        ) {
-            return Err(picked::NOT_PICKED.into());
-        }
-        modsroot::validate_folder(p)?;
-        let known = modsroot::add_known(
-            db::get_app_setting(&conn, modsroot::KNOWN_KEY).as_deref(),
+        let picked = picked::allows(picked::Purpose::ModsFolder, p);
+        apply_mods_root_choice(
+            &conn,
             &path,
-        );
-        db::set_app_setting(&conn, modsroot::KNOWN_KEY, Some(&known))?;
-        db::set_app_setting(&conn, modsroot::CHOICE_KEY, Some(&path))?;
+            picked,
+            default.as_deref(),
+            &live_mods_folders(),
+        )?;
         // Used: a later call can't replay it (the folder is in the known list now anyway).
         picked::forget(picked::Purpose::ModsFolder);
         Ok(compute_mods_root_status(&conn))
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// `set_mods_root` without the picker and the status: refuse a folder that wasn't picked and
+/// isn't known (or FS25's default), then one that shares files with another layout (`live`:
+/// the folders in use, see `live_mods_folders`) — both before the write probe — then remember
+/// `path` as known and chosen.
+fn apply_mods_root_choice(
+    conn: &rusqlite::Connection,
+    path: &str,
+    picked: bool,
+    default: Option<&std::path::Path>,
+    live: &[PathBuf],
+) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    let known: Vec<PathBuf> =
+        modsroot::parse_known(db::get_app_setting(conn, modsroot::KNOWN_KEY).as_deref())
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+    if !mods_root_choice_allowed(p, picked, &known, default) {
+        return Err(picked::NOT_PICKED.into());
+    }
+    let mut extra: Vec<PathBuf> = default.map(PathBuf::from).into_iter().collect();
+    extra.extend(live.iter().cloned());
+    let all = known_mods_folders(conn, &extra);
+    if let Some(why) = mods_folder_check(conn, p, &all)? {
+        return Err(why.message);
+    }
+    modsroot::validate_folder(p)?;
+    let known = modsroot::add_known(
+        db::get_app_setting(conn, modsroot::KNOWN_KEY).as_deref(),
+        path,
+    );
+    db::set_app_setting(conn, modsroot::KNOWN_KEY, Some(&known))?;
+    db::set_app_setting(conn, modsroot::CHOICE_KEY, Some(path))
 }
 
 /// Forget the user's choice and follow the folder FS25 reads.
@@ -2117,16 +2407,18 @@ async fn clear_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus, String
     .map_err(|e| e.to_string())?
 }
 
-/// Point FS25 at the folder Silo currently manages.
+/// Point FS25 at the folder Silo currently manages — or at the folder the user chose, while
+/// FS25's own setting is what blocks it (`game_point_target`).
 #[tauri::command]
 async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus, String> {
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         config_write_refusal(gamelaunch::fs25_running())?;
-        let folder = modsroot::active()
-            .map(|a| a.layout.mods)
-            .ok_or_else(|| "No mods folder selected".to_string())?;
+        let folder = game_point_target(
+            modsroot::active().as_ref(),
+            modsroot::blocked_detail().as_ref(),
+        )?;
         point_game_at(&folder)?;
         let conn = db::open(&db)?;
         Ok(compute_mods_root_status(&conn))
@@ -2266,14 +2558,14 @@ struct ArchiveStatus {
 
 /// The active layout and its mods-folder key, or why there isn't one yet.
 fn active_layout() -> Result<(organize::Layout, String), String> {
-    match modsroot::active() {
+    blocked_first(modsroot::blocked(), || match modsroot::active() {
         Some(a) => {
             let key = modsroot::canonical_key(&a.layout.mods);
             Ok((a.layout, key))
         }
         None if !modsroot::resolved() => Err(STILL_LOADING.into()),
         None => Err("No mods folder selected".into()),
-    }
+    })
 }
 
 /// A folder's identity key as a path, for component-wise `starts_with` comparisons.
@@ -2294,19 +2586,45 @@ struct Fences {
     app_data: Option<PathBuf>,
 }
 
+/// Every mods folder Silo knows: the known list, plus `extra` — FS25's default mods folder and
+/// the folders in use right now (`live_mods_folders`), which count even when never picked.
+fn known_mods_folders(conn: &rusqlite::Connection, extra: &[PathBuf]) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> =
+        modsroot::parse_known(db::get_app_setting(conn, modsroot::KNOWN_KEY).as_deref())
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+    v.extend(extra.iter().cloned());
+    v
+}
+
+/// The mods folders in use right now: the folder FS25 reads (its override) and the one Silo
+/// manages, as last resolved.
+fn live_mods_folders() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = modsroot::game_reads().into_iter().collect();
+    v.extend(modsroot::active().map(|a| a.layout.mods));
+    v
+}
+
+/// A mods folder's archive: the one chosen for it, or the default `<mods>/archive`.
+fn archive_of(conn: &rusqlite::Connection, mods: &std::path::Path) -> PathBuf {
+    db::get_app_setting(
+        conn,
+        &relocate::archive_setting_key(&modsroot::canonical_key(mods)),
+    )
+    .map(PathBuf::from)
+    .unwrap_or_else(|| organize::Layout::default_for(mods).archive)
+}
+
 fn fences(
     conn: &rusqlite::Connection,
     layout: &organize::Layout,
     app_data: Option<&std::path::Path>,
 ) -> Fences {
     let user_dir = fsgame::locate().map(|l| l.user_dir);
-    let mut others: Vec<PathBuf> =
-        modsroot::parse_known(db::get_app_setting(conn, modsroot::KNOWN_KEY).as_deref())
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
-    // FS25's default mods folder counts even when it was never picked.
-    others.extend(user_dir.as_ref().map(|u| u.join("mods")));
+    let mut extra: Vec<PathBuf> = user_dir.iter().map(|u| u.join("mods")).collect();
+    extra.extend(live_mods_folders());
+    let others = known_mods_folders(conn, &extra);
     let mine = key_path(&layout.mods);
     let mut other_mods: Vec<PathBuf> = Vec::new();
     let mut other_archives: Vec<PathBuf> = Vec::new();
@@ -2315,14 +2633,8 @@ fn fences(
         if k == mine || other_mods.contains(&k) {
             continue;
         }
-        let archive = db::get_app_setting(
-            conn,
-            &relocate::archive_setting_key(&modsroot::canonical_key(&p)),
-        )
-        .map(PathBuf::from)
-        .unwrap_or_else(|| organize::Layout::default_for(&p).archive);
         other_mods.push(k);
-        other_archives.push(key_path(&archive));
+        other_archives.extend(managed_archive(conn, &p).map(|a| key_path(&a)));
     }
     Fences {
         mods: mine,
@@ -2334,14 +2646,138 @@ fn fences(
     }
 }
 
+/// Pure: `a` and `b` (identity keys) are the same folder, or one is inside the other.
+fn overlaps(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a == b || a.starts_with(b) || b.starts_with(a)
+}
+
+/// Pure: one of `a` and `b` (identity keys) is inside the other (not the same folder).
+fn nests(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a != b && overlaps(a, b)
+}
+
+/// A known mods folder's archive, if it has one worth fencing: its stored choice, or the
+/// default `<X>/archive` once Silo has managed the folder (organized rows) or that folder
+/// exists. A folder Silo never managed — say one only FS25's override points at — has no
+/// archive yet, so only the folder itself counts.
+fn managed_archive(conn: &rusqlite::Connection, mods: &std::path::Path) -> Option<PathBuf> {
+    let key = modsroot::canonical_key(mods);
+    if let Some(s) = db::get_app_setting(conn, &relocate::archive_setting_key(&key)) {
+        return Some(PathBuf::from(s));
+    }
+    let default = organize::Layout::default_for(mods).archive;
+    (db::count_organized(conn, &key) > 0 || default.exists()).then_some(default)
+}
+
+/// Every archive Silo knows of except `mods`' own: each stored archive choice
+/// (`archive_root:*`, whichever mods folder it belongs to) and each other known mods folder's
+/// `managed_archive`. One entry per folder (by identity key), spelled as stored. An unreadable
+/// setting list is an error: the check must never pass because it couldn't look.
+fn other_archives(
+    conn: &rusqlite::Connection,
+    mods: &std::path::Path,
+    known: &[PathBuf],
+) -> Result<Vec<PathBuf>, String> {
+    let mine = modsroot::canonical_key(mods);
+    let mut v: Vec<PathBuf> = Vec::new();
+    let stored = db::app_settings_with_prefix(conn, relocate::ARCHIVE_SETTING_PREFIX)?;
+    for (k, archive) in stored {
+        if k != relocate::archive_setting_key(&mine) {
+            v.push(PathBuf::from(archive));
+        }
+    }
+    for k in known {
+        if modsroot::canonical_key(k) != mine {
+            v.extend(managed_archive(conn, k));
+        }
+    }
+    let mut seen = HashSet::new();
+    v.retain(|p| seen.insert(key_path(p)));
+    Ok(v)
+}
+
+/// Why a folder can't be a mods folder, and the folder it runs into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FolderProblem {
+    message: String,
+    conflict: PathBuf,
+}
+
+/// Pure: why `mods` can't be a mods folder — it overlaps another folder's archive (it is one,
+/// a category inside one, or holds one), or its own archive (`own_archive`: chosen, or the
+/// default `<mods>/archive`) would overlap another archive or another mods folder
+/// (`other_mods`). Two layouts sharing files would shuffle each other's parked mods. All
+/// identity keys; `conflict` is the one it runs into.
+fn mods_folder_problem(
+    mods: &std::path::Path,
+    own_archive: &std::path::Path,
+    archives: &[PathBuf],
+    other_mods: &[PathBuf],
+) -> Option<FolderProblem> {
+    let hit = |list: &[PathBuf], p: &std::path::Path, message: &str| {
+        list.iter().find(|a| overlaps(p, a)).map(|a| FolderProblem {
+            message: message.into(),
+            conflict: a.clone(),
+        })
+    };
+    hit(archives, mods, OVERLAPS_AN_ARCHIVE)
+        .or_else(|| {
+            hit(
+                archives,
+                own_archive,
+                "That folder's archive would be another mods folder's archive. Pick another folder.",
+            )
+        })
+        .or_else(|| {
+            hit(
+                other_mods,
+                own_archive,
+                "That folder's archive would overlap another mods folder. Pick another folder.",
+            )
+        })
+}
+
+/// Why `mods` can't be a mods folder, given every mods folder Silo knows (`known`, which may
+/// include `mods` itself): `mods_folder_problem` over the other layouts in the database, with
+/// the conflicting folder spelled as Silo knows it. An unreadable database is an error, never
+/// a pass.
+fn mods_folder_check(
+    conn: &rusqlite::Connection,
+    mods: &std::path::Path,
+    known: &[PathBuf],
+) -> Result<Option<FolderProblem>, String> {
+    let mine = key_path(mods);
+    let archives = other_archives(conn, mods, known)?;
+    let others: Vec<&PathBuf> = known.iter().filter(|k| key_path(k) != mine).collect();
+    let shown: HashMap<PathBuf, PathBuf> = archives
+        .iter()
+        .chain(others.iter().copied())
+        .map(|p| (key_path(p), p.clone()))
+        .collect();
+    let keys = |v: &mut dyn Iterator<Item = &PathBuf>| v.map(|p| key_path(p)).collect::<Vec<_>>();
+    let problem = mods_folder_problem(
+        &mine,
+        &key_path(&archive_of(conn, mods)),
+        &keys(&mut archives.iter()),
+        &keys(&mut others.iter().copied()),
+    );
+    Ok(problem.map(|p| FolderProblem {
+        conflict: shown.get(&p.conflict).cloned().unwrap_or(p.conflict),
+        message: p.message,
+    }))
+}
+
+const OVERLAPS_AN_ARCHIVE: &str =
+    "That folder overlaps another mods folder's archive. Pick a folder outside it.";
+
 /// Pure: where a new archive (`new`, an identity key) runs into a folder it must keep clear
 /// of. Equality with the current archive / another archive is `path_problems`' to report.
 fn overlap_problems(new: &std::path::Path, f: &Fences) -> Vec<String> {
     if new.parent().is_none() {
         return vec!["Pick a folder, not a whole drive.".into()];
     }
-    let overlaps = |a: &PathBuf| new == a || new.starts_with(a) || a.starts_with(new);
-    let nests = |a: &PathBuf| new != a && (new.starts_with(a) || a.starts_with(new));
+    let overlaps = |a: &PathBuf| overlaps(new, a);
+    let nests = |a: &PathBuf| nests(new, a);
     let mut v = Vec::new();
     if nests(&f.current_archive) {
         v.push(
@@ -2349,10 +2785,12 @@ fn overlap_problems(new: &std::path::Path, f: &Fences) -> Vec<String> {
         );
     }
     if f.other_mods.iter().any(overlaps) {
-        v.push("That folder overlaps another mods folder Silo knows — pick one outside it.".into());
+        v.push(
+            "That folder overlaps another mods folder Silo knows. Pick a folder outside it.".into(),
+        );
     }
     if f.other_archives.iter().any(nests) {
-        v.push("That folder overlaps another mods folder's archive — pick one outside it.".into());
+        v.push(OVERLAPS_AN_ARCHIVE.into());
     }
     // The FS25 user dir, a folder containing it, or anything inside it — except inside a
     // mods folder (the default `<mods>/archive`; a wrong spot there gets its own message).
@@ -2471,20 +2909,12 @@ fn move_problems(f: MoveFacts) -> Vec<String> {
     v
 }
 
-/// Pure: both mounts known and equal. An unknown mount is NOT the same drive (so the space
-/// check still runs) — unlike `organize::same_volume`, which assumes same for link fallback.
-fn known_same_mount(a: &Option<(PathBuf, u64)>, b: &Option<(PathBuf, u64)>) -> bool {
-    matches!((a, b), (Some((ma, _)), Some((mb, _))) if ma == mb)
-}
-
 /// The facts a move to `new` depends on (the dialog's preflight, and the start command's
 /// server-side re-check — the webview isn't trusted to have run the preflight).
 struct MoveCheck {
     mod_count: usize,
     bytes: u64,
     free: Option<u64>,
-    /// `new` shares a drive with the mods folder (hardlinks work).
-    same_drive: bool,
     problems: Vec<String>,
 }
 
@@ -2509,8 +2939,9 @@ fn check_move(
         .count();
     let new_mount = organize::mount_of(new);
     let free = new_mount.as_ref().map(|(_, f)| *f);
-    let same_drive = known_same_mount(&organize::mount_of(&layout.mods), &new_mount);
-    let archive_same_drive = known_same_mount(&organize::mount_of(&layout.archive), &new_mount);
+    // For space, an unknown mount is another drive: the whole archive must fit.
+    let archive_same_drive =
+        organize::known_same_mount(&organize::mount_of(&layout.archive), &new_mount);
     let unknown = relocate::unknown_mods(&layout.archive, &rows);
     let problems = move_problems(MoveFacts {
         target,
@@ -2533,7 +2964,6 @@ fn check_move(
         mod_count: rows.len(),
         bytes,
         free,
-        same_drive,
         problems,
     }
 }
@@ -2583,7 +3013,16 @@ fn with_move_ctx(
 ) -> Result<Option<relocate::MoveMarker>, String> {
     let run = || {
         let _write = try_move_lock()?;
-        let (layout, key) = active_layout()?;
+        // A resume or cancel also reaches a blocked folder's own unfinished move.
+        let (layout, key) = match what {
+            "resume" | "cancel" => {
+                let (active, blocked) = modsroot::published();
+                let l = resumable_layout(active, blocked, modsroot::resolved())?;
+                let key = modsroot::canonical_key(&l.mods);
+                (l, key)
+            }
+            _ => active_layout()?,
+        };
         let conn = db::open(db)?;
         let emitter = app.clone();
         let mut progress = move |p: &relocate::Progress| {
@@ -2662,7 +3101,10 @@ async fn archive_status(app: tauri::AppHandle) -> Result<ArchiveStatus, error::A
                 STILL_LOADING,
             ));
         }
-        let Some(a) = modsroot::active() else {
+        // A blocked folder's own unfinished move is still shown (it can be resumed or
+        // cancelled).
+        let (active, blocked) = modsroot::published();
+        let Some(a) = active.or_else(|| blocked.and_then(|b| b.moving).map(|m| *m)) else {
             return Ok(ArchiveStatus {
                 path: None,
                 is_default: true,
@@ -2687,8 +3129,8 @@ async fn archive_status(app: tauri::AppHandle) -> Result<ArchiveStatus, error::A
 }
 
 /// What moving the archive to `path` involves, and anything that blocks it. Read-only apart
-/// from the write probe and the symlink probe (both removed again), which only run when the
-/// folder itself isn't ruled out.
+/// from the write probe, the symlink probe and — on a drive the disk list doesn't know — the
+/// hardlink probe (each removed again), which only run when the folder itself isn't ruled out.
 #[tauri::command]
 async fn archive_move_preflight(
     app: tauri::AppHandle,
@@ -2717,8 +3159,17 @@ async fn archive_move_preflight(
             && fence_problems(&layout, &new, &fences(&conn, &layout, app_data.as_deref()))
                 .is_empty();
         let check = check_move(&conn, &layout, &key, &new, target);
+        // Links as `LinkPolicy` will decide them there: a drive the disk list doesn't know is
+        // probed (only once the folder is cleared), and symlinks never leave a Mac App Store
+        // sandbox. The space check above keeps "unknown = another drive".
+        let same_drive =
+            organize::same_volume_or_probe(organize::volume_relation(&layout.mods, &new), || {
+                probed
+                    .then(|| organize::hardlinks_between(&layout.mods, &new))
+                    .flatten()
+            });
         let symlinks_available = probed
-            && organize::supports_symlinks(&organize::Layout {
+            && organize::symlinks_usable(&organize::Layout {
                 mods: layout.mods.clone(),
                 archive: new.clone(),
             });
@@ -2726,7 +3177,7 @@ async fn archive_move_preflight(
             mod_count: check.mod_count,
             bytes: check.bytes,
             free_bytes: check.free,
-            same_drive: check.same_drive,
+            same_drive,
             symlinks_available,
             loose_mods: relocate::loose_mods(&new).len(),
             problems: check.problems,
@@ -4638,9 +5089,9 @@ fn hold_quit() -> bool {
 mod tests {
     use super::{
         archive_holds_mods, build_gh_scope, cancel_falls_back, fence_problems,
-        foreign_mods_problem, known_same_mount, move_outcome, move_outcome_level, move_problems,
-        overlap_problems, repoint_refusal, scan_archives, scope_grants, select_adopt, split_adopt,
-        Fences, MoveFacts, Space,
+        foreign_mods_problem, move_outcome, move_outcome_level, move_problems, overlap_problems,
+        repoint_refusal, scan_archives, scope_grants, select_adopt, split_adopt, Fences, MoveFacts,
+        Space,
     };
     use crate::{
         organize::{Layout, ModInput},
@@ -4783,6 +5234,503 @@ mod tests {
     }
 
     #[test]
+    fn a_mods_folder_clear_of_every_archive_is_fine() {
+        let archives = vec![
+            PathBuf::from("/hdd/lib"),
+            PathBuf::from("/other/mods/archive"),
+        ];
+        assert_eq!(
+            super::mods_folder_problem(
+                Path::new("/ssd/mods"),
+                Path::new("/ssd/mods/archive"),
+                &archives,
+                &[PathBuf::from("/other/mods")]
+            ),
+            None
+        );
+        // A sibling that only shares a name prefix isn't inside.
+        assert_eq!(
+            super::mods_folder_problem(
+                Path::new("/hdd/lib2"),
+                Path::new("/hdd/lib2/archive"),
+                &archives,
+                &[]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_mods_folder_that_is_in_or_holds_another_archive_is_refused() {
+        let archives = vec![PathBuf::from("/hdd/lib")];
+        // The archive itself, a category inside it, or a folder holding it.
+        for p in ["/hdd/lib", "/hdd/lib/Tools", "/hdd"] {
+            let own = PathBuf::from(p).join("archive");
+            let why = super::mods_folder_problem(Path::new(p), &own, &archives, &[]);
+            assert_eq!(
+                why,
+                Some(super::FolderProblem {
+                    message:
+                        "That folder overlaps another mods folder's archive. Pick a folder outside it."
+                            .into(),
+                    conflict: PathBuf::from("/hdd/lib"),
+                }),
+                "{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mods_folder_whose_own_archive_overlaps_another_mods_folder_is_refused() {
+        let other_mods = vec![PathBuf::from("/hdd/m2")];
+        let want =
+            Some("That folder's archive would overlap another mods folder. Pick another folder.");
+        // Its chosen archive inside another mods folder, or holding one.
+        for own in ["/hdd/m2/lib", "/hdd/m2", "/hdd"] {
+            let why = super::mods_folder_problem(
+                Path::new("/ssd/mods"),
+                Path::new(own),
+                &[],
+                &other_mods,
+            );
+            assert_eq!(why.map(|w| w.message).as_deref(), want, "{own}");
+        }
+        assert_eq!(
+            super::mods_folder_problem(
+                Path::new("/ssd/mods"),
+                Path::new("/ssd/mods/archive"),
+                &[],
+                &other_mods
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_mods_folder_check_reads_the_other_layouts_from_the_database() {
+        let base = temp_base("modscheck");
+        let mine = base.join("mine");
+        let other = base.join("other");
+        for d in [&mine, &other] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let known = vec![mine.clone(), other.clone()];
+        assert_eq!(super::mods_folder_check(&conn, &mine, &known), Ok(None));
+        // Its own archive chosen inside the other mods folder.
+        crate::db::set_app_setting(
+            &conn,
+            &crate::relocate::archive_setting_key(&crate::modsroot::canonical_key(&mine)),
+            Some(&other.join("lib").to_string_lossy()),
+        )
+        .unwrap();
+        let p = super::mods_folder_check(&conn, &mine, &known)
+            .unwrap()
+            .unwrap();
+        assert!(p.message.contains("overlap another mods folder"));
+        // Named as Silo knows it, not as an identity key.
+        assert_eq!(p.conflict, other);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn switching_back_to_a_known_folder_with_a_custom_archive_still_works() {
+        let base = temp_base("switchback");
+        let (a, b, lib) = (base.join("a"), base.join("b"), base.join("lib-a"));
+        for d in [&a, &b, &lib.join("Tools")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let default = base.join("mods");
+        let s = |p: &Path| p.to_string_lossy().into_owned();
+        let choose = |p: &Path, picked: bool| {
+            super::apply_mods_root_choice(&conn, &s(p), picked, Some(&default), &[])
+        };
+        let choice = || crate::db::get_app_setting(&conn, crate::modsroot::CHOICE_KEY);
+        choose(&a, true).unwrap();
+        // A's archive moved to a folder of its own (what a finished move stores).
+        crate::db::set_app_setting(
+            &conn,
+            &crate::relocate::archive_setting_key(&crate::modsroot::canonical_key(&a)),
+            Some(&s(&lib)),
+        )
+        .unwrap();
+        choose(&b, true).unwrap();
+        assert_eq!(choice(), Some(s(&b)));
+        // Back to A from the known list (not picked again): its own archive is no obstacle.
+        choose(&a, false).unwrap();
+        assert_eq!(choice(), Some(s(&a)));
+        // A category folder inside A's archive is refused, and nothing changes.
+        assert_eq!(
+            choose(&lib.join("Tools"), true),
+            Err(super::OVERLAPS_AN_ARCHIVE.to_string())
+        );
+        assert_eq!(choice(), Some(s(&a)));
+        // An unknown folder that wasn't picked is refused.
+        assert_eq!(
+            choose(&base.join("c"), false),
+            Err(super::picked::NOT_PICKED.to_string())
+        );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_folder_fs25_reads_counts_as_a_known_mods_folder() {
+        let base = temp_base("overridepick");
+        let o = base.join("override");
+        std::fs::create_dir_all(o.join("archive/Maps")).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        // O is only FS25's override (never picked, so not in the known list).
+        let maps = o.join("archive/Maps");
+        assert_eq!(
+            super::apply_mods_root_choice(
+                &conn,
+                &maps.to_string_lossy(),
+                true,
+                None,
+                std::slice::from_ref(&o)
+            ),
+            Err(super::OVERLAPS_AN_ARCHIVE.to_string())
+        );
+        assert_eq!(
+            crate::db::get_app_setting(&conn, crate::modsroot::CHOICE_KEY),
+            None
+        );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_override_into_another_layouts_archive_is_reported_and_blocks_writes() {
+        let base = temp_base("overrideblock");
+        let mods = base.join("mods");
+        let lib = base.join("lib");
+        std::fs::create_dir_all(lib.join("Maps")).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        crate::db::set_app_setting(
+            &conn,
+            &crate::relocate::archive_setting_key(&crate::modsroot::canonical_key(&mods)),
+            Some(&lib.to_string_lossy()),
+        )
+        .unwrap();
+        // FS25 reads a category folder of that archive.
+        let b =
+            super::resolve_layout(&conn, &lib.join("Maps"), Some(&mods), None, false).unwrap_err();
+        assert_eq!(b.reason, super::OVERLAPS_AN_ARCHIVE);
+        assert_eq!(b.cause, crate::modsroot::BlockCause::Overlap);
+        assert_eq!(b.conflict, Some(lib.clone()));
+        let why = b.reason;
+        // Published as "no writable layout, because…": nothing is a write root, and organize
+        // and the other library writes are refused with the reason.
+        assert!(super::trusted_roots(None, true, true).is_empty());
+        assert!(super::trusted_roots(None, true, false).is_empty());
+        assert_eq!(
+            super::blocked_first(Some(why.clone()), || Ok::<_, String>(())),
+            Err(why.clone())
+        );
+        assert_eq!(super::blocked_first(None, || Ok::<_, String>(1)), Ok(1));
+        assert_eq!(
+            super::archive_availability(None, true, Some(&why)),
+            Err(why)
+        );
+        // The default layout of a clear folder resolves.
+        let clear = base.join("clear");
+        std::fs::create_dir_all(&clear).unwrap();
+        let a = super::resolve_layout(&conn, &clear, Some(&mods), None, false).unwrap();
+        assert_eq!(a.layout, Layout::default_for(&clear));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn when_only_fs25s_setting_clashes_pointing_fs25_here_clears_it() {
+        let base = temp_base("gameclash");
+        let o = base.join("override");
+        let chosen = o.join("archive/Maps");
+        std::fs::create_dir_all(&chosen).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        // The user chose a folder inside O's archive; FS25's setting points at O.
+        let b = super::resolve_layout(&conn, &chosen, None, Some(&o), true).unwrap_err();
+        assert_eq!(b.cause, crate::modsroot::BlockCause::GameSetting);
+        assert!(
+            b.reason.starts_with(&format!(
+                "Farming Simulator 25's mods folder setting points at {}",
+                o.display()
+            )),
+            "{}",
+            b.reason
+        );
+        // "Point FS25 here" targets the chosen folder, though nothing is published.
+        assert_eq!(super::game_point_target(None, Some(&b)), Ok(chosen.clone()));
+        // Once FS25 reads the chosen folder, it resolves.
+        assert!(super::resolve_layout(&conn, &chosen, None, Some(&chosen), true).is_ok());
+        // Not the user's choice (FS25's override itself picked it): a plain overlap, and
+        // "Point FS25 here" has nothing to point at.
+        let b = super::resolve_layout(&conn, &chosen, None, Some(&o), false).unwrap_err();
+        assert_eq!(b.cause, crate::modsroot::BlockCause::Overlap);
+        assert_eq!(
+            super::game_point_target(None, Some(&b)),
+            Err(b.reason.clone())
+        );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_folder_silo_never_managed_counts_only_as_itself() {
+        let base = temp_base("unmanaged");
+        let (me, o) = (base.join("me"), base.join("override"));
+        for d in [&me, &o] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let known = vec![o.clone()];
+        let archives = || super::other_archives(&conn, &me, &known).unwrap();
+        // No stored archive, no organized rows, no archive folder: no archive to fence.
+        assert!(archives().is_empty());
+        // Its archive folder exists: it counts.
+        std::fs::create_dir_all(o.join("archive")).unwrap();
+        assert_eq!(archives(), vec![o.join("archive")]);
+        // Or Silo has organized it (the archive folder may be gone).
+        std::fs::remove_dir(o.join("archive")).unwrap();
+        let row = crate::db::OrganizedRow {
+            tech_name: "FS25_A".into(),
+            file_name: "FS25_A.zip".into(),
+            kind: "zip".into(),
+            category: "Tools".into(),
+            subcategory: None,
+            active: false,
+        };
+        crate::db::upsert_organized(&conn, &crate::modsroot::canonical_key(&o), &row).unwrap();
+        assert_eq!(archives(), vec![o.join("archive")]);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_blocked_folders_own_move_can_still_be_resumed_or_cancelled() {
+        let base = temp_base("blockedmove");
+        let mods = base.join("mods");
+        let hdd = base.join("hdd");
+        std::fs::create_dir_all(&hdd).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        assert_eq!(super::unfinished_move(&conn, &mods), None);
+        let m = MoveMarker::new(mods.join("archive"), hdd.clone());
+        crate::relocate::save_marker(&conn, &crate::modsroot::canonical_key(&mods), &m).unwrap();
+        let moving = super::unfinished_move(&conn, &mods).unwrap();
+        assert_eq!(moving.layout, Layout::default_for(&mods));
+        assert_eq!(moving.move_to, Some(hdd));
+        let blocked = |moving| crate::modsroot::Blocked {
+            reason: "blocked".into(),
+            cause: crate::modsroot::BlockCause::Overlap,
+            mods: mods.clone(),
+            conflict: None,
+            moving,
+        };
+        // Resume / cancel run in the blocked folder's move; without one, the reason.
+        assert_eq!(
+            super::resumable_layout(None, Some(blocked(Some(Box::new(moving.clone())))), true),
+            Ok(Layout::default_for(&mods))
+        );
+        assert_eq!(
+            super::resumable_layout(None, Some(blocked(None)), true),
+            Err("blocked".to_string())
+        );
+        // Everything else waits for that move, as for any unfinished move.
+        assert_eq!(
+            super::no_move_refusal(None, Some(&blocked(Some(Box::new(moving)))), true),
+            Err("Finish or cancel the archive move first.".to_string())
+        );
+        assert_eq!(
+            super::no_move_refusal(None, Some(&blocked(None)), true),
+            Ok(())
+        );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn once_resolved_no_layout_means_no_write_roots_at_all() {
+        // An unavailable chosen folder (not blocked) never falls back to FS25's default.
+        assert!(super::trusted_roots(None, true, true).is_empty());
+        assert!(super::trusted_roots(None, true, false).is_empty());
+        // Before anything is resolved, the auto-detected default is all there is.
+        assert_eq!(
+            super::trusted_roots(None, false, false),
+            crate::fsgame::default_mods_paths()
+        );
+        let a = crate::modsroot::Active {
+            layout: Layout::default_for(Path::new("/m")),
+            move_to: Some(PathBuf::from("/hdd")),
+        };
+        assert_eq!(
+            super::trusted_roots(Some(a.clone()), true, true),
+            vec![
+                PathBuf::from("/m"),
+                PathBuf::from("/m").join("archive"),
+                PathBuf::from("/hdd")
+            ]
+        );
+        assert_eq!(
+            super::trusted_roots(Some(a), true, false),
+            vec![PathBuf::from("/m")]
+        );
+    }
+
+    /// A zip mod with a minimal modDesc at `path`.
+    fn mod_zip(path: &Path) {
+        use std::io::Write;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zw.start_file("modDesc.xml", opts).unwrap();
+        zw.write_all(b"<modDesc descVersion=\"100\"><title><en>A</en></title></modDesc>")
+            .unwrap();
+        zw.finish().unwrap();
+    }
+
+    #[test]
+    fn a_scan_of_a_blocked_folder_writes_no_organized_rows() {
+        static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static E: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let base = temp_base("scanblocked");
+        let mods = base.join("mods");
+        mod_zip(&mods.join("archive/Tools/FS25_A.zip"));
+        let key = crate::modsroot::canonical_key(&mods);
+        let mut conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let organized = |c: &rusqlite::Connection| crate::db::load_organized(c, &key);
+        let scan = |conn: &mut rusqlite::Connection, plan: &super::ScanPlan| {
+            let start = super::quiet_epoch(&L, &E);
+            super::scan_library(conn, plan, None, &L, &E, start, |_, _| {})
+        };
+
+        // Blocked: no trusted roots, so the folder the webview names is neither read nor
+        // reconciled.
+        let plan = super::scan_plan(vec![mods.clone()], &[], None);
+        assert_eq!(plan, super::ScanPlan::default());
+        scan(&mut conn, &plan);
+        assert!(organized(&conn).is_empty());
+
+        // A trusted root that isn't the active layout's folder is read, never reconciled.
+        let other = crate::modsroot::Active {
+            layout: Layout::default_for(&base.join("other")),
+            move_to: None,
+        };
+        let plan = super::scan_plan(
+            vec![mods.clone()],
+            std::slice::from_ref(&mods),
+            Some(&other),
+        );
+        assert_eq!(plan.reconcile_key, None);
+        let found = scan(&mut conn, &plan);
+        assert_eq!(found.mods.len(), 1);
+        assert!(organized(&conn).is_empty());
+
+        // Control: the active folder's manifest follows its archive.
+        let active = crate::modsroot::Active {
+            layout: Layout::default_for(&mods),
+            move_to: None,
+        };
+        let plan = super::scan_plan(Vec::new(), std::slice::from_ref(&mods), Some(&active));
+        assert_eq!(plan.reconcile_key.as_deref(), Some(key.as_str()));
+        scan(&mut conn, &plan);
+        assert_eq!(organized(&conn).len(), 1);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn overlap_messages_are_plain_sentences() {
+        let f = fences();
+        assert!(overlap_problems(Path::new("/other/mods/sub"), &f).contains(
+            &"That folder overlaps another mods folder Silo knows. Pick a folder outside it."
+                .to_string()
+        ));
+        assert!(overlap_problems(Path::new("/x/a2/deeper"), &f).contains(
+            &"That folder overlaps another mods folder's archive. Pick a folder outside it."
+                .to_string()
+        ));
+    }
+
+    #[test]
+    fn a_mods_folder_whose_own_archive_is_another_folders_is_refused() {
+        // The default `<X>/archive` is another folder's chosen archive...
+        let archives = vec![PathBuf::from("/x/archive")];
+        assert!(super::mods_folder_problem(
+            Path::new("/x"),
+            Path::new("/x/archive"),
+            &archives,
+            &[]
+        )
+        .is_some());
+        // ...or its own chosen archive sits inside another folder's (the folder itself is
+        // clear, so this is the own-archive check speaking).
+        let archives = vec![PathBuf::from("/hdd/lib")];
+        let why = super::mods_folder_problem(
+            Path::new("/ssd/mods"),
+            Path::new("/hdd/lib/a"),
+            &archives,
+            &[],
+        );
+        assert_eq!(
+            why.map(|w| w.message).as_deref(),
+            Some("That folder's archive would be another mods folder's archive. Pick another folder.")
+        );
+    }
+
+    #[test]
+    fn other_archives_lists_stored_and_default_archives_but_not_its_own() {
+        let base = temp_base("otherarchives");
+        let mine = base.join("mine");
+        let other = base.join("other");
+        let unlisted = base.join("unlisted");
+        let lib = base.join("lib");
+        let mine_lib = base.join("mine-lib");
+        let stale = base.join("stale-lib");
+        for d in [
+            &mine,
+            &other.join("archive"),
+            &unlisted,
+            &lib,
+            &mine_lib,
+            &stale,
+        ] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let set = |mods: &Path, archive: &Path| {
+            crate::db::set_app_setting(
+                &conn,
+                &crate::relocate::archive_setting_key(&crate::modsroot::canonical_key(mods)),
+                Some(&archive.to_string_lossy()),
+            )
+            .unwrap();
+        };
+        set(&mine, &mine_lib);
+        set(&unlisted, &stale); // a mods folder no longer in the known list
+        let known = vec![mine.clone(), other.clone(), base.join("mods")];
+        set(&base.join("mods"), &lib);
+        let got: HashSet<PathBuf> = super::other_archives(&conn, &mine, &known)
+            .unwrap()
+            .iter()
+            .map(|p| super::key_path(p))
+            .collect();
+        let want: HashSet<PathBuf> = [
+            super::key_path(&other.join("archive")),
+            super::key_path(&lib),
+            super::key_path(&stale),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(got, want);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn cancel_falls_back_only_when_a_move_holds_the_lock() {
         assert!(cancel_falls_back(super::MOVE_LOCK_HELD));
         // relocate's own guard refusal is a different case.
@@ -4797,16 +5745,6 @@ mod tests {
         assert!(foreign_mods_problem(1).contains("move it to"));
         assert!(foreign_mods_problem(4).contains("already has 4 mods in subfolders"));
         assert!(foreign_mods_problem(4).contains("move them to"));
-    }
-
-    #[test]
-    fn unknown_mount_is_not_the_same_drive() {
-        let c = Some((PathBuf::from("C:\\"), 1));
-        let d = Some((PathBuf::from("D:\\"), 1));
-        assert!(known_same_mount(&c, &c.clone()));
-        assert!(!known_same_mount(&c, &d));
-        assert!(!known_same_mount(&c, &None));
-        assert!(!known_same_mount(&None, &None));
     }
 
     /// Finishing, or pausing because the user asked, is routine; a pause for a reason (the game

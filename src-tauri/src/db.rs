@@ -830,6 +830,23 @@ pub fn set_app_setting(conn: &Connection, key: &str, value: Option<&str>) -> Res
     Ok(())
 }
 
+/// Every app setting whose key starts with `prefix`, as (key, value) pairs. Matched exactly
+/// (no `LIKE` wildcards), in key order. A failed read is an error, never "none".
+pub fn app_settings_with_prefix(
+    conn: &Connection,
+    prefix: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT key, value FROM app_setting WHERE substr(key, 1, length(?1)) = ?1 ORDER BY key",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([prefix], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
 /// Rewrite the database file, reclaiming free pages. SQLite leaves deleted row bytes in
 /// free pages until this runs — so after scrubbing a legacy plaintext secret we VACUUM to
 /// ensure the old token can't be carved out of the file. Best-effort; never fatal.
@@ -1389,6 +1406,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         base.join("silo.db")
+    }
+
+    #[test]
+    fn settings_by_prefix_match_the_prefix_exactly() {
+        let path = temp_db("prefix");
+        let conn = open(&path).unwrap();
+        set_app_setting(&conn, "archive_root:b", Some("2")).unwrap();
+        set_app_setting(&conn, "archive_root:a", Some("1")).unwrap();
+        // `_` and `%` would be LIKE wildcards: neither may widen the match.
+        set_app_setting(&conn, "archiveXroot:c", Some("3")).unwrap();
+        set_app_setting(&conn, "archive_root", Some("4")).unwrap();
+        set_app_setting(&conn, "a%:d", Some("5")).unwrap();
+        assert_eq!(
+            app_settings_with_prefix(&conn, "archive_root:").unwrap(),
+            vec![
+                ("archive_root:a".to_string(), "1".to_string()),
+                ("archive_root:b".to_string(), "2".to_string()),
+            ]
+        );
+        assert!(app_settings_with_prefix(&conn, "a%").unwrap().len() == 1);
+        // A failed query is an error, never "no settings".
+        conn.execute_batch("DROP TABLE app_setting").unwrap();
+        assert!(app_settings_with_prefix(&conn, "archive_root:").is_err());
+        drop(conn);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

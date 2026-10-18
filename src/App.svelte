@@ -149,6 +149,11 @@
   import LibraryToolbar from "./lib/components/panels/LibraryToolbar.svelte";
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
   import { fmtSize } from "./lib/format";
+  import {
+    rootsFor,
+    showOverrideNotice,
+    switchBlockReason as switchGate,
+  } from "./lib/modsStatus";
 
   let roots = $state<string[]>([]);
   let modsStatus = $state<ModsRootStatus | null>(null);
@@ -1463,13 +1468,11 @@
   );
 
   /** Why switching folders isn't safe right now, or null. */
-  async function switchBlockReason(): Promise<string | null> {
-    if (moveUnfinished) return "Finish or cancel the archive move first.";
-    if (scanning) return "Wait for the scan to finish.";
-    if (busy) return `Wait for “${busy}” to finish.`;
-    const snap = await bisectSnapshotGet().catch(() => null);
-    if (snap) return "Finish or cancel the guided bisection first — it belongs to this folder.";
-    return null;
+  function switchBlockReason(): Promise<string | null> {
+    return switchGate(
+      { moveUnfinished, scanning, busy, blocked: !!modsStatus?.layoutProblem },
+      async () => !!(await bisectSnapshotGet().catch(() => null)),
+    );
   }
 
   /** Adopt a new status; if the live folder changed, reload everything folder-specific. */
@@ -1477,7 +1480,7 @@
     const prev = roots[0] ?? null;
     modsStatus = st;
     await refreshArchive(); // the archive belongs to the mods folder
-    roots = st.available && st.path ? [st.path] : [];
+    roots = rootsFor(st);
     if ((roots[0] ?? null) === prev) return;
     result = null;
     mods = [];
@@ -2066,10 +2069,9 @@
       }
       try {
         modsStatus = await modsRootStatus();
-        roots = modsStatus.available && modsStatus.path ? [modsStatus.path] : [];
+        roots = rootsFor(modsStatus);
         if (
-          modsStatus.source === "gameOverride" &&
-          localStorage.getItem("silo.overrideNoticeShown") !== "1"
+          showOverrideNotice(modsStatus, localStorage.getItem("silo.overrideNoticeShown") === "1")
         ) {
           overrideNoticeOpen = true;
         }
@@ -2185,6 +2187,22 @@
     }
     busy = null;
   }
+
+  /** Forget an interrupted bisection without restoring it (asked first: it can't be undone). */
+  async function discardBisect() {
+    if (!bisectRecovery) return;
+    const ok = await confirmDialog(
+      "Forget the interrupted diagnosis? Your active mods stay as they are now, and Silo won't offer to restore the earlier set again.",
+      { okLabel: "Discard", cancelLabel: "Keep it" },
+    );
+    if (!ok) return;
+    try {
+      await bisectSnapshotClear();
+      bisectRecovery = null;
+    } catch (e) {
+      errorMsg = String(e);
+    }
+  }
 </script>
 
 <div class="app" style="--topbar-h:{topbarH}px">
@@ -2236,6 +2254,7 @@
         <button class="btn primary" onclick={restoreBisect} disabled={!!busy}>
           Restore my mod set
         </button>
+        <button class="btn" onclick={discardBisect} disabled={!!busy}>Discard</button>
         <button class="btn" onclick={() => (bisectRecovery = null)} disabled={!!busy}>
           Later
         </button>
@@ -2547,6 +2566,24 @@
       <button class="cn-act" onclick={changeModsFolder}>Choose another</button>
       <button class="cn-act" onclick={useGameFolder}>Use the game's folder</button>
     </div>
+  {:else if modsStatus?.layoutProblem}
+    <div class="cloud-notice">
+      <span class="cn-ico">⚠</span>
+      <div class="cn-text">
+        <b>Silo won't change files in this mods folder:</b>
+        <span class="tnum">{modsStatus.path}</span>. {modsStatus.layoutProblem}
+        {#if modsStatus.layoutConflict}
+          (<span class="tnum">{modsStatus.layoutConflict}</span>)
+        {/if}
+      </div>
+      {#if modsStatus.layoutProblemCause === "readError"}
+        <button class="cn-act" onclick={retryModsFolder}>Retry</button>
+      {/if}
+      {#if modsStatus.mismatch && modsStatus.canWriteGameSetting}
+        <button class="cn-act" onclick={pointGameHere}>Point FS25 here</button>
+      {/if}
+      <button class="cn-act" onclick={changeModsFolder}>Choose another</button>
+    </div>
   {:else if modsStatus?.modsFolderMissing}
     <div class="cloud-notice">
       <span class="cn-ico">ⓘ</span>
@@ -2630,7 +2667,7 @@
     </div>
   {/if}
 
-  {#if overrideNoticeOpen && modsStatus?.path}
+  {#if overrideNoticeOpen && modsStatus?.path && !modsStatus.layoutProblem}
     <div class="cloud-notice">
       <span class="cn-ico">ⓘ</span>
       <div class="cn-text">

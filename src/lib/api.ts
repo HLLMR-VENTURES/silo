@@ -95,6 +95,12 @@ export interface ModsRootStatus {
   canWriteGameSetting: boolean;
   gameSettingProblem: string | null;
   unresolvedOverride: string | null;
+  /** Why Silo won't change files in this folder (it shares files with another layout's archive). */
+  layoutProblem: string | null;
+  /** What causes it: an overlap, only FS25's own setting, or a database read that failed. */
+  layoutProblemCause: "overlap" | "gameSetting" | "readError" | null;
+  /** The folder it runs into, when known. */
+  layoutConflict: string | null;
 }
 
 export function modsRootStatus(): Promise<ModsRootStatus> {
@@ -125,6 +131,9 @@ export interface MoveMarker {
   errors: string[];
   /** techNames placed in `to` and not yet moved back. */
   moved: string[];
+  /** Category folders Silo created in `to`; a cancel removes the ones left empty. Absent on a
+   * marker from before Silo recorded them. */
+  created?: string[];
 }
 
 export interface ArchiveStatus {
