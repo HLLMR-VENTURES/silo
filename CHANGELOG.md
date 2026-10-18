@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Filing errors stay on screen.** When filing loose mods into the library failed (Organize,
+  auto-file, or turning off a loose mod), the rescan that followed cleared the error, so it never
+  showed. It now appears after the rescan. (#PR)
+
 ## [0.11.0] - 2026-10-17
 
 ### Added

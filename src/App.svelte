@@ -805,20 +805,24 @@
   async function applyLoose(inputs: ModInput[], techNames: string[], keepActive: boolean) {
     if (inputs.length === 0) return;
     busy = `Filing ${inputs.length} mod${inputs.length > 1 ? "s" : ""} into the library…`;
+    let problem: string | null = null;
     try {
       const rep = await applyOrganize(inputs);
       if (rep.errors.length) {
-        errorMsg = rep.errors.slice(0, 3).join("; ");
+        problem = rep.errors.slice(0, 3).join("; ");
       } else if (keepActive) {
         const next = new Set([...activeSet, ...techNames]);
         activeSet = next;
-        await applyActive([...next]);
+        const act = await applyActive([...next]);
+        if (act.errors.length) problem = act.errors.slice(0, 3).join("; ");
       }
     } catch (e) {
-      errorMsg = String(e);
+      problem = String(e);
     }
     busy = null;
     await runScan(false);
+    // runScan clears errorMsg: show what filing said after the scan's own problems.
+    if (problem) errorMsg = appendInfo(errorMsg, [problem]);
   }
 
   // Auto-filer (opt-in): file new mods and keep them active — no prompt, they chose it.
