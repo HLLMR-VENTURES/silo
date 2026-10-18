@@ -139,9 +139,9 @@
   --accent: #e3b23c;
   --accent-text: #8a5f12;
   --on-accent: #2a2a22;
-  --info: #2f6893;
+  --info: #2d6490; /* 4.5:1 on --info-soft under protanopia too */
   --success: #3f6529;
-  --warn-text: #94560a;
+  --warn-text: #905309; /* 4.5:1 on --warn-soft under deuteranopia too */
   --danger: #a63d2c;
   --on-danger: #ffffff;
   --earth: #8a6a45;

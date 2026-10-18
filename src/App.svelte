@@ -3275,7 +3275,6 @@
   {/snippet}
 
   {#snippet notices()}
-    <p class="sr-only" role="status">{scanSaid}</p>
     {#if scanning}
       <div
         class="progress"
@@ -3864,6 +3863,8 @@
 <ShortcutsDialog bind:open={shortcutsOpen} />
 <WhatsNew bind:open={whatsNewOpen} onclose={closeWhatsNew} onshowshortcuts={() => (shortcutsOpen = true)} />
 <ToastRegion />
+<!-- Scan start / finish for screen readers; outside the shell so F6 doesn't treat it as a notice. -->
+<p class="sr-only" role="status">{scanSaid}</p>
 
 <style>
   .busy {

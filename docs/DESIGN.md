@@ -74,9 +74,9 @@ below, never the raw ramps, so both themes come for free.
 | `--accent` | `#E3B23C` wheat | `#E3B23C` wheat | update dots, selection, "new" — a fill, never text in light |
 | `--accent-text` | `#8A5F12` | `#F2D26B` | the rare gold-toned text |
 | `--on-accent` | `#2A2A22` | `#2A2A22` | text on gold |
-| `--info` | `#2F6893` | `#8CBDE0` | neutral info, links, "syncing" |
+| `--info` | `#2D6490` | `#8CBDE0` | neutral info, links, "syncing" |
 | `--success` | `#3F6529` | `#9CC06E` | done, verified |
-| `--warn-text` | `#94560A` | `#F0B45C` | caution, out-of-date, soft conflict |
+| `--warn-text` | `#905309` | `#F0B45C` | caution, out-of-date, soft conflict |
 | `--danger` | `#A63D2C` | `#EE9481` | destructive, critical conflict |
 | `--on-danger` | `#FFFFFF` | `#1A0E0B` | text on danger |
 | `--focus` | `#2F5A1D` | `#F2D26B` | the focus ring |
