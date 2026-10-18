@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The silo mark.** Silo's own logo, a grain silo with the sun rising behind it, now sits in the
   top bar. (#224)
 
+- **Undo for loadout switches and deletes.** After you switch to a loadout, use a savegame's mods
+  or delete a loadout, a notice offers Undo, which puts your previous active mods or the deleted
+  loadout back. The notice waits while you're in another window or pointing at it. (#226)
+
 ### Changed
 
 - **Sharper text and better contrast.** Secondary text, warnings, links and buttons are easier to
@@ -29,7 +33,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Consistent icons.** Icons throughout the app now come from one set, the same icon always
   means the same thing, and buttons that show only an icon have a name for screen readers. (#224)
 
+- **Confirmations appear inside Silo.** Questions like "Delete this loadout?" or "Move your
+  library?" now open in Silo's own window, say what will happen and how to undo it, and have
+  buttons that name the action ("Delete", "Move library", "Switch") instead of OK. The question
+  Silo asks when you quit while it's still changing files stays a Windows dialog. (#226)
+
+- **Saving a loadout uses a proper name box.** "Save current active set as a loadout" opens a
+  dialog inside Silo instead of a browser-style text box, and tells you right there if the name
+  is empty. (#226)
+
+- **Switching loadouts shows what will change.** Before Silo switches to a loadout, or to a
+  savegame's mods, it shows how many mods turn on, how many are parked and how many aren't in
+  your library, with the list of mods. Cancel changes nothing. (#226)
+
 ### Fixed
+
+- **Overwriting a loadout asks first.** Saving your current mods over an existing loadout now
+  says how many mods it had and how many are added and removed, and waits for you to choose
+  Replace. Before, it replaced the loadout straight away. (#226)
+
+- **No more duplicate loadouts.** Saving a loadout under a name you already use now offers to
+  replace that loadout instead of quietly creating a second one with the same name. (#226)
 
 - **Filing errors stay on screen.** When filing loose mods into the library failed (Organize,
   auto-file, or turning off a loose mod), the rescan that followed cleared the error, so it never
