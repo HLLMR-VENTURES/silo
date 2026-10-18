@@ -17,6 +17,7 @@
   import { formatCount, plural } from "../../plural";
   import {
     droppedBuildFor,
+    normVersion,
     sourceLabel,
     versionChange,
     type UpdateSections,
@@ -24,9 +25,10 @@
   import type { ExplainedError } from "../../updates/run";
   import { UPDATE_PRIVACY_LINE } from "../../updates/autoCheck.svelte";
 
-  /** One row's install: running, or failed with the reason. */
+  /** One row's state: updating, failed with the reason, or (Couldn't check) checking again. */
   export type RowInstallState =
     | { phase: "installing" }
+    | { phase: "checking" }
     | { phase: "error"; message: string; detail: string };
 
   interface Props {
@@ -39,8 +41,10 @@
     rowStates: Record<string, RowInstallState>;
     /** Update all is running. */
     updatingAll: boolean;
-    /** Why installs are off (a library write is running), or "". */
+    /** Why installs are off (a library write or a check is running), or "". */
     lockReason: string;
+    /** Linked GitHub repos were checked even if the catalog didn't answer. */
+    hasLinkedRepos?: boolean;
     /** Why Check now is off, or "". */
     checkDisabledReason: string;
     /** Files in the mods folder at a mod's name that Silo didn't put there (saved from ModHub). */
@@ -64,6 +68,7 @@
     rowStates,
     updatingAll,
     lockReason,
+    hasLinkedRepos = false,
     checkDisabledReason,
     foreign,
     onCheck,
@@ -83,10 +88,23 @@
   );
   const n = (count: number) => formatCount(count);
   const isModHubPage = (url: string | null | undefined) => !!url && /farming-simulator\.com/i.test(url);
+
+  // Up to date and Not tracked start collapsed (this view visit).
+  let openUpToDate = $state(false);
+  let openNotTracked = $state(false);
 </script>
 
 {#snippet sectionHead(id: string, title: string, count: number)}
   <h2 class="sec-title" {id}>{title} <span class="count tnum">({n(count)})</span></h2>
+{/snippet}
+
+{#snippet foldHead(id: string, title: string, count: number, open: boolean, toggle: () => void)}
+  <h2 class="sec-title">
+    <button type="button" class="fold-btn" aria-expanded={open} aria-controls={`${id}-body`} onclick={toggle}>
+      <Icon name={open ? "chevronDown" : "chevronRight"} size={16} />
+      {title} <span class="count tnum">({n(count)})</span>
+    </button>
+  </h2>
 {/snippet}
 
 {#snippet copyButton(detail: string, name: string)}
@@ -112,7 +130,9 @@
         icon="cloud"
         level={2}
         title="Silo can't reach its catalog right now. Your library still works."
-        body="Linked GitHub mods were still checked. Try again in a moment."
+        body={hasLinkedRepos
+          ? "Linked GitHub mods were still checked. Try again in a moment."
+          : "Try again in a moment."}
         details={catalogError.detail}
       >
         {#snippet actions()}
@@ -139,7 +159,8 @@
             </Button>
           </span>
         </div>
-        {#if lockReason}<p class="reason" role="status">{lockReason}</p>{/if}
+        <!-- Always mounted, so screen readers announce the reason when it appears. -->
+        <p class="reason" role="status">{lockReason}</p>
         <ul class="rows">
           {#each s.ready as r (r.techName)}
             {@const st = rowStates[r.techName]}
@@ -157,7 +178,7 @@
               </div>
               <div class="acts">
                 {#if st?.phase === "installing"}
-                  <span class="busy" role="status">Installing…</span>
+                  <span class="busy" role="status">Updating…</span>
                 {:else if st?.phase === "error"}
                   <span use:tooltip={lockReason || null}>
                     <Button size="sm" icon="rescan" disabled={!!lockReason} aria-label={`Try again: update ${r.title}`} onclick={() => onInstall(r)}>
@@ -208,7 +229,7 @@
                   </span>
                 {/if}
                 {#if r.pageUrl}
-                  <Button size="sm" aria-label={`Open ${r.title} on ${isModHubPage(r.pageUrl) ? "ModHub" : "its page"}`} onclick={() => onOpenPage(r)}>
+                  <Button size="sm" aria-label={`${isModHubPage(r.pageUrl) ? "Open on ModHub" : "Open page"}: ${r.title}`} onclick={() => onOpenPage(r)}>
                     {isModHubPage(r.pageUrl) ? "Open on ModHub" : "Open page"} <Icon name="external" size={12} />
                   </Button>
                 {/if}
@@ -236,10 +257,10 @@
                 </div>
               </div>
               <div class="acts">
-                <Button size="sm" aria-label={`Open the page for ${c.title}`} onclick={() => onOpenSource(c)}>
+                <Button size="sm" aria-label={`Open page: ${c.title}`} onclick={() => onOpenSource(c)}>
                   Open page <Icon name="external" size={12} />
                 </Button>
-                <Button size="sm" variant="ghost" aria-label={`I checked ${c.title}`} onclick={() => onMarkChecked(c)}>
+                <Button size="sm" variant="ghost" aria-label={`I checked it: ${c.title}`} onclick={() => onMarkChecked(c)}>
                   I checked it
                 </Button>
               </div>
@@ -254,15 +275,18 @@
         <div class="sec-head">{@render sectionHead("up-failed", "Couldn't check", s.failed.length)}</div>
         <ul class="rows">
           {#each s.failed as r (r.techName)}
+            {@const rechecking = rowStates[r.techName]?.phase === "checking"}
             <li class="row">
               <div class="main">
                 <div class="name">{r.title}</div>
                 <p class="row-error"><Icon name="problem" size={14} /> {r.error}</p>
               </div>
               <div class="acts">
-                <Button size="sm" icon="rescan" disabled={checking} aria-label={`Try again: check ${r.title}`} onclick={() => onRecheck(r)}>
-                  Try again
-                </Button>
+                <span use:tooltip={checking ? "Wait for the check to finish." : null}>
+                  <Button size="sm" icon="rescan" loading={rechecking} disabled={checking || rechecking} aria-label={`Try again: check ${r.title}`} onclick={() => onRecheck(r)}>
+                    Try again
+                  </Button>
+                </span>
                 {#if r.errorDetail}{@render copyButton(r.errorDetail, r.title)}{/if}
               </div>
             </li>
@@ -272,33 +296,38 @@
     {/if}
 
     {#if s.upToDate.length > 0}
-      <details class="sec fold">
-        <summary><h2 class="sec-title">Up to date <span class="count tnum">({n(s.upToDate.length)})</span></h2></summary>
-        <ul class="rows compact">
-          {#each s.upToDate as r (r.techName)}
-            <li class="row">
-              <span class="name">{r.title}</span>
-              <span class="detail tnum">{r.current ?? r.latest ?? ""}</span>
-            </li>
-          {/each}
-        </ul>
-      </details>
+      <section class="sec fold">
+        {@render foldHead("up-current", "Up to date", s.upToDate.length, openUpToDate, () => (openUpToDate = !openUpToDate))}
+        {#if openUpToDate}
+          <ul class="rows compact" id="up-current-body">
+            {#each s.upToDate as r (r.techName)}
+              {@const v = r.current ?? r.latest}
+              <li class="row">
+                <span class="name">{r.title}</span>
+                <span class="detail tnum">{v ? normVersion(v) : ""}</span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
     {/if}
 
     {#if s.notTracked.length > 0}
-      <details class="sec fold">
-        <summary><h2 class="sec-title">Not tracked <span class="count tnum">({n(s.notTracked.length)})</span></h2></summary>
+      <section class="sec fold">
+        {@render foldHead("up-untracked", "Not tracked", s.notTracked.length, openNotTracked, () => (openNotTracked = !openNotTracked))}
         <p class="help">
           Silo's catalog doesn't know {plural(s.notTracked.length, { one: "this mod", other: "these mods" })}.
           If you got one from a website, save that page in the mod's details and Silo lists it under
           Check these yourself.
         </p>
-        <ul class="rows compact">
-          {#each s.notTracked as m (m.techName)}
-            <li class="row"><span class="name">{m.title}</span></li>
-          {/each}
-        </ul>
-      </details>
+        {#if openNotTracked}
+          <ul class="rows compact" id="up-untracked-body">
+            {#each s.notTracked as m (m.techName)}
+              <li class="row"><span class="name">{m.title}</span></li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
     {/if}
   {/if}
 </div>
@@ -418,11 +447,18 @@
     font-size: var(--fs-sm);
     color: var(--success);
   }
-  .fold summary {
+  .fold-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
     cursor: pointer;
-    list-style-position: inside;
   }
-  .fold summary::marker {
-    color: var(--text-muted);
+  .reason:empty {
+    margin: 0;
   }
 </style>

@@ -254,3 +254,23 @@ export function updateAllSummary(res: UpdateAllResult, why: (e: unknown) => stri
     .join(" ");
   return { tone: ok > 0 ? "warn" : "danger", message, body };
 }
+
+/** What the check/install guards read: Update all and each row's state. */
+export interface InstallActivity {
+  updatingAll: boolean;
+  rowStates: Record<string, { phase: string }>;
+}
+
+/**
+ * Why a new check can't start now, or "": a check replaces every row, so it waits while an
+ * update is installing (its row would lose its state and its "updated" mark).
+ */
+export function checkBlockedReason(a: InstallActivity): string {
+  const installing = a.updatingAll || Object.values(a.rowStates).some((s) => s.phase === "installing");
+  return installing ? "Wait for the updates to finish." : "";
+}
+
+/** Why Update / Update all can't run while a check is running, or "". */
+export function installBlockedReason(checking: boolean): string {
+  return checking ? "Wait for the check to finish." : "";
+}

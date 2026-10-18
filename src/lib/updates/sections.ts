@@ -15,6 +15,8 @@ export interface LibraryModLike {
   techName: string;
   title?: string | null;
   version?: string | null;
+  /** Where the mod's file is now (Organize or auto-file can move it after a check). */
+  path?: string;
 }
 
 /** A mod Silo's catalog doesn't know, with no linked repo and no saved page. */
@@ -46,9 +48,27 @@ export const NO_SECTIONS: UpdateSections = {
   notTracked: [],
 };
 
-/** A version as compared for "already installed": no leading "v", no surrounding space. */
-function normVersion(v: string): string {
+/** A version as compared and shown: no leading "v", no surrounding space. */
+export function normVersion(v: string): string {
   return v.trim().replace(/^v(?=\d)/i, "");
+}
+
+/**
+ * Whether version `a` is newer than `b`, comparing dot-separated numbers ("1.0.10.0" > "1.0.9.0";
+ * missing parts count as 0). Versions that aren't plain numbers are never called newer.
+ * @param a candidate
+ * @param b baseline
+ */
+export function isNewerVersion(a: string, b: string): boolean {
+  const parse = (v: string) => normVersion(v).split(".").map((p) => (/^\d+$/.test(p) ? Number(p) : NaN));
+  const x = parse(a);
+  const y = parse(b);
+  if (x.some(Number.isNaN) || y.some(Number.isNaN)) return false;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d !== 0) return d > 0;
+  }
+  return false;
 }
 
 /**
@@ -88,9 +108,11 @@ export function groupUpdates(opts: {
     notTracked: [],
   };
   const answered = new Set<string>(opts.checkYourself.map((r) => r.techName));
-  for (const row of opts.rows) {
-    const mod = byTech.get(row.techName);
+  for (const checked of opts.rows) {
+    const mod = byTech.get(checked.techName);
     if (!mod) continue;
+    // Install from where the file is now, not where it was at check time.
+    const row = mod.path && mod.path !== checked.path ? { ...checked, path: mod.path } : checked;
     if (typeof row.hasUpdate !== "boolean") {
       if (row.error) {
         out.failed.push(row);
@@ -136,8 +158,9 @@ export function updatesBadge(s: UpdateSections, checked: boolean): number | unde
 }
 
 /**
- * The file in the mods folder that's a different build of a ModHub row's mod (the zip the user
- * saved from the page), when it differs from Silo's copy.
+ * The file in the mods folder that's a newer build of a ModHub row's mod (the zip the user saved
+ * from the page): the version the check found, or anything newer than the installed one. An older
+ * or same build (a rollback, a multiplayer server's copy) isn't offered as "newer".
  * @param row a Download from ModHub row
  * @param foreign files at a managed mod's name that Silo didn't put there
  */
@@ -147,7 +170,8 @@ export function droppedBuildFor(row: UpdateRow, foreign: ForeignFile[]): Foreign
       (f) =>
         f.techName === row.techName &&
         !!f.flatVersion &&
-        (!f.managedVersion || normVersion(f.flatVersion) !== normVersion(f.managedVersion)),
+        ((!!row.latest && normVersion(f.flatVersion) === normVersion(row.latest)) ||
+          isNewerVersion(f.flatVersion, f.managedVersion ?? row.current ?? "")),
     ) ?? null
   );
 }

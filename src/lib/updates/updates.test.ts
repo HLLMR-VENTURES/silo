@@ -13,11 +13,20 @@ import {
   lastCheckedText,
   newDroppedBuilds,
   droppedKey,
+  isNewerVersion,
   sourceLabel,
   updatesBadge,
   versionChange,
 } from "./sections";
-import { runUpdateCheck, updateAll, updateAllSummary, type WriteToken } from "./run";
+import {
+  checkBlockedReason,
+  installBlockedReason,
+  recheckRow,
+  runUpdateCheck,
+  updateAll,
+  updateAllSummary,
+  type WriteToken,
+} from "./run";
 import {
   answerAutoCheckOffer,
   AUTO_CHECK_KEY,
@@ -100,6 +109,26 @@ describe("groupUpdates", () => {
     expect(updatesBadge(none, true)).toBeUndefined();
   });
 
+  it("the badge drops when a ModHub build was used (the library now has that version)", () => {
+    const hubRow = rows[1];
+    const before = groupUpdates({ mods, rows: [hubRow], checkYourself: [], catalogReached: true });
+    expect(updatesBadge(before, true)).toBe(1);
+    const adopted = mods.map((m) => (m.techName === "B_Hub" ? { ...m, version: "1.1.0.0" } : m));
+    const after = groupUpdates({ mods: adopted, rows: [hubRow], checkYourself: [], catalogReached: true });
+    expect(updatesBadge(after, true)).toBeUndefined();
+    expect(after.upToDate.map((r) => r.techName)).toEqual(["B_Hub"]);
+  });
+
+  it("installs from where the file is now (Organize may have moved it since the check)", () => {
+    const s = groupUpdates({
+      mods: [{ ...mod("X"), path: "C:/mods/archive/Tractors/X.zip" }],
+      rows: [row("X", { hasUpdate: true, assetUrl: "https://x/x.zip" })],
+      checkYourself: [],
+      catalogReached: true,
+    });
+    expect(s.ready[0].path).toBe("C:/mods/archive/Tractors/X.zip");
+  });
+
   it("treats 'v1.1.0.0' as the same version as '1.1.0.0'", () => {
     const s = groupUpdates({
       mods: [mod("X", "v1.1.0.0")],
@@ -150,10 +179,58 @@ describe("ModHub dropped builds", () => {
     expect(newDroppedBuilds([hub], [file("1.0.3.0")], seen)).toHaveLength(1);
   });
 
-  it("ignores the same build as Silo's copy, and other mods", () => {
+  it("ignores the same build as Silo's copy, an older one, and other mods", () => {
     expect(droppedBuildFor(hub, [file("1.0.0.0")])).toBeNull();
+    // A rollback or a multiplayer server's older copy is never offered as "newer".
+    expect(droppedBuildFor(hub, [file("0.9.0.0")])).toBeNull();
+    expect(droppedBuildFor(hub, [file("1.0.0.0", "1.0.2.0")])).toBeNull();
     expect(droppedBuildFor(hub, [file(null)])).toBeNull();
     expect(droppedBuildFor(hub, [{ ...file("2.0"), techName: "Other" }])).toBeNull();
+  });
+});
+
+describe("isNewerVersion", () => {
+  it("compares dotted numbers, ignoring a leading v", () => {
+    expect(isNewerVersion("1.0.10.0", "1.0.9.0")).toBe(true);
+    expect(isNewerVersion("v1.2", "1.1.9.9")).toBe(true);
+    expect(isNewerVersion("1.0", "1.0.0.0")).toBe(false);
+    expect(isNewerVersion("0.9", "1.0")).toBe(false);
+    expect(isNewerVersion("1.0-beta", "0.1")).toBe(false);
+  });
+});
+
+describe("guards", () => {
+  it("a check waits while an update installs; installs wait while a check runs", () => {
+    expect(checkBlockedReason({ updatingAll: false, rowStates: {} })).toBe("");
+    expect(checkBlockedReason({ updatingAll: true, rowStates: {} })).toBe("Wait for the updates to finish.");
+    expect(checkBlockedReason({ updatingAll: false, rowStates: { A: { phase: "installing" } } })).not.toBe("");
+    expect(checkBlockedReason({ updatingAll: false, rowStates: { A: { phase: "error" } } })).toBe("");
+    expect(installBlockedReason(true)).toBe("Wait for the check to finish.");
+    expect(installBlockedReason(false)).toBe("");
+  });
+});
+
+describe("recheckRow", () => {
+  const explain = (e: unknown) => ({ message: `why: ${String(e)}`, detail: "d" });
+  const failed = row("C", { hasUpdate: undefined, error: "old reason" });
+
+  it("fills the row in when the repo answers", async () => {
+    const next = await recheckRow(failed, mod("C"), { owner: "o", repo: "c" }, {
+      checkRepo: async () => ({ hasUpdate: true, current: "1.0.0.0", release: { tag: "2.0", assetUrl: "https://gh/c.zip" } as never }),
+      explain,
+    });
+    expect(next).toMatchObject({ hasUpdate: true, latest: "2.0", assetUrl: "https://gh/c.zip", error: undefined });
+  });
+
+  it("keeps it in Couldn't check with the new reason when it fails again", async () => {
+    const next = await recheckRow(failed, mod("C"), { owner: "o", repo: "c" }, {
+      checkRepo: async () => {
+        throw "still down";
+      },
+      explain,
+    });
+    expect(next).toMatchObject({ error: "why: still down", errorDetail: "d" });
+    expect(next.hasUpdate).toBeUndefined();
   });
 });
 

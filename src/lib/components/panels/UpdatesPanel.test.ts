@@ -100,7 +100,7 @@ describe("UpdatesPanel", () => {
       { ready: [row("A", { assetUrl: "https://x/a.zip" })] },
       { rowStates: { A: { phase: "installing" } }, updatingAll: true },
     );
-    expect(screen.getByText("Installing…")).toBeInTheDocument();
+    expect(screen.getByText("Updating…")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Update all 1/ })).toBeDisabled();
   });
 
@@ -112,7 +112,7 @@ describe("UpdatesPanel", () => {
     });
     const h = setup({ modhub: [hub] });
     expect(screen.queryByRole("button", { name: /Use this version/ })).toBeNull();
-    await h.user.click(screen.getByRole("button", { name: "Open Lizard R-Series on ModHub" }));
+    await h.user.click(screen.getByRole("button", { name: "Open on ModHub: Lizard R-Series" }));
     expect(h.onOpenPage).toHaveBeenCalledWith(hub);
   });
 
@@ -139,21 +139,39 @@ describe("UpdatesPanel", () => {
     expect(h.onRecheck).toHaveBeenCalledWith(c);
   });
 
-  it("Up to date and Not tracked start collapsed; Not tracked explains itself", () => {
-    setup({
-      upToDate: [row("D", { hasUpdate: false })],
+  it("Up to date and Not tracked start collapsed; Not tracked explains itself", async () => {
+    const h = setup({
+      upToDate: [row("D", { hasUpdate: false, current: "v1.2.0" })],
       notTracked: [{ techName: "E", title: "Some map" }],
     });
-    const folds = document.querySelectorAll("details");
-    expect(folds).toHaveLength(2);
-    folds.forEach((d) => expect(d.open).toBe(false));
-    expect(within(folds[1] as HTMLElement).getByText(/save that page in the mod's details/)).toBeInTheDocument();
+    const upToDate = screen.getByRole("button", { name: /Up to date \(1\)/ });
+    const untracked = screen.getByRole("button", { name: /Not tracked \(1\)/ });
+    expect(upToDate).toHaveAttribute("aria-expanded", "false");
+    expect(untracked).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Some map")).toBeNull();
+    expect(screen.getByText(/save that page in the mod's details/)).toBeInTheDocument();
+    await h.user.click(upToDate);
+    expect(upToDate).toHaveAttribute("aria-expanded", "true");
+    // Versions show without a "v".
+    expect(within(document.getElementById("up-current-body")!).getByText("1.2.0")).toBeInTheDocument();
+    await h.user.click(untracked);
+    expect(screen.getByText("Some map")).toBeInTheDocument();
     expect(screen.getByText(/Every mod Silo can check is up to date/)).toBeInTheDocument();
+  });
+
+  it("Couldn't check: Try again shows it's checking and can't be pressed twice", () => {
+    setup(
+      { failed: [row("C", { hasUpdate: undefined, error: "No answer." })] },
+      { rowStates: { C: { phase: "checking" } } },
+    );
+    expect(screen.getByRole("button", { name: "Try again: check C" })).toBeDisabled();
   });
 
   it("a catalog that didn't answer says so, with Try again", async () => {
     const h = setup({}, { catalogError: { message: "Silo can't reach the internet right now.", detail: "Code: NET_OFFLINE" } });
     expect(screen.getByText(/Silo can't reach its catalog right now/)).toBeInTheDocument();
+    // Nothing linked: it doesn't claim GitHub mods were checked.
+    expect(screen.queryByText(/Linked GitHub mods/)).toBeNull();
     await h.user.click(screen.getByRole("button", { name: "Try again" }));
     expect(h.onCheck).toHaveBeenCalledOnce();
   });

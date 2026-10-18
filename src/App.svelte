@@ -125,6 +125,8 @@
     updatesBadge,
   } from "./lib/updates/sections";
   import {
+    checkBlockedReason,
+    installBlockedReason,
     recheckRow,
     runUpdateCheck,
     updateAll,
@@ -1613,9 +1615,11 @@
   let updateRowStates = $state<Record<string, RowInstallState>>({});
   let updatingAll = $state(false);
   // Mods with a saved page that this check couldn't answer: the user checks those by hand.
-  const checkYourself = $derived(
-    updateChecking ? [] : checkYourselfList(mods, sourceMap, updateResults),
-  );
+  const checkYourself = $derived(checkYourselfList(mods, sourceMap, updateResults));
+  /** Why Check now is off while an update installs (a check replaces every row), or "". */
+  const updateCheckBlocked = $derived(checkBlockedReason({ updatingAll, rowStates: updateRowStates }));
+  /** Why Update / Update all are off: a library write, or a check that's running. */
+  const updateInstallLock = $derived(fgLock.reason || installBlockedReason(updateChecking));
   const linkedCount = $derived(Object.keys(repoMap).length);
   // The Updates view's sections. A mod updated since the check (by Silo, or a ModHub zip the user
   // used) drops out of the "newer version" sections, so the badge and filters stay accurate.
@@ -1654,20 +1658,19 @@
     explain: explainUpdateError,
   };
 
+  // The last check's rows stay up (and the badge with them) until the new check is done.
   async function checkAllUpdates(quiet = false) {
     if (!quiet) go("updates");
-    if (updateChecking) return;
+    if (updateChecking || updateCheckBlocked) return;
     updateChecking = true;
-    updateResults = [];
-    updateRowStates = {};
     updateProgress = null;
     try {
       const res = await runUpdateCheck(mods, repoMap, {
         ...updateCheckDeps,
-        onRows: (rows) => (updateResults = rows),
         onProgress: (done, total) => (updateProgress = { done, total }),
       });
       updateResults = res.rows;
+      updateRowStates = {};
       updateCatalogError = res.catalogError;
       updateCheckedAt = Date.now();
     } finally {
@@ -1680,9 +1683,14 @@
   async function recheckUpdate(row: UpdateRow) {
     const m = mods.find((x) => x.techName === row.techName);
     const r = repoMap[row.techName];
-    if (!m || !r) return;
-    const next = await recheckRow(row, m, r, updateCheckDeps);
-    updateResults = updateResults.map((x) => (x.techName === row.techName ? next : x));
+    if (!m || !r || updateChecking || updateRowStates[row.techName]) return;
+    setRowState(row.techName, { phase: "checking" });
+    try {
+      const next = await recheckRow(row, m, r, updateCheckDeps);
+      updateResults = updateResults.map((x) => (x.techName === row.techName ? next : x));
+    } finally {
+      setRowState(row.techName, null);
+    }
   }
 
   async function copyDetailsText(text: string) {
@@ -1718,7 +1726,7 @@
   }
 
   async function installFromRow(row: UpdateRow) {
-    if (!row.assetUrl) return;
+    if (!row.assetUrl || updateChecking) return;
     const op = beginWrite(`Updating ${row.title}`);
     if (!op) return;
     setRowState(row.techName, { phase: "installing" });
@@ -1760,7 +1768,7 @@
   // header, then one summary toast. No confirm: each update keeps the previous version in backups.
   async function updateAllReady() {
     const rows = updateSections.ready.filter((r) => r.assetUrl);
-    if (rows.length === 0 || updatingAll) return;
+    if (rows.length === 0 || updatingAll || updateChecking) return;
     updatingAll = true;
     try {
       const res = await updateAll(rows, {
@@ -1788,6 +1796,10 @@
   const announcedDrops = new Set<string>();
   $effect(() => {
     const arrivals = newDroppedBuilds(updateSections.modhub, foreignFiles, announcedDrops);
+    // Untracked: showing a toast mustn't make this effect depend on the toast list.
+    untrack(() => announceDrops(arrivals));
+  });
+  function announceDrops(arrivals: ReturnType<typeof newDroppedBuilds>) {
     for (const { row, file } of arrivals) {
       announcedDrops.add(droppedKey(file));
       toast({
@@ -1799,6 +1811,17 @@
         },
       });
     }
+  }
+
+  // The opt-in startup check: once the first scan has filled the library (a queued or skipped
+  // scan resolves before that), and a moment later so the window settles first. Only checks.
+  let startupCheckPending = $state(false);
+  $effect(() => {
+    if (!startupCheckPending || !libraryScanned || scanning || mods.length === 0) return;
+    startupCheckPending = false;
+    setTimeout(() => {
+      if (updateCheckedAt == null) void checkAllUpdates(true);
+    }, 3000);
   });
 
   const availableUpdates = $derived(availableRows(updateSections));
@@ -2818,17 +2841,11 @@
       } catch {
         /* non-critical */
       }
-      const firstScan = roots.length ? runScan() : null;
+      if (roots.length) runScan();
       // Checking for mod updates at startup is opt-in (Settings > General, offered once in
-      // Updates): it sends mod names to the catalog. It waits for the first scan, then a moment
-      // more so the window settles first. It only checks; nothing is installed.
-      if (firstScan && autoCheckEnabled()) {
-        void firstScan.then(() =>
-          setTimeout(() => {
-            if (mods.length && !updateChecking) void checkAllUpdates(true);
-          }, 3000),
-        );
-      }
+      // Updates): it sends mod names to the catalog. It runs after the first scan (see
+      // startupCheckPending) and only checks; nothing is installed.
+      if (roots.length && autoCheckEnabled()) startupCheckPending = true;
       // Detect a cloud-synced mods folder (OneDrive / Google Drive / Proton Drive): those reject
       // hardlinks, so Silo projects the active set as copies. Warn once so the extra disk use and
       // slower bulk changes aren't a mystery — and so "Optimize links" can explain itself.
@@ -3559,8 +3576,10 @@
         checking={updateChecking}
         checkedAt={updateCheckedAt}
         progress={updateProgress}
-        checkDisabled={!!fgLock.reason || updateChecking || mods.length === 0}
-        checkDisabledReason={fgLock.reason || (mods.length === 0 ? "No mods to check yet." : "")}
+        checkDisabled={!!fgLock.reason || !!updateCheckBlocked || updateChecking || mods.length === 0}
+        checkDisabledReason={fgLock.reason ||
+          updateCheckBlocked ||
+          (mods.length === 0 ? "No mods to check yet." : "")}
         oncheck={() => checkAllUpdates()}
       >
         <UpdatesPanel
@@ -3570,8 +3589,11 @@
           catalogError={updateCatalogError}
           rowStates={updateRowStates}
           {updatingAll}
-          lockReason={fgLock.reason}
-          checkDisabledReason={fgLock.reason || (mods.length === 0 ? "No mods to check yet." : "")}
+          lockReason={updateInstallLock}
+          checkDisabledReason={fgLock.reason ||
+            updateCheckBlocked ||
+            (mods.length === 0 ? "No mods to check yet." : "")}
+          hasLinkedRepos={linkedCount > 0}
           foreign={foreignFiles}
           onCheck={() => checkAllUpdates()}
           onInstall={installFromRow}
