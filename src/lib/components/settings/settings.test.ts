@@ -8,7 +8,14 @@ import MaintenanceSettings from "./MaintenanceSettings.svelte";
 import LibrarySettings from "./LibrarySettings.svelte";
 import ModsFolderSettings from "./ModsFolderSettings.svelte";
 import GeneralSettings from "./GeneralSettings.svelte";
+import DiagnosticsSettings from "./DiagnosticsSettings.svelte";
+import { openKnownFolder } from "../../api";
 import { MOVE_UNFINISHED_REASON, rereadLock, SCANNING_REASON, settingsLock } from "./lock";
+
+vi.mock("../../api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api")>()),
+  openKnownFolder: vi.fn(() => Promise.resolve()),
+}));
 
 describe("settingsLock", () => {
   it("is off with no reason when nothing runs", () => {
@@ -162,5 +169,22 @@ describe("GeneralSettings", () => {
     await user.click(screen.getByRole("radio", { name: "Dark" }));
     expect(onSetTheme).toHaveBeenCalledWith("dark");
     expect(screen.getByLabelText("UI size")).toHaveValue("1");
+  });
+});
+
+describe("DiagnosticsSettings", () => {
+  it("Open log folder asks Rust for the logs folder; a failure shows under the card", async () => {
+    const user = userEvent.setup();
+    const onCopyDiagnostics = vi.fn();
+    render(DiagnosticsSettings, { onCopyDiagnostics, onExportReport: vi.fn() });
+    await user.click(screen.getByRole("button", { name: "Open log folder" }));
+    expect(openKnownFolder).toHaveBeenCalledWith("logs");
+
+    vi.mocked(openKnownFolder).mockRejectedValueOnce("That folder isn't there right now.");
+    await user.click(screen.getByRole("button", { name: "Open log folder" }));
+    expect(await screen.findByText(/That folder isn't there right now\./)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Copy diagnostics" }));
+    expect(onCopyDiagnostics).toHaveBeenCalledOnce();
   });
 });
