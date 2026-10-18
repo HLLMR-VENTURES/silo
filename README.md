@@ -68,8 +68,8 @@ and loadouts you can switch between playthroughs.
   game's flat folder right away (hardlinks for zips, junctions/symlinks for folder mods, copies
   where links aren't allowed, such as cloud-synced folders). Launch just starts the game.
   Organize files your zips into a local archive and shows every move before it touches a
-  file; *Restore vanilla layout* puts every mod back in your mods folder, where the game
-  loads all of them again.
+  file; *Undo organizing* (Settings → Maintenance) puts every mod back in your mods folder,
+  where the game loads all of them again.
 - **Any mods folder** — follows FS25's own mods-folder override, or pick any folder in
   Settings; Silo can point the game at it too (backing up `gameSettings.xml`) and keeps each
   folder's organized library separately.
@@ -119,7 +119,7 @@ npm run tauri:build   # produce an installer in src-tauri/target/release/bundle/
   The [privacy policy](docs/legal/privacy-policy.md) lists every connection.
 - **Undoable, and it owns what it touches** — it files your mods into a local archive and
   links the active set into the game. Organize shows every move before it touches a file;
-  *Restore vanilla layout* puts every mod back in your mods folder. It only ever removes files
+  *Undo organizing* puts every mod back in your mods folder. It only ever removes files
   it put there itself (a copied folder mod you edited goes to `backups/` instead), and it backs
   up settings and savegames before editing them.
 - **Verifiable** — the integrity check compares an installed mod to the build its source

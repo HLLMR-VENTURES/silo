@@ -1,7 +1,6 @@
 <script lang="ts" module>
-  export const DISCUSSIONS_URL = "https://github.com/HLLMR/silo/discussions";
-  export const DISCORD_URL = "https://discord.gg/NpxcYdGHrW";
-  export const NEW_ISSUE_URL = "https://github.com/HLLMR/silo/issues/new/choose";
+  import { DISCORD_URL, DISCUSSIONS_URL, NEW_ISSUE_URL } from "../links";
+  export { DISCORD_URL, DISCUSSIONS_URL, NEW_ISSUE_URL };
 </script>
 
 <script lang="ts">

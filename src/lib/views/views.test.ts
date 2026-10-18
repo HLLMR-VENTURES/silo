@@ -11,6 +11,7 @@ import LibraryView from "./LibraryView.svelte";
 import ModSetsView from "./ModSetsView.svelte";
 import DiagnoseView from "./DiagnoseView.svelte";
 import ToolsView from "./ToolsView.svelte";
+import SettingsView from "./SettingsView.svelte";
 import UpdatesView from "./UpdatesView.svelte";
 import HelpView, { DISCORD_URL, DISCUSSIONS_URL, NEW_ISSUE_URL } from "./HelpView.svelte";
 import { go, nav, resetNav, VIEW_IDS } from "../state/nav.svelte";
@@ -181,6 +182,66 @@ describe("ToolsView", () => {
     go("tools", "graphics");
     await tick();
     expect(screen.getByText("Graphics body")).toBeInTheDocument();
+  });
+});
+
+describe("SettingsView", () => {
+  const props = () => ({
+    generalTab: stub("General body"),
+    modsFolderTab: stub("Mods folder body"),
+    libraryTab: stub("Library body"),
+    accountsTab: createRawSnippet(() => ({
+      render: () => `<section id="settings-accounts" tabindex="-1">GitHub card</section>`,
+    })),
+    diagnosticsTab: stub("Diagnostics body"),
+    maintenanceTab: stub("Maintenance body"),
+    aboutTab: stub("About body"),
+  });
+
+  it("has the seven sections as tabs and opens on General", () => {
+    render(SettingsView, props());
+    expect(screen.getByRole("heading", { level: 2, name: "Settings" })).toBeInTheDocument();
+    expect(screen.getAllByRole("tab").map((t) => t.textContent?.trim())).toEqual([
+      "General",
+      "Mods folder",
+      "Library",
+      "Accounts",
+      "Diagnostics",
+      "Maintenance",
+      "About",
+    ]);
+    expect(screen.getByText("General body")).toBeInTheDocument();
+  });
+
+  it("clicking a tab shows its section and sets nav.tab.settings, without focusing the section", async () => {
+    const user = userEvent.setup();
+    render(SettingsView, props());
+    await user.click(screen.getByRole("tab", { name: "Maintenance" }));
+    expect(screen.getByText("Maintenance body")).toBeInTheDocument();
+    expect(screen.queryByText("General body")).toBeNull();
+    expect(nav.tab.settings).toBe("maintenance");
+    await user.click(screen.getByRole("tab", { name: "Accounts" }));
+    await tick();
+    await tick();
+    expect(screen.getByText("GitHub card")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Accounts" })).toHaveFocus();
+  });
+
+  it("nav.tab.settings = 'accounts' opens Accounts", async () => {
+    render(SettingsView, props());
+    nav.tab.settings = "accounts";
+    await tick();
+    expect(screen.getByRole("tab", { name: "Accounts" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("GitHub card")).toBeInTheDocument();
+  });
+
+  it("go('settings', 'accounts') opens Accounts and focuses the GitHub card, once", async () => {
+    render(SettingsView, props());
+    go("settings", "accounts");
+    await tick();
+    await tick();
+    expect(screen.getByText("GitHub card")).toHaveFocus();
+    expect(nav.tab.settings).toBe("accounts"); // the tab stays (it isn't cleared any more)
   });
 });
 
