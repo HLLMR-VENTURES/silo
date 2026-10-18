@@ -106,7 +106,6 @@
       <span class="knob"></span>
     </button>
     <span class="tc-state" class:on={active}>{active ? "Active" : "Parked"}</span>
-    {#if organized && !active}<span class="tc-parked">parked</span>{/if}
     <span class="tc-sp"></span>
     {#if hasSettings}
       <button class="tc-gear" onclick={stop(onOpenSettings)} title="Edit this mod's settings" aria-label="Edit this mod's settings"><Icon name="modSettings" /></button>
@@ -285,13 +284,6 @@
   }
   .tc-state.on {
     color: var(--primary-text);
-  }
-  .tc-parked {
-    font-size: var(--fs-xs);
-    color: var(--text-muted);
-    background: color-mix(in srgb, var(--text-muted) 12%, transparent);
-    border-radius: 999px;
-    padding: 1px 8px;
   }
   .tc-sp {
     flex: 1 1 auto;
