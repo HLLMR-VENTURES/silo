@@ -5,7 +5,7 @@
 // Typed backend errors carry a `code`; older commands still reject with a bare string, which
 // classifyMessage() maps from the OS error number or a few well-known phrases.
 
-import { toAppError } from "./errors";
+import { AppError, toAppError } from "./errors";
 
 /** The technical side of an error, for "Copy details" and the activity log. */
 export interface ErrorDetail {
@@ -23,6 +23,10 @@ export interface DescribedError {
   code: string;
   /** The sentence shown to the user. Empty when `silent`. */
   title: string;
+  /** A second line under the title: the raw message, when an error Silo has no copy for
+   *  (UNKNOWN) already reads as a sentence meant for people. Otherwise absent (the raw text
+   *  stays behind "Copy details"). */
+  body?: string;
   detail: ErrorDetail;
   /** Trying the same thing again can work (show "Try again" when a retry is offered). */
   retryable: boolean;
@@ -176,6 +180,25 @@ function copyFor(code: ErrorCode, message: string, op: string): string {
 
 const KNOWN: ReadonlySet<string> = new Set(ERROR_CODES);
 
+/** Longest raw message shown as a body line. */
+export const HUMAN_COPY_MAX = 240;
+
+/**
+ * Whether a raw error message reads as copy written for people ("Close FS25 first.") rather
+ * than technical text: no OS error number, no `Error:` prefix, no stack-trace lines, not just a
+ * path, at most HUMAN_COPY_MAX characters.
+ * @param msg the raw message
+ */
+export function looksLikeHumanCopy(msg: string): boolean {
+  const m = msg.trim();
+  if (!m || m.length > HUMAN_COPY_MAX) return false;
+  if (/\(os error\b/i.test(m)) return false;
+  if (/^[\w.]*error:/i.test(m)) return false;
+  if (/^\s*at\s/m.test(m)) return false;
+  if (!/\s/.test(m) && /[\\/]/.test(m)) return false; // a bare path
+  return true;
+}
+
 /**
  * Turn any thrown value into what the user sees.
  * @param e a thrown value (AppError, `{code, message}`, string, Error...)
@@ -190,9 +213,15 @@ export function describeError(e: unknown, op?: string): DescribedError {
   else if (KNOWN.has(raw)) code = raw as ErrorCode;
   else code = "UNKNOWN"; // OTHER, or a code this build doesn't know yet
   const opText = op ?? "";
+  // Only for messages Silo's backend wrote (strings, `{code, message}`, AppError): a JS Error is
+  // a bug's own words ("Cannot read properties of undefined"), never shown as copy.
+  const fromCode = !(e instanceof Error) || e instanceof AppError;
+  const body =
+    code === "UNKNOWN" && fromCode && looksLikeHumanCopy(err.message) ? err.message.trim() : undefined;
   return {
     code,
     title: copyFor(code, err.message, opText),
+    ...(body !== undefined ? { body } : {}),
     detail: {
       code: raw ?? code,
       message: err.message,

@@ -2,6 +2,7 @@
   // Filltype compatibility bridge: generate a companion mod that adds a custom fill type
   // into the categories your equipment accepts — the "nothing can haul my sugar beets" fix.
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import { generateBridge } from "../api";
   import { blocked, tryStart } from "../state/ops.svelte";
 
@@ -86,7 +87,7 @@
       });
       done = filename;
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Generating the bridge mod");
     } finally {
       generating = false;
       op.end();

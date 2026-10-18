@@ -5,6 +5,7 @@
   // auto-detected from the log). The player's real mod set is snapshotted first and
   // restored on finish/cancel — nothing here is destructive.
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import { onDestroy } from "svelte";
   import {
     bisectPlan,
@@ -93,7 +94,7 @@
       await advance([...pool]);
     } catch (e) {
       if (destroyed) return abandon();
-      error = String(e);
+      error = inlineError(e, "Starting the diagnosis");
       phase = "error";
     } finally {
       working = null;
@@ -127,7 +128,7 @@
     try {
       await launchGame();
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Launching the game");
       phase = "error";
     } finally {
       working = null;
@@ -156,7 +157,7 @@
       if (destroyed) return;
       await advance(next);
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Narrowing down the suspects");
       phase = "error";
     } finally {
       working = null;
@@ -185,7 +186,7 @@
     if (!r.ok) {
       // Stay open with the message (and any culprit still on screen); ✕ or the restore
       // button retries. Closing the panel instead leaves the snapshot for App's banner.
-      if (!destroyed) error = r.error;
+      if (!destroyed) error = inlineError(r.error, "Restoring your mods");
       return;
     }
     started = false;

@@ -3,6 +3,7 @@
   // your set against a friend's — turning FS's "mod mismatch" join error into a fix-list.
   // (Sharing curated mod sets as a link lives in Collections, a separate panel.)
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import { mpExport, mpVerify } from "../api";
   import type { MpModRef, MpVerifyReport } from "../types";
   import { start } from "../state/ops.svelte";
@@ -44,7 +45,7 @@
         const n = await mpExport(active);
         if (n != null) note = `Saved a manifest of ${n} mods. Share the .silomp file with your group.`;
       } catch (e) {
-        error = String(e);
+        error = inlineError(e, "Saving the multiplayer manifest");
       }
     });
   }
@@ -57,7 +58,7 @@
       try {
         report = await mpVerify(active);
       } catch (e) {
-        error = String(e);
+        error = inlineError(e, "Comparing mod sets");
       }
     });
   }

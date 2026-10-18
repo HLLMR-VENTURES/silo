@@ -1,3 +1,4 @@
+import type { Notice } from "./state/notify.svelte";
 import type { ModsRootStatus } from "./api";
 
 /**
@@ -42,4 +43,110 @@ export async function switchBlockReason(
   if (await hasBisectSnapshot())
     return "Finish or cancel the guided bisection first — it belongs to this folder.";
   return null;
+}
+
+// ── Notices (#228) ──
+// The mods-folder conditions, in the order the old banners checked them: at most one of
+// unavailable / blocked / not created yet is up (key `mods-folder`); FS25 reading another folder
+// (key `override`) only when none of those is; "Silo now follows FS25's folder" (key
+// `override-followed`) on its own.
+
+export const MODS_FOLDER_KEY = "mods-folder";
+export const OVERRIDE_KEY = "override";
+export const OVERRIDE_FOLLOWED_KEY = "override-followed";
+
+export interface ModsFolderActions {
+  retry: () => void | Promise<void>;
+  chooseAnother: () => void | Promise<void>;
+  useGameFolder: () => void | Promise<void>;
+  pointGameHere: () => void | Promise<void>;
+  createFolder: () => void | Promise<void>;
+  /** The "Silo now follows FS25's folder" notice was dismissed. */
+  dismissFollowed: () => void;
+}
+
+export interface ModsFolderNotices {
+  modsFolder: Notice | null;
+  override: Notice | null;
+  followed: Notice | null;
+}
+
+/**
+ * The mods-folder notices for a status.
+ * @param st the status, or null before the first read
+ * @param followedOpen the one-time "Silo now uses FS25's folder" notice hasn't been dismissed
+ */
+export function modsFolderNotices(
+  st: ModsRootStatus | null,
+  followedOpen: boolean,
+  a: ModsFolderActions,
+): ModsFolderNotices {
+  const out: ModsFolderNotices = { modsFolder: null, override: null, followed: null };
+  if (st && st.source === "user" && !st.available) {
+    out.modsFolder = {
+      key: MODS_FOLDER_KEY,
+      level: "blocking",
+      title: `Your mods folder isn't available: ${st.path}.`,
+      body: "Nothing was scanned. Reconnect the drive, or pick another folder.",
+      actions: [
+        { label: "Try again", run: a.retry, primary: true },
+        { label: "Choose another", run: a.chooseAnother },
+        { label: "Use the game's folder", run: a.useGameFolder },
+      ],
+      dismissible: false,
+    };
+  } else if (st?.layoutProblem) {
+    out.modsFolder = {
+      key: MODS_FOLDER_KEY,
+      level: "blocking",
+      title: `Silo won't change files in this mods folder: ${st.path}.`,
+      body: st.layoutProblem + (st.layoutConflict ? ` (${st.layoutConflict})` : ""),
+      actions: [
+        ...(st.layoutProblemCause === "readError"
+          ? [{ label: "Try again", run: a.retry, primary: true }]
+          : []),
+        ...(st.mismatch && st.canWriteGameSetting
+          ? [{ label: "Point FS25 here", run: a.pointGameHere }]
+          : []),
+        { label: "Choose another", run: a.chooseAnother },
+      ],
+      dismissible: false,
+    };
+  } else if (st?.modsFolderMissing) {
+    out.modsFolder = {
+      key: MODS_FOLDER_KEY,
+      level: "warning",
+      icon: "info",
+      title: "Farming Simulator hasn't created its mods folder yet.",
+      actions: [
+        { label: "Create it", run: a.createFolder, primary: true },
+        { label: "Choose a folder", run: a.chooseAnother },
+      ],
+      dismissible: false,
+    };
+  } else if (st?.mismatch) {
+    out.override = {
+      key: OVERRIDE_KEY,
+      level: "warning",
+      title: `FS25 is reading a different mods folder${st.gameReads ? ` (${st.gameReads})` : ""}.`,
+      body: "Mods you activate here won't load in-game.",
+      actions: [
+        ...(st.canWriteGameSetting
+          ? [{ label: "Point FS25 here", run: a.pointGameHere, primary: true }]
+          : []),
+        { label: "Switch Silo to the game's folder", run: a.useGameFolder },
+      ],
+      dismissible: false,
+    };
+  }
+  if (followedOpen && st?.path && !st.layoutProblem) {
+    out.followed = {
+      key: OVERRIDE_FOLLOWED_KEY,
+      level: "info",
+      title: `Silo now uses the mods folder FS25 is set to: ${st.path}.`,
+      dismissible: true,
+      onDismiss: a.dismissFollowed,
+    };
+  }
+  return out;
 }

@@ -2,6 +2,7 @@
   // "Where it came from" (#196): the page the user downloaded this mod from. Silo only keeps
   // the address. It never requests the page; Open page hands it to the user's browser.
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import type { ModEntry, SourceRow } from "../types";
   import { setModSource, getModSources, markSourceChecked, openExternal } from "../api";
   import { sourceHost, checkedDate } from "../sources";
@@ -53,7 +54,7 @@
       editing = false;
       draft = "";
     } catch (e) {
-      err = String(e);
+      err = inlineError(e, "Saving the source page");
     }
     saving = false;
   }
@@ -65,7 +66,7 @@
       await setModSource(mod.techName, null);
       onSourceChange(null);
     } catch (e) {
-      err = String(e);
+      err = inlineError(e, "Removing the source page");
     }
   }
 
@@ -76,7 +77,7 @@
       const at = await markSourceChecked(source.techName);
       onSourceChange({ ...source, lastChecked: at });
     } catch (e) {
-      err = String(e);
+      err = inlineError(e, "Saving the check date");
     }
   }
 

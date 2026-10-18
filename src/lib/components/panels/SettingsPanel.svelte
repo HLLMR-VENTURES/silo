@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "../../ui/Icon.svelte";
+  import { inlineError } from "../../state/notify.svelte";
   import { onMount } from "svelte";
   import type { GameInfo } from "../../types";
   import { openKnownFolder, secretStorageSecure } from "../../api";
@@ -105,7 +106,7 @@
   let openErr = $state<{ which: OpenTarget; msg: string } | null>(null);
   function openFolder(which: OpenTarget) {
     openErr = null;
-    openKnownFolder(which).catch((e) => (openErr = { which, msg: String(e) }));
+    openKnownFolder(which).catch((e) => (openErr = { which, msg: inlineError(e, "Opening the folder") }));
   }
   function sourceLabel(s: ModsRootStatus["source"]): string {
     return s === "user"

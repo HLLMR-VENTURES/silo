@@ -4,6 +4,7 @@
   // for review. A view, not a verdict — reused inputs are usually legitimate context
   // bindings, so we surface them and let the player decide.
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import { onMount } from "svelte";
   import { scanBindings } from "../api";
   import type { BindingReport } from "../types";
@@ -48,7 +49,7 @@
     try {
       report = await scanBindings();
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Reading your key bindings");
       report = null;
     } finally {
       loading = false;

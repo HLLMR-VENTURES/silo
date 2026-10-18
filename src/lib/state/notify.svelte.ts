@@ -8,6 +8,7 @@
 //   Activity: everything above lands in `activity` (re-exported from ./activity.svelte).
 // Copy for errors comes from describeError() in src/lib/errorCopy.ts.
 
+import { untrack } from "svelte";
 import { logFrontendError } from "../api";
 import { describeError, formatDetail } from "../errorCopy";
 import type { IconName } from "../ui/icons";
@@ -34,6 +35,9 @@ export interface NoticeAction {
   label: string;
   run: () => void | Promise<void>;
   primary?: boolean;
+  /** Off for now (e.g. a library write is running); `title` says why. */
+  disabled?: boolean;
+  title?: string;
 }
 
 export interface Notice {
@@ -46,6 +50,8 @@ export interface Notice {
   actions?: NoticeAction[];
   dismissible: boolean;
   icon?: IconName;
+  /** Called after the user dismisses it (its close button), e.g. to remember that. */
+  onDismiss?: () => void;
 }
 
 export interface NoticeEntry extends Notice {
@@ -96,8 +102,26 @@ export function clearNotice(key: string): void {
   pushActivity({ kind: "notice", level: NOTICE_ACTIVITY[n.level], message: n.title });
 }
 
-/** The user dismissed a notice (its close button). Same as clearNotice. */
-export const dismissNotice = clearNotice;
+/**
+ * The user dismissed a notice (its close button): clearNotice, then its `onDismiss`.
+ * @param key the notice's key
+ */
+export function dismissNotice(key: string): void {
+  const n = notices.find((x) => x.key === key);
+  clearNotice(key);
+  n?.onDismiss?.();
+}
+
+/**
+ * Raise, update or clear a notice from an `$effect` that tracks the condition behind it. The
+ * notice list itself isn't tracked, so the effect reruns only when its own condition changes.
+ *   $effect(() => syncNotice("cloud", cloudNoticeOpen ? { level: "warning", ... } : null));
+ * @param key the notice's key
+ * @param n the notice to show, or null when the condition is over
+ */
+export function syncNotice(key: string, n: Omit<Notice, "key"> | null): void {
+  untrack(() => (n ? setNotice({ ...n, key }) : clearNotice(key)));
+}
 
 function byPriority(a: NoticeEntry, b: NoticeEntry): number {
   return RANK[b.level] - RANK[a.level] || b.at - a.at || b.seq - a.seq;
@@ -150,10 +174,11 @@ export function error(
   const retry = opts.retry;
   return toast({
     message: d.title,
+    body: d.body,
     tone: "danger",
     sticky: true,
     detail: formatDetail(d.detail),
-    dedupeKey: `${d.code}\u0000${d.title}`,
+    dedupeKey: `${d.code}\u0000${d.title}\u0000${d.body ?? ""}`,
     action:
       retry && d.retryable
         ? { label: "Try again", ariaLabel: `Try again: ${d.title}`, run: retry }
@@ -177,10 +202,30 @@ export function reportError(
   void logFrontendError("error", `${op}: ${d.detail.message}`, d.detail.code);
   if (d.silent) return;
   if (opts.quiet) {
-    pushActivity({ kind: "toast", level: "error", message: d.title, detail: formatDetail(d.detail) });
+    pushActivity({
+      kind: "toast",
+      level: "error",
+      message: d.body ? `${d.title} ${d.body}` : d.title,
+      detail: formatDetail(d.detail),
+    });
     return;
   }
   error(e, { op, retry: opts.retry });
+}
+
+/**
+ * For a failure a view shows in place (its own error line) instead of as a toast: logs it like
+ * `reportError(e, op, { quiet: true })` (the activity list keeps the details) and returns the
+ * copy to show. Empty for silent codes.
+ *   } catch (e) { error = inlineError(e, "Loading the catalog"); }
+ * @param e the thrown value
+ * @param op what Silo was doing ("Loading the catalog")
+ */
+export function inlineError(e: unknown, op: string): string {
+  reportError(e, op, { quiet: true });
+  const d = describeError(e, op);
+  if (d.silent) return "";
+  return d.body ? `${d.title} ${d.body}` : d.title;
 }
 
 /**

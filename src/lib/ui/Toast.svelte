@@ -93,10 +93,13 @@
   {onfocusout}
 >
   <span class="icon"><Icon name={ICON[item.tone]} size={16} /></span>
-  <p class="message">
-    {item.message}
-    {#if item.count > 1}<span class="count" title="Happened {item.count} times">×{item.count}</span>{/if}
-  </p>
+  <div class="text">
+    <p class="message">
+      {item.message}
+      {#if item.count > 1}<span class="count" title="Happened {item.count} times">×{item.count}</span>{/if}
+    </p>
+    {#if item.body}<p class="body">{item.body}</p>{/if}
+  </div>
   <span class="controls" use:inertWhen={$modalOpen}>
     {#if item.detail}
       <Button size="sm" variant="ghost" onclick={copyDetails}>{copied ? "Copied" : "Copy details"}</Button>
@@ -153,13 +156,24 @@
   .tone-danger .icon {
     color: var(--danger);
   }
-  .message {
+  .text {
     flex: 1;
-    margin: 0;
     min-width: 0;
+  }
+  .message {
+    margin: 0;
     font-size: var(--fs-sm);
     line-height: var(--lh-sm);
     overflow-wrap: anywhere;
+  }
+  .body {
+    margin: var(--sp-1) 0 0;
+    color: var(--muted);
+    font-size: var(--fs-xs);
+    line-height: var(--lh-sm);
+    overflow-wrap: anywhere;
+    /* Several reasons arrive one per line. */
+    white-space: pre-line;
   }
 
   .count {

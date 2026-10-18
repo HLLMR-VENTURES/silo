@@ -57,7 +57,13 @@
     {#if n.actions?.length}
       <div class="actions">
         {#each ordered(n.actions) as a (a.label)}
-          <Button size="sm" variant={a.primary ? "primary" : "secondary"} onclick={() => run(a)}>
+          <Button
+            size="sm"
+            variant={a.primary ? "primary" : "secondary"}
+            disabled={a.disabled}
+            title={a.title}
+            onclick={() => run(a)}
+          >
             {a.label}
           </Button>
         {/each}

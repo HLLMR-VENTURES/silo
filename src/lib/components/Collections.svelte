@@ -4,6 +4,7 @@
   // Unlike Multiplayer sync (which matches your ACTIVE set to a host's for a session),
   // Collections are about sharing groups of mods, independent of any session.
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import {
     collectionExport,
     collectionImportPreview,
@@ -92,7 +93,7 @@
     try {
       myColls = await collectionsList();
     } catch (e) {
-      myErr = String(e);
+      myErr = inlineError(e, "Loading your collections");
     } finally {
       myLoading = false;
     }
@@ -133,7 +134,7 @@
         updatedNote = null;
       }, 4000);
     } catch (e) {
-      myErr = String(e);
+      myErr = inlineError(e, "Updating the collection");
     } finally {
       updatingRef = null;
     }
@@ -156,7 +157,7 @@
       await collectionDelete(c.kind, c.reference);
       myColls = myColls.filter((x) => x.reference !== c.reference);
     } catch (e) {
-      myErr = String(e);
+      myErr = inlineError(e, "Deleting the collection");
     } finally {
       deletingRef = null;
     }
@@ -172,7 +173,7 @@
       shareResult = await collectionExport(collName.trim(), null, sharePublic, active);
       void loadMyCollections();
     } catch (e) {
-      shareErr = String(e);
+      shareErr = inlineError(e, "Sharing the collection");
     } finally {
       shareBusy = false;
     }
@@ -252,7 +253,7 @@
       plan = await collectionImportPreview(importUrl.trim(), installed);
       await computePreflight(plan);
     } catch (e) {
-      importErr = String(e);
+      importErr = inlineError(e, "Opening the collection link");
     } finally {
       importBusy = false;
     }
@@ -286,7 +287,7 @@
       applyReport = await collectionApply(importUrl.trim(), installed, fingerprint);
       applied = true;
     } catch (e) {
-      importErr = String(e);
+      importErr = inlineError(e, "Adding the collection's mods");
     } finally {
       applyBusy = false;
       applyProgress = null;

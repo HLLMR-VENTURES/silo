@@ -22,6 +22,8 @@ export interface ToastAction {
 
 export interface ToastOptions {
   message: string;
+  /** A second line under the message (an error's own words, a list of reasons). */
+  body?: string;
   tone?: ToastTone;
   action?: ToastAction;
   /** Milliseconds on screen (time paused doesn't count). Default 6000, or 10000 with an action. */
@@ -37,6 +39,7 @@ export interface ToastOptions {
 export interface ToastItem {
   id: number;
   message: string;
+  body?: string;
   tone: ToastTone;
   action?: ToastAction;
   duration: number;
@@ -93,12 +96,13 @@ export function toast(opts: ToastOptions): ToastHandle {
   const activityId = pushActivity({
     kind: "toast",
     level: LEVEL[tone],
-    message: opts.message,
+    message: opts.body ? `${opts.message} ${opts.body}` : opts.message,
     detail: opts.detail,
   });
   toasts.push({
     id,
     message: opts.message,
+    body: opts.body,
     tone,
     action: opts.action,
     duration: opts.duration ?? (opts.action ? 10_000 : 6_000),

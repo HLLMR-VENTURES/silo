@@ -2,6 +2,7 @@
   // The "Browse" tab: discover mods from the canonical SiloAPI catalog, see which
   // you already have, and install new ones straight into the library.
   import { onMount, onDestroy } from "svelte";
+  import { inlineError } from "../state/notify.svelte";
   import {
     browseMods,
     siloapiStats,
@@ -185,7 +186,7 @@
     try {
       detail = await siloapiModDetail(m.id);
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Loading the mod's details");
     } finally {
       detailLoading = false;
     }
@@ -237,7 +238,7 @@
       lastPageFull = page.mods.length === PAGE;
       setBrowseView(key, { results, total, lastPageFull });
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Loading the catalog");
       results = [];
       total = 0;
       lastPageFull = false;
@@ -285,7 +286,7 @@
         lastPageFull,
       });
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Loading more mods");
     } finally {
       loadingMore = false;
     }
@@ -312,7 +313,7 @@
       filename = await installRemoteMod(m.id, source);
       installedNote = `Installed ${filename}`;
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Installing the mod");
     } finally {
       installing = null;
       const { [m.id]: _drop, ...rest } = progress;

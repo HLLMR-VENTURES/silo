@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import { getConfig, setConfig } from "../api";
   import type { CfgField, CfgPreset } from "../configSchemas";
 
@@ -29,7 +30,7 @@
       orig = got;
       vals = { ...got };
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Reading the settings file");
     }
     loading = false;
   }
@@ -52,7 +53,7 @@
       saved = true;
       setTimeout(() => (saved = false), 1800);
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Saving the settings file");
     }
   }
 </script>

@@ -4,6 +4,7 @@
   // land on GitHub's servers — Silo only reflects the state back. Nothing is stored on
   // our side. See SiloAPI docs/ENRICHMENT.md "scope boundary".
   import Icon from "../ui/Icon.svelte";
+  import { inlineError } from "../state/notify.svelte";
   import { ghRepoStats, ghStar, ghWatch, openExternal } from "../api";
   import type { RepoStats } from "../types";
 
@@ -33,7 +34,7 @@
     try {
       stats = await ghRepoStats(owner, repo);
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Loading GitHub stats");
     } finally {
       loading = false;
     }
@@ -62,7 +63,7 @@
       stats.youStarred = next;
       stats.stars += next ? 1 : -1;
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Starring the repo");
     } finally {
       pending = "";
     }
@@ -79,7 +80,7 @@
       stats.youWatching = next;
       stats.watchers += next ? 1 : -1;
     } catch (e) {
-      error = String(e);
+      error = inlineError(e, "Watching the repo");
     } finally {
       pending = "";
     }
