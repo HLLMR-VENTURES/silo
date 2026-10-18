@@ -63,7 +63,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Parking a loose mod explains itself.** The first time you park a mod Silo hasn't filed yet, it
   says it moves the mod into your library folder (it stays in your library) and asks, with
-  "Don't explain this again". Parking several loose mods at once files them the same way. (#242)
+  "Don't explain this again". (#242)
+
+- **Parking several mods that include loose ones always says it moves files.** Park from the
+  selection bar with mods Silo hasn't filed yet among them, and one dialog says how many are filed
+  into your library folder (each into its category folder in archive), lists them, and notes when
+  the library folder is on another drive; it asks every time ("Don't explain this again" only
+  covers parking one mod) and replaces the separate "more than 25" question. The loose mods are
+  filed first; if Silo is busy, nothing changes. If some couldn't be filed, the toast says so
+  ("Parked 5 mods, but 2 couldn't be filed.") and Undo still puts them back. (#242)
+
+- **Focus stays put in the Library.** When the mod you were on is filtered out, focus moves to the
+  mod now in its place; clearing the selection puts focus back on your row; removing the last
+  filter chip moves it to Filters; switching between list and cards keeps your place. The
+  selection bar is one Tab stop, with ←/→ between its buttons, and each row is named with its
+  state ("Courseplay, active"). Favorite / Hide on many mods only shows what was saved, and says
+  how many couldn't be. (#242)
 
 - **Library toolbar.** The row of six filter buttons and the "Active" select-all checkbox are
   replaced by the filters above and the selection bar; empty states now offer what to do next
@@ -79,7 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same rules. (#242)
 
 - **Wider Library and Browse on large screens.** On a wide window the Library and Browse grow to
-  1920px instead of 1280px: the Library shows three tiles across and Browse more cards per row,
+  1920px instead of 1280px: the Library shows three cards across and Browse more cards per row,
   instead of wide empty margins. Other pages keep their width. (#238)
 
 - **Clearer status text.** Messages, hints and tooltips read as plain sentences ("Links are

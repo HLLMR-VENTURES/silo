@@ -5,6 +5,9 @@
   //     onfavorite={...} onhide={...} onselectall={...} onclear={() => sel.clear()} />
   // Turn on / Park are off (with the reason as the tooltip) while another library change runs.
   // Favorite / Hide flip to Remove favorite / Unhide when every selected mod already is one.
+  // A toolbar: one Tab stop, ←/→ (and Home/End) move between its buttons, skipping turned-off
+  // ones. `bind:ref` gives the bar's element (App hands focus on when the bar goes away).
+  import { tick } from "svelte";
   import Button from "../../ui/Button.svelte";
   import { tooltip } from "../../ui/tooltip";
 
@@ -25,6 +28,8 @@
     onhide: (on: boolean) => void;
     onselectall: () => void;
     onclear: () => void;
+    /** The bar's element (bindable). */
+    ref?: HTMLElement | null;
   }
 
   let {
@@ -40,10 +45,50 @@
     onhide,
     onselectall,
     onclear,
+    ref = $bindable(null),
   }: Props = $props();
+
+  /** The buttons that can take focus, in order. */
+  function buttons(): HTMLButtonElement[] {
+    return [...(ref?.querySelectorAll<HTMLButtonElement>("button") ?? [])].filter((b) => !b.disabled);
+  }
+  /** Make `stop` (else the current stop, else the first button) the one Tab stop. */
+  function rove(stop?: Element | null) {
+    const bs = buttons();
+    const cur = bs.find((b) => b === stop) ?? bs.find((b) => b.tabIndex === 0) ?? bs[0];
+    for (const b of bs) b.tabIndex = b === cur ? 0 : -1;
+  }
+  // Buttons turn on and off (a write starts, everything gets selected): keep one stop on.
+  $effect(() => {
+    void [writeReason, allShownSelected, allFavorite, allHidden, ref];
+    void tick().then(() => rove());
+  });
+  function onkeydown(e: KeyboardEvent) {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const bs = buttons();
+    const i = bs.findIndex((b) => b === document.activeElement);
+    if (i < 0 || bs.length === 0) return;
+    let to: number;
+    if (e.key === "ArrowRight") to = (i + 1) % bs.length;
+    else if (e.key === "ArrowLeft") to = (i - 1 + bs.length) % bs.length;
+    else if (e.key === "Home") to = 0;
+    else if (e.key === "End") to = bs.length - 1;
+    else return;
+    e.preventDefault();
+    rove(bs[to]);
+    bs[to].focus();
+  }
 </script>
 
-<div class="bulk" role="toolbar" aria-label="Selected mods">
+<div
+  class="bulk"
+  role="toolbar"
+  aria-label="Selected mods"
+  tabindex="-1"
+  bind:this={ref}
+  {onkeydown}
+  onfocusin={(e) => rove(e.target as Element)}
+>
   <span class="count tnum" aria-live="polite">{count} selected</span>
   <span class="sep" aria-hidden="true">·</span>
   <span class="group" use:tooltip={writeReason || null}>

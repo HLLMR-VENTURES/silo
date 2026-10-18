@@ -180,7 +180,9 @@
     type FilterContext,
     type LibraryFilters,
   } from "./lib/components/library/filters";
-  import { bulkChanges, confirmBulkChange } from "./lib/components/library/bulk";
+  import { saveEach } from "./lib/components/library/bulk";
+  import { onOtherDrive, runBulkSwitch } from "./lib/components/library/bulkSwitch";
+  import { focusInside, returnFocusWhenHidden } from "./lib/components/library/focusReturn.svelte";
   import { createParkLooseExplainer } from "./lib/components/library/parkLoose";
   import BulkBar from "./lib/components/library/BulkBar.svelte";
   import ActiveFilters from "./lib/components/library/ActiveFilters.svelte";
@@ -1118,12 +1120,10 @@
     if (wasRunning && !bisectRecovery) await runScan(false);
   }
 
+  /** The path separator the dialogs show. */
+  const pathSep = typeof navigator !== "undefined" && /Win/i.test(navigator.userAgent) ? "\\" : "/";
   /** Before parking a loose mod: explain once that it's filed into the library (parkLoose.ts). */
-  const explainParkLoose = createParkLooseExplainer(
-    askWithOption,
-    undefined,
-    typeof navigator !== "undefined" && /Win/i.test(navigator.userAgent) ? "\\" : "/",
-  );
+  const explainParkLoose = createParkLooseExplainer(askWithOption, undefined, pathSep);
 
   /** The organize input that files a loose mod into the library as it is. */
   function looseInput(mod: ModEntry): ModInput {
@@ -1146,6 +1146,12 @@
     // back on the next scan). To park it, file it into the library (flat→archive, no re-project):
     // it leaves the live folder but stays in the library. Reversible — toggling it on re-projects.
     if (turningOff && mod && isFileable(mod)) {
+      // Refuse first: don't explain something that can't happen now.
+      const busy = writeRefusal();
+      if (busy) {
+        refuse(busy);
+        return;
+      }
       if (!(await explainParkLoose(name, mod.category))) return;
       const previous = [...activeSet];
       const filed = await applyLoose([looseInput(mod)], [mod.techName], false, false, () =>
@@ -1800,7 +1806,38 @@
     saveLibraryDensity(d);
   }
   // The rendered list or grid, so the drawer can hand focus back to the row it was opened from.
-  let libList = $state<{ focusKey: (key: string) => boolean }>();
+  let libList = $state<{
+    focusKey: (key: string) => boolean;
+    showKey: (key: string) => boolean;
+    currentKey: () => string | null;
+    focusCurrent: () => boolean;
+  }>();
+  /** The list or grid's element wrapper, the BulkBar and the toolbar, for handing focus on. */
+  let listBodyEl = $state<HTMLElement | null>(null);
+  let bulkBarEl = $state<HTMLElement | null>(null);
+  let libToolbar = $state<{ focusFilters: () => boolean; focusFirst: () => boolean }>();
+  /** A row's accessible name: its title and state ("Courseplay, active"). */
+  const rowLabel = (m: ModEntry) => `${m.title ?? m.techName}, ${activeSet.has(m.techName) ? "active" : "parked"}`;
+  // List ↔ cards: the new view starts on the mod the old one was on (focused if focus was in it,
+  // else just scrolled to and made the tab stop).
+  let shownView = untrack(() => libView);
+  let pendingViewKey: { key: string; focus: boolean } | null = null;
+  $effect.pre(() => {
+    const v = libView;
+    if (v === shownView) return;
+    shownView = v;
+    untrack(() => {
+      const key = libList?.currentKey() ?? null;
+      pendingViewKey = key ? { key, focus: focusInside(listBodyEl) } : null;
+    });
+  });
+  $effect(() => {
+    const l = libList; // re-bound to the new view's list once it mounts
+    if (!l || !pendingViewKey) return;
+    const p = pendingViewKey;
+    pendingViewKey = null;
+    untrack(() => (p.focus ? l.focusKey(p.key) : l.showKey(p.key)));
+  });
   const modKey = (m: ModEntry) => m.path;
   // ── Multi-select (lib/state/selection): keys are mod paths, in the order of `visible` ──
   const selection = new Selection();
@@ -1866,88 +1903,105 @@
     const keys = new Set(visibleKeys);
     untrack(() => selection.prune(keys));
   });
-  /** Esc in the list clears the selection (unless an overlay above it takes Esc first). */
+  /** Esc in the list (unless an overlay above it takes Esc first): the first clears the
+   *  selection; with nothing selected, it closes the mod drawer (focus stays in the list). */
   function onListKeydown(e: KeyboardEvent) {
-    if (e.key !== "Escape" || e.defaultPrevented || selection.size === 0 || layerCount() > 0) return;
-    e.preventDefault();
-    selection.clear();
+    if (e.key !== "Escape" || e.defaultPrevented || layerCount() > 0) return;
+    if (selection.size > 0) {
+      e.preventDefault();
+      selection.clear();
+    } else if (detailMod) {
+      e.preventDefault();
+      detailMod = null;
+    }
+  }
+  // The BulkBar goes when the selection clears (Clear, Esc, a filter pruning it): if it had focus,
+  // focus goes to the list's row, else the toolbar's first control.
+  returnFocusWhenHidden(
+    () => selection.size > 0,
+    () => bulkBarEl,
+    () => {
+      if (!libList?.focusCurrent()) libToolbar?.focusFirst();
+    },
+  );
+
+  /**
+   * Why a library write can't start now (what beginWrite would say), or null. Checked before a
+   * dialog, so the user isn't asked about something that would then be refused.
+   */
+  function writeRefusal(): string | null {
+    if (archiveMove.unfinished && !archiveMove.running) return MOVE_UNFINISHED_COPY;
+    const b = blocked("library-write");
+    return b.blocked ? `${b.reason} Try again when it's done.` : null;
   }
 
   /**
-   * BulkBar Turn on / Park: switch the selected mods through the bulk activation path. More than
-   * 25 changes ask first; loose mods being parked are filed into the library (as one switch
-   * does); then the switch toast offers Undo.
+   * BulkBar Turn on / Park (the sequence and its dialogs are in library/bulkSwitch.ts): loose mods
+   * being parked are filed into the library first, always after a dialog that says so; the rest
+   * switch through the projection; then the switch toast offers Undo.
    * @param list the mods to switch
    * @param on true to turn them on, false to park them
    */
   async function setActiveForMods(list: ModEntry[], on: boolean) {
-    // How many mods this actually changes (already-correct ones are free).
-    const changing = bulkChanges(list, on, activeSet);
-    if (changing.length === 0) {
-      toast({ message: on ? "They're already on." : "They're already parked." });
-      return;
-    }
-    // Switching many mods at once moves a lot of files — and on a cloud-synced folder each one is
-    // a copy or delete, not a cheap link. Confirm a big change so it's not an accidental
-    // gigabytes-long operation.
-    if (!(await confirmBulkChange(changing.length, on, cloudSynced, ask))) return;
-    // Loose mods can't be parked by set_active (they're the user's own files): they're filed.
-    const loose = on ? [] : changing.filter(isFileable);
-    if (loose.length > 0) {
-      const one = loose.length === 1;
-      const what = one ? (loose[0].title ?? loose[0].techName) : modsCount(loose.length);
-      if (!(await explainParkLoose(what, one ? loose[0].category : "<category>"))) return;
-    }
-    const looseSet = new Set(loose.map((m) => m.techName));
-    const projected = changing.filter((m) => !looseSet.has(m.techName));
-    const previous = [...activeSet];
-    let clean = true;
-    let applied = false;
-    if (projected.length > 0) {
-      const op = beginWrite(on ? "Activating mods" : "Deactivating mods");
-      if (!op) return;
-      switchUndo.dismiss();
-      const next = new Set(activeSet);
-      for (const m of projected) {
-        if (on) next.add(m.techName);
-        else next.delete(m.techName);
-      }
-      activeSet = next;
-      let problem: unknown = null;
-      try {
-        const rep = await applyActive([...next]); // reports its own problems
-        clean = rep.errors.length === 0;
-        applied = true;
-      } catch (e) {
-        problem = e;
-      } finally {
-        op.end();
-      }
-      // Reconcile the optimistic set against what's actually on disk — a partial/failed
-      // projection (e.g. a file Silo couldn't prove was its own) leaves the two out of sync.
-      await runScan(false);
-      if (problem !== null) {
-        reportError(problem, on ? "Activating mods" : "Deactivating mods");
-        return;
-      }
-    }
-    if (loose.length > 0) {
-      const filed = await applyLoose(loose.map(looseInput), [...looseSet], false, false, () =>
-        switchUndo.dismiss(),
-      );
-      // Refused, or it failed (reported): with nothing else switched there's nothing to undo.
-      if (filed !== true && !applied) return;
-      if (filed !== true) clean = false;
-    }
-    switchUndo.offer({
-      message: switchMessage(
-        changing.map((m) => m.title ?? m.techName),
-        on,
-        clean,
-      ),
-      tone: clean ? "neutral" : "warn",
-      previous,
-      expected: [...activeSet],
+    const archive = archiveMove.archive;
+    await runBulkSwitch(list, on, {
+      active: () => activeSet,
+      isLoose: isFileable,
+      busy: writeRefusal,
+      cloudSynced,
+      archiveOnOtherDrive: !!archive && !archive.isDefault && onOtherDrive(archive.path, roots[0]),
+      sep: pathSep,
+      ask,
+      explain: (name, category) => explainParkLoose(name, category),
+      fileLoose: async (techNames) => {
+        // Built from the scan as it is now (as Try again does): mods filed meanwhile are skipped.
+        const wanted = new Set(techNames);
+        const fresh = looseInputs();
+        const inputs = fresh.inputs.filter((i) => wanted.has(i.techName));
+        if (inputs.length === 0) return true;
+        return await applyLoose(
+          inputs,
+          fresh.techNames.filter((t) => wanted.has(t)),
+          false,
+          false,
+          () => switchUndo.dismiss(),
+        );
+      },
+      stillLoose: (techNames) => {
+        const wanted = new Set(techNames);
+        return effectiveMods.filter((m) => wanted.has(m.techName) && isFileable(m)).length;
+      },
+      applyProjected: async (techNames, turnOn) => {
+        const op = beginWrite(turnOn ? "Activating mods" : "Deactivating mods");
+        if (!op) return null;
+        switchUndo.dismiss();
+        const next = new Set(activeSet);
+        for (const t of techNames) {
+          if (turnOn) next.add(t);
+          else next.delete(t);
+        }
+        activeSet = next;
+        let problem: unknown = null;
+        let clean = true;
+        try {
+          const rep = await applyActive([...next]); // reports its own problems
+          clean = rep.errors.length === 0;
+        } catch (e) {
+          problem = e;
+        } finally {
+          op.end();
+        }
+        // Reconcile the optimistic set against what's actually on disk — a partial/failed
+        // projection (e.g. a file Silo couldn't prove was its own) leaves the two out of sync.
+        await runScan(false);
+        if (problem !== null) {
+          reportError(problem, turnOn ? "Activating mods" : "Deactivating mods");
+          return "failed";
+        }
+        return clean;
+      },
+      toast,
+      offerUndo: (o) => switchUndo.offer(o),
     });
   }
 
@@ -1960,18 +2014,23 @@
   async function setCurationFor(list: ModEntry[], flag: "favorite" | "hidden", value: boolean) {
     const before = list.map((m) => cur(m.techName)).filter((c) => c[flag] !== value);
     if (before.length === 0) return;
+    /** Save each row; only the saved ones show their new flag. */
     const write = async (rows: CurationRow[]) => {
-      curationMap = { ...curationMap, ...Object.fromEntries(rows.map((r) => [r.techName, r])) };
-      for (const r of rows) await setCuration(r);
+      const res = await saveEach(rows, (r) => setCuration(r));
+      if (res.written.length)
+        curationMap = { ...curationMap, ...Object.fromEntries(res.written.map((r) => [r.techName, r])) };
+      return res;
     };
-    try {
-      await write(before.map((c) => ({ ...c, [flag]: value })));
-    } catch (e) {
-      reportError(e, "Saving your mod flags");
+    const res = await write(before.map((c) => ({ ...c, [flag]: value })));
+    if (res.written.length === 0) {
+      reportError(res.error, "Saving your mod flags");
       return;
     }
-    const n = modsCount(before.length);
-    const message =
+    if (res.failed.length) reportError(res.error, "Saving your mod flags", { quiet: true });
+    const savedNames = new Set(res.written.map((r) => r.techName));
+    const changed = before.filter((c) => savedNames.has(c.techName));
+    const n = modsCount(changed.length);
+    let message =
       flag === "favorite"
         ? value
           ? `Added ${n} to favorites.`
@@ -1979,17 +2038,18 @@
         : value
           ? `Hid ${n}.`
           : `Unhid ${n}.`;
+    if (res.failed.length) message += ` Couldn't update ${modsCount(res.failed.length)}.`;
     toast({
       message,
+      tone: res.failed.length ? "warn" : "neutral",
       action: {
         label: "Undo",
         run: async () => {
-          try {
-            // Put back each mod's flag as it was, leaving its other flags as they are now.
-            await write(before.map((c) => ({ ...cur(c.techName), [flag]: c[flag] })));
-          } catch (e) {
-            reportError(e, "Saving your mod flags");
-          }
+          // Put back each mod's flag as it was, leaving its other flags as they are now.
+          const back = await write(changed.map((c) => ({ ...cur(c.techName), [flag]: c[flag] })));
+          if (back.failed.length === 0) return;
+          reportError(back.error, "Saving your mod flags", { quiet: true });
+          toast({ message: `Couldn't update ${modsCount(back.failed.length)}.`, tone: "warn" });
         },
       },
     });
@@ -3152,6 +3212,7 @@
 
           {#if selection.size > 0}
             <BulkBar
+              bind:ref={bulkBarEl}
               count={selection.size}
               shownCount={visible.length}
               allShownSelected={selection.size === visible.length}
@@ -3167,6 +3228,7 @@
             />
           {:else}
             <LibraryToolbar
+              bind:this={libToolbar}
               filters={libFilters}
               onchange={(f) => (libFilters = f)}
               onneedsupdate={(on) => toggleNeedsUpdate(on)}
@@ -3184,11 +3246,18 @@
               bind:libView
             />
           {/if}
-          <ActiveFilters chips={libChips} onremove={removeLibFilter} onclear={() => clearLibFilters()} />
+          <ActiveFilters
+            chips={libChips}
+            onremove={removeLibFilter}
+            onclear={() => clearLibFilters()}
+            onemptied={() => {
+              if (!libToolbar?.focusFilters()) libList?.focusCurrent();
+            }}
+          />
         {/snippet}
         {#snippet list()}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div class="list-body" onkeydown={onListKeydown}>
+          <div class="list-body" bind:this={listBodyEl} onkeydown={onListKeydown}>
             {#if mods.length === 0 && !scanning}
               <EmptyState icon="library" title="No mods in this folder yet.">
                 {#snippet actions()}
@@ -3208,6 +3277,7 @@
                 bind:this={libList}
                 items={visible}
                 getKey={modKey}
+                itemLabel={rowLabel}
                 itemHeight={CARD_HEIGHT}
                 bottomPad={16}
                 label="Mods"
@@ -3240,6 +3310,7 @@
                 bind:this={libList}
                 items={visible}
                 getKey={modKey}
+                itemLabel={rowLabel}
                 rowHeight={ROW_HEIGHTS[libDensity]}
                 bottomPad={16}
                 label="Mods"

@@ -12,6 +12,7 @@
     onselect,
     onmenu,
     oninner,
+    itemLabel,
   }: {
     items: Item[];
     rowHeight?: number;
@@ -20,11 +21,22 @@
     onselect?: (it: Item, intent: SelectIntent) => void;
     onmenu?: (it: Item, anchor: HTMLElement) => void;
     oninner?: (it: Item) => void;
+    itemLabel?: (it: Item) => string;
   } = $props();
 
-  let list = $state<{ focusKey: (key: string) => boolean }>();
+  let list = $state<{
+    focusKey: (key: string) => boolean;
+    showKey: (key: string) => boolean;
+    currentKey: () => string | null;
+  }>();
   export function focusKey(key: string): boolean {
     return list?.focusKey(key) ?? false;
+  }
+  export function showKey(key: string): boolean {
+    return list?.showKey(key) ?? false;
+  }
+  export function currentKey(): string | null {
+    return list?.currentKey() ?? null;
   }
 </script>
 
@@ -35,6 +47,7 @@
     getKey={(it) => it.id}
     {rowHeight}
     label="Things"
+    {itemLabel}
     {onopen}
     {ontoggle}
     {onselect}

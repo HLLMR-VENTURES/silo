@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import BulkBar from "./BulkBar.svelte";
-import { BULK_CONFIRM_OVER, bulkChanges, bulkConfirm, confirmBulkChange } from "./bulk";
+import { BULK_CONFIRM_OVER, bulkChanges, bulkConfirm, confirmBulkChange, saveEach } from "./bulk";
 import type { ConfirmOptions } from "../../ui/dialogs.svelte";
 
 describe("bulkChanges", () => {
@@ -82,5 +82,25 @@ describe("BulkBar", () => {
     expect(screen.getByRole("button", { name: "Turn on" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Park" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Select all 140 shown" })).toBeDisabled();
+  });
+});
+
+describe("saveEach (bulk Favorite / Hide)", () => {
+  it("carries on past a failure and says which rows were written", async () => {
+    const err = new Error("db locked");
+    const save = vi.fn(async (r: { techName: string }) => {
+      if (r.techName === "B") throw err;
+    });
+    const rows = ["A", "B", "C"].map((techName) => ({ techName }));
+    const res = await saveEach(rows, save);
+    expect(save).toHaveBeenCalledTimes(3);
+    expect(res.written.map((r) => r.techName)).toEqual(["A", "C"]);
+    expect(res.failed.map((r) => r.techName)).toEqual(["B"]);
+    expect(res.error).toBe(err);
+  });
+
+  it("all saved: no error", async () => {
+    const res = await saveEach([1, 2], async () => {});
+    expect(res).toEqual({ written: [1, 2], failed: [], error: null });
   });
 });

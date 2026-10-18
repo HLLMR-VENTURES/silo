@@ -87,6 +87,22 @@
     return id === "conflicted" && counts.conflicted === 0;
   }
 
+  let root = $state<HTMLElement | null>(null);
+
+  /** Focus the Filters button (focus lands here when the last filter chip is removed). */
+  export function focusFilters(): boolean {
+    const b = trigger?.querySelector<HTMLElement>("button");
+    b?.focus();
+    return !!b;
+  }
+
+  /** Focus the toolbar's first control. */
+  export function focusFirst(): boolean {
+    const b = root?.querySelector<HTMLElement>("button:not(:disabled), input:not(:disabled), select:not(:disabled)");
+    b?.focus();
+    return !!b;
+  }
+
   async function toggleFilters() {
     filtersOpen = !filtersOpen;
     if (!filtersOpen) return;
@@ -95,7 +111,7 @@
   }
 </script>
 
-<div class="toolbar">
+<div class="toolbar" bind:this={root}>
   <Segmented
     ariaLabel="Show"
     size="sm"

@@ -1,7 +1,8 @@
 // The Undo toast after the active set changed: a single switch, a bulk Turn on / Park, or a
 // loadout switch. One at a time: a new switch dismisses the previous switch's toast. Undo puts the
 // previous active set back through the caller's guarded path, but only when the active set is
-// still what the switch left (otherwise it refuses with a warn toast).
+// still what the switch left (otherwise it refuses with a warn toast). When that write is refused
+// (another one is running), the Undo toast comes back so it can be tried again.
 //   const undo = createSwitchUndo({ toast, blocked: activeUndoBlocked, reapply: (s) => setActiveSetTo(s, "Switching back") });
 //   undo.dismiss();                         // a new switch is starting
 //   undo.offer({ message: switchMessage(["Courseplay"], false), previous, expected: [...activeSet] });
@@ -14,7 +15,9 @@ export interface SwitchUndoDeps {
    * @param expected the active set the switch left
    */
   blocked: (expected: string[]) => string | null;
-  /** Put this active set back (a guarded write; it reports its own problems). */
+  /** Put this active set back (a guarded write; it reports its own problems). Resolves to null
+   *  when the write was refused (another one is running, the refusal was shown): the Undo toast
+   *  comes back so it can be tried again. */
   reapply: (previous: string[]) => Promise<unknown>;
 }
 
@@ -64,7 +67,8 @@ export function createSwitchUndo(deps: SwitchUndoDeps): SwitchUndo {
             deps.toast({ message: why, tone: "warn" });
             return;
           }
-          await deps.reapply(previous);
+          // Refused (Silo is busy, and said so): offer the same Undo again.
+          if ((await deps.reapply(previous)) === null) offer({ ...o, previous, expected });
         },
       },
     });

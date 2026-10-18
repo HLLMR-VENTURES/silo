@@ -19,16 +19,34 @@ function defaultStorage(): StorageLike | null {
 }
 
 /**
- * The explanation dialog.
- * @param name the mod's title, or a count ("3 mods") for several
- * @param category the archive folder it's filed under (its category)
+ * The explanation dialog, for one loose mod or several.
+ * @param count how many loose mods are parked
+ * @param name the mod's title (one), or what to call them ("3 mods") for several
+ * @param category the archive folder one mod is filed under (its category); several go each
+ *   into their own category folder, so it isn't shown then
  * @param sep the path separator to show ("\\" on Windows)
  */
-export function parkLooseOptions(name: string, category: string, sep = "\\"): ConfirmOptions {
+export function parkLooseOptions(
+  count: number,
+  name: string,
+  category: string | null,
+  sep = "\\",
+): ConfirmOptions {
+  if (count > 1) {
+    return {
+      title: `Park ${name}?`,
+      body:
+        "Silo moves them into your library folder, each into its category folder in archive, so the game stops loading them. " +
+        "They stay in your library. Switch them on any time.",
+      confirm: "Park them",
+      checkbox: { label: "Don't explain this again" },
+    };
+  }
+  const where = category ? ` (archive${sep}${category})` : "";
   return {
     title: `Park ${name}?`,
     body:
-      `Silo moves it into your library folder (archive${sep}${category}) so the game stops loading it. ` +
+      `Silo moves it into your library folder${where} so the game stops loading it. ` +
       "It stays in your library. Switch it on any time.",
     confirm: "Park it",
     checkbox: { label: "Don't explain this again" },
@@ -40,14 +58,14 @@ export function parkLooseOptions(name: string, category: string, sep = "\\"): Co
  * @param askWithOption the dialog (ui's askWithOption)
  * @param storage where "don't explain" is kept (defaults to localStorage)
  * @param sep the path separator the explanation shows
- * @returns explain(name, category): true to go ahead (explained and confirmed, or nothing to
- *   explain), false when the user cancelled
+ * @returns explain(name, category, count = 1): true to go ahead (explained and confirmed, or
+ *   nothing to explain), false when the user cancelled
  */
 export function createParkLooseExplainer(
   askWithOption: (opts: ConfirmOptions) => Promise<ConfirmWithOption>,
   storage: StorageLike | null = defaultStorage(),
   sep = "\\",
-): (name: string, category: string) => Promise<boolean> {
+): (name: string, category: string | null, count?: number) => Promise<boolean> {
   let explained = false;
   const dismissed = () => {
     try {
@@ -56,9 +74,9 @@ export function createParkLooseExplainer(
       return false;
     }
   };
-  return async (name, category) => {
+  return async (name, category, count = 1) => {
     if (explained || dismissed()) return true;
-    const { confirmed, checked } = await askWithOption(parkLooseOptions(name, category, sep));
+    const { confirmed, checked } = await askWithOption(parkLooseOptions(count, name, category, sep));
     if (!confirmed) return false;
     explained = true;
     if (checked) {

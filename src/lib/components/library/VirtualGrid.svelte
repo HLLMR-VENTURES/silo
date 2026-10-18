@@ -19,8 +19,13 @@
   // Keys: arrows move (←/→ by one, ↑/↓ by a row; ←/→ only with `twoD`), Home/End, PageUp/Down;
   // Enter opens and Space toggles (only when the item itself has focus, not a control in it);
   // Shift+arrows and Ctrl+Space select; Shift+F10 or the Menu key opens the item's menu.
-  // `focusKey(key)` moves focus to an item by key (the drawer hands focus back with it).
-  import { tick, type Snippet } from "svelte";
+  // `focusKey(key)` moves focus to an item by key (the drawer hands focus back with it);
+  // `showKey(key)` makes it the tab stop and scrolls to it without taking focus; `currentKey()`
+  // and `focusCurrent()` read and restore the tab stop (a list ↔ cards switch, a closing bar).
+  // When the focused item leaves `items` (filtered out, removed) while focus is in the grid, focus
+  // moves to the item now at its index (or the last one), else to the grid itself. Items sharing
+  // a key are dropped after the first (with a warning in dev), so a keyed each can't throw.
+  import { tick, untrack, type Snippet } from "svelte";
   import { TILE_GAP, tileColumns } from "../../views/tileGrid";
   import { keyAction, scrollToReveal, type SelectIntent } from "./roving";
 
@@ -42,6 +47,8 @@
     twoD?: boolean;
     /** Accessible name for the list. */
     label: string;
+    /** Accessible name for an item ("Courseplay, active"); without it, its content names it. */
+    itemLabel?: (item: T) => string;
     item: Snippet<[T, ItemContext]>;
     onopen?: (item: T) => void;
     ontoggle?: (item: T) => void;
@@ -60,6 +67,7 @@
     bottomPad = 0,
     twoD = true,
     label,
+    itemLabel,
     item,
     onopen,
     ontoggle,
@@ -76,17 +84,35 @@
   let viewportW = $state(0);
   let focusedKey = $state<string | null>(null);
 
+  /** `items` with repeated keys dropped (the first one stays). */
+  const list = $derived.by(() => {
+    const seen = new Set<string>();
+    let dup: string | null = null;
+    const out: T[] = [];
+    for (const it of items) {
+      const k = getKey(it);
+      if (seen.has(k)) {
+        dup ??= k;
+        continue;
+      }
+      seen.add(k);
+      out.push(it);
+    }
+    if (dup !== null && import.meta.env.DEV) console.warn(`[Silo] VirtualGrid "${label}": duplicate key ${dup}`);
+    return dup === null ? items : out;
+  });
+
   // jsdom (and the first frame) measure 0: assume a typical window so something renders.
   const vh = $derived(viewportH > 0 ? viewportH : 600);
   const cols = $derived(Math.max(1, Math.floor(columns(viewportW)) || 1));
   const stride = $derived(itemHeight + gap);
-  const count = $derived(items.length);
+  const count = $derived(list.length);
   const rowCount = $derived(Math.ceil(count / cols));
   const pageRows = $derived(Math.max(1, Math.floor(vh / stride)));
 
   const keyIndex = $derived.by(() => {
     const m = new Map<string, number>();
-    items.forEach((it, i) => m.set(getKey(it), i));
+    list.forEach((it, i) => m.set(getKey(it), i));
     return m;
   });
   const focusIndex = $derived(focusedKey === null ? -1 : (keyIndex.get(focusedKey) ?? -1));
@@ -103,11 +129,36 @@
     const out: { it: T; index: number; key: string }[] = [];
     const from = firstRow * cols;
     const to = Math.min(count, endRow * cols);
-    for (let i = from; i < to; i++) out.push({ it: items[i], index: i, key: getKey(items[i]) });
+    for (let i = from; i < to; i++) out.push({ it: list[i], index: i, key: getKey(list[i]) });
     if (focusIndex >= 0 && (focusIndex < from || focusIndex >= to)) {
-      out.push({ it: items[focusIndex], index: focusIndex, key: focusedKey as string });
+      out.push({ it: list[focusIndex], index: focusIndex, key: focusedKey as string });
     }
     return out;
+  });
+
+  // The focused item left the list: before its element goes (pre-effect), note whether focus was
+  // in the grid; if so, hand it to the item now at that index (clamped), or the grid itself.
+  let lastIndex = -1;
+  $effect.pre(() => {
+    const key = focusedKey;
+    const index = key === null ? undefined : keyIndex.get(key);
+    if (key === null) return;
+    if (index !== undefined) {
+      lastIndex = index;
+      return;
+    }
+    untrack(() => {
+      const inside = !!viewport && viewport.contains(document.activeElement);
+      const at = lastIndex;
+      focusedKey = null;
+      lastIndex = -1;
+      if (!inside) return;
+      if (count === 0) {
+        void tick().then(() => viewport?.focus({ preventScroll: true }));
+        return;
+      }
+      void moveTo(Math.min(Math.max(0, at), count - 1));
+    });
   });
 
   function onScroll() {
@@ -132,13 +183,40 @@
   }
 
   async function moveTo(index: number) {
-    const target = items[index];
+    const target = list[index];
     if (target === undefined) return;
     const key = getKey(target);
     focusedKey = key;
     reveal(index);
     await tick();
     itemEl(key)?.focus({ preventScroll: true });
+  }
+
+  /** The key of the item that holds the tab stop (the focused one), or null. */
+  export function currentKey(): string | null {
+    return focusedKey;
+  }
+
+  /**
+   * Make the item with this key the tab stop and scroll it into view, without taking focus.
+   * @returns false when no item has that key
+   */
+  export function showKey(key: string): boolean {
+    const index = keyIndex.get(key);
+    if (index === undefined) return false;
+    focusedKey = key;
+    reveal(index);
+    return true;
+  }
+
+  /**
+   * Focus the tab stop: the focused item, else the first one on screen.
+   * @returns false when the list is empty
+   */
+  export function focusCurrent(): boolean {
+    if (count === 0) return false;
+    void moveTo(Math.max(0, tabIndexAt));
+    return true;
   }
 
   /**
@@ -168,7 +246,7 @@
       case "move":
         if (act.to === index) return;
         void moveTo(act.to);
-        if (act.extend) onselect?.(items[act.to], { shift: true, ctrl: false, range: true, from: getKey(it) });
+        if (act.extend) onselect?.(list[act.to], { shift: true, ctrl: false, range: true, from: getKey(it) });
         return;
       case "open":
         onopen?.(it);
@@ -194,8 +272,10 @@
   const width = $derived(cols === 1 ? "100%" : `calc((100% - ${(cols - 1) * gap}px) / ${cols})`);
 </script>
 
+<!-- tabindex -1: focus lands here when the focused item leaves an emptied list. -->
 <div
   class="vg-viewport"
+  tabindex="-1"
   bind:this={viewport}
   bind:clientHeight={viewportH}
   bind:clientWidth={viewportW}
@@ -212,6 +292,7 @@
       <div
         class="vg-item"
         role="listitem"
+        aria-label={itemLabel?.(entry.it)}
         data-key={entry.key}
         tabindex={entry.index === tabIndexAt ? 0 : -1}
         aria-setsize={count}
@@ -240,6 +321,9 @@
   .vg-sizer {
     position: relative;
     width: 100%;
+  }
+  .vg-viewport:focus {
+    outline: none;
   }
   .vg-item {
     position: absolute;

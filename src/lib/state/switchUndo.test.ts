@@ -63,6 +63,22 @@ describe("switch Undo", () => {
   });
 });
 
+describe("switch Undo, refused", () => {
+  it("brings the Undo toast back when the re-apply is refused (Silo busy)", async () => {
+    const { undo, shown, reapply } = setup();
+    reapply.mockResolvedValueOnce(null as never).mockResolvedValueOnce(true);
+    undo.offer({ message: "Parked 3 mods.", tone: "warn", previous: ["A"], expected: [] });
+    await shown[0].opts.action!.run();
+    expect(shown).toHaveLength(2);
+    expect(shown[1].opts).toMatchObject({ message: "Parked 3 mods.", tone: "warn" });
+    expect(shown[1].opts.action?.label).toBe("Undo");
+    // Tried again once the other write is done: it applies, and no third toast.
+    await shown[1].opts.action!.run();
+    expect(reapply).toHaveBeenLastCalledWith(["A"]);
+    expect(shown).toHaveLength(2);
+  });
+});
+
 describe("switchMessage", () => {
   it("names one mod, counts several, and says when it had problems", () => {
     expect(switchMessage(["Courseplay"], false)).toBe("Parked Courseplay.");

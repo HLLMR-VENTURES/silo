@@ -63,3 +63,38 @@ export async function confirmBulkChange(
   if (!opts) return true;
   return await ask(opts);
 }
+
+/** What saving several rows one by one did. */
+export interface SaveEachResult<R> {
+  /** The rows that were saved, in order. */
+  written: R[];
+  /** The rows that weren't. */
+  failed: R[];
+  /** The first error, or null. */
+  error: unknown;
+}
+
+/**
+ * Save rows one at a time, carrying on past a failure, so the caller can show only what was
+ * written (BulkBar Favorite / Hide: each mod's flags are their own row).
+ * @param rows the rows to save
+ * @param save saves one row; rejects when it couldn't
+ */
+export async function saveEach<R>(
+  rows: readonly R[],
+  save: (row: R) => Promise<unknown>,
+): Promise<SaveEachResult<R>> {
+  const written: R[] = [];
+  const failed: R[] = [];
+  let error: unknown = null;
+  for (const r of rows) {
+    try {
+      await save(r);
+      written.push(r);
+    } catch (e) {
+      failed.push(r);
+      if (error === null) error = e;
+    }
+  }
+  return { written, failed, error };
+}

@@ -11,12 +11,35 @@ function memStorage() {
 
 describe("loose-mod park explanation", () => {
   it("names the mod and its archive folder, with the option", () => {
-    const o = parkLooseOptions("Courseplay", "Scripts & Tools");
+    const o = parkLooseOptions(1, "Courseplay", "Scripts & Tools");
     expect(o.title).toBe("Park Courseplay?");
     expect(o.body).toContain("archive\\Scripts & Tools");
     expect(o.confirm).toBe("Park it");
     expect(o.checkbox).toEqual({ label: "Don't explain this again" });
-    expect(parkLooseOptions("X", "Maps", "/").body).toContain("archive/Maps");
+    expect(parkLooseOptions(1, "X", "Maps", "/").body).toContain("archive/Maps");
+    expect(o.body).toBe(
+      "Silo moves it into your library folder (archive\\Scripts & Tools) so the game stops loading it. " +
+        "It stays in your library. Switch it on any time.",
+    );
+  });
+
+  it("several: plural copy, no placeholder folder", () => {
+    const o = parkLooseOptions(3, "3 mods", null);
+    expect(o.title).toBe("Park 3 mods?");
+    expect(o.body).toBe(
+      "Silo moves them into your library folder, each into its category folder in archive, so the game stops loading them. " +
+        "They stay in your library. Switch them on any time.",
+    );
+    expect(o.body).not.toContain("<");
+    expect(o.confirm).toBe("Park them");
+    expect(o.checkbox).toEqual({ label: "Don't explain this again" });
+  });
+
+  it("the explainer passes the count through", async () => {
+    const ask = vi.fn((_o: ConfirmOptions) => Promise.resolve({ confirmed: true, checked: false }));
+    await createParkLooseExplainer(ask, memStorage())("2 mods", null, 2);
+    expect(ask.mock.calls[0][0].title).toBe("Park 2 mods?");
+    expect(ask.mock.calls[0][0].body).toContain("each into its category folder in archive");
   });
 
   it("shows once, then not; ticked, it's remembered", async () => {
