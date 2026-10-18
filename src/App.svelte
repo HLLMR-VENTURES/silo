@@ -173,7 +173,13 @@
   import UpdatesPanel from "./lib/components/panels/UpdatesPanel.svelte";
   import LoadoutsPanel from "./lib/components/panels/LoadoutsPanel.svelte";
   import SavegamesPanel from "./lib/components/panels/SavegamesPanel.svelte";
-  import SettingsPanel from "./lib/components/panels/SettingsPanel.svelte";
+  import GeneralSettings from "./lib/components/settings/GeneralSettings.svelte";
+  import ModsFolderSettings from "./lib/components/settings/ModsFolderSettings.svelte";
+  import LibrarySettings from "./lib/components/settings/LibrarySettings.svelte";
+  import AccountSettings from "./lib/components/settings/AccountSettings.svelte";
+  import DiagnosticsSettings from "./lib/components/settings/DiagnosticsSettings.svelte";
+  import MaintenanceSettings from "./lib/components/settings/MaintenanceSettings.svelte";
+  import AboutSettings from "./lib/components/settings/AboutSettings.svelte";
   import CategoryMenu from "./lib/components/panels/CategoryMenu.svelte";
   import ContextMenu, { type ContextMenuItem } from "./lib/components/ContextMenu.svelte";
   import LibraryToolbar, { type StatFilter } from "./lib/components/panels/LibraryToolbar.svelte";
@@ -1309,9 +1315,9 @@
   async function restoreVanilla() {
     if (
       !(await ask({
-        title: "Restore a plain, flat mods folder?",
-        body: "Every mod moves back out of archive/ and Silo's links are removed. Your mods are not deleted. To undo it, run Organize again.",
-        confirm: "Restore flat folder",
+        title: "Put every mod back in your mods folder?",
+        body: "Silo moves all parked and active mods out of the library folder and removes its links. Nothing is deleted.",
+        confirm: "Undo organizing",
       }))
     )
       return;
@@ -3258,44 +3264,73 @@
     {/snippet}
     {#snippet settings()}
       <SettingsView>
-        <SettingsPanel
-          {theme}
-          {uiScale}
-          {roots}
-          {gameInfo}
-          {userDir}
-          {appVer}
-          {autoFileNew}
-          {organizedCount}
-          {unorganizedCount}
-          {cloudSynced}
-          lockReason={fgLock.reason}
-          {scanning}
-          onSetTheme={setTheme}
-          onSetUiScale={setUiScale}
-          onOpenGameGraphics={openGameGraphics}
-          onExportReport={exportReport}
-          onCopyDiagnostics={copyDiagnostics}
-          onSetAutoFile={setAutoFile}
-          onOrganize={organizeNew}
-          onRebuild={rebuildLibrary}
-          onRestoreVanilla={restoreVanilla}
-          onOptimizeLinks={optimizeLinks}
-          {modsStatus}
-          onChangeModsFolder={changeModsFolder}
-          onUseGameFolder={useGameFolder}
-          onSwitchModsFolder={switchModsFolder}
-          archive={archiveMove.archive}
-          moveUnfinished={archiveMove.unfinished}
-          archiveLoadFailed={archiveMove.loadFailed}
-          onChangeArchive={changeArchive}
-          onArchiveDefault={archiveDefault}
-          scanMs={result ? result.tookMs : null}
-          {update}
-          {updating}
-          {updatePct}
-          onApplyUpdate={applyUpdate}
-        />
+        {#snippet generalTab()}
+          <GeneralSettings
+            {theme}
+            {uiScale}
+            {userDir}
+            onSetTheme={setTheme}
+            onSetUiScale={setUiScale}
+            onOpenGameGraphics={openGameGraphics}
+          />
+        {/snippet}
+        {#snippet modsFolderTab()}
+          <ModsFolderSettings
+            {roots}
+            {modsStatus}
+            {gameInfo}
+            lockReason={fgLock.reason}
+            {scanning}
+            moveUnfinished={archiveMove.unfinished}
+            onChangeModsFolder={changeModsFolder}
+            onUseGameFolder={useGameFolder}
+            onSwitchModsFolder={switchModsFolder}
+          />
+        {/snippet}
+        {#snippet libraryTab()}
+          <LibrarySettings
+            {autoFileNew}
+            {organizedCount}
+            {unorganizedCount}
+            lockReason={fgLock.reason}
+            {scanning}
+            archive={archiveMove.archive}
+            moveUnfinished={archiveMove.unfinished}
+            archiveLoadFailed={archiveMove.loadFailed}
+            onSetAutoFile={setAutoFile}
+            onOrganize={organizeNew}
+            onChangeArchive={changeArchive}
+            onArchiveDefault={archiveDefault}
+          />
+        {/snippet}
+        {#snippet accountsTab()}
+          <AccountSettings />
+        {/snippet}
+        {#snippet diagnosticsTab()}
+          <DiagnosticsSettings onCopyDiagnostics={copyDiagnostics} onExportReport={exportReport} />
+        {/snippet}
+        {#snippet maintenanceTab()}
+          <MaintenanceSettings
+            {organizedCount}
+            {cloudSynced}
+            lockReason={fgLock.reason}
+            {scanning}
+            moveUnfinished={archiveMove.unfinished}
+            onRebuild={rebuildLibrary}
+            onOptimizeLinks={optimizeLinks}
+            onRestoreVanilla={restoreVanilla}
+          />
+        {/snippet}
+        {#snippet aboutTab()}
+          <AboutSettings
+            {appVer}
+            scanMs={result ? result.tookMs : null}
+            {update}
+            {updating}
+            {updatePct}
+            onApplyUpdate={applyUpdate}
+          />
+        {/snippet}
       </SettingsView>
     {/snippet}
     {#snippet help()}

@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Settings is organized into tabs, like Tools:** General, Mods folder, Library, Accounts,
+  Diagnostics, Maintenance and About. Each group of settings sits in its own card, folder paths
+  show in a read-only field with **Open folder** and **Change…** beside them, and a button that's
+  off says why in text under it. About also links to the website, source code, changelog, Discord
+  and GitHub Discussions. Renamed: **Rebuild categories** is now **Re-read every mod**, **Optimize
+  links** is now **Reclaim disk space**, and **Restore vanilla layout** / **Restore flat folder**
+  is now **Undo organizing**. (#236)
+
 - **Ctrl+R and F5 rescan instead of reloading the window.** Reloading dropped whatever Silo was in
   the middle of; now these keys rescan your library (and do nothing while a dialog is open). (#230)
 
@@ -125,6 +133,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   your library, with the list of mods. Cancel changes nothing. (#226)
 
 ### Fixed
+
+- **The UI size list is readable in the dark theme.** Native drop-down lists showed dark text on
+  a dark background. (#236)
 
 - **A rescan no longer hides a warning.** Rescanning (including the automatic rescan when you
   come back to Silo) used to clear whatever problem was showing, such as a mods folder FS25

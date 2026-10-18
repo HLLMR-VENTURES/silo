@@ -107,3 +107,12 @@ button {
 .drawer-resize-handle:hover::before {
   background: var(--primary);
 }
+
+/* Native <select> popups: Windows WebView2 draws the option list with the page's option colors,
+   so without these a dark theme shows dark text on a dark list (blank). color-scheme (set per
+   theme in tokens.css) makes the popup chrome follow the theme too. */
+select option,
+select optgroup {
+  background: var(--raised);
+  color: var(--text);
+}

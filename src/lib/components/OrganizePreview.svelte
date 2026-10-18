@@ -72,7 +72,7 @@
         This files your loose mod zips into <code>mods/archive/&lt;Category&gt;/</code>.
         Active mods stay loaded: Silo links them back into your mods folder, so in most
         setups they take no extra disk space. Nothing has moved yet, and
-        <b>Restore vanilla layout</b> in Settings puts every mod back.
+        <b>Undo organizing</b> in Settings → Maintenance puts every mod back.
       </p>
 
       <div class="groups">
