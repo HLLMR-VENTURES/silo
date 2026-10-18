@@ -153,25 +153,27 @@
         class="fb-search"
         type="search"
         placeholder={searchPlaceholder}
+        aria-label={searchPlaceholder || "Search"}
         bind:value={query}
         oninput={() => onSearchInput?.()}
       />
     {:else}
       <span class="fb-spacer"></span>
     {/if}
-    <select class="fb-sel fb-sort" bind:value={sort} onchange={() => onChange?.()} title="Sort order">
+    <select class="fb-sel fb-sort" bind:value={sort} onchange={() => onChange?.()} aria-label="Sort by">
       {#each sortOptions as o (o.value)}
         <option value={o.value}>{o.label}</option>
       {/each}
     </select>
     <button
+      type="button"
       class="fb-dir"
       disabled={!dirEnabled}
       onclick={toggleDir}
       use:tooltip={dirEnabled
         ? `Sort ${sortDir === "desc" ? "descending" : "ascending"}`
         : "Sort direction is coming with a catalog update (silo-api)."}
-      aria-label="Toggle sort direction"
+      aria-label="Sort direction: {sortDir === 'desc' ? 'descending' : 'ascending'}"
     >
       <Icon name={sortDir === "desc" ? "arrowDown" : "arrowUp"} size={14} />
     </button>
@@ -201,13 +203,14 @@
           min="1900"
           max="2100"
           placeholder="Year"
+          aria-label="Available by year"
           title="Period-correct: only machines that existed by this year (dated mods only)."
           value={availableBy ?? ""}
           onchange={(e) => setAvailableBy(e.currentTarget.value)}
         />
       {/if}
       {#if showClear && filterCount > 0}
-        <button class="clear-filters" onclick={() => onClear?.()}>Clear all <Icon name="close" size={13} /></button>
+        <button type="button" class="clear-filters" onclick={() => onClear?.()}>Clear all <Icon name="close" size={13} /></button>
       {/if}
     </div>
   {/if}

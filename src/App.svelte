@@ -221,7 +221,6 @@
   import DiagnosticsSettings from "./lib/components/settings/DiagnosticsSettings.svelte";
   import MaintenanceSettings from "./lib/components/settings/MaintenanceSettings.svelte";
   import AboutSettings from "./lib/components/settings/AboutSettings.svelte";
-  import CategoryMenu from "./lib/components/panels/CategoryMenu.svelte";
   import LibraryToolbar from "./lib/components/panels/LibraryToolbar.svelte";
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
   import Onboarding from "./lib/firstRun/Onboarding.svelte";
@@ -329,7 +328,10 @@
   // search are libCat/libSub and `query`.
   let libFilters = $state<LibraryFilters>({ ...NO_FILTERS, status: loadLibraryState().status });
   $effect(() => saveLibraryState({ status: libFilters.status }));
-  let editing = $state<{ techName: string; x: number; y: number } | null>(null);
+  // "Change category…": a menu at the row's ⋯ button (or where the row menu opened), so Esc and a
+  // choice hand focus back to that row.
+  let editing = $state<{ techName: string; x: number; y: number; anchor: HTMLElement | null } | null>(null);
+  let editingOpen = $state(false);
   let activeSet = $state<Set<string>>(new Set());
   // Library writes hold the "library-write" op class, one at a time: a second is refused with the
   // reason. `writeLock` counts every holder (the archive move too) and turns off the controls
@@ -1378,7 +1380,8 @@
 
   function openEditor(techName: string, ev: MouseEvent) {
     ev.stopPropagation();
-    editing = { techName, x: ev.clientX, y: ev.clientY };
+    editing = { techName, x: ev.clientX, y: ev.clientY, anchor: null };
+    editingOpen = true;
   }
 
   // ── Library row menu: the ⋯ button, right-click and Shift+F10 open the same items ──
@@ -1450,7 +1453,8 @@
           const r = at.anchor?.getBoundingClientRect();
           const x = at.point?.x ?? r?.left ?? 0;
           const y = at.point?.y ?? r?.bottom ?? 0;
-          editing = { techName: mod.techName, x, y };
+          editing = { techName: mod.techName, x, y, anchor: at.anchor?.isConnected ? at.anchor : null };
+          editingOpen = true;
           return;
         }
         case "settings":
@@ -1465,6 +1469,23 @@
     return { items, run };
   }
   const rowMenuSpec = $derived(rowMenu ? rowMenuFor(rowMenu.mod, rowMenu.at) : null);
+  // Forget the category menu once it has closed (Esc, outside click, or a choice).
+  $effect(() => {
+    if (!editingOpen) untrack(() => (editing = null));
+  });
+  const CATEGORY_RESET = "silo:reset-category"; // not a category name
+  /** The category menu's items: every category (the current one checked), then Reset to auto. */
+  function categoryMenuItems(techName: string): MenuItem[] {
+    const now = effectiveMods.find((m) => m.techName === techName)?.category;
+    return [
+      ...CATEGORIES.map((c) => ({ id: c, label: c, icon: c === now ? ("check" as const) : undefined })),
+      { id: CATEGORY_RESET, label: "Reset to auto", icon: "undo" as const, separatorBefore: true },
+    ];
+  }
+  function modTitle(techName: string): string {
+    const m = mods.find((x) => x.techName === techName);
+    return m?.title ?? techName;
+  }
 
   async function setCategory(
     techName: string,
@@ -3819,13 +3840,16 @@
   {/if}
 
   {#if editing}
-    <CategoryMenu
-      categories={CATEGORIES}
-      x={editing.x}
-      y={editing.y}
-      onSelect={(c) => setCategory(editing!.techName, c)}
-      onReset={() => resetCategory(editing!.techName)}
-      onClose={() => (editing = null)}
+    {@const ed = editing}
+    <Menu
+      bind:open={editingOpen}
+      anchor={ed.anchor}
+      point={ed.anchor ? null : { x: ed.x, y: ed.y }}
+      placement="bottom-end"
+      items={categoryMenuItems(ed.techName)}
+      label="Category for {modTitle(ed.techName)}"
+      onselect={(id) =>
+        id === CATEGORY_RESET ? resetCategory(ed.techName) : setCategory(ed.techName, id)}
     />
   {/if}
 
