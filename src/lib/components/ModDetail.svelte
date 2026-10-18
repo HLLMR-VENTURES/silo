@@ -415,17 +415,17 @@
   }
   .d-title {
     font-family: var(--font-display);
-    font-size: 18px;
+    font-size: var(--fs-xl);
     font-weight: 600;
     line-height: 1.2;
   }
   .d-sub {
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     margin-top: 2px;
   }
   .d-tech {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     opacity: 0.7;
     margin-top: 2px;
@@ -437,7 +437,7 @@
     width: 30px;
     height: 30px;
     border-radius: var(--radius-sm);
-    font-size: 14px;
+    font-size: 0.875rem;
   }
   .d-x:hover {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
@@ -455,14 +455,14 @@
     color: var(--text-muted);
     padding: 6px 10px;
     border-radius: var(--radius-sm);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .d-act:hover {
     color: var(--text);
   }
   .d-act.on {
-    color: var(--primary);
+    color: var(--primary-text);
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
     background: color-mix(in srgb, var(--primary) 10%, transparent);
   }
@@ -486,19 +486,20 @@
     justify-content: space-between;
     gap: 10px;
     flex-wrap: wrap;
-    font-size: 12.5px;
-    color: var(--gold-700);
-    background: color-mix(in srgb, var(--gold-500) 12%, transparent);
-    border: 1px solid color-mix(in srgb, var(--gold-500) 40%, var(--border));
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
     border-radius: var(--radius-sm);
     padding: 8px 10px;
+    font-variant-numeric: tabular-nums;
   }
   .d-upd-link {
     border: none;
     background: transparent;
-    color: var(--gold-700);
+    color: var(--accent-text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
@@ -511,7 +512,7 @@
     border: 1px solid color-mix(in srgb, var(--primary) 40%, var(--border));
   }
   .d-foreign-msg {
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     color: var(--text);
   }
@@ -526,7 +527,7 @@
     background: var(--primary);
     color: var(--on-primary);
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 7px 14px;
     border-radius: var(--radius-sm);
@@ -540,7 +541,7 @@
     background: var(--surface);
     color: var(--text);
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 7px 14px;
     border-radius: var(--radius-sm);
@@ -550,14 +551,14 @@
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
   }
   .d-uptodate {
-    font-size: 12px;
-    color: var(--primary);
+    font-size: var(--fs-xs);
+    color: var(--primary-text);
   }
   .d-mut {
     color: var(--text-muted);
   }
   .d-summary {
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     line-height: 1.55;
     color: var(--text);
     white-space: pre-wrap;
@@ -571,9 +572,9 @@
     align-self: flex-start;
     border: none;
     background: transparent;
-    color: var(--primary);
+    color: var(--primary-text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
     padding: 0;
@@ -585,7 +586,7 @@
     gap: 6px;
   }
   .d-src-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -598,7 +599,7 @@
     padding: 4px 9px;
     border-radius: var(--radius-sm);
     font: inherit;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .d-src:hover {
@@ -640,7 +641,7 @@
   .fd-body {
     padding: 14px;
     overflow-y: auto;
-    font-size: 13px;
+    font-size: var(--fs-sm);
     line-height: 1.6;
     white-space: pre-wrap;
     color: var(--text);
@@ -649,7 +650,7 @@
   .d-meta {
     display: grid;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     padding: 10px 0;
     border-top: 1px solid var(--border);
   }
@@ -669,7 +670,7 @@
     border-top: 1px solid var(--border);
   }
   .d-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -677,8 +678,8 @@
     margin-bottom: 8px;
   }
   .d-ovr {
-    font-size: 9px;
-    color: var(--accent);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     padding: 1px 6px;
     border-radius: 999px;
@@ -743,33 +744,33 @@
     display: flex;
     justify-content: space-between;
     gap: 10px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     padding: 4px 0;
   }
   .d-dep-name {
     color: var(--text);
   }
   .d-ok {
-    color: var(--primary);
-    font-size: 11.5px;
+    color: var(--primary-text);
+    font-size: var(--fs-xs);
   }
   .d-missing {
-    color: var(--warn);
-    font-size: 11.5px;
+    color: var(--warn-text);
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .d-uniq {
-    font-size: 12.5px;
-    color: var(--warn);
+    font-size: var(--fs-xs);
+    color: var(--warn-text);
   }
   .d-conf {
     display: block;
-    border-left: 3px solid var(--warn);
+    border-left: 3px solid var(--warn-text);
     padding: 6px 10px;
     margin-bottom: 6px;
     border-radius: var(--radius-sm);
-    background: color-mix(in srgb, var(--warn) 6%, transparent);
-    font-size: 12px;
+    background: color-mix(in srgb, var(--warn-text) 6%, transparent);
+    font-size: var(--fs-xs);
   }
   .d-conf.crit {
     border-left-color: var(--danger);
@@ -777,9 +778,9 @@
   }
   .d-conf-sev {
     font-weight: 700;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
-    color: var(--warn);
+    color: var(--warn-text);
     margin-right: 6px;
   }
   .d-conf.crit .d-conf-sev {

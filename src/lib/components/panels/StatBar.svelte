@@ -146,15 +146,15 @@
   }
   .stat-num {
     font-family: var(--font-display);
-    font-size: 18px;
+    font-size: var(--fs-xl);
     font-weight: 600;
   }
   .stat-label {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .stat.flag .stat-num {
-    color: var(--warn);
+    color: var(--warn-text);
   }
   .statbtn {
     border: none;
@@ -168,21 +168,21 @@
   }
   /* A stat acting as an active filter — highlight the number + underline the label. */
   .statbtn.sel .stat-num {
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .statbtn.sel .stat-label {
-    color: var(--primary);
+    color: var(--primary-text);
     text-decoration: underline;
     text-underline-offset: 2px;
   }
   .statbtn.flag .stat-num {
-    color: var(--warn);
+    color: var(--warn-text);
   }
   .statbtn.crit .stat-num {
     color: var(--danger);
   }
   .took {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     margin-left: auto;
   }

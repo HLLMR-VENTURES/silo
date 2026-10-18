@@ -145,7 +145,7 @@
     margin-bottom: 6px;
   }
   .prov-title {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted);
@@ -187,7 +187,7 @@
   }
   .prov-fine {
     margin-top: 10px;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     opacity: 0.85;
   }
   .verdict {
@@ -208,14 +208,14 @@
     border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
   }
   .verdict.ok .dot {
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .verdict.warn {
-    background: color-mix(in srgb, var(--warn) 12%, transparent);
-    border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+    background: color-mix(in srgb, var(--warn-text) 12%, transparent);
+    border-color: color-mix(in srgb, var(--warn-text) 40%, var(--border));
   }
   .verdict.warn .dot {
-    color: var(--warn);
+    color: var(--warn-text);
   }
   .verdict.muted .dot {
     color: var(--text-muted);
@@ -257,11 +257,11 @@
   }
   .diff li.mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     word-break: break-all;
   }
   .diff li.more {
     font-style: italic;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
   }
 </style>

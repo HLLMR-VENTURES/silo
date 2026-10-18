@@ -146,11 +146,11 @@
   }
   .ms-title {
     font-family: var(--font-display);
-    font-size: 17px;
+    font-size: var(--fs-lg);
     font-weight: 600;
   }
   .ms-sub {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     word-break: break-all;
   }
@@ -161,7 +161,7 @@
     width: 30px;
     height: 30px;
     border-radius: var(--radius-sm);
-    font-size: 15px;
+    font-size: 0.9375rem;
   }
   .ms-x:hover {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
@@ -177,7 +177,7 @@
     margin-bottom: 8px;
   }
   .ce-presets-label {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .ce-preset {
@@ -186,12 +186,12 @@
     color: var(--text);
     padding: 6px 12px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .ce-preset:hover {
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .ce-field {
     display: flex;
@@ -201,13 +201,13 @@
     padding: 8px 0;
   }
   .ce-flabel {
-    font-size: 13px;
+    font-size: var(--fs-sm);
     display: flex;
     flex-direction: column;
     gap: 2px;
   }
   .ce-hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .ce-input {
@@ -218,7 +218,7 @@
     background: var(--bg);
     color: var(--text);
     font-family: inherit;
-    font-size: 13px;
+    font-size: var(--fs-sm);
   }
   .switch {
     flex: 0 0 auto;
@@ -260,21 +260,21 @@
     padding: 8px 16px;
     border-radius: var(--radius-sm);
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-sm);
   }
   .ms-save:disabled {
     opacity: 0.5;
     cursor: default;
   }
   .ms-saved {
-    color: var(--primary);
+    color: var(--primary-text);
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-sm);
   }
   .ms-empty,
   .ms-error {
     padding: 14px 0;
-    font-size: 13px;
+    font-size: var(--fs-sm);
   }
   .ms-error {
     color: var(--danger);
@@ -283,7 +283,7 @@
     margin-top: 12px;
     padding-top: 10px;
     border-top: 1px solid var(--border);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
 </style>

@@ -250,26 +250,27 @@
     place-items: center;
     font-family: var(--font-display);
     font-weight: 600;
-    font-size: 22px;
+    font-size: var(--fs-xl);
     color: var(--on-primary);
-    background: linear-gradient(135deg, var(--green-500), var(--green-700));
+    background: linear-gradient(135deg, var(--primary), var(--primary-hover));
     box-shadow: var(--shadow-1);
   }
   h1 {
-    font-size: 20px;
+    font-size: var(--fs-xl);
     line-height: 1.1;
   }
   .ver {
     margin-left: 6px;
     font-family: var(--font-mono, monospace);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-muted);
     vertical-align: super;
+    font-variant-numeric: tabular-nums;
   }
   .tagline {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .btn {
@@ -321,11 +322,11 @@
   }
   .icon-btn {
     padding: 9px 12px;
-    font-size: 16px;
+    font-size: 1rem;
     line-height: 1;
   }
   .icon-btn.on {
-    color: var(--primary);
+    color: var(--primary-text);
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
   }
   .launch-btn {
@@ -333,14 +334,14 @@
   }
   .update-btn {
     font-weight: 700;
-    color: var(--gold-700);
-    border-color: color-mix(in srgb, var(--gold-500) 55%, var(--border));
-    background: color-mix(in srgb, var(--gold-500) 14%, var(--surface-raised));
+    color: var(--accent-text);
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+    background: color-mix(in srgb, var(--accent) 14%, var(--surface-raised));
   }
   .update-btn:hover:not(:disabled) {
-    color: var(--gold-700);
-    border-color: var(--gold-500);
-    background: color-mix(in srgb, var(--gold-500) 22%, var(--surface-raised));
+    color: var(--accent-text);
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 22%, var(--surface-raised));
   }
   .btn:hover:not(:disabled):not(.primary) {
     color: var(--text);
@@ -352,6 +353,6 @@
   }
   .loadout-btn.on {
     border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
-    color: var(--primary);
+    color: var(--primary-text);
   }
 </style>

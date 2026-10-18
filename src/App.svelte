@@ -2631,8 +2631,8 @@
   .busy {
     padding: 8px 20px;
     background: color-mix(in srgb, var(--accent) 14%, var(--surface));
-    color: var(--gold-700);
-    font-size: 13px;
+    color: var(--accent-text);
+    font-size: var(--fs-sm);
     font-weight: 600;
   }
   .progress {
@@ -2649,14 +2649,14 @@
     position: absolute;
     right: 12px;
     top: 6px;
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .error {
     padding: 10px 20px;
     background: color-mix(in srgb, var(--danger) 12%, var(--surface));
     color: var(--danger);
-    font-size: 13px;
+    font-size: var(--fs-sm);
     /* Several problems arrive one per line. */
     white-space: pre-line;
   }
@@ -2669,8 +2669,8 @@
     flex-wrap: wrap;
     margin: 0 0 10px;
     padding: 10px 14px;
-    background: color-mix(in srgb, var(--warn) 14%, transparent);
-    border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+    background: color-mix(in srgb, var(--warn-text) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--warn-text) 40%, transparent);
     border-radius: var(--radius-sm);
     color: var(--text);
     font-size: 0.88rem;
@@ -2727,7 +2727,7 @@
     color: var(--text-muted);
     padding: 8px 12px;
     border-radius: var(--radius);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
@@ -2741,12 +2741,12 @@
   .lib-tog.on {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .lib-upd.on {
-    background: color-mix(in srgb, var(--gold-700) 15%, transparent);
-    border-color: color-mix(in srgb, var(--gold-700) 45%, var(--border));
-    color: var(--gold-700);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    color: var(--accent-text);
   }
   .lib-clear {
     margin-left: auto;
@@ -2760,7 +2760,7 @@
     padding: 6px;
   }
   .lib-clear:hover {
-    color: var(--primary);
+    color: var(--primary-text);
     text-decoration: underline;
   }
   .list-wrap {
@@ -2812,7 +2812,7 @@
     place-items: center;
     height: 100%;
     color: var(--text-muted);
-    font-size: 14px;
+    font-size: var(--fs-md);
     padding: 40px;
     text-align: center;
   }

@@ -179,7 +179,7 @@
     right: 8px;
     background: var(--primary);
     color: var(--on-primary);
-    font-size: 0.7rem;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 8px;
     border-radius: 999px;
@@ -230,7 +230,7 @@
   }
   .chip {
     align-self: flex-start;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     color: var(--soil-700);
     background: color-mix(in srgb, var(--soil-500) 16%, transparent);
     padding: 2px 8px;
@@ -268,7 +268,7 @@
     }
   }
   .dl-text {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     white-space: nowrap;
   }
@@ -305,7 +305,7 @@
   /* Directly installable reads as the primary action; the rest are link-outs. */
   .srcbtn.can-install {
     border-color: var(--primary);
-    color: var(--primary);
+    color: var(--primary-text);
     font-weight: 600;
   }
   .srcbtn.can-install:hover:not(:disabled) {
@@ -316,7 +316,7 @@
     flex: 1 1 auto;
     justify-content: center;
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
-    color: var(--primary);
+    color: var(--primary-text);
     font-weight: 600;
   }
   .srcbtn.find-lib:hover {
@@ -335,6 +335,6 @@
   }
   .srcbtn-icon {
     opacity: 0.7;
-    font-size: 0.7rem;
+    font-size: var(--fs-xs);
   }
 </style>

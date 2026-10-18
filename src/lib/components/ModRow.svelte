@@ -245,10 +245,10 @@
     display: grid;
     place-items: center;
     font-family: var(--font-display);
-    font-size: 20px;
+    font-size: var(--fs-xl);
     font-weight: 600;
     color: var(--on-primary);
-    background: linear-gradient(135deg, var(--green-500), var(--green-700));
+    background: linear-gradient(135deg, var(--primary), var(--primary-hover));
     box-shadow: var(--shadow-1);
   }
   .tile.map {
@@ -265,13 +265,13 @@
     cursor: pointer;
   }
   .rating {
-    color: var(--accent);
-    font-size: 11px;
+    color: var(--accent-text);
+    font-size: var(--fs-xs);
     letter-spacing: -1px;
   }
   .rowtag {
     color: var(--info);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     opacity: 0.85;
   }
   .titleline {
@@ -287,11 +287,11 @@
   }
   .ver {
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--fs-xs);
   }
   .sub {
     color: var(--text-muted);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     display: flex;
     gap: 6px;
     white-space: nowrap;
@@ -308,16 +308,17 @@
     align-items: center;
   }
   .badge {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
     color: var(--text-muted);
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
   .badge.cat {
-    color: var(--primary);
+    color: var(--primary-text);
     background: color-mix(in srgb, var(--primary) 12%, transparent);
     border-color: color-mix(in srgb, var(--primary) 30%, var(--border));
     cursor: pointer;
@@ -327,7 +328,7 @@
     background: color-mix(in srgb, var(--primary) 22%, transparent);
   }
   .badge.cat.overridden {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   }
@@ -336,14 +337,14 @@
     border-color: color-mix(in srgb, var(--soil-500) 40%, var(--border));
   }
   .badge.verified {
-    color: var(--primary);
+    color: var(--primary-text);
     background: color-mix(in srgb, var(--primary) 12%, transparent);
     border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
   }
   .badge.modded {
-    color: var(--warn);
-    background: color-mix(in srgb, var(--warn) 14%, transparent);
-    border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+    color: var(--warn-text);
+    background: color-mix(in srgb, var(--warn-text) 14%, transparent);
+    border-color: color-mix(in srgb, var(--warn-text) 40%, var(--border));
   }
   .badge.mp {
     color: var(--info);
@@ -351,19 +352,19 @@
   }
   .badge.unique,
   .badge.warn {
-    color: var(--warn);
-    border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+    color: var(--warn-text);
+    border-color: color-mix(in srgb, var(--warn-text) 45%, var(--border));
   }
   .badge.err {
     color: var(--danger);
     border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
   }
   .badge.dep {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
   .badge.dev {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   }
@@ -372,7 +373,7 @@
     width: 64px;
     text-align: right;
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--fs-xs);
   }
   .has-error {
     background: color-mix(in srgb, var(--danger) 5%, transparent);
@@ -387,7 +388,7 @@
     border: none;
     background: transparent;
     color: var(--text-muted);
-    font-size: 15px;
+    font-size: 0.9375rem;
     line-height: 1;
     width: 26px;
     height: 26px;
@@ -408,7 +409,7 @@
     opacity: 1;
   }
   .act.star.on {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .act.warn.on {
     color: var(--danger);

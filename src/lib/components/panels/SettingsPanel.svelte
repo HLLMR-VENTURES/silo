@@ -407,23 +407,23 @@
     border-top: none;
   }
   .set-label {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text);
     margin-bottom: 6px;
   }
   .set-hint {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.5;
     margin-bottom: 8px;
   }
   .keychain-warn {
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     color: var(--text);
-    background: color-mix(in srgb, var(--barn-500) 12%, var(--surface-raised));
-    border: 1px solid color-mix(in srgb, var(--barn-500) 45%, var(--border));
+    background: color-mix(in srgb, var(--danger) 12%, var(--surface-raised));
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
     border-radius: var(--radius);
     padding: 10px 12px;
   }
@@ -431,7 +431,7 @@
     padding: 10px 4px 4px;
     text-align: center;
     font-family: var(--font-mono, monospace);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     border-top: 1px solid var(--border);
     margin-top: 4px;
@@ -440,7 +440,7 @@
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .set-link:hover {
@@ -461,7 +461,7 @@
     color: var(--text-muted);
     padding: 6px;
     border-radius: 5px;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: capitalize;
   }
@@ -478,16 +478,16 @@
     border-radius: var(--radius-sm);
     padding: 5px 8px;
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .seg-btn.on {
     background: var(--surface-raised);
-    color: var(--primary);
+    color: var(--primary-text);
     box-shadow: var(--shadow-1);
   }
   .set-path {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     background: var(--bg);
     border: 1px solid var(--border);
@@ -545,13 +545,13 @@
     color: var(--text);
     padding: 9px 12px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
   .set-btn:hover:not(:disabled) {
     border-color: var(--primary);
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .set-btn:disabled {
     opacity: 0.55;
@@ -563,7 +563,7 @@
     color: var(--danger);
     padding: 9px 12px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     width: 100%;
     cursor: pointer;

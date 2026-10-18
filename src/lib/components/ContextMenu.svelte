@@ -92,12 +92,12 @@
     color: var(--text);
     padding: 8px 10px;
     border-radius: var(--radius-sm);
-    font-size: 13px;
+    font-size: var(--fs-sm);
     cursor: pointer;
   }
   .menu-item:hover:not(:disabled) {
     background: color-mix(in srgb, var(--primary) 14%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .menu-item:disabled {
     opacity: 0.45;
@@ -111,7 +111,7 @@
     flex: 0 0 auto;
     width: 16px;
     text-align: center;
-    font-size: 13px;
+    font-size: 0.8125rem;
     opacity: 0.9;
   }
   .lbl {

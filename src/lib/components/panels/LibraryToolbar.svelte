@@ -82,13 +82,13 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-muted);
     cursor: pointer;
   }
   .crumb-count {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .crumb-tag {
@@ -97,7 +97,7 @@
     color: var(--info);
     border-radius: 999px;
     padding: 3px 10px;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
@@ -126,7 +126,7 @@
     width: 26px;
     height: 22px;
     border-radius: 5px;
-    font-size: 13px;
+    font-size: var(--fs-sm);
     line-height: 1;
     cursor: pointer;
   }
@@ -135,6 +135,6 @@
   }
   .vt.on {
     background: color-mix(in srgb, var(--primary) 16%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
   }
 </style>

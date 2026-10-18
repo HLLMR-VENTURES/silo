@@ -257,7 +257,7 @@
   }
   .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
   }
   .modal-foot {
     display: flex;

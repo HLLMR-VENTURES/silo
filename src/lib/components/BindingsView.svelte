@@ -151,6 +151,7 @@
     margin: 2px 0 0;
     color: var(--text-muted);
     font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
   }
   .x {
     border: none;
@@ -203,7 +204,7 @@
     margin-bottom: 8px;
   }
   .sec {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted);
@@ -237,7 +238,7 @@
   .b-key {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.8rem;
-    color: var(--primary);
+    color: var(--primary-text);
     white-space: nowrap;
   }
   .grid {

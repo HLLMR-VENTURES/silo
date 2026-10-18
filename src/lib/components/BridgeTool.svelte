@@ -216,7 +216,7 @@
   .field label,
   .lbl {
     display: block;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -283,7 +283,7 @@
   .opt.on {
     border-color: var(--primary);
     background: color-mix(in srgb, var(--primary) 14%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
     font-weight: 600;
   }
   .caveat {

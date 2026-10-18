@@ -535,7 +535,7 @@
     margin-bottom: 12px;
   }
   .ok-note {
-    color: var(--primary);
+    color: var(--primary-text);
     padding: 8px 12px;
     margin-bottom: 12px;
   }

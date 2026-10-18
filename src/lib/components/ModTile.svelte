@@ -275,15 +275,15 @@
     background: var(--primary);
   }
   .tc-state {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-muted);
   }
   .tc-state.on {
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .tc-parked {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     background: color-mix(in srgb, var(--text-muted) 12%, transparent);
     border-radius: 999px;
@@ -295,8 +295,8 @@
   .tc-gear {
     border: none;
     background: transparent;
-    color: var(--primary);
-    font-size: 15px;
+    color: var(--primary-text);
+    font-size: 0.9375rem;
     cursor: pointer;
     line-height: 1;
   }
@@ -319,10 +319,10 @@
     display: grid;
     place-items: center;
     font-family: var(--font-display);
-    font-size: 30px;
+    font-size: var(--fs-2xl);
     font-weight: 600;
     color: var(--on-primary);
-    background: linear-gradient(135deg, var(--green-500), var(--green-700));
+    background: linear-gradient(135deg, var(--primary), var(--primary-hover));
     box-shadow: var(--shadow-1);
   }
   .tc-icon.map {
@@ -348,7 +348,7 @@
     text-overflow: ellipsis;
   }
   .tc-author {
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
@@ -358,14 +358,14 @@
     display: flex;
     align-items: baseline;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .tc-meta .dot {
     opacity: 0.6;
   }
   .rating {
-    color: var(--accent);
+    color: var(--accent-text);
     letter-spacing: -1px;
   }
   .tc-flags {
@@ -375,25 +375,25 @@
     margin-top: 2px;
   }
   .tc-flag {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 1px 7px;
     border-radius: 999px;
     border: 1px solid var(--border);
   }
   .tc-flag.ok {
-    color: var(--primary);
+    color: var(--primary-text);
     background: color-mix(in srgb, var(--primary) 12%, transparent);
     border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
   }
   .tc-flag.mod {
-    color: var(--warn);
-    border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+    color: var(--warn-text);
+    border-color: color-mix(in srgb, var(--warn-text) 40%, var(--border));
   }
   .tc-flag.upd {
-    color: var(--gold-700);
-    background: color-mix(in srgb, var(--gold-700) 12%, transparent);
-    border-color: color-mix(in srgb, var(--gold-700) 40%, var(--border));
+    color: var(--accent-text);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   }
   .tc-links {
     margin-top: auto;
@@ -402,9 +402,9 @@
   .tc-link {
     border: none;
     background: transparent;
-    color: var(--primary);
+    color: var(--primary-text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
     padding: 0;
@@ -423,7 +423,7 @@
     border: none;
     background: transparent;
     color: var(--text-muted);
-    font-size: 15px;
+    font-size: 0.9375rem;
     line-height: 1;
     width: 26px;
     height: 26px;
@@ -436,7 +436,7 @@
     color: var(--text);
   }
   .tc-act.star.on {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .tc-act.warn.on {
     color: var(--danger);
@@ -456,16 +456,17 @@
     background: color-mix(in srgb, var(--surface-raised) 45%, transparent);
   }
   .pill {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
     color: var(--text-muted);
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
   .pill.cat {
-    color: var(--primary);
+    color: var(--primary-text);
     background: color-mix(in srgb, var(--primary) 12%, transparent);
     border-color: color-mix(in srgb, var(--primary) 30%, var(--border));
     cursor: pointer;
@@ -475,7 +476,7 @@
     background: color-mix(in srgb, var(--primary) 22%, transparent);
   }
   .pill.cat.overridden {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   }
@@ -488,15 +489,15 @@
     border-color: color-mix(in srgb, var(--info) 40%, var(--border));
   }
   .pill.warn {
-    color: var(--warn);
-    border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+    color: var(--warn-text);
+    border-color: color-mix(in srgb, var(--warn-text) 45%, var(--border));
   }
   .pill.dep {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
   .pill.dev {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   }

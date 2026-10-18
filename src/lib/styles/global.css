@@ -99,7 +99,7 @@ button {
   transition: background 0.12s;
 }
 .drawer-resize-handle:hover::before {
-  background: var(--green-300, #9cc06e);
+  background: var(--primary);
 }
 
 /* Notice banners (ⓘ / ⚠ / ⇄ strips under the toolbar): App.svelte and the banner components

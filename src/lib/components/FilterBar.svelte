@@ -229,7 +229,7 @@
     cursor: pointer;
   }
   .fb-sel.on {
-    color: var(--primary);
+    color: var(--primary-text);
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
     background: color-mix(in srgb, var(--primary) 10%, transparent);
     font-weight: 600;
@@ -253,7 +253,7 @@
   .fb-sort {
     border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
     background: color-mix(in srgb, var(--primary) 14%, var(--surface-raised));
-    color: var(--primary);
+    color: var(--primary-text);
     font-weight: 700;
   }
   .fb-sort:hover {
@@ -295,7 +295,7 @@
     padding: 6px;
   }
   .clear-filters:hover {
-    color: var(--primary);
+    color: var(--primary-text);
     text-decoration: underline;
   }
 </style>

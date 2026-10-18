@@ -160,20 +160,20 @@
   }
   .src-name {
     font-weight: 700;
-    font-size: 13px;
+    font-size: var(--fs-sm);
     display: inline-flex;
     align-items: center;
     gap: 6px;
   }
   .src-sub {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .src-link {
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 0;
     cursor: pointer;
@@ -186,7 +186,7 @@
     text-decoration: underline;
   }
   .src-body {
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     display: flex;
     align-items: center;
     gap: 10px;
@@ -197,7 +197,7 @@
   .src-nums {
     display: flex;
     gap: 14px;
-    font-size: 13px;
+    font-size: var(--fs-sm);
     color: var(--text);
     flex-wrap: wrap;
   }
@@ -216,18 +216,18 @@
     color: var(--text);
     padding: 6px 12px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
   .act:hover:not(:disabled) {
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .act.on {
     background: color-mix(in srgb, var(--accent, var(--primary)) 16%, transparent);
     border-color: var(--accent, var(--primary));
-    color: var(--accent, var(--primary));
+    color: var(--accent-text);
   }
   .act.connect {
     color: var(--info);
@@ -243,11 +243,11 @@
     color: var(--text);
     border-radius: var(--radius-sm);
     padding: 2px 8px;
-    font-size: 12px;
+    font-size: var(--fs-xs);
   }
   .err,
   .src-err {
     color: var(--danger);
-    font-size: 12px;
+    font-size: var(--fs-xs);
   }
 </style>

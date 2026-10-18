@@ -363,11 +363,12 @@
     display: inline-block;
     background: var(--primary);
     color: var(--on-primary);
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 1px 8px;
     border-radius: 999px;
     margin-right: 6px;
+    font-variant-numeric: tabular-nums;
   }
   .steps {
     margin: 0 0 14px;
@@ -388,7 +389,7 @@
   }
   .hint.good {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .result {
     border: 1px solid var(--border);
@@ -401,7 +402,7 @@
     background: color-mix(in srgb, var(--danger) 8%, transparent);
   }
   .result-title {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted);
@@ -448,7 +449,7 @@
   }
   .btn.ok {
     background: color-mix(in srgb, var(--primary) 16%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
     border-color: color-mix(in srgb, var(--primary) 35%, transparent);
     font-weight: 600;
   }

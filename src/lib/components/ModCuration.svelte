@@ -93,7 +93,7 @@
     border-top: 1px solid var(--border);
   }
   .d-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -108,12 +108,12 @@
     border: none;
     background: transparent;
     color: var(--border);
-    font-size: 22px;
+    font-size: 1.375rem;
     line-height: 1;
     padding: 0 2px;
   }
   .star.on {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .d-tags {
     display: flex;
@@ -133,7 +133,7 @@
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 4px 4px 4px 10px;
   }
@@ -141,7 +141,7 @@
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 11px;
+    font-size: 0.75rem;
     padding: 4px 8px 4px 4px;
     opacity: 0.7;
   }
@@ -154,7 +154,7 @@
     color: var(--text);
     border-radius: 999px;
     padding: 5px 12px;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-family: inherit;
     width: 100px;
   }
@@ -168,6 +168,6 @@
     color: var(--text);
     padding: 8px 10px;
     font-family: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
   }
 </style>

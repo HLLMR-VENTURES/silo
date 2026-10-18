@@ -234,18 +234,18 @@
   }
   .dh-title {
     font-family: var(--font-display);
-    font-size: 18px;
+    font-size: var(--fs-xl);
     font-weight: 600;
     line-height: 1.2;
     color: var(--text);
   }
   .dh-sub {
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     margin-top: 2px;
   }
   .dh-tech {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     opacity: 0.75;
     margin-top: 2px;
@@ -282,7 +282,7 @@
     margin: 0 0 12px;
     padding: 10px 0;
     border-top: 1px solid var(--border);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
   }
   .facts dt {
     color: var(--text-muted);
@@ -320,7 +320,7 @@
   }
   /* Match the Library drawer's section labels so both read as one system. */
   .drawer-sec {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     font-weight: 700;
@@ -334,7 +334,7 @@
     margin: 0 0 14px;
   }
   .dtag {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
@@ -409,7 +409,7 @@
   /* Why this source can't be installed directly — names who's responsible. */
   .src-why {
     margin: 6px 0 0;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     line-height: 1.4;
     color: var(--text-muted);
   }
@@ -436,7 +436,7 @@
   .find-lib-btn {
     border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--border));
     background: var(--surface);
-    color: var(--primary);
+    color: var(--primary-text);
     font: inherit;
     font-weight: 600;
     padding: 7px 14px;

@@ -94,13 +94,13 @@
     font-weight: 600;
   }
   .lp-sub {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     font-family: var(--font-ui);
   }
   .lp-empty {
     padding: 10px 8px 14px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.5;
   }
@@ -124,7 +124,7 @@
     color: var(--text);
     padding: 9px 10px;
     border-radius: var(--radius-sm);
-    font-size: 13px;
+    font-size: var(--fs-sm);
   }
   .lp-apply:hover {
     background: color-mix(in srgb, var(--primary) 10%, transparent);
@@ -150,7 +150,7 @@
   }
   .lp-count {
     flex: 0 0 auto;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .lp-icon {
@@ -161,7 +161,7 @@
     width: 28px;
     height: 30px;
     border-radius: var(--radius-sm);
-    font-size: 14px;
+    font-size: 0.875rem;
   }
   .lp-icon:hover {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
@@ -177,10 +177,10 @@
     margin-top: 6px;
     border: 1px dashed var(--border);
     background: transparent;
-    color: var(--primary);
+    color: var(--primary-text);
     padding: 10px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .lp-save:hover:not(:disabled) {
@@ -199,7 +199,7 @@
     color: var(--text-muted);
     padding: 8px;
     border-radius: var(--radius-sm);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .lp-import:hover {

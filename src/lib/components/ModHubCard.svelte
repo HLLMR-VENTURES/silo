@@ -64,13 +64,13 @@
   }
   .src-name {
     font-weight: 700;
-    font-size: 13px;
+    font-size: var(--fs-sm);
   }
   .src-link {
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 0;
     cursor: pointer;
@@ -85,7 +85,7 @@
   .src-nums {
     display: flex;
     gap: 14px;
-    font-size: 13px;
+    font-size: var(--fs-sm);
     color: var(--text);
     flex-wrap: wrap;
   }
@@ -94,7 +94,7 @@
   }
   .muted {
     color: var(--text-muted);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
   }
   .src-actions {
     display: flex;
@@ -107,17 +107,17 @@
     color: var(--text);
     padding: 6px 12px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
   .act:hover {
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .why {
     margin: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.45;
   }

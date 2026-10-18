@@ -188,7 +188,7 @@
   }
   .ok-note {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
     border-radius: var(--radius-sm);
     padding: 8px 12px;
     margin-bottom: 10px;
@@ -260,7 +260,7 @@
     border-color: color-mix(in srgb, var(--danger) 35%, transparent);
   }
   .sec {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -286,5 +286,6 @@
     color: var(--text-muted);
     font-size: 0.8rem;
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
 </style>

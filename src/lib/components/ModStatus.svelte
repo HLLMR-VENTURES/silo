@@ -76,7 +76,7 @@
     border-top: 1px solid var(--border);
   }
   .d-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -96,7 +96,7 @@
     opacity: 0.85;
   }
   .d-log.warn {
-    color: var(--squash-500);
+    color: var(--warn-text);
   }
   .d-log.bad {
     color: var(--danger);
@@ -104,7 +104,7 @@
   .d-log-sample {
     margin-top: 4px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;

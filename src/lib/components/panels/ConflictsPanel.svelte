@@ -71,21 +71,21 @@
     font-weight: 600;
   }
   .lp-sub {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     font-family: var(--font-ui);
   }
   .lp-empty {
     padding: 10px 8px 14px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.5;
   }
   .cf-row {
     padding: 10px 10px 12px;
     border-radius: var(--radius-sm);
-    border-left: 3px solid var(--warn);
-    background: color-mix(in srgb, var(--warn) 6%, transparent);
+    border-left: 3px solid var(--warn-text);
+    background: color-mix(in srgb, var(--warn-text) 6%, transparent);
     margin-bottom: 8px;
   }
   .cf-row.crit {
@@ -105,17 +105,17 @@
     gap: 8px;
   }
   .cf-sev {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--warn);
+    color: var(--warn-text);
   }
   .cf-row.crit .cf-sev {
     color: var(--danger);
   }
   .cf-kind {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .cf-name {
@@ -124,12 +124,12 @@
   }
   .cf-mods {
     margin-top: 5px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     color: var(--text);
   }
   .cf-why {
     margin-top: 5px;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.5;
   }

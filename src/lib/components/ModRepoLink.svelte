@@ -145,7 +145,7 @@
     border-top: 1px solid var(--border);
   }
   .d-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -164,7 +164,7 @@
     color: var(--text);
     border-radius: var(--radius-sm);
     padding: 7px 10px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-family: inherit;
   }
   .gh-btn {
@@ -174,12 +174,12 @@
     color: var(--text);
     padding: 7px 12px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .gh-btn:hover:not(:disabled) {
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .gh-actions {
     display: flex;
@@ -190,7 +190,7 @@
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .gh-open:hover {
@@ -199,16 +199,16 @@
   .gh-err {
     margin-top: 8px;
     color: var(--danger);
-    font-size: 12px;
+    font-size: var(--fs-xs);
   }
   .gh-suggest {
     margin-top: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--info);
   }
   .gh-result {
     margin-top: 8px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     padding: 8px 10px;
     border-radius: var(--radius-sm);
     background: var(--bg);
@@ -219,6 +219,6 @@
   }
   .gh-result.has {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
-    color: var(--gold-700);
+    color: var(--accent-text);
   }
 </style>

@@ -584,6 +584,7 @@
     color: var(--text-muted);
     font-size: 0.85rem;
     margin-bottom: 8px;
+    font-variant-numeric: tabular-nums;
   }
   .err {
     background: color-mix(in srgb, var(--danger) 12%, transparent);
@@ -596,7 +597,7 @@
   }
   .ok-note {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
     border-radius: var(--radius-sm);
     padding: 8px 12px;
     margin-bottom: 10px;
@@ -712,9 +713,10 @@
     gap: 8px;
     font-size: 0.76rem;
     color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
   }
   .kind {
-    font-size: 0.64rem;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -788,7 +790,7 @@
     margin-top: 12px;
   }
   .sec {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -814,5 +816,6 @@
     color: var(--text-muted);
     font-size: 0.8rem;
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
 </style>

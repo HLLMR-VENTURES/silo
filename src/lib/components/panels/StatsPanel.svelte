@@ -101,12 +101,12 @@
     font-weight: 600;
   }
   .lp-sub {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     font-family: var(--font-ui);
   }
   .hz-group {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -129,10 +129,10 @@
   .st-tile b {
     display: block;
     font-family: var(--font-display);
-    font-size: 20px;
+    font-size: var(--fs-xl);
   }
   .st-tile span {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .st-cat {
@@ -141,12 +141,12 @@
   .st-cat-top {
     display: flex;
     justify-content: space-between;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     margin-bottom: 3px;
   }
   .st-cat-size {
     color: var(--text-muted);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .st-bar {
     height: 6px;
@@ -162,7 +162,7 @@
   .st-big {
     display: flex;
     justify-content: space-between;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     padding: 4px 8px;
   }
   .st-big-size {
