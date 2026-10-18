@@ -124,6 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   savegame's mods, it shows how many mods turn on, how many are parked and how many aren't in
   your library, with the list of mods. Cancel changes nothing. (#226)
 
+- **Dev tooling only:** the test runner moves to Vitest 5 and `npm audit` is clean again
+  (nanoid, postcss and source-map-js updated). Nothing in the shipped app changes. (#234)
+
 ### Fixed
 
 - **A rescan no longer hides a warning.** Rescanning (including the automatic rescan when you
