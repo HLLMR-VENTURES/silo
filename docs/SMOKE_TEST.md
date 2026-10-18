@@ -188,7 +188,7 @@ start below it).
 - [ ] `[app]` **Dependencies**, **uniqueType**, and **Conflicts** sub-sections render when present.
 
 **Settings page — every control:**
-- [ ] `[app]` **General**: **Theme** System / Light / Dark (both themes legible); **UI size** (in the dark theme its list is readable, not blank); **Graphics settings → Edit game.xml**.
+- [ ] `[app]` **General**: **Theme** System / Light / Dark (both themes legible); **UI size**; **Graphics settings → Edit game.xml**.
 - [ ] `[app]` **Mods folder**: the path in a read-only field with **Open folder** and **Change…** on the right; the game install below it.
 - [ ] `[app]` **Library**: **Organize**, the **Auto-file new mods** switch and **Library archive** are present. Confirm auto-file is **OFF by default** on a fresh profile.
 - [ ] `[app]` **Accounts**: **GitHub account**: Connect / **Enable actions** / **Use a Personal Access Token** / Disconnect all render (see §14 for the real connect).

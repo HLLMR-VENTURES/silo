@@ -134,9 +134,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **The UI size list is readable in the dark theme.** Native drop-down lists showed dark text on
-  a dark background. (#236)
-
 - **A rescan no longer hides a warning.** Rescanning (including the automatic rescan when you
   come back to Silo) used to clear whatever problem was showing, such as a mods folder FS25
   doesn't read or a failed install. Each warning now stays until its cause is fixed. (#228)

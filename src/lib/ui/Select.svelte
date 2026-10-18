@@ -58,12 +58,6 @@
     font: inherit;
     cursor: pointer;
   }
-  /* The option list (global.css sets the same for every native select). */
-  select :global(option),
-  select :global(optgroup) {
-    background: var(--raised);
-    color: var(--text);
-  }
   .select-md select {
     min-height: 2.25rem;
   }
