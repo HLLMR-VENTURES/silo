@@ -70,7 +70,7 @@
     type ArchivePreflight,
   } from "./lib/api";
   import { ArchiveMove } from "./lib/archiveMove.svelte";
-  import { capList, modsCount, problemLines, sentence, unDot } from "./lib/archiveMoveLogic";
+  import { capList, modsCount, problemLines, unDot } from "./lib/archiveMoveLogic";
   import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { checkUpdate, installUpdate, type AvailableUpdate } from "./lib/updater";
@@ -142,6 +142,7 @@
   import StatBar from "./lib/components/panels/StatBar.svelte";
   import LibraryToolbar from "./lib/components/panels/LibraryToolbar.svelte";
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
+  import ArchiveMoveBanner from "./lib/components/ArchiveMoveBanner.svelte";
   import { fmtSize } from "./lib/format";
   import {
     rootsFor,
@@ -2357,66 +2358,22 @@
     </div>
   {/if}
 
-  {#if archiveMove.unfinished}
-    <div class="cloud-notice">
-      <span class="cn-ico">⇄</span>
-      <div class="cn-text">
-        {#if archiveMove.running}
-          <b>{archiveMove.cancelling ? "Moving your library back" : "Moving your library"}</b>
-          {#if archiveMove.archive?.moving}
-            to <span class="tnum">{archiveMove.cancelling ? archiveMove.archive.moving.from : archiveMove.archive.moving.to}</span>
-          {/if}
-          —
-          {#if archiveMove.progress && archiveMove.progress.total > 0}
-            <span class="tnum">
-              {archiveMove.progress.done}/{archiveMove.progress.total} mods · {fmtSize(archiveMove.progress.bytesDone)} of
-              {fmtSize(archiveMove.progress.bytesTotal)}</span
-            >.
-          {:else}
-            starting.
-          {/if}
-          Launch is blocked until it pauses or finishes.
-        {:else if archiveMove.archive?.moving?.errors.length}
-          <b>{modsCount(archiveMove.archive.moving.errors.length)} couldn't be moved:</b>
-          {sentence(capList(archiveMove.archive.moving.errors.map(unDot), 3, "; "))}
-          {archiveMove.archive.moving.pauseReason ? `${sentence(archiveMove.archive.moving.pauseReason)} ` : ""}The move is
-          paused — Retry tries them again{archiveMove.cancelling ? "." : ", or Cancel moves everything back."}
-        {:else if archiveMove.archive?.moving}
-          <b>{archiveMove.cancelling ? "Moving your library back is paused." : "Archive move paused."}</b>
-          {archiveMove.archive.moving.pauseReason ? `${sentence(archiveMove.archive.moving.pauseReason)} ` : ""}You can play —
-          resume when you're done.
-        {/if}
-      </div>
-      {#if archiveMove.running}
-        <button class="cn-act" onclick={() => archiveMove.pause()} disabled={archiveMove.pauseRequested}>
-          {archiveMove.pauseRequested ? "Pausing…" : "Pause"}
-        </button>
-      {:else if archiveMove.archive?.moving}
-        <button class="cn-act" onclick={() => archiveMove.resume()}>
-          {archiveMove.archive.moving.errors.length ? "Retry" : "Resume"}
-        </button>
-      {/if}
-      {#if !archiveMove.cancelling}
-        <button class="cn-act" onclick={() => archiveMove.cancel()}>Cancel move</button>
-      {/if}
-    </div>
-  {:else if archiveMove.archive?.path && !archiveMove.archive.available}
-    <div class="cloud-notice">
-      <span class="cn-ico">⚠</span>
-      <div class="cn-text">
-        <b>Your library archive isn't available:</b> <span class="tnum">{archiveMove.archive.path}</span>. Parked
-        mods are hidden until it's back; active mods linked from it won't load in-game.
-      </div>
-      <button
-        class="cn-act"
-        onclick={async () => {
-          await archiveMove.refresh();
-          await runScan();
-        }}>Retry</button
-      >
-      <button class="cn-act" onclick={changeArchive}>Choose another</button>
-    </div>
-  {/if}
+  <ArchiveMoveBanner
+    archive={archiveMove.archive}
+    moveProgress={archiveMove.progress}
+    moveRunning={archiveMove.running}
+    moveUnfinished={archiveMove.unfinished}
+    moveCancelling={archiveMove.cancelling}
+    pauseRequested={archiveMove.pauseRequested}
+    onPause={() => archiveMove.pause()}
+    onResume={() => archiveMove.resume()}
+    onCancel={() => archiveMove.cancel()}
+    onRetry={async () => {
+      await archiveMove.refresh();
+      await runScan();
+    }}
+    onChooseAnother={changeArchive}
+  />
 
   {#if overrideNoticeOpen && modsStatus?.path && !modsStatus.layoutProblem}
     <div class="cloud-notice">
@@ -2688,53 +2645,6 @@
     font-size: 13px;
     /* Several problems arrive one per line. */
     white-space: pre-line;
-  }
-  .cloud-notice {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    padding: 11px 16px 11px 20px;
-    background: color-mix(in srgb, var(--info) 12%, var(--surface));
-    border-bottom: 1px solid color-mix(in srgb, var(--info) 30%, var(--border));
-    font-size: 12.5px;
-    line-height: 1.5;
-    color: var(--text);
-  }
-  .cn-ico {
-    font-size: 16px;
-    line-height: 1.4;
-    color: var(--info);
-    flex: 0 0 auto;
-  }
-  .cn-text {
-    flex: 1 1 auto;
-  }
-  .cn-act {
-    flex: 0 0 auto;
-    border: 1px solid color-mix(in srgb, var(--info) 40%, transparent);
-    background: transparent;
-    color: var(--text);
-    font-size: 12px;
-    cursor: pointer;
-    padding: 3px 8px;
-    border-radius: var(--radius-sm);
-  }
-  .cn-act:hover {
-    background: color-mix(in srgb, var(--info) 15%, transparent);
-  }
-  .cn-x {
-    flex: 0 0 auto;
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: 13px;
-    cursor: pointer;
-    padding: 2px 6px;
-    border-radius: var(--radius-sm);
-  }
-  .cn-x:hover {
-    background: color-mix(in srgb, var(--info) 15%, transparent);
-    color: var(--text);
   }
   /* Log-triage panel owns its own padding (LogTriage.svelte), so no inner padding here. */
   .recover-banner {
