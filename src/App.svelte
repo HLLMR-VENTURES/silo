@@ -7,9 +7,10 @@
     ToastRegion,
     ask,
     askText,
+    askWithOption,
+    EmptyState,
     toast,
     type ConfirmFact,
-    type ToastHandle,
   } from "./lib/ui";
   import {
     modsRootStatus,
@@ -162,10 +163,29 @@
   import { rowBadges } from "./lib/components/library/rowBadges";
   import type { MenuTarget, SelectIntent } from "./lib/components/library/roving";
   import {
+    loadLibraryDensity,
+    loadLibraryState,
     loadLibraryView,
+    saveLibraryDensity,
+    saveLibraryState,
     saveLibraryView,
     type LibraryViewMode,
   } from "./lib/components/library/viewPref";
+  import {
+    filterChips,
+    filterMods,
+    NO_FILTERS,
+    needsAttention,
+    withoutFilter,
+    type FilterContext,
+    type LibraryFilters,
+  } from "./lib/components/library/filters";
+  import { bulkChanges, confirmBulkChange } from "./lib/components/library/bulk";
+  import { createParkLooseExplainer } from "./lib/components/library/parkLoose";
+  import BulkBar from "./lib/components/library/BulkBar.svelte";
+  import ActiveFilters from "./lib/components/library/ActiveFilters.svelte";
+  import { Selection } from "./lib/state/selection.svelte";
+  import { createSwitchUndo, switchMessage } from "./lib/state/switchUndo";
   import { getVerdict } from "./lib/provenanceCache.svelte";
   import FilterBar from "./lib/components/FilterBar.svelte";
   import ModSettings from "./lib/components/ModSettings.svelte";
@@ -191,7 +211,7 @@
   import MaintenanceSettings from "./lib/components/settings/MaintenanceSettings.svelte";
   import AboutSettings from "./lib/components/settings/AboutSettings.svelte";
   import CategoryMenu from "./lib/components/panels/CategoryMenu.svelte";
-  import LibraryToolbar, { type StatFilter } from "./lib/components/panels/LibraryToolbar.svelte";
+  import LibraryToolbar from "./lib/components/panels/LibraryToolbar.svelte";
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
   import NoticeArea from "./lib/components/NoticeArea.svelte";
   import ViewBoundary from "./lib/components/ViewBoundary.svelte";
@@ -202,7 +222,7 @@
   import { cycleRegion, regionOf } from "./lib/components/shell/regions";
   import { BISECT_BADGE } from "./lib/components/shell/navItems";
   import { installShortcuts, shortcutsBlocked, type ShortcutAction } from "./lib/state/shortcuts";
-  import { modalOpen } from "./lib/ui/overlayStack";
+  import { layerCount, modalOpen } from "./lib/ui/overlayStack";
   import StatusChip from "./lib/components/shell/StatusChip.svelte";
   import { libraryReadState } from "./lib/components/shell/status";
   import PlayButton, { type PlayMenuItem } from "./lib/components/shell/PlayButton.svelte";
@@ -225,7 +245,6 @@
   } from "./lib/views/libraryStatus";
   import { back, go, nav, searchPlaceholderFor, searchTargetFor } from "./lib/state/nav.svelte";
   import type { MenuItem } from "./lib/ui/overlayTypes";
-  import Icon from "./lib/ui/Icon.svelte";
   import { fmtSize } from "./lib/format";
   import {
     MODS_FOLDER_KEY,
@@ -280,15 +299,11 @@
   let overrideMap = $state<
     Record<string, { category: string; subcategory: string | null }>
   >({});
-  let showHidden = $state(false);
-  let favoritesOnly = $state(false);
-  let flaggedOnly = $state(false);
-  let conflictedOnly = $state(false);
-  let hasSettingsOnly = $state(false);
-  let needsUpdateOnly = $state(false);
-  // A single categorical facet (maps/scripts/uniqueType/active), from LibraryToolbar's "show only"
-  // counts (they were the stat bar's) — click one to scope the list to it; again to clear.
-  let statFilter = $state<StatFilter>("");
+  // The Library's filters (lib/components/library/filters): the All / Active / Parked segment
+  // (remembered), the Favorites / Needs attention chips and the Filters popover. Category and
+  // search are libCat/libSub and `query`.
+  let libFilters = $state<LibraryFilters>({ ...NO_FILTERS, status: loadLibraryState().status });
+  $effect(() => saveLibraryState({ status: libFilters.status }));
   let editing = $state<{ techName: string; x: number; y: number } | null>(null);
   let activeSet = $state<Set<string>>(new Set());
   // Library writes hold the "library-write" op class, one at a time: a second is refused with the
@@ -825,8 +840,12 @@
     return clean;
   }
 
-  /** The Undo notice of the last loadout switch; a new switch dismisses it. */
-  let switchUndo: ToastHandle | null = null;
+  /** The Undo toast of the last switch (a mod, a bulk change or a loadout); a new one dismisses it. */
+  const switchUndo = createSwitchUndo({
+    toast,
+    blocked: (expected) => activeUndoBlocked(expected),
+    reapply: (previous) => setActiveSetTo(previous, "Switching back"),
+  });
 
   /**
    * Why an Undo that puts the active set back can't run now, or null.
@@ -842,26 +861,15 @@
   /** Switch to a loadout's mods (already confirmed), then offer to switch back. Errors the
    *  apply reports are reported on their own; the switch toast still shows so Undo is reachable. */
   async function switchTo(name: string, techNames: string[]) {
-    switchUndo?.dismiss();
-    switchUndo = null;
+    switchUndo.dismiss();
     const previous = [...activeSet];
     const clean = await setActiveSetTo(techNames, `Switching to ${name}`);
     if (clean === null) return; // refused: another write is running, nothing changed
-    const switched = [...techNames];
-    switchUndo = toast({
+    switchUndo.offer({
       message: clean ? `Switched to ${name}.` : `Switch to ${name} finished with problems.`,
       tone: clean ? "neutral" : "warn",
-      action: {
-        label: "Undo",
-        run: async () => {
-          const why = activeUndoBlocked(switched);
-          if (why) {
-            toast({ message: why, tone: "warn" });
-            return;
-          }
-          await setActiveSetTo(previous, "Switching back");
-        },
-      },
+      previous,
+      expected: [...techNames],
     });
   }
 
@@ -1110,38 +1118,55 @@
     if (wasRunning && !bisectRecovery) await runScan(false);
   }
 
+  /** Before parking a loose mod: explain once that it's filed into the library (parkLoose.ts). */
+  const explainParkLoose = createParkLooseExplainer(
+    askWithOption,
+    undefined,
+    typeof navigator !== "undefined" && /Win/i.test(navigator.userAgent) ? "\\" : "/",
+  );
+
+  /** The organize input that files a loose mod into the library as it is. */
+  function looseInput(mod: ModEntry): ModInput {
+    return {
+      techName: mod.techName,
+      fileName: fileName(mod.path),
+      kind: mod.kind,
+      category: mod.category,
+      subcategory: mod.subcategory,
+    };
+  }
+
+  /** Turn one mod on or park it, then offer Undo (the switch toast). */
   async function toggleActive(techName: string) {
     const turningOff = activeSet.has(techName);
     const mod = effectiveMods.find((m) => m.techName === techName);
+    const name = mod?.title ?? techName;
     // A loose (unorganized) mod isn't a Silo projection — it's the user's own file sitting in the
     // live folder, so set_active can't remove it (and would silently no-op, the toggle bouncing
     // back on the next scan). To park it, file it into the library (flat→archive, no re-project):
     // it leaves the live folder but stays in the library. Reversible — toggling it on re-projects.
     if (turningOff && mod && isFileable(mod)) {
-      await applyLoose(
-        [
-          {
-            techName: mod.techName,
-            fileName: fileName(mod.path),
-            kind: mod.kind,
-            category: mod.category,
-            subcategory: mod.subcategory,
-          },
-        ],
-        [mod.techName],
-        false,
+      if (!(await explainParkLoose(name, mod.category))) return;
+      const previous = [...activeSet];
+      const filed = await applyLoose([looseInput(mod)], [mod.techName], false, false, () =>
+        switchUndo.dismiss(),
       );
+      // Problems were reported by applyLoose; a refusal changed nothing.
+      if (filed) switchUndo.offer({ message: switchMessage([name], false), previous, expected: [...activeSet] });
       return;
     }
     const op = beginWrite(turningOff ? "Parking a mod" : "Activating a mod");
     if (!op) return;
+    switchUndo.dismiss();
     const before = activeSet;
     const next = new Set(activeSet);
     if (next.has(techName)) next.delete(techName);
     else next.add(techName);
     activeSet = next; // optimistic: the switch moves at once
+    let clean: boolean | null = null;
     try {
-      await applyActive([...next]);
+      const rep = await applyActive([...next]);
+      clean = rep.errors.length === 0;
     } catch (e) {
       // Nothing was applied: put the switch back (unless something else set the mods since).
       if (activeSet === next) activeSet = before;
@@ -1149,6 +1174,13 @@
     } finally {
       op.end();
     }
+    if (clean === null) return;
+    switchUndo.offer({
+      message: switchMessage([name], !turningOff, clean),
+      tone: clean ? "neutral" : "warn",
+      previous: [...before],
+      expected: [...activeSet],
+    });
   }
 
   // Resolve a foreign file (a mod-folder file that isn't Silo's projection — typically a newer
@@ -1178,13 +1210,7 @@
   function looseInputs(): { inputs: ModInput[]; techNames: string[] } {
     const targets = effectiveMods.filter(isFileable);
     return {
-      inputs: targets.map((m) => ({
-        techName: m.techName,
-        fileName: fileName(m.path),
-        kind: m.kind,
-        category: m.category,
-        subcategory: m.subcategory,
-      })),
+      inputs: targets.map(looseInput),
       techNames: targets.map((m) => m.techName),
     };
   }
@@ -1192,17 +1218,21 @@
   // Apply a prepared set of organize inputs. `keepActive` re-projects them so their
   // loaded state is preserved (used by both the auto-filer and the manual button). `auto`: the
   // auto-filer, which says nothing when another write is running (the next scan retries).
+  // `onStart` runs once the write is under way (parking dismisses the previous switch toast).
+  // Returns true when they were filed cleanly, false on a problem (reported), null when refused.
   async function applyLoose(
     inputs: ModInput[],
     techNames: string[],
     keepActive: boolean,
     auto = false,
-  ) {
-    if (inputs.length === 0) return;
+    onStart?: () => void,
+  ): Promise<boolean | null> {
+    if (inputs.length === 0) return null;
     const op = beginWrite(`Filing ${modsCount(inputs.length)} into the library`, false, {
       silent: auto,
     });
-    if (!op) return;
+    if (!op) return null;
+    onStart?.();
     /** What went wrong: the thrown error (keeps its code), or the report's problems. */
     let problem: unknown = null;
     try {
@@ -1223,9 +1253,9 @@
     if (problem !== null) {
       // Try again files whichever of these mods are still loose, as they are now.
       const wanted = new Set(techNames);
-      const retry = () => {
+      const retry = async () => {
         const fresh = looseInputs();
-        return applyLoose(
+        await applyLoose(
           fresh.inputs.filter((i) => wanted.has(i.techName)),
           fresh.techNames.filter((t) => wanted.has(t)),
           keepActive,
@@ -1233,6 +1263,7 @@
       };
       reportError(problem, "Filing mods into the library", { retry });
     }
+    return problem === null;
   }
 
   // Auto-filer (opt-in): file new mods and keep them active — no prompt, they chose it.
@@ -1488,7 +1519,6 @@
   // Tags: techName -> string[]
   let tagMap = $state<Record<string, string[]>>({});
   let detailMod = $state<ModEntry | null>(null);
-  let selectedTag = $state<string | null>(null);
 
   const allTags = $derived.by(() => {
     const s = new Set<string>();
@@ -1558,14 +1588,14 @@
 
   // "Needs update" is on-demand: the first time it's switched on it runs a quiet update check,
   // then filters to whatever came back (or reports that everything's current). No launch-time work.
-  async function toggleNeedsUpdate() {
-    if (needsUpdateOnly) {
-      needsUpdateOnly = false;
+  async function toggleNeedsUpdate(on = !libFilters.needsUpdate) {
+    if (!on) {
+      libFilters = { ...libFilters, needsUpdate: false };
       return;
     }
     if (updateResults.length === 0 && !updateChecking) await checkAllUpdates(true);
     if (availableUpdates.length > 0) {
-      needsUpdateOnly = true;
+      libFilters = { ...libFilters, needsUpdate: true };
     } else {
       success("All mods are up to date");
     }
@@ -1698,25 +1728,31 @@
           .map(([cname, ccount]) => ({ name: cname, count: ccount, value: cname })),
       }));
   });
-  const libFilterCount = $derived(
-    (libCat ? 1 : 0) +
-      (favoritesOnly ? 1 : 0) +
-      (showHidden ? 1 : 0) +
-      (flaggedOnly ? 1 : 0) +
-      (conflictedOnly ? 1 : 0) +
-      (hasSettingsOnly ? 1 : 0) +
-      (needsUpdateOnly ? 1 : 0),
-  );
-  function clearLibFilters() {
+  /** What the filters read beyond a mod's scan entry (curation, conflicts, updates, tags). */
+  const filterCtx: FilterContext = {
+    curation: (t) => cur(t),
+    active: (t) => activeSet.has(t),
+    conflicted: (m) => conflictedSet.has(m.techName) || conflictedSet.has(m.title ?? ""),
+    hasUpdate: (t) => updatesSet.has(t),
+    tags: (t) => tagsOf(t),
+    verdict: (m) => getVerdict(m as ModEntry)?.status,
+  };
+  /** The filters in effect as chips (the category too), for ActiveFilters. */
+  const libChips = $derived(filterChips(libFilters, libCat, libSub));
+  function removeLibFilter(id: string) {
+    if (id === "category") {
+      libCat = "";
+      libSub = "";
+    } else {
+      libFilters = withoutFilter(libFilters, id);
+    }
+  }
+  /** Clear filters: every filter, the category and (from the empty state) the search too. */
+  function clearLibFilters(alsoSearch = false) {
     libCat = "";
     libSub = "";
-    favoritesOnly = false;
-    showHidden = false;
-    flaggedOnly = false;
-    conflictedOnly = false;
-    hasSettingsOnly = false;
-    needsUpdateOnly = false;
-    selectedTag = null;
+    libFilters = { ...NO_FILTERS };
+    if (alsoSearch) query = "";
   }
   const filtered = $derived.by(() => {
     let list = effectiveMods;
@@ -1725,38 +1761,7 @@
         (m) => m.category === libCat && (!libSub || m.subcategory === libSub),
       );
     }
-    if (!showHidden) {
-      list = list.filter((m) => !cur(m.techName).hidden);
-    }
-    if (favoritesOnly) {
-      list = list.filter((m) => cur(m.techName).favorite);
-    }
-    if (flaggedOnly) {
-      list = list.filter((m) => cur(m.techName).broken);
-    }
-    if (conflictedOnly) {
-      list = list.filter(
-        (m) => conflictedSet.has(m.techName) || conflictedSet.has(m.title ?? ""),
-      );
-    }
-    if (hasSettingsOnly) {
-      list = list.filter((m) => m.hasSettings);
-    }
-    if (needsUpdateOnly) {
-      list = list.filter((m) => updatesSet.has(m.techName));
-    }
-    if (statFilter === "maps") {
-      list = list.filter((m) => m.isMap);
-    } else if (statFilter === "scripts") {
-      list = list.filter((m) => m.scriptCount > 0);
-    } else if (statFilter === "unique") {
-      list = list.filter((m) => m.uniqueType != null);
-    } else if (statFilter === "active") {
-      list = list.filter((m) => activeSet.has(m.techName));
-    }
-    if (selectedTag) {
-      list = list.filter((m) => tagsOf(m.techName).includes(selectedTag!));
-    }
+    list = filterMods(list, libFilters, filterCtx);
     if (q !== "") {
       list = list.filter(
         (m) =>
@@ -1767,6 +1772,20 @@
     }
     return list;
   });
+  /** How many mods "Needs attention" would show (hidden ones aside), for its chip. */
+  const attentionCount = $derived(
+    effectiveMods.reduce((n, m) => {
+      const c = cur(m.techName);
+      if (c.hidden && !libFilters.hidden) return n;
+      const hit = needsAttention(m, {
+        verdict: getVerdict(m)?.status,
+        conflicted: filterCtx.conflicted(m),
+        flagged: c.broken,
+        hasUpdate: updatesSet.has(m.techName),
+      });
+      return n + (hit ? 1 : 0);
+    }, 0),
+  );
 
   type SortKey = "name" | "category" | "size" | "added" | "version" | "rating";
   let sortBy = $state<SortKey>("added");
@@ -1774,13 +1793,21 @@
   // Library view: the list (default, for every library size) or cards; remembered per machine.
   let libView = $state<LibraryViewMode>(loadLibraryView());
   $effect(() => saveLibraryView(libView));
-  // Row density: comfortable (56px) by default; compact (44px) awaits a Settings toggle.
-  const libDensity: Density = "comfortable";
+  // Row density: comfortable (56px) by default, compact (44px) from Settings → General. Remembered.
+  let libDensity = $state<Density>(loadLibraryDensity());
+  function setLibDensity(d: Density) {
+    libDensity = d;
+    saveLibraryDensity(d);
+  }
   // The rendered list or grid, so the drawer can hand focus back to the row it was opened from.
   let libList = $state<{ focusKey: (key: string) => boolean }>();
   const modKey = (m: ModEntry) => m.path;
-  // Selection lands in Task 2 of #242; the rows and keys already report the gestures.
-  function selectMod(_key: string, _intent: SelectIntent) {}
+  // ── Multi-select (lib/state/selection): keys are mod paths, in the order of `visible` ──
+  const selection = new Selection();
+  /** A row's checkbox or a selection key: plain/Ctrl toggles, Shift selects from the anchor. */
+  function selectMod(key: string, intent: SelectIntent) {
+    selection.apply(key, intent, visibleKeys);
+  }
   // A row's badges: problems, then status, then info (the row caps them at three).
   function badgesFor(mod: ModEntry) {
     const c = cur(mod.techName);
@@ -1829,59 +1856,143 @@
     return arr;
   });
 
-  // Select-all checkbox state over the filtered view.
-  const filteredActiveCount = $derived(
-    filtered.reduce((n, m) => n + (activeSet.has(m.techName) ? 1 : 0), 0),
+  const visibleKeys = $derived(visible.map(modKey));
+  /** The selected mods, in list order. */
+  const selectedMods = $derived(
+    selection.size === 0 ? [] : visible.filter((m) => selection.has(modKey(m))),
   );
-  const allFilteredActive = $derived(
-    filtered.length > 0 && filteredActiveCount === filtered.length,
-  );
+  // Filters, search or a rescan changed the list: forget selected mods that aren't in it.
+  $effect(() => {
+    const keys = new Set(visibleKeys);
+    untrack(() => selection.prune(keys));
+  });
+  /** Esc in the list clears the selection (unless an overlay above it takes Esc first). */
+  function onListKeydown(e: KeyboardEvent) {
+    if (e.key !== "Escape" || e.defaultPrevented || selection.size === 0 || layerCount() > 0) return;
+    e.preventDefault();
+    selection.clear();
+  }
 
-  // Bulk activate/deactivate the currently-filtered set (fast loadout building).
-  async function setActiveForFiltered(active: boolean) {
+  /**
+   * BulkBar Turn on / Park: switch the selected mods through the bulk activation path. More than
+   * 25 changes ask first; loose mods being parked are filed into the library (as one switch
+   * does); then the switch toast offers Undo.
+   * @param list the mods to switch
+   * @param on true to turn them on, false to park them
+   */
+  async function setActiveForMods(list: ModEntry[], on: boolean) {
     // How many mods this actually changes (already-correct ones are free).
-    const changing = filtered.filter((m) =>
-      active ? !activeSet.has(m.techName) : activeSet.has(m.techName),
-    );
-    // Toggling the WHOLE library at once moves a lot of files — and on a cloud-synced folder each
-    // one is a copy or delete, not a cheap link. Confirm before a big unfiltered sweep so it's not
-    // an accidental gigabytes-long operation.
-    if (libFilterCount === 0 && changing.length > 25) {
-      const verb = active ? "Activate" : "Deactivate";
-      const tail = cloudSynced
-        ? " Your mods folder is cloud-synced, so each one is copied/removed individually. This can take a while."
-        : "";
-      if (
-        !(await ask({
-          title: `${verb} all ${changing.length} mods in your library?`,
-          body:
-            `Each one is ${active ? "linked into" : "removed from"} your mods folder; nothing is deleted from your library.${tail} ` +
-            `To undo it, ${active ? "deactivate" : "activate"} them again or switch to a loadout.`,
-          confirm: `${verb} ${changing.length} mods`,
-        }))
-      )
+    const changing = bulkChanges(list, on, activeSet);
+    if (changing.length === 0) {
+      toast({ message: on ? "They're already on." : "They're already parked." });
+      return;
+    }
+    // Switching many mods at once moves a lot of files — and on a cloud-synced folder each one is
+    // a copy or delete, not a cheap link. Confirm a big change so it's not an accidental
+    // gigabytes-long operation.
+    if (!(await confirmBulkChange(changing.length, on, cloudSynced, ask))) return;
+    // Loose mods can't be parked by set_active (they're the user's own files): they're filed.
+    const loose = on ? [] : changing.filter(isFileable);
+    if (loose.length > 0) {
+      const one = loose.length === 1;
+      const what = one ? (loose[0].title ?? loose[0].techName) : modsCount(loose.length);
+      if (!(await explainParkLoose(what, one ? loose[0].category : "<category>"))) return;
+    }
+    const looseSet = new Set(loose.map((m) => m.techName));
+    const projected = changing.filter((m) => !looseSet.has(m.techName));
+    const previous = [...activeSet];
+    let clean = true;
+    let applied = false;
+    if (projected.length > 0) {
+      const op = beginWrite(on ? "Activating mods" : "Deactivating mods");
+      if (!op) return;
+      switchUndo.dismiss();
+      const next = new Set(activeSet);
+      for (const m of projected) {
+        if (on) next.add(m.techName);
+        else next.delete(m.techName);
+      }
+      activeSet = next;
+      let problem: unknown = null;
+      try {
+        const rep = await applyActive([...next]); // reports its own problems
+        clean = rep.errors.length === 0;
+        applied = true;
+      } catch (e) {
+        problem = e;
+      } finally {
+        op.end();
+      }
+      // Reconcile the optimistic set against what's actually on disk — a partial/failed
+      // projection (e.g. a file Silo couldn't prove was its own) leaves the two out of sync.
+      await runScan(false);
+      if (problem !== null) {
+        reportError(problem, on ? "Activating mods" : "Deactivating mods");
         return;
+      }
     }
-    const op = beginWrite(active ? "Activating mods" : "Deactivating mods");
-    if (!op) return;
-    const next = new Set(activeSet);
-    for (const m of filtered) {
-      if (active) next.add(m.techName);
-      else next.delete(m.techName);
+    if (loose.length > 0) {
+      const filed = await applyLoose(loose.map(looseInput), [...looseSet], false, false, () =>
+        switchUndo.dismiss(),
+      );
+      // Refused, or it failed (reported): with nothing else switched there's nothing to undo.
+      if (filed !== true && !applied) return;
+      if (filed !== true) clean = false;
     }
-    activeSet = next;
-    let problem: unknown = null;
+    switchUndo.offer({
+      message: switchMessage(
+        changing.map((m) => m.title ?? m.techName),
+        on,
+        clean,
+      ),
+      tone: clean ? "neutral" : "warn",
+      previous,
+      expected: [...activeSet],
+    });
+  }
+
+  /**
+   * BulkBar Favorite / Hide: set one curation flag on every selected mod, then offer Undo.
+   * @param list the mods
+   * @param flag "favorite" or "hidden"
+   * @param value the flag's new value
+   */
+  async function setCurationFor(list: ModEntry[], flag: "favorite" | "hidden", value: boolean) {
+    const before = list.map((m) => cur(m.techName)).filter((c) => c[flag] !== value);
+    if (before.length === 0) return;
+    const write = async (rows: CurationRow[]) => {
+      curationMap = { ...curationMap, ...Object.fromEntries(rows.map((r) => [r.techName, r])) };
+      for (const r of rows) await setCuration(r);
+    };
     try {
-      await applyActive([...next]); // reports its own problems
+      await write(before.map((c) => ({ ...c, [flag]: value })));
     } catch (e) {
-      problem = e;
-    } finally {
-      op.end();
+      reportError(e, "Saving your mod flags");
+      return;
     }
-    // Reconcile the optimistic set against what's actually on disk — a partial/failed projection
-    // (e.g. a file Silo couldn't prove was its own) leaves the two out of sync otherwise.
-    await runScan(false);
-    if (problem !== null) reportError(problem, active ? "Activating mods" : "Deactivating mods");
+    const n = modsCount(before.length);
+    const message =
+      flag === "favorite"
+        ? value
+          ? `Added ${n} to favorites.`
+          : `Removed ${n} from favorites.`
+        : value
+          ? `Hid ${n}.`
+          : `Unhid ${n}.`;
+    toast({
+      message,
+      action: {
+        label: "Undo",
+        run: async () => {
+          try {
+            // Put back each mod's flag as it was, leaving its other flags as they are now.
+            await write(before.map((c) => ({ ...cur(c.techName), [flag]: c[flag] })));
+          } catch (e) {
+            reportError(e, "Saving your mod flags");
+          }
+        },
+      },
+    });
   }
 
   // Repair copy-projections into hardlinks: reclaims the duplicated space and makes future
@@ -2025,6 +2136,10 @@
     } catch (e) {
       reportError(e, "Switching mods folders");
     }
+  }
+
+  function openModsFolder() {
+    openKnownFolder("modsFolder").catch((e) => reportError(e, "Opening the mods folder"));
   }
 
   async function changeModsFolder() {
@@ -2931,7 +3046,7 @@
         onCurationChange={(row) => (curationMap = { ...curationMap, [dm.techName]: row })}
         onTagsChange={(t) => (tagMap = { ...tagMap, [dm.techName]: t })}
         onFilterTag={(t) => {
-          selectedTag = t;
+          libFilters = { ...libFilters, tag: t };
           detailMod = null;
         }}
         repo={repoMap[dm.techName] ?? null}
@@ -3033,74 +3148,61 @@
             dirEnabled={true}
             showYear={false}
             showClear={false}
-            filterCount={libFilterCount}
-            onClear={clearLibFilters}
           />
 
-          <!-- Library-only filters (they have no Browse equivalent). -->
-          <div class="lib-toggles">
-            <button class="lib-tog" class:on={favoritesOnly} onclick={() => (favoritesOnly = !favoritesOnly)}>
-              <Icon name="favorite" size={13} filled={favoritesOnly} /> Favorites
-            </button>
-            <button class="lib-tog" class:on={showHidden} onclick={() => (showHidden = !showHidden)}>
-              Hidden
-            </button>
-            <button class="lib-tog" class:on={flaggedOnly} onclick={() => (flaggedOnly = !flaggedOnly)}>
-              <Icon name="flagged" size={13} /> Flagged
-            </button>
-            <button
-              class="lib-tog"
-              class:on={conflictedOnly}
-              disabled={conflictedSet.size === 0}
-              onclick={() => (conflictedOnly = !conflictedOnly)}
-            >
-              <Icon name="problem" size={13} /> In conflict{conflictedSet.size > 0 ? ` (${conflictedSet.size})` : ""}
-            </button>
-            <button class="lib-tog" class:on={hasSettingsOnly} onclick={() => (hasSettingsOnly = !hasSettingsOnly)}>
-              <Icon name="modSettings" size={13} /> Has settings
-            </button>
-            <button
-              class="lib-tog lib-upd"
-              class:on={needsUpdateOnly}
-              disabled={updateChecking}
-              title="Show only mods with a newer version available. Checks for updates the first time."
-              onclick={toggleNeedsUpdate}
-            >
-              <Icon name="update" size={13} />
-              {updateChecking ? "Checking…" : `Needs update${availableUpdates.length > 0 ? ` (${availableUpdates.length})` : ""}`}
-            </button>
-            {#if libFilterCount > 0}
-              <button class="lib-clear" onclick={clearLibFilters}>Clear all <Icon name="close" size={13} /></button>
-            {/if}
-          </div>
-
-          <LibraryToolbar
-            {selectedTag}
-            shownCount={filtered.length}
-            allActive={allFilteredActive}
-            activeInFilter={filteredActiveCount}
-            disabled={writeLock.blocked || filtered.length === 0}
-            disabledReason={writeLock.reason}
-            bind:libView
-            bind:statFilter
-            statCounts={{
-              maps: stats.maps,
-              scripts: stats.scripts,
-              unique: stats.unique,
-              active: activeSet.size,
-            }}
-            onSelectAll={setActiveForFiltered}
-            onClearTag={() => (selectedTag = null)}
-          />
+          {#if selection.size > 0}
+            <BulkBar
+              count={selection.size}
+              shownCount={visible.length}
+              allShownSelected={selection.size === visible.length}
+              allFavorite={selectedMods.every((m) => cur(m.techName).favorite)}
+              allHidden={selectedMods.every((m) => cur(m.techName).hidden)}
+              writeReason={writeLock.reason}
+              onturnon={() => setActiveForMods(selectedMods, true)}
+              onpark={() => setActiveForMods(selectedMods, false)}
+              onfavorite={(on) => setCurationFor(selectedMods, "favorite", on)}
+              onhide={(on) => setCurationFor(selectedMods, "hidden", on)}
+              onselectall={() => selection.selectAll(visibleKeys)}
+              onclear={() => selection.clear()}
+            />
+          {:else}
+            <LibraryToolbar
+              filters={libFilters}
+              onchange={(f) => (libFilters = f)}
+              onneedsupdate={(on) => toggleNeedsUpdate(on)}
+              {updateChecking}
+              tags={allTags}
+              counts={{
+                attention: attentionCount,
+                conflicted: conflictedSet.size,
+                needsUpdate: availableUpdates.length || undefined,
+                maps: stats.maps,
+                scripts: stats.scripts,
+                unique: stats.unique,
+              }}
+              shownCount={visible.length}
+              bind:libView
+            />
+          {/if}
+          <ActiveFilters chips={libChips} onremove={removeLibFilter} onclear={() => clearLibFilters()} />
         {/snippet}
         {#snippet list()}
-          <div class="list-body">
-            {#if filtered.length === 0 && !scanning}
-              <div class="empty">
-                {mods.length === 0
-                  ? "No mods found yet. Point Silo at your mods folder and rescan."
-                  : "No mods match your filter."}
-              </div>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="list-body" onkeydown={onListKeydown}>
+            {#if mods.length === 0 && !scanning}
+              <EmptyState icon="library" title="No mods in this folder yet.">
+                {#snippet actions()}
+                  <Button variant="primary" icon="browse" onclick={() => go("browse")}>Browse mods</Button>
+                  <Button icon="folder" onclick={openModsFolder}>Open mods folder</Button>
+                  <Button onclick={changeModsFolder}>Choose another folder</Button>
+                {/snippet}
+              </EmptyState>
+            {:else if filtered.length === 0 && !scanning}
+              <EmptyState icon="search" title="No mods match these filters.">
+                {#snippet actions()}
+                  <Button onclick={() => clearLibFilters(true)}>Clear filters</Button>
+                {/snippet}
+              </EmptyState>
             {:else if libView === "cards"}
               <VirtualGrid
                 bind:this={libList}
@@ -3124,6 +3226,8 @@
                     flagged={c.broken}
                     rating={c.rating}
                     menuOpen={rowMenuOpen && rowMenu?.mod.path === mod.path}
+                    selected={selection.has(modKey(mod))}
+                    selectionMode={selection.size > 0}
                     onToggle={() => toggleActive(mod.techName)}
                     onOpen={() => (detailMod = mod)}
                     onMenu={(at) => openRowMenu(mod, at)}
@@ -3154,6 +3258,8 @@
                     favorite={c.favorite}
                     flagged={c.broken}
                     menuOpen={rowMenuOpen && rowMenu?.mod.path === mod.path}
+                    selected={selection.has(modKey(mod))}
+                    selectionMode={selection.size > 0}
                     onToggle={() => toggleActive(mod.techName)}
                     onOpen={() => (detailMod = mod)}
                     onMenu={(at) => openRowMenu(mod, at)}
@@ -3322,8 +3428,10 @@
             {theme}
             {uiScale}
             {userDir}
+            density={libDensity}
             onSetTheme={setTheme}
             onSetUiScale={setUiScale}
+            onSetDensity={setLibDensity}
             onOpenGameGraphics={openGameGraphics}
           />
         {/snippet}
@@ -3524,66 +3632,8 @@
     color: var(--muted);
   }
   /* ── Library view (LibraryView lays out the column) ── */
-  .lib-toggles {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 7px;
-    margin: 0 0 8px;
-  }
-  .lib-tog {
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--text-muted);
-    padding: 8px 12px;
-    border-radius: var(--radius);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .lib-tog:hover {
-    color: var(--text);
-  }
-  .lib-tog:disabled {
-    opacity: 0.45;
-    cursor: default;
-  }
-  .lib-tog.on {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-    color: var(--accent-text);
-  }
-  .lib-upd.on {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-    color: var(--accent-text);
-  }
-  .lib-clear {
-    margin-left: auto;
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--fs-sm);
-    font-weight: 600;
-    cursor: pointer;
-    padding: 6px;
-  }
-  .lib-clear:hover {
-    color: var(--primary-text);
-    text-decoration: underline;
-  }
   .list-body {
     height: 100%;
     min-height: 0;
-  }
-  .empty {
-    display: grid;
-    place-items: center;
-    height: 100%;
-    color: var(--text-muted);
-    font-size: var(--fs-md);
-    padding: 40px;
-    text-align: center;
   }
 </style>

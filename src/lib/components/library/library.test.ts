@@ -118,7 +118,7 @@ describe("VirtualList", () => {
     itemEl(container, "k0")!.focus();
     await user.keyboard("{Shift>}{ArrowDown}{/Shift}");
     await settle();
-    expect(onselect).toHaveBeenLastCalledWith(items[1], { shift: true, ctrl: false, range: true });
+    expect(onselect).toHaveBeenLastCalledWith(items[1], { shift: true, ctrl: false, range: true, from: "k0" });
     expect(document.activeElement).toBe(itemEl(container, "k1"));
 
     await user.keyboard("{Control>} {/Control}");

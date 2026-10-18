@@ -149,6 +149,26 @@ describe("ModsFolderSettings", () => {
 });
 
 describe("GeneralSettings", () => {
+  it("offers the list density as Comfortable / Compact", async () => {
+    const user = userEvent.setup();
+    const onSetDensity = vi.fn();
+    render(GeneralSettings, {
+      theme: "system",
+      uiScale: 1,
+      userDir: null,
+      density: "comfortable",
+      onSetTheme: vi.fn(),
+      onSetUiScale: vi.fn(),
+      onSetDensity,
+      onOpenGameGraphics: vi.fn(),
+    });
+    const group = screen.getByRole("radiogroup", { name: "List density" });
+    expect(screen.getByRole("radio", { name: "Comfortable" })).toHaveAttribute("aria-checked", "true");
+    expect(group.querySelectorAll("[role=radio]")).toHaveLength(2);
+    await user.click(screen.getByRole("radio", { name: "Compact" }));
+    expect(onSetDensity).toHaveBeenCalledWith("compact");
+  });
+
   it("offers the theme as System / Light / Dark", async () => {
     const user = userEvent.setup();
     const onSetTheme = vi.fn();

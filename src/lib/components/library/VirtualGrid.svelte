@@ -168,7 +168,7 @@
       case "move":
         if (act.to === index) return;
         void moveTo(act.to);
-        if (act.extend) onselect?.(items[act.to], { shift: true, ctrl: false, range: true });
+        if (act.extend) onselect?.(items[act.to], { shift: true, ctrl: false, range: true, from: getKey(it) });
         return;
       case "open":
         onopen?.(it);

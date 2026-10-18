@@ -3,7 +3,7 @@
 //    with an async function, so it returns an always-truthy Promise and the guarded action runs
 //    no matter what the user clicks;
 //  - `prompt(` / `window.prompt(` appears: views ask for text with `await askText(...)`;
-//  - an `ask(` / `confirmAction(` / `askText(` / `askOrOs(` / `askOs(` / `confirmDialog(` /
+//  - an `ask(` / `askWithOption(` / `confirmAction(` / `askText(` / `askOrOs(` / `askOs(` / `confirmDialog(` /
 //    `pluginConfirm(` call (also as a member, `ui.ask(`) isn't awaited: an un-awaited one is a
 //    Promise, always truthy, so a `!ask(...)` guard never blocks. Also allowed: `return ask(` on
 //    a line that says `async`, and `async () => ask(` (the arrow is async, so whoever calls it awaits it);
@@ -25,13 +25,13 @@ export const bareConfirm = /(?<![\w$])(?:window\.)?confirm\s*\(/;
 /** A `prompt(` / `window.prompt(` call (not `x.prompt(`, not `askPrompt(`). */
 export const barePrompt = /(?<![\w$.])prompt\s*\(|(?<![\w$])window\.prompt\s*\(/;
 /** Any call of the in-app confirm/prompt helpers or the OS confirm wrappers, `ui.ask(` included. */
-export const dialogCall = /(?<![\w$])(?:ask|confirmAction|askText|askOrOs|askOs|confirmDialog|pluginConfirm)\s*\(/g;
+export const dialogCall = /(?<![\w$])(?:ask|askWithOption|confirmAction|askText|askOrOs|askOs|confirmDialog|pluginConfirm)\s*\(/g;
 /** Directly before such a call: `await`, or `.then(` (the call is the argument). */
 export const awaitedBefore = /(?:\bawait|\.then\()\s*$/;
 /** Directly before such a call: the body of an `async` arrow, `async (x) => ask(` / `async x => ask(`. */
 export const asyncArrowBefore = /\basync\s*(?:\([^()]*\)|[\w$]+)\s*=>\s*$/;
 /** A helper imported / exported under another name. */
-export const aliasImport = /(?<![\w$])(ask|askText|askOrOs|askOs|confirmAction|confirmDialog|confirm)\s+as\s+([\w$]+)/;
+export const aliasImport = /(?<![\w$])(ask|askWithOption|askText|askOrOs|askOs|confirmAction|confirmDialog|confirm)\s+as\s+([\w$]+)/;
 
 /** Files allowed to define (not call) the helpers. */
 const DEFINITIONS = ["src/lib/ui/dialogs.svelte.ts", "src/lib/confirm.ts"];
@@ -117,7 +117,7 @@ function main() {
   if (hits.length) {
     console.error(
       "Unsafe confirmation found. A bare confirm() returns a Promise under tauri-plugin-dialog, so Cancel " +
-        "is ignored (#177); prompt() is replaced by askText(); an un-awaited ask()/askText()/askOrOs()/" +
+        "is ignored (#177); prompt() is replaced by askText(); an un-awaited ask()/askWithOption()/askText()/askOrOs()/" +
         "confirmDialog() is always truthy; and importing one under another name hides it from this check.\n" +
         "Use `await ask({...})` / `await askText({...})` from src/lib/ui, or `await askOrOs({...})` from " +
         "src/lib/confirm.ts before the app shell mounts:\n  " +

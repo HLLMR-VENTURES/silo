@@ -1,11 +1,14 @@
 <script lang="ts">
-  // Settings → General: theme, UI size, and a pointer to the game's graphics settings.
-  //   <GeneralSettings {theme} {uiScale} {userDir} {onSetTheme} {onSetUiScale} {onOpenGameGraphics} />
+  // Settings → General: theme, UI size, the Library's list density, and a pointer to the game's
+  // graphics settings.
+  //   <GeneralSettings {theme} {uiScale} {density} {userDir} {onSetTheme} {onSetUiScale}
+  //     {onSetDensity} {onOpenGameGraphics} />
   import Button from "../../ui/Button.svelte";
   import Segmented from "../../ui/Segmented.svelte";
   import Select from "../../ui/Select.svelte";
   import type { ChoiceOption } from "../../ui/types";
   import { UI_SCALES, parseUiScale, type UiScale } from "../../uiScale";
+  import type { Density } from "../library/ModListRow.svelte";
   import SettingsCard from "./SettingsCard.svelte";
 
   type Theme = "system" | "light" | "dark";
@@ -17,16 +20,32 @@
     userDir: string | null;
     onSetTheme: (t: Theme) => void;
     onSetUiScale: (s: UiScale) => void;
+    /** The Library list's row height. */
+    density?: Density;
+    onSetDensity?: (d: Density) => void;
     /** Opens Tools → Graphics settings (the game.xml editor lives there). */
     onOpenGameGraphics: () => void;
   }
 
-  let { theme, uiScale, userDir, onSetTheme, onSetUiScale, onOpenGameGraphics }: Props = $props();
+  let {
+    theme,
+    uiScale,
+    userDir,
+    onSetTheme,
+    onSetUiScale,
+    density = "comfortable",
+    onSetDensity,
+    onOpenGameGraphics,
+  }: Props = $props();
 
   const THEMES: ChoiceOption<Theme>[] = [
     { value: "system", label: "System" },
     { value: "light", label: "Light" },
     { value: "dark", label: "Dark" },
+  ];
+  const DENSITIES: ChoiceOption<Density>[] = [
+    { value: "comfortable", label: "Comfortable" },
+    { value: "compact", label: "Compact" },
   ];
   const SCALES: ChoiceOption[] = UI_SCALES.map((s) => ({
     value: String(s),
@@ -55,6 +74,16 @@
     />
   </div>
   <p class="hint">Makes text and icons smaller or larger everywhere in Silo.</p>
+  <div class="row">
+    <span class="label">List density</span>
+    <Segmented
+      ariaLabel="List density"
+      options={DENSITIES}
+      value={density}
+      onchange={(d) => onSetDensity?.(d)}
+    />
+  </div>
+  <p class="hint">Compact fits more mods on screen in the Library's list.</p>
 </SettingsCard>
 
 {#if userDir}

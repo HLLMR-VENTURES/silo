@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Library filters you can see.** Show All, Active or Parked mods; Favorites and Needs attention
+  (mods that can't load, conflict, were modified, are flagged or have an update) are one click;
+  the rest (Hidden, Flagged, In conflict, Has settings, Needs update, Maps, Script mods, uniqueType
+  and a tag) are under **Filters**. Each filter in effect shows as a chip you can remove, with
+  Clear filters. Silo remembers All / Active / Parked. (#242)
+
+- **Select several mods at once.** Tick a mod's checkbox, Shift+click for a range, Ctrl+click to
+  add one (or Shift+↑/↓ and Ctrl+Space from the keyboard), then Turn on, Park, Favorite or Hide
+  them together, or Select all shown. Esc clears the selection. Changing more than 25 mods at
+  once asks first. (#242)
+
+- **Undo after switching mods.** Turning a mod on or parking it (one, or several at once) shows a
+  toast with Undo for 10 seconds. Undo refuses if your active mods changed since. (#242)
+
+- **List density.** Settings → General → List density: Comfortable or Compact. (#242)
+
 - **Keyboard navigation in the Library.** The mod list is one Tab stop: ↑/↓, Home, End and
   PageUp/PageDown move between mods, Enter opens a mod's details, Space turns it on or off and
   Shift+F10 (or the Menu key) opens its menu. In card view ←/→ move between cards. Closing the
@@ -44,6 +60,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running. (#226)
 
 ### Changed
+
+- **Parking a loose mod explains itself.** The first time you park a mod Silo hasn't filed yet, it
+  says it moves the mod into your library folder (it stays in your library) and asks, with
+  "Don't explain this again". Parking several loose mods at once files them the same way. (#242)
+
+- **Library toolbar.** The row of six filter buttons and the "Active" select-all checkbox are
+  replaced by the filters above and the selection bar; empty states now offer what to do next
+  (Clear filters, or Browse mods / Open mods folder / Choose another folder). (#242)
 
 - **The Library opens as a list.** List view is now the default for every library size; card
   view is still in the toolbar, and Silo remembers which one you picked. Rows were rebuilt: icon,

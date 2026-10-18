@@ -12,6 +12,8 @@ export interface SelectIntent {
   ctrl: boolean;
   /** The gesture came from Shift+arrow: select the range from the anchor to this item. */
   range?: boolean;
+  /** Shift+arrow only: the key of the item focus moved from (the anchor when none is set yet). */
+  from?: string;
 }
 
 export type KeyAction =

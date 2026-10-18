@@ -2,7 +2,7 @@
 // ask()/askText() through DialogHost: results, initial focus, focus return, Tab trap, inert page,
 // the arm delay against carried-over clicks and key repeat, and cleanup on unmount.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { tick } from "svelte";
 import Dialog from "./Dialog.svelte";
@@ -418,5 +418,50 @@ describe("askText()", () => {
     await user.type(input, "2");
     expect(screen.queryByText("Exists.")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Rename" })).toBeInTheDocument();
+  });
+});
+
+describe("askWithOption()", () => {
+  const parkOpts: ConfirmOptions = {
+    title: "Park Courseplay?",
+    body: "Silo moves it into your library folder.",
+    confirm: "Park it",
+    checkbox: { label: "Don't explain this again" },
+  };
+
+  async function openWithOption(opts: ConfirmOptions) {
+    const user = userEvent.setup();
+    const onresult = vi.fn();
+    render(DialogHarness, { mode: "askWithOption", opts, onresult });
+    await user.click(screen.getByRole("button", { name: "Open dialog" }));
+    await screen.findByRole("dialog", { name: opts.title });
+    return { user, onresult };
+  }
+
+  it("returns the answer and the checkbox, unticked by default", async () => {
+    const { user, onresult } = await openWithOption(parkOpts);
+    const box = screen.getByRole("checkbox", { name: "Don't explain this again" });
+    expect(box).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Park it" }));
+    await waitFor(() => expect(onresult).toHaveBeenCalledWith({ confirmed: true, checked: false }));
+  });
+
+  it("returns checked when ticked, and confirmed false on Cancel", async () => {
+    const { user, onresult } = await openWithOption(parkOpts);
+    await user.click(screen.getByRole("checkbox", { name: "Don't explain this again" }));
+    await user.click(screen.getByRole("button", { name: "Park it" }));
+    await waitFor(() => expect(onresult).toHaveBeenCalledWith({ confirmed: true, checked: true }));
+    cleanup();
+    const second = await openWithOption({ ...parkOpts, checkbox: { label: "Don't explain this again", checked: true } });
+    expect(screen.getByRole("checkbox", { name: "Don't explain this again" })).toBeChecked();
+    await second.user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(second.onresult).toHaveBeenCalledWith({ confirmed: false, checked: true }));
+  });
+
+  it("ask() shows no checkbox and still resolves a boolean", async () => {
+    const { user, onresult } = await openAsk(moveOpts);
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Move 12 mods" }));
+    await waitFor(() => expect(onresult).toHaveBeenCalledWith(true));
   });
 });
