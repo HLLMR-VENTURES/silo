@@ -11,9 +11,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/check-confirm.mjs && svelte-check --tsconfig ./tsconfig.json && vite build",
+    "build": "node scripts/check-confirm.mjs && node scripts/check-contrast.mjs && svelte-check --tsconfig ./tsconfig.json && vite build",
     "preview": "vite preview",
-    "check": "node scripts/check-confirm.mjs && svelte-check --tsconfig ./tsconfig.json",
+    "check": "node scripts/check-confirm.mjs && node scripts/check-contrast.mjs && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

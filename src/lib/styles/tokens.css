@@ -129,7 +129,7 @@
   --raised: #ffffff;
   --sunken: #efeadf;
   --border: #e4dece;
-  --border-strong: #8f8875;
+  --border-strong: #8a8370; /* 3:1 on --sunken too (inputs) */
   --text: #2a2a22;
   --muted: #5e5d50;
   --primary: #4a7330;

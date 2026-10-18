@@ -64,7 +64,7 @@ below, never the raw ramps, so both themes come for free.
 | `--raised` | `#FFFFFF` | `#282D24` | menus, modals |
 | `--sunken` | `#EFEADF` | `#13160F` | wells, inputs, inset areas |
 | `--border` | `#E4DECE` | `#39402F` | hairlines, dividers |
-| `--border-strong` | `#8F8875` | `#767E66` | ≈3:1 control edges; the border under high contrast |
+| `--border-strong` | `#8A8370` | `#767E66` | ≥3:1 control edges on every surface, `--sunken` included; the border under high contrast |
 | `--text` | `#2A2A22` | `#EDEBE0` | primary text |
 | `--muted` | `#5E5D50` | `#ADAC9C` | secondary text, AA (5.5:1 or better on every surface) |
 | `--primary` | `#4A7330` field | `#7FAE55` (dark-theme primary) | Play, primary buttons, active nav |
