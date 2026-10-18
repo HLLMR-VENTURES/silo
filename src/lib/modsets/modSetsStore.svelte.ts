@@ -1,10 +1,10 @@
 // The mod sets App holds: the saved sets, the remembered last-applied set, and every action the
 // Mod sets page, the Play menu and the Savegames tab run. Switching goes through App's guarded
 // `setActiveSetTo` and its switch Undo toast; App passes those in.
-//   const modSets = createModSets({ active: () => activeSet, setActiveSetTo, undo: switchUndo, ... });
-//   await modSets.load();
-//   modSets.state            // { kind: "custom", name: "Harvest 2026", changes: 3, ... }
-//   await modSets.switchTo(set);
+//   const setStore = createModSets({ active: () => activeSet, setActiveSetTo, undo: switchUndo, ... });
+//   await setStore.load();
+//   setStore.state           // { kind: "custom", name: "Harvest 2026", changes: 3, ... }
+//   await setStore.switchTo(set);
 import { ask, askText, toast, type ConfirmFact } from "../ui";
 import { reportError } from "../state/notify.svelte";
 import { deleteLoadout, getLoadouts, saveAutoSnapshot, saveLoadout } from "../api";
