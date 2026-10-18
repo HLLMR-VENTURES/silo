@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from "../ui/Icon.svelte";
   import { openExternal } from "../api";
+  import { tooltip } from "../ui/tooltip";
 
   let {
     modal,
@@ -22,7 +23,7 @@
 <div class="modal" role="dialog" aria-modal="true">
   <div class="modal-head">
     <h3>{modal.title}</h3>
-    <button class="drawer-x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+    <button class="drawer-x" use:tooltip={"Close"} aria-label="Close" onclick={onClose}><Icon name="close" /></button>
   </div>
   <div class="modal-body">
     {#if modal.text}

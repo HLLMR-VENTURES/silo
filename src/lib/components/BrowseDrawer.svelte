@@ -5,6 +5,7 @@
   import GithubCard from "./GithubCard.svelte";
   import ModHubCard from "./ModHubCard.svelte";
   import { label, gatedReason, fmtCount, parseRepo, canExpand, loadCatalogImage } from "../browse";
+  import { tooltip } from "../ui/tooltip";
 
   let {
     detail,
@@ -71,7 +72,7 @@
         {/if}
         {#if d.techName}<div class="dh-tech tnum">{d.techName}</div>{/if}
       </div>
-      <button class="drawer-x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+      <button class="drawer-x" use:tooltip={"Close"} aria-label="Close" onclick={onClose}><Icon name="close" /></button>
     </div>
     <div class="drawer-body">
       {#if cover}

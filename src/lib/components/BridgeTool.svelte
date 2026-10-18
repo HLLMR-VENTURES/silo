@@ -5,6 +5,7 @@
   import { inlineError } from "../state/notify.svelte";
   import { generateBridge } from "../api";
   import { blocked, tryStart } from "../state/ops.svelte";
+  import { tooltip } from "../ui/tooltip";
 
   interface Props {
     onGenerated: (filename: string) => void; // parent rescans
@@ -108,7 +109,7 @@
       </p>
     </div>
     {#if onClose}
-      <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+      <button class="x" use:tooltip={"Close"} aria-label="Close" onclick={onClose}><Icon name="close" /></button>
     {/if}
   </div>
 

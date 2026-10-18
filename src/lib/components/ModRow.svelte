@@ -9,6 +9,7 @@
   import type { ModEntry, CurationRow } from "../types";
   import { getModIcon } from "../api";
   import { getVerdict } from "../provenanceCache.svelte";
+  import { tooltip } from "../ui/tooltip";
 
   type Flag = "favorite" | "hidden" | "broken";
   let {
@@ -94,7 +95,7 @@
   <button
     class="active-dot"
     class:on={active}
-    title={active ? "Active — click to park" : "Parked — click to activate"}
+    use:tooltip={active ? "Active — click to park" : "Parked — click to activate"}
     onclick={onToggleActive}
     aria-label="Toggle active"
   ></button>
@@ -170,7 +171,7 @@
     {#if hasSettings}
       <button
         class="act on"
-        title="Edit this mod's settings"
+        use:tooltip={"Edit this mod's settings"}
         aria-label="Edit this mod's settings"
         onclick={onOpenSettings}
       >
@@ -180,7 +181,7 @@
     <button
       class="act star"
       class:on={curation.favorite}
-      title={curation.favorite ? "Remove favorite" : "Favorite"}
+      use:tooltip={curation.favorite ? "Remove favorite" : "Favorite"}
       aria-label={curation.favorite ? "Remove favorite" : "Favorite"}
       onclick={() => onToggle("favorite")}
     >
@@ -189,7 +190,7 @@
     <button
       class="act"
       class:on={curation.hidden}
-      title={curation.hidden ? "Unhide" : "Hide"}
+      use:tooltip={curation.hidden ? "Unhide" : "Hide"}
       aria-label={curation.hidden ? "Unhide" : "Hide"}
       onclick={() => onToggle("hidden")}
     >
@@ -198,7 +199,7 @@
     <button
       class="act warn"
       class:on={curation.broken}
-      title={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
+      use:tooltip={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
       aria-label={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
       onclick={() => onToggle("broken")}
     >

@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from "../ui/Icon.svelte";
   import type { PlannedMove } from "../types";
+  import { tooltip } from "../ui/tooltip";
 
   let {
     plan,
@@ -52,7 +53,7 @@
 >
   <div class="modal-head">
     <h3>{adopt ? `File ${noun(plan.length)} into your library` : `Organize ${noun(plan.length)}`}</h3>
-    <button class="drawer-x" title="Close" aria-label="Close" onclick={onCancel}><Icon name="close" /></button>
+    <button class="drawer-x" use:tooltip={"Close"} aria-label="Close" onclick={onCancel}><Icon name="close" /></button>
   </div>
 
   <div class="modal-body">

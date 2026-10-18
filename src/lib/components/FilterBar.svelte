@@ -8,6 +8,7 @@
   // Top line:    category (parent · child) · search · sort · direction
   // Bottom line: facets (in `facetOrder`) · year · Clear all
   import Icon from "../ui/Icon.svelte";
+  import { tooltip } from "../ui/tooltip";
 
   export interface CatChild {
     name: string;
@@ -167,7 +168,7 @@
       class="fb-dir"
       disabled={!dirEnabled}
       onclick={toggleDir}
-      title={dirEnabled
+      use:tooltip={dirEnabled
         ? `Sort ${sortDir === "desc" ? "descending" : "ascending"}`
         : "Sort direction — coming with a catalog update (silo-api)"}
       aria-label="Toggle sort direction"

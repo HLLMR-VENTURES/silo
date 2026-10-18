@@ -10,6 +10,7 @@
   import ModRepoLink from "./ModRepoLink.svelte";
   import ModSourceLink from "./ModSourceLink.svelte";
   import ProvenanceCheck from "./ProvenanceCheck.svelte";
+  import { tooltip } from "../ui/tooltip";
 
   type Flag = "favorite" | "hidden" | "broken";
   interface Props {
@@ -188,7 +189,7 @@
       </div>
       <div class="d-tech tnum">{mod.techName}</div>
     </div>
-    <button class="d-x" onclick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
+    <button class="d-x" onclick={onClose} use:tooltip={"Close"} aria-label="Close"><Icon name="close" /></button>
   </div>
 
   {#if foreign}
@@ -372,7 +373,7 @@
   <div class="fd-modal">
     <div class="fd-head">
       <span class="fd-title">{label}</span>
-      <button class="d-x" onclick={() => (showFullDesc = false)} title="Close" aria-label="Close"><Icon name="close" /></button>
+      <button class="d-x" onclick={() => (showFullDesc = false)} use:tooltip={"Close"} aria-label="Close"><Icon name="close" /></button>
     </div>
     <div class="fd-body">{catalog.descriptionFull || catalog.description}</div>
   </div>

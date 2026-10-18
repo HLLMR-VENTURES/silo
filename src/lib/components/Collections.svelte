@@ -33,6 +33,7 @@
   } from "../types";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import { onDestroy, onMount } from "svelte";
+  import { tooltip } from "../ui/tooltip";
 
   interface Props {
     /** The active set as (techName, path, kind, version) refs — the source for "share". */
@@ -322,7 +323,7 @@
       </p>
     </div>
     {#if onClose}
-      <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+      <button class="x" use:tooltip={"Close"} aria-label="Close" onclick={onClose}><Icon name="close" /></button>
     {/if}
   </div>
 

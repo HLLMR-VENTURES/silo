@@ -8,6 +8,7 @@
   import type { ModEntry, CurationRow } from "../types";
   import { getModIcon } from "../api";
   import { getVerdict } from "../provenanceCache.svelte";
+  import { tooltip } from "../ui/tooltip";
 
   type Flag = "favorite" | "hidden" | "broken";
   let {
@@ -100,7 +101,7 @@
       class="tc-switch"
       class:on={active}
       onclick={stop(onToggleActive)}
-      title={active ? "Active — click to park" : "Parked — click to activate"}
+      use:tooltip={active ? "Active — click to park" : "Parked — click to activate"}
       aria-label="Toggle active"
     >
       <span class="knob"></span>
@@ -108,7 +109,7 @@
     <span class="tc-state" class:on={active}>{active ? "Active" : "Parked"}</span>
     <span class="tc-sp"></span>
     {#if hasSettings}
-      <button class="tc-gear" onclick={stop(onOpenSettings)} title="Edit this mod's settings" aria-label="Edit this mod's settings"><Icon name="modSettings" /></button>
+      <button class="tc-gear" onclick={stop(onOpenSettings)} use:tooltip={"Edit this mod's settings"} aria-label="Edit this mod's settings"><Icon name="modSettings" /></button>
     {/if}
   </div>
 
@@ -146,7 +147,7 @@
       <button
         class="tc-act star"
         class:on={curation.favorite}
-        title={curation.favorite ? "Remove favorite" : "Favorite"}
+        use:tooltip={curation.favorite ? "Remove favorite" : "Favorite"}
         aria-label={curation.favorite ? "Remove favorite" : "Favorite"}
         onclick={stop(() => onToggle("favorite"))}
       >
@@ -155,7 +156,7 @@
       <button
         class="tc-act"
         class:on={curation.hidden}
-        title={curation.hidden ? "Unhide" : "Hide"}
+        use:tooltip={curation.hidden ? "Unhide" : "Hide"}
         aria-label={curation.hidden ? "Unhide" : "Hide"}
         onclick={stop(() => onToggle("hidden"))}
       >
@@ -164,7 +165,7 @@
       <button
         class="tc-act warn"
         class:on={curation.broken}
-        title={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
+        use:tooltip={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
         aria-label={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
         onclick={stop(() => onToggle("broken"))}
       >

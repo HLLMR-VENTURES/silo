@@ -1,9 +1,12 @@
 <script lang="ts">
   // Icon-only button: <IconButton icon="close" label="Close" onclick={...} />.
-  // `label` is required: it becomes the accessible name and the hover tooltip.
+  // `label` is required: it becomes the accessible name and the hover tooltip. The tooltip is the
+  // in-app one (use:tooltip), not a native `title`: a native tip can stay on screen after its button
+  // is gone (a removed row, a closed drawer), the in-app one is removed with it.
   import type { HTMLButtonAttributes } from "svelte/elements";
   import Icon from "./Icon.svelte";
   import type { IconName } from "./icons";
+  import { tooltip } from "./tooltip";
 
   interface Props extends Omit<HTMLButtonAttributes, "class" | "onclick" | "children"> {
     label: string;
@@ -37,7 +40,7 @@
   class="icon-btn icon-btn-{variant} icon-btn-{size} {className}"
   class:pressed
   aria-label={label}
-  title={label}
+  use:tooltip={label}
   aria-pressed={pressed}
   {disabled}
   {onclick}

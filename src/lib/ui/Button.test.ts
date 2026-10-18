@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/svelte";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { createRawSnippet } from "svelte";
 import Button from "./Button.svelte";
@@ -52,10 +52,50 @@ describe("Button", () => {
 });
 
 describe("IconButton", () => {
-  it("takes its accessible name and tooltip from label", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    document.querySelectorAll("[role='tooltip']").forEach((t) => t.remove());
+  });
+
+  const tipOf = (btn: HTMLElement) => document.getElementById(btn.getAttribute("aria-describedby") ?? "");
+
+  it("takes its accessible name from label, with no native title", () => {
     render(IconButton, { icon: "close", label: "Close panel" });
     const btn = screen.getByRole("button", { name: "Close panel" });
-    expect(btn).toHaveAttribute("title", "Close panel");
+    // A native title can linger on screen after its button is removed; the in-app tooltip can't.
+    expect(btn).not.toHaveAttribute("title");
+  });
+
+  it("shows the label as an in-app tooltip on hover", () => {
+    vi.useFakeTimers();
+    render(IconButton, { icon: "close", label: "Close panel" });
+    const btn = screen.getByRole("button", { name: "Close panel" });
+    btn.dispatchEvent(new Event("pointerenter"));
+    vi.advanceTimersByTime(500);
+    const tip = tipOf(btn);
+    expect(tip).toHaveAttribute("role", "tooltip");
+    expect(tip).toHaveTextContent("Close panel");
+    expect(tip?.hidden).toBe(false);
+  });
+
+  it("shows the tooltip on keyboard focus", async () => {
+    render(IconButton, { icon: "more", label: "More" });
+    const btn = screen.getByRole("button", { name: "More" });
+    await userEvent.tab();
+    expect(btn).toHaveFocus();
+    await waitFor(() => expect(tipOf(btn)).toHaveTextContent("More"));
+    expect(tipOf(btn)?.hidden).toBe(false);
+  });
+
+  it("removes its tooltip when it unmounts", () => {
+    vi.useFakeTimers();
+    const { unmount } = render(IconButton, { icon: "close", label: "Delete loadout" });
+    const btn = screen.getByRole("button", { name: "Delete loadout" });
+    btn.dispatchEvent(new Event("pointerenter"));
+    vi.advanceTimersByTime(500);
+    expect(document.querySelectorAll("[role='tooltip']")).toHaveLength(1);
+    unmount();
+    expect(document.querySelectorAll("[role='tooltip']")).toHaveLength(0);
   });
 
   it("sets aria-pressed only when pressed is given", () => {

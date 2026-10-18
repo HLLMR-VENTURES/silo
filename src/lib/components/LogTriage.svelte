@@ -8,6 +8,7 @@
   import { scanLog, revealInFolder, userDirPath } from "../api";
   import type { LogReport, LogModHealth } from "../types";
   import BisectFlow from "./BisectFlow.svelte";
+  import { tooltip } from "../ui/tooltip";
 
   interface Props {
     /** Shows a close button (the page has none). */
@@ -97,7 +98,7 @@
         </button>
       {/if}
       {#if onClose}
-        <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+        <button class="x" use:tooltip={"Close"} aria-label="Close" onclick={onClose}><Icon name="close" /></button>
       {/if}
     </div>
   </div>

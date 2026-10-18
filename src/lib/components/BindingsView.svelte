@@ -8,6 +8,7 @@
   import { onMount } from "svelte";
   import { scanBindings } from "../api";
   import type { BindingReport } from "../types";
+  import { tooltip } from "../ui/tooltip";
 
   interface Props {
     /** Shows a close button (the page has none). */
@@ -73,7 +74,7 @@
     </div>
     <div class="bv-head-actions">
       {#if onClose}
-        <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+        <button class="x" use:tooltip={"Close"} aria-label="Close" onclick={onClose}><Icon name="close" /></button>
       {/if}
     </div>
   </div>

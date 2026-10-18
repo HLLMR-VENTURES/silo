@@ -18,6 +18,7 @@
   } from "../api";
   import { BISECT_RESTORE_FIRST, canStartBisect, finishBisect } from "../bisect";
   import type { BisectStep } from "../types";
+  import { tooltip } from "../ui/tooltip";
 
   interface Props {
     /** Suspects to bisect (active mods minus always-on). */
@@ -214,7 +215,7 @@
 <div class="bf">
   <div class="bf-head">
     <h3>Guided bisection</h3>
-    <button class="x" title="Cancel & restore" aria-label="Cancel & restore" onclick={finish} disabled={!!working}><Icon name="close" /></button>
+    <button class="x" use:tooltip={"Cancel & restore"} aria-label="Cancel & restore" onclick={finish} disabled={!!working}><Icon name="close" /></button>
   </div>
 
   {#if working}

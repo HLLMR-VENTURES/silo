@@ -7,6 +7,7 @@
   import { mpExport, mpVerify } from "../api";
   import type { MpModRef, MpVerifyReport } from "../types";
   import { start } from "../state/ops.svelte";
+  import { tooltip } from "../ui/tooltip";
 
   interface Props {
     /** The active set as (techName, path, kind, version) refs. */
@@ -75,7 +76,7 @@
       </p>
     </div>
     {#if onClose}
-      <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+      <button class="x" use:tooltip={"Close"} aria-label="Close" onclick={onClose}><Icon name="close" /></button>
     {/if}
   </div>
 

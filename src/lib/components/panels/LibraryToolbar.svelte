@@ -9,6 +9,7 @@
   // the stat bar's counts), the active tag chip, and the shown count. Category + sort live in
   // the shared FilterBar.
   import Icon from "../../ui/Icon.svelte";
+  import { tooltip } from "../../ui/tooltip";
   let {
     selectedTag,
     shownCount,
@@ -89,7 +90,7 @@
     <button
       class="vt"
       class:on={libView === "tiles"}
-      title="Tile view"
+      use:tooltip={"Tile view"}
       aria-label="Tile view"
       aria-pressed={libView === "tiles"}
       onclick={() => (libView = "tiles")}
@@ -99,7 +100,7 @@
     <button
       class="vt"
       class:on={libView === "rows"}
-      title="List view"
+      use:tooltip={"List view"}
       aria-label="List view"
       aria-pressed={libView === "rows"}
       onclick={() => (libView = "rows")}

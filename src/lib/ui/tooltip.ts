@@ -1,7 +1,9 @@
 // `use:tooltip={"Rescan library"}`: a short hint on hover (after 500 ms) or keyboard focus
 // (at once; focus from a click waits like hover), hidden again on leave, blur, click or Esc. The
 // tip is a role="tooltip" element, created the first time it shows and only then wired to the
-// trigger's aria-describedby.
+// trigger's aria-describedby. A shown tip hides at once if its trigger is removed from the page or
+// becomes disabled, and the tip element itself goes when the action is destroyed (unmount), so it
+// never lingers the way a native `title` tooltip can once its button is gone.
 //
 // A tooltip is a hint, never the only place essential information lives: it's invisible on touch,
 // easy to miss, and gone the moment the pointer moves. Put anything the user needs in the UI itself.
@@ -37,6 +39,26 @@ export function tooltip(node: HTMLElement, text: string | null | undefined) {
   let current = text ?? "";
   let tip: HTMLDivElement | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  /** Live only while the tip is showing (see watch). */
+  let watcher: MutationObserver | null = null;
+
+  function isDisabled(): boolean {
+    return node.hasAttribute("disabled") || node.getAttribute("aria-disabled") === "true";
+  }
+
+  /**
+   * While shown, hide on the trigger leaving the page or turning disabled. A trigger that was
+   * already disabled when the tip showed (a "why is this disabled" hint) keeps its tip.
+   */
+  function watch() {
+    if (watcher || typeof MutationObserver === "undefined") return;
+    const wasDisabled = isDisabled();
+    watcher = new MutationObserver(() => {
+      if (!node.isConnected || (!wasDisabled && isDisabled())) hide();
+    });
+    watcher.observe(node, { attributes: true, attributeFilter: ["disabled", "aria-disabled"] });
+    watcher.observe(document.body, { childList: true, subtree: true });
+  }
 
   function ensureTip(): HTMLDivElement {
     if (!tip) {
@@ -71,18 +93,22 @@ export function tooltip(node: HTMLElement, text: string | null | undefined) {
 
   function show() {
     clearTimeout(timer);
-    if (!current) return;
+    // A hover delay can outlive its trigger: never show for a node that has left the page.
+    if (!current || !node.isConnected) return;
     const el = ensureTip();
     describedBy(true);
     el.hidden = false;
     position(el);
     document.addEventListener("keydown", onKey, true);
+    watch();
   }
 
   function hide() {
     clearTimeout(timer);
     if (tip) tip.hidden = true;
     document.removeEventListener("keydown", onKey, true);
+    watcher?.disconnect();
+    watcher = null;
   }
 
   function onKey(e: KeyboardEvent) {
