@@ -144,6 +144,7 @@
   $effect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      if (e.defaultPrevented) return; // a menu or dialog over the drawer took this Esc
       if (showFullDesc) showFullDesc = false; // close the full-description modal first
       else onClose();
     };
@@ -176,9 +177,9 @@
   const summaryHasMore = $derived(summaryText.length > 420);
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="backdrop" style="top: var(--topbar-h, 0px)" onclick={onClose}></div>
-<aside class="drawer" use:resizable>
+<!-- Docked in the app shell's drawer region (AppShell's <aside>), so the list beside it stays
+     usable. resizable publishes its width as --drawer-w, which sizes that region. -->
+<div class="drawer" use:resizable>
   <div class="d-top">
     <div class="d-head">
       <div class="d-title">{label}</div>
@@ -363,7 +364,7 @@
       {/each}
     </div>
   {/if}
-</aside>
+</div>
 
 {#if showFullDesc && catalog}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -379,19 +380,12 @@
 
 <style>
   .drawer {
-    position: fixed;
-    z-index: 50;
-    top: var(--topbar-h, 0px);
-    right: 0;
-    height: calc(100vh - var(--topbar-h, 0px));
+    box-sizing: border-box;
+    min-height: 100%;
     width: 420px;
     max-width: calc(100vw - 40px);
-    overflow-y: auto;
     background: var(--surface-raised);
-    border-left: 1px solid var(--border);
-    box-shadow: var(--shadow-2);
     padding: 18px;
-    scrollbar-width: thin;
   }
   .d-top {
     display: flex;

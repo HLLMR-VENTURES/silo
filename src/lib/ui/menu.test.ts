@@ -8,7 +8,7 @@ import type { MenuItem } from "./overlayTypes";
 
 const items: MenuItem[] = [
   { id: "open", label: "Open folder", icon: "showFile" },
-  { id: "copy", label: "Copy name", shortcut: "Ctrl+C" },
+  { id: "copy", label: "Copy name", shortcut: "Ctrl+C", keyshortcuts: "Control+C" },
   { id: "hide", label: "Hide", disabled: true },
   { id: "check", label: "Check for updates" },
   { id: "delete", label: "Delete", danger: true, separatorBefore: true },
@@ -34,6 +34,12 @@ describe("Menu", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(trigger).toHaveAttribute("aria-controls", menu.id);
     expect(screen.getAllByRole("menuitem")).toHaveLength(5);
+  });
+
+  it("puts an item's aria-keyshortcuts on its menuitem", async () => {
+    const { item } = await openMenu();
+    expect(item("Copy name")).toHaveAttribute("aria-keyshortcuts", "Control+C");
+    expect(item("Open folder")).not.toHaveAttribute("aria-keyshortcuts");
   });
 
   it("ArrowDown/Up move focus, skip disabled items and wrap", async () => {

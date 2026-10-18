@@ -1,101 +1,56 @@
 <script lang="ts">
+  // GitHub sign-in controls (Settings → Accounts). A view of the githubAuth store: the device flow
+  // and its polling live there, so leaving Settings mid-sign-in doesn't stop it.
   import Icon from "../ui/Icon.svelte";
   import { inlineError } from "../state/notify.svelte";
+  import { ghSetClientId, ghSetPat, ghLogout, openExternal } from "../api";
   import {
-    ghStatus,
-    ghSetClientId,
-    ghDeviceStart,
-    ghDevicePoll,
-    ghSetPat,
-    ghLogout,
-    openExternal,
-  } from "../api";
-  import type { GhStatus } from "../types";
+    attachGithubView,
+    cancelDeviceFlow,
+    githubAuth,
+    refreshGithub,
+    startDeviceFlow,
+  } from "../state/githubAuth.svelte";
 
-  let status = $state<GhStatus>({
-    clientId: null,
-    user: null,
-    builtin: false,
-    canWrite: false,
-    canGist: false,
-  });
+  const status = $derived(githubAuth.status);
+  const flow = $derived(githubAuth.flow);
   let clientIdInput = $state("");
-  let flow = $state<{ userCode: string; verificationUri: string } | null>(null);
-  let message = $state<string | null>(null);
   let showAdvanced = $state(false);
   let showPat = $state(false);
   let patInput = $state("");
-  let poller: ReturnType<typeof setTimeout> | undefined;
 
   async function refresh() {
-    try {
-      status = await ghStatus();
-      clientIdInput = status.clientId ?? "";
-    } catch (e) {
-      message = inlineError(e, "Checking your GitHub connection");
-    }
+    await refreshGithub();
+    clientIdInput = githubAuth.status.clientId ?? "";
   }
   refresh();
+
+  // While this view is mounted it shows the flow's messages itself (no toast).
+  $effect(() => attachGithubView());
 
   async function saveClientId() {
     try {
       await ghSetClientId(clientIdInput.trim());
       await refresh();
-      message = null;
+      githubAuth.message = null;
     } catch (e) {
-      message = inlineError(e, "Saving the GitHub app ID");
+      githubAuth.message = inlineError(e, "Saving the GitHub app ID");
     }
   }
 
-  // Callers request the UNION of held + newly-wanted capabilities, so enabling one
-  // (e.g. gist) never drops another the token already carries.
-  async function connect(write = false, gist = false) {
-    message = null;
-    try {
-      const dc = await ghDeviceStart(write, gist);
-      flow = { userCode: dc.userCode, verificationUri: dc.verificationUri };
-      openExternal(dc.verificationUri).catch(() => {});
-      let interval = Math.max(dc.interval, 3);
-      const tick = async () => {
-        try {
-          const r = await ghDevicePoll(dc.deviceCode);
-          if (r.status === "ok") {
-            flow = null;
-            await refresh();
-            return;
-          }
-          if (r.status === "slow_down") interval += 5;
-          if (r.status === "expired" || r.status === "denied" || r.status === "error") {
-            flow = null;
-            message =
-              r.status === "denied"
-                ? "Authorization was denied."
-                : r.status === "expired"
-                  ? "The code expired — try again."
-                  : `Auth error: ${r.error ?? "unknown"}`;
-            return;
-          }
-          poller = setTimeout(tick, interval * 1000);
-        } catch (e) {
-          flow = null;
-          message = inlineError(e, "Waiting for GitHub to confirm");
-        }
-      };
-      poller = setTimeout(tick, interval * 1000);
-    } catch (e) {
-      message = inlineError(e, "Starting GitHub sign-in");
-    }
+  function connect(write = false, gist = false) {
+    void startDeviceFlow(write, gist);
   }
 
   async function savePat() {
-    message = null;
+    githubAuth.message = null;
     try {
       await ghSetPat(patInput.trim());
       patInput = "";
       showPat = false;
       await refresh();
     } catch (e) {
-      message = inlineError(e, "Saving your GitHub token");
+      githubAuth.message = inlineError(e, "Saving your GitHub token");
     }
   }
 
@@ -104,11 +59,9 @@
       await ghLogout();
       await refresh();
     } catch (e) {
-      message = inlineError(e, "Disconnecting GitHub");
+      githubAuth.message = inlineError(e, "Disconnecting GitHub");
     }
   }
-
-  $effect(() => () => clearTimeout(poller));
 </script>
 
 <div class="gha">
@@ -118,7 +71,10 @@
         A browser opened to <b>github.com/login/device</b>. Enter this code there:
       </div>
       <div class="gha-code tnum">{flow?.userCode}</div>
-      <div class="gha-hint">Waiting for you to authorize… keep this open.</div>
+      <div class="gha-hint">
+        Waiting for you to authorize… You can keep using Silo meanwhile.
+      </div>
+      <button class="gha-link" onclick={cancelDeviceFlow}>Cancel sign-in</button>
     </div>
   {/snippet}
 
@@ -232,7 +188,7 @@
       </div>
     {/if}
   {/if}
-  {#if message}<div class="gha-msg">{message}</div>{/if}
+  {#if githubAuth.message}<div class="gha-msg">{githubAuth.message}</div>{/if}
 </div>
 
 <style>

@@ -12,7 +12,7 @@
     onRemove,
     onSaveCurrent,
     onImport,
-    onClose,
+    lockReason = "",
   }: {
     loadouts: Loadout[];
     activeCount: number;
@@ -23,12 +23,11 @@
     onRemove: (l: Loadout) => void;
     onSaveCurrent: () => void;
     onImport: () => void;
-    onClose: () => void;
+    /** Why loadouts can't be changed right now (a foreground library change); "" = they can. */
+    lockReason?: string;
   } = $props();
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="backdrop" onclick={onClose}></div>
 <div class="loadouts-panel">
   <div class="lp-head">
     <span>Loadouts</span>
@@ -48,8 +47,9 @@
       </button>
       <button
         class="lp-icon"
-        title="Overwrite with current active set"
+        title={lockReason || "Overwrite with current active set"}
         aria-label="Overwrite with current active set"
+        disabled={!!lockReason}
         onclick={() => onOverwrite(l)}><Icon name="rescan" size={14} /></button
       >
       <button
@@ -60,38 +60,32 @@
       >
       <button
         class="lp-icon danger"
-        title="Delete loadout"
+        title={lockReason || "Delete loadout"}
         aria-label="Delete loadout"
+        disabled={!!lockReason}
         onclick={() => onRemove(l)}><Icon name="close" size={14} /></button
       >
     </div>
   {/each}
-  <button class="lp-save" onclick={onSaveCurrent} disabled={activeCount === 0}>
+  <button
+    class="lp-save"
+    onclick={onSaveCurrent}
+    disabled={activeCount === 0 || !!lockReason}
+    title={lockReason || undefined}
+  >
     + Save current active set as a loadout
   </button>
-  <button class="lp-import" onclick={onImport}><Icon name="download" size={13} /> Import a .silo file</button>
+  <button class="lp-import" onclick={onImport} disabled={!!lockReason} title={lockReason || undefined}><Icon name="download" size={13} /> Import a .silo file</button>
 </div>
 
 <style>
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 40;
-  }
+  /* A page section in its view (it was a popover under the old top bar). */
   .loadouts-panel {
-    position: fixed;
-    z-index: 50;
-    top: 66px;
-    right: 20px;
-    width: 320px;
-    max-height: 70vh;
-    overflow-y: auto;
+    max-width: 48rem;
     background: var(--surface-raised);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: var(--shadow-2);
     padding: 8px;
-    scrollbar-width: thin;
   }
   .lp-head {
     display: flex;
@@ -172,11 +166,11 @@
     display: inline-grid;
     place-items: center;
   }
-  .lp-icon:hover {
+  .lp-icon:hover:not(:disabled) {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
     color: var(--text);
   }
-  .lp-icon.danger:hover {
+  .lp-icon.danger:hover:not(:disabled) {
     background: color-mix(in srgb, var(--danger) 14%, transparent);
     color: var(--danger);
   }
@@ -211,8 +205,13 @@
     font-size: var(--fs-xs);
     font-weight: 600;
   }
-  .lp-import:hover {
+  .lp-import:hover:not(:disabled) {
     background: color-mix(in srgb, var(--primary) 8%, transparent);
     color: var(--text);
+  }
+  .lp-icon:disabled,
+  .lp-import:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 </style>

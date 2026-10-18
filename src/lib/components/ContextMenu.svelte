@@ -44,12 +44,16 @@
     onClose();
   }
 
+  // Capture phase, so this runs before the drawers' window Esc handlers; preventDefault tells them
+  // the Esc was used (only the menu closes).
   function onKey(e: KeyboardEvent) {
-    if (e.key === "Escape") onClose();
+    if (e.key !== "Escape" || e.defaultPrevented) return;
+    e.preventDefault();
+    onClose();
   }
 </script>
 
-<svelte:window on:keydown={onKey} />
+<svelte:window onkeydowncapture={onKey} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="backdrop" onclick={onClose} oncontextmenu={(e) => { e.preventDefault(); onClose(); }}></div>

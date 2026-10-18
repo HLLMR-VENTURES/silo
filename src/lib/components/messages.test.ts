@@ -109,6 +109,19 @@ describe("NoticeArea", () => {
     expect(shown).toEqual(["Archive drive missing", "Scan finished", "Update available"]);
   });
 
+  it("a pinned notice (a ready Silo update) is never folded under '+N more'", async () => {
+    render(NoticeArea);
+    await act(() => {
+      setNotice({ key: "w", level: "warning", title: "Archive drive missing", dismissible: false });
+      setNotice({ key: "self-update", level: "info", title: "Silo 0.12.0 is ready", pinned: true, dismissible: true });
+      setNotice({ key: "i", level: "info", title: "Scan finished", dismissible: true });
+    });
+    expect(screen.getByText("Archive drive missing")).toBeVisible();
+    expect(screen.getByText("Silo 0.12.0 is ready")).toBeVisible();
+    expect(screen.getByText("Scan finished")).not.toBeVisible();
+    expect(screen.getByRole("button", { name: "+1 more" })).toBeInTheDocument();
+  });
+
   it("every blocking notice and every notice with progress stays visible; '+N more' resets", async () => {
     const user = userEvent.setup();
     render(NoticeArea);

@@ -9,15 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **An activity list.** The bell next to Settings lists what Silo is doing right now and what it
+- **Keyboard shortcuts.** Ctrl+K or / jumps to search, F5 rescans your library, Alt+1 to Alt+5
+  open Library, Browse, Mod sets, Diagnose and Updates, Ctrl+, opens Settings and Alt+← goes back.
+  F6 and Shift+F6 move between the sidebar, header, notices, page and mod details. Press ? (or
+  Help → Keyboard shortcuts) for the list. Letters and numbers you type in a field are never
+  taken as shortcuts. (#230)
+
+- **Help page.** Help in the sidebar links to GitHub Discussions and the Discord, and Report a
+  problem copies Silo's diagnostics and opens a new issue. (#230)
+
+- **An activity list.** The bell in the header lists what Silo is doing right now and what it
   said recently: results, warnings and errors, each error with Copy details. A dot on the bell
   shows when something is running or an error came in. (#228)
 
 - **UI size setting.** Settings → Appearance lets you make text and icons smaller or larger
   (90%, 100%, 110% or 125%). (#224)
 
-- **The silo mark.** Silo's own logo, a grain silo with the sun rising behind it, now sits in the
-  top bar. (#224)
+- **The silo mark.** Silo's own logo, a grain silo with the sun rising behind it, now sits at the
+  top of the sidebar. (#224)
 
 - **Undo for loadout switches, replacements and deletes.** After you switch to a loadout, use a
   savegame's mods, replace a loadout's mods with your current ones or delete a loadout, a notice
@@ -28,9 +37,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Ctrl+R and F5 rescan instead of reloading the window.** Reloading dropped whatever Silo was in
+  the middle of; now these keys rescan your library (and do nothing while a dialog is open). (#230)
+
+- **A new layout.** A sidebar takes you to Library, Browse, Mod sets, Diagnose and Updates, with
+  Tools, Settings and Help below. The header holds the search (it searches your mods, or the
+  catalog on Browse), a status chip that says whether anything needs a look and opens Diagnose,
+  the activity bell, and Play with a menu for the game folder and your mod sets. Loadouts,
+  collections, multiplayer sync and savegames live together under Mod sets; crash triage,
+  conflicts and library health under Diagnose. A mod's details now sit beside the list, so you
+  can keep clicking through mods. Silo reopens the page you were on last, except Browse: a
+  launch never contacts the catalog unasked, so it starts on the Library instead. The Updates
+  page doesn't check on its own when you open it; use **Check for updates** there. (#230)
+
+- **The status chip only says "All good" once your library has been read.** Until then it says
+  "Checking…" or "Not read yet", and "Couldn't read library" when the scan failed. A mod that
+  can't load counts as a problem only when it's active; an inactive one is something to review.
+  The Library's "Ready to play" line likewise shows only when Play would work (the game was
+  found, nothing is blocking Play and there's no critical conflict). (#230)
+
+- **A guided diagnosis keeps running when you switch pages.** You can look at Conflicts or
+  another page mid-run and come back to the same round; Diagnose in the sidebar shows a dot
+  while it runs. (#230)
+
+- **GitHub sign-in keeps waiting when you leave Settings.** Start connecting GitHub, go to another
+  page, and finish on github.com: Silo says "Connected to GitHub as …" when it's done. Connecting
+  from Browse opens Settings at the GitHub account section, and the code shown there can be
+  cancelled. (#230)
+
+- **Loadouts wait for a running library change.** While Silo is changing your library, Save
+  current, Replace, Delete and Import on Mod sets → My sets are off and say what Silo is busy
+  with (a library move doesn't stop them). (#230)
+
+- **Settings → Graphics & performance opens the game.xml editor directly** (it's also in Tools →
+  Graphics settings), and a ready Silo update's notice is always shown, never folded under
+  "+N more". (#230)
+
+- **Settings is a full page,** with an About section for the version, the last scan time and a
+  ready Silo update. A ready update also shows as a notice with Restart to update. (#230)
+
+- **Library statistics, the controls map, the fill type bridge and the graphics settings
+  (game.xml) moved to Tools.** The library's map, script mod, uniqueType and active counts are
+  now quick filters above the list, and Rescan is in the Library's More menu. (#230)
+
 - **One notice area instead of stacked banners.** Warnings like "your mods folder isn't
   available", a library move in progress or an interrupted diagnosis now share one strip under
-  the top bar, most important first, with "+N more" for the rest (red warnings and anything
+  the header, most important first, with "+N more" for the rest (red warnings and anything
   with a progress bar always show). Results and one-off problems appear as short notices in the
   corner instead of a coloured line; errors never push an Undo notice out of view. Messages from
   startup, such as "your library database was restored", stay until you close them. (#228)

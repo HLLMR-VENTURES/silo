@@ -5,17 +5,13 @@
     conflicts,
     criticalCount,
     activeCount,
-    onClose,
   }: {
     conflicts: Conflict[];
     criticalCount: number;
     activeCount: number;
-    onClose: () => void;
   } = $props();
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="backdrop" onclick={onClose}></div>
 <div class="conflicts-panel">
   <div class="lp-head">
     <span>Conflicts in the active set</span>
@@ -40,27 +36,13 @@
 </div>
 
 <style>
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 40;
-  }
+  /* A page section in its view (it was a panel floating over the library). */
   .conflicts-panel {
-    position: fixed;
-    z-index: 50;
-    top: 120px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 560px;
-    max-width: calc(100vw - 40px);
-    max-height: 70vh;
-    overflow-y: auto;
+    max-width: 48rem;
     background: var(--surface-raised);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: var(--shadow-2);
     padding: 10px;
-    scrollbar-width: thin;
   }
   .lp-head {
     display: flex;

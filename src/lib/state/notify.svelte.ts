@@ -50,6 +50,8 @@ export interface Notice {
   actions?: NoticeAction[];
   dismissible: boolean;
   icon?: IconName;
+  /** Always shown, never folded under "+N more" (like blocking notices and ones with progress). */
+  pinned?: boolean;
   /** Called after the user dismisses it (its close button), e.g. to remember that. */
   onDismiss?: () => void;
 }

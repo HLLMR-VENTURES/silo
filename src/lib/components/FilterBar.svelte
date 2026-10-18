@@ -32,6 +32,8 @@
     // Search
     query?: string;
     searchPlaceholder?: string;
+    /** False when the app header's search drives `query` instead (the box isn't shown). */
+    showSearch?: boolean;
     // Sort
     sort?: string;
     sortOptions: { value: string; label: string }[];
@@ -63,6 +65,7 @@
     childCategory = $bindable(""),
     query = $bindable(""),
     searchPlaceholder = "Search…",
+    showSearch = true,
     sort = $bindable(""),
     sortOptions,
     sortDir = $bindable("desc"),
@@ -144,13 +147,17 @@
         </select>
       {/if}
     {/if}
-    <input
-      class="fb-search"
-      type="search"
-      placeholder={searchPlaceholder}
-      bind:value={query}
-      oninput={() => onSearchInput?.()}
-    />
+    {#if showSearch}
+      <input
+        class="fb-search"
+        type="search"
+        placeholder={searchPlaceholder}
+        bind:value={query}
+        oninput={() => onSearchInput?.()}
+      />
+    {:else}
+      <span class="fb-spacer"></span>
+    {/if}
     <select class="fb-sel fb-sort" bind:value={sort} onchange={() => onChange?.()} title="Sort order">
       {#each sortOptions as o (o.value)}
         <option value={o.value}>{o.label}</option>
@@ -234,6 +241,9 @@
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
     background: color-mix(in srgb, var(--primary) 10%, transparent);
     font-weight: 600;
+  }
+  .fb-spacer {
+    flex: 1;
   }
   .fb-search {
     flex: 1;

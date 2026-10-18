@@ -19,4 +19,6 @@ export interface MenuItem {
   separatorBefore?: boolean;
   /** Display-only shortcut hint, e.g. "Ctrl+D". */
   shortcut?: string;
+  /** The item's aria-keyshortcuts value, e.g. "Control+D" (the key itself is wired elsewhere). */
+  keyshortcuts?: string;
 }

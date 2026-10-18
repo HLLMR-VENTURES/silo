@@ -13,7 +13,6 @@
     onConfigure,
     onBackup,
     onLoadout,
-    onClose,
   }: {
     rows: { s: Savegame; st: SaveStat }[];
     /** Why Back up is off (a library write is running), or "". */
@@ -21,14 +20,14 @@
     onConfigure: (s: Savegame) => void;
     onBackup: (s: Savegame) => void;
     onLoadout: (s: Savegame) => void;
-    onClose: () => void;
   } = $props();
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="backdrop" onclick={onClose}></div>
 <div class="loadouts-panel saves">
   <div class="lp-head"><span>Savegames</span></div>
+  {#if rows.length === 0}
+    <div class="sg-empty">No savegames found in your Farming Simulator 25 folder yet.</div>
+  {/if}
   {#each rows as { s, st } (s.folder)}
     <div class="sg-row">
       <div class="sg-info">
@@ -70,28 +69,19 @@
 </div>
 
 <style>
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 40;
-  }
+  /* A page section in its view (it was a popover under the old top bar). */
   .loadouts-panel {
-    position: fixed;
-    z-index: 50;
-    top: 66px;
-    right: 20px;
-    width: 320px;
-    max-height: 70vh;
-    overflow-y: auto;
+    max-width: 48rem;
     background: var(--surface-raised);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: var(--shadow-2);
     padding: 8px;
-    scrollbar-width: thin;
   }
-  .loadouts-panel.saves {
-    width: 380px;
+  .sg-empty {
+    padding: 10px 8px 14px;
+    font-size: var(--fs-xs);
+    color: var(--text-muted);
+    line-height: 1.5;
   }
   .lp-head {
     display: flex;

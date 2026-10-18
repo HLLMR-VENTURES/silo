@@ -8,7 +8,8 @@
 
   interface Props {
     onGenerated: (filename: string) => void; // parent rescans
-    onClose: () => void;
+    /** Shows the close buttons (the page has none). */
+    onClose?: () => void;
   }
   let { onGenerated, onClose }: Props = $props();
 
@@ -106,7 +107,9 @@
         mod that adds it to the categories your equipment accepts — no editing other mods.
       </p>
     </div>
-    <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+    {#if onClose}
+      <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+    {/if}
   </div>
 
   {#if done}
@@ -163,7 +166,7 @@
   </div>
 
   <div class="actions">
-    <button class="btn" onclick={onClose}>Close</button>
+    {#if onClose}<button class="btn" onclick={onClose}>Close</button>{/if}
     <button class="btn primary" disabled={!canGenerate} onclick={generate}>
       {generating ? "Generating…" : "Generate bridge mod"}
     </button>

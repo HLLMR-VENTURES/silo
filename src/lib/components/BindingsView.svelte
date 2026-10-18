@@ -10,7 +10,8 @@
   import type { BindingReport } from "../types";
 
   interface Props {
-    onClose: () => void;
+    /** Shows a close button (the page has none). */
+    onClose?: () => void;
   }
   let { onClose }: Props = $props();
 
@@ -71,7 +72,9 @@
       {/if}
     </div>
     <div class="bv-head-actions">
-      <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+      {#if onClose}
+        <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+      {/if}
     </div>
   </div>
 

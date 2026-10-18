@@ -18,5 +18,4 @@
   {onInstall}
   onOpenSource={() => {}}
   onMarkChecked={() => {}}
-  onClose={() => {}}
 />

@@ -150,6 +150,7 @@
       class="item"
       class:danger={item.danger}
       aria-disabled={item.disabled ? "true" : undefined}
+      aria-keyshortcuts={item.keyshortcuts}
       onclick={() => choose(item)}
     >
       <span class="icon">{#if item.icon}<Icon name={item.icon} size={16} />{/if}</span>

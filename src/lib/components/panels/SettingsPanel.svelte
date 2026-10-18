@@ -1,7 +1,8 @@
 <script lang="ts">
   import Icon from "../../ui/Icon.svelte";
   import { inlineError } from "../../state/notify.svelte";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
+  import { nav, setTab } from "../../state/nav.svelte";
   import type { GameInfo } from "../../types";
   import { openKnownFolder, secretStorageSecure } from "../../api";
   import type { ModsRootStatus, ArchiveStatus } from "../../api";
@@ -11,6 +12,22 @@
   // When the OS keychain is unavailable, connecting an account falls back to storing the
   // token in the local DB unencrypted — warn before the user connects rather than silently.
   let keychainOk = $state(true);
+
+  // go("settings", "accounts") (Browse's "connect GitHub" path) lands on the GitHub section:
+  // scrolled into view and focused, once. The tab is cleared so the next request does it again.
+  /** The section ids go("settings", id) can land on. */
+  const SECTION_IDS: Record<string, string> = { accounts: "settings-accounts" };
+  $effect(() => {
+    const target = nav.tab.settings;
+    if (!target || !SECTION_IDS[target]) return;
+    void tick().then(() => {
+      const el = document.getElementById(SECTION_IDS[target]);
+      if (!el) return;
+      el.scrollIntoView?.({ block: "start" });
+      el.focus({ preventScroll: true });
+      setTab("settings", undefined);
+    });
+  });
   onMount(async () => {
     try {
       keychainOk = await secretStorageSecure();
@@ -42,7 +59,6 @@
     onRebuild,
     onRestoreVanilla,
     onOptimizeLinks,
-    onClose,
     modsStatus,
     onChangeModsFolder,
     onUseGameFolder,
@@ -52,6 +68,11 @@
     archiveLoadFailed,
     onChangeArchive,
     onArchiveDefault,
+    scanMs = null,
+    update = null,
+    updating = false,
+    updatePct = null,
+    onApplyUpdate,
   }: {
     theme: "system" | "light" | "dark";
     uiScale: UiScale;
@@ -68,6 +89,7 @@
     scanning: boolean;
     onSetTheme: (t: "system" | "light" | "dark") => void;
     onSetUiScale: (s: UiScale) => void;
+    /** Opens Tools → Graphics settings (the game.xml editor lives there now). */
     onOpenGameGraphics: () => void;
     onExportReport: () => void;
     onCopyDiagnostics: () => void;
@@ -76,7 +98,6 @@
     onRebuild: () => void;
     onRestoreVanilla: () => void;
     onOptimizeLinks: () => void;
-    onClose: () => void;
     modsStatus: ModsRootStatus | null;
     onChangeModsFolder: () => void;
     onUseGameFolder: () => void;
@@ -88,6 +109,13 @@
     archiveLoadFailed: boolean;
     onChangeArchive: () => void;
     onArchiveDefault: () => void;
+    /** How long the last library scan took, for About. */
+    scanMs?: number | null;
+    /** A Silo update that's ready to install, if any. */
+    update?: { version: string } | null;
+    updating?: boolean;
+    updatePct?: number | null;
+    onApplyUpdate?: () => void;
   } = $props();
 
   // Folder- and library-changing controls are off during a library write, a scan, or mid-move.
@@ -117,10 +145,8 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="backdrop" onclick={onClose}></div>
+<!-- A page (SettingsView titles it): every section stacked at content width. -->
 <div class="loadouts-panel settings">
-  <div class="lp-head"><span>Settings</span></div>
 
   <div class="set-section">
     <div class="set-label">Appearance</div>
@@ -251,7 +277,7 @@
       <div class="set-path">{gameInfo.installDir}</div>
     {:else}
       <div class="set-path muted">
-        Farming Simulator 25 install not found. The Launch button is hidden.
+        Farming Simulator 25 install not found. The Play button is hidden.
       </div>
     {/if}
   </div>
@@ -260,10 +286,11 @@
     <div class="set-section">
       <div class="set-row">
         <div class="set-label">Graphics &amp; performance</div>
-        <button class="set-link" onclick={onOpenGameGraphics}>Edit game.xml <Icon name="external" size={12} /></button>
+        <button class="set-link" onclick={onOpenGameGraphics}>Edit game.xml</button>
       </div>
       <div class="set-hint">
         Tune graphics settings (presets: Performance / Balanced / Quality) without launching the game.
+        Also in Tools → Graphics settings.
       </div>
     </div>
   {/if}
@@ -278,8 +305,8 @@
     </div>
   {/if}
 
-  <div class="set-section">
-    <div class="set-label">GitHub account</div>
+  <div class="set-section" id="settings-accounts" tabindex="-1" aria-labelledby="settings-accounts-label">
+    <div class="set-label" id="settings-accounts-label">GitHub account</div>
     <GitHubAuth />
   </div>
 
@@ -371,40 +398,37 @@
     {/if}
   </div>
 
-  <div class="set-foot">Silo {appVer ? `v${appVer}` : "—"}</div>
+  <div class="set-section">
+    <div class="set-label">About</div>
+    <div class="set-path tnum">Silo {appVer ? `v${appVer}` : "—"}</div>
+    {#if scanMs !== null}
+      <div class="set-hint tnum">Last library scan took {scanMs} ms.</div>
+    {/if}
+    {#if update}
+      <div class="set-hint">Silo {update.version} is ready to install. Silo restarts to finish.</div>
+      <button
+        class="set-btn"
+        onclick={() => onApplyUpdate?.()}
+        disabled={updating}
+        title="Download and install Silo {update.version}, then restart"
+      >
+        {#if updating}
+          {updatePct != null ? `Updating… ${updatePct}%` : "Updating…"}
+        {:else}
+          <Icon name="update" size={13} /> Restart to update
+        {/if}
+      </button>
+    {/if}
+  </div>
 </div>
 
 <style>
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 40;
-  }
   .loadouts-panel {
-    position: fixed;
-    z-index: 50;
-    top: 66px;
-    right: 20px;
-    width: 320px;
-    max-height: 70vh;
-    overflow-y: auto;
+    max-width: 48rem;
     background: var(--surface-raised);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: var(--shadow-2);
     padding: 8px;
-    scrollbar-width: thin;
-  }
-  .loadouts-panel.settings {
-    width: 380px;
-  }
-  .lp-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    padding: 6px 8px 10px;
-    font-family: var(--font-display);
-    font-weight: 600;
   }
   .set-section {
     padding: 10px 8px;
@@ -412,6 +436,13 @@
   }
   .set-section:first-of-type {
     border-top: none;
+  }
+  .set-section:focus {
+    outline: none;
+  }
+  .set-section:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
   }
   .set-label {
     font-size: var(--fs-xs);
@@ -433,15 +464,6 @@
     border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
     border-radius: var(--radius);
     padding: 10px 12px;
-  }
-  .set-foot {
-    padding: 10px 4px 4px;
-    text-align: center;
-    font-family: var(--font-mono, monospace);
-    font-size: var(--fs-xs);
-    color: var(--text-muted);
-    border-top: 1px solid var(--border);
-    margin-top: 4px;
   }
   .set-link {
     border: none;

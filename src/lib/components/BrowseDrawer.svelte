@@ -37,7 +37,8 @@
   // The drawer is non-modal (clicks fall through to the grid), so Escape is the click-away close.
   $effect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape" || e.defaultPrevented) return; // a menu or dialog took this Esc
+      onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -201,7 +202,7 @@
   .drawer-backdrop {
     position: fixed;
     inset: 0;
-    top: var(--topbar-h, 0px);
+    top: var(--header-h);
     background: rgba(0, 0, 0, 0.15);
     /* Non-modal: let clicks fall through to the catalog grid so clicking another card switches
        the drawer to that mod. Close via the ✕ or Escape instead of clicking away. */
@@ -210,7 +211,7 @@
   }
   .drawer {
     position: fixed;
-    top: var(--topbar-h, 0px);
+    top: var(--header-h);
     right: 0;
     bottom: 0;
     width: min(420px, 92vw);
