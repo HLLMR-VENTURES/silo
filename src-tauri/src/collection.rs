@@ -99,12 +99,59 @@ pub fn to_json(c: &Collection) -> Result<String, String> {
 /// Parse + validate an untrusted collection document. Rejects anything that isn't a
 /// Silo collection (wrong/missing schema or malformed JSON) with one user-facing message.
 pub fn parse(json: &str) -> Result<Collection, String> {
-    let c: Collection = serde_json::from_str(json)
-        .map_err(|_| "That file isn't a valid Silo collection".to_string())?;
+    let c: Collection =
+        serde_json::from_str(json).map_err(|_| "That isn't a valid Silo shared set".to_string())?;
     if !c.schema.starts_with(SCHEMA_PREFIX) {
-        return Err("That file isn't a valid Silo collection".to_string());
+        return Err("That isn't a valid Silo shared set".to_string());
     }
     Ok(c)
+}
+
+/// A `.silo` mod set file: a name and bare tech names (the format `export_set_file` writes).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetFile {
+    pub silo: u32,
+    pub name: String,
+    pub mods: Vec<String>,
+}
+
+/// Read a shared mod set file: a collection document, or a `.silo` set file (which becomes a
+/// collection with bare tech names, so it previews and installs through the same path).
+pub fn parse_set_file(json: &str) -> Result<Collection, String> {
+    const NOT_A_SET: &str = "That file isn't a Silo mod set";
+    if let Ok(c) = parse(json) {
+        return Ok(c);
+    }
+    let f: SetFile = serde_json::from_str(json).map_err(|_| NOT_A_SET.to_string())?;
+    let name = f.name.trim();
+    if name.is_empty() {
+        return Err(NOT_A_SET.into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mods = f
+        .mods
+        .into_iter()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty() && seen.insert(t.clone()))
+        .map(|tech_name| CollectionMod {
+            tech_name,
+            version: None,
+            source: None,
+            source_url: None,
+            manifest_hash: None,
+            installable: None,
+            catalog_id: None,
+        })
+        .collect();
+    Ok(Collection {
+        schema: SCHEMA.to_string(),
+        name: name.to_string(),
+        description: None,
+        author: None,
+        created_at: None,
+        savegame: None,
+        mods,
+    })
 }
 
 /// What the catalog lookup said about one techName.
@@ -236,10 +283,51 @@ pub enum CollectionRef {
 /// GitHub repo URL / bare `owner/repo`. Gist forms win first (they're unambiguous); a
 /// repo is anything that resolves to a `github.com/{owner}/{repo}`.
 pub fn parse_collection_ref(input: &str) -> Option<CollectionRef> {
+    if let Some(r) = parse_page_ref(input) {
+        return Some(r);
+    }
     if let Some(id) = parse_gist_ref(input) {
         return Some(CollectionRef::Gist(id));
     }
     parse_repo_ref(input).map(|(owner, repo)| CollectionRef::Repo { owner, repo })
+}
+
+/// The handoff page link Silo hands out (`https://silo.hllmr.com/c/?g=<gist id>` or
+/// `?r=<owner>/<repo>`, see `gist_page_url` / `repo_page_url`), as a friend would paste it.
+fn parse_page_ref(input: &str) -> Option<CollectionRef> {
+    let s = input.trim();
+    let rest = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s);
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    let (host, path) = rest.split_once('/')?;
+    if !host.eq_ignore_ascii_case("silo.hllmr.com") {
+        return None;
+    }
+    let path = path.split('#').next().unwrap_or(path);
+    let (page, query) = path.split_once('?')?;
+    if page.trim_end_matches('/') != "c" {
+        return None;
+    }
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=')?;
+        match k {
+            "g" if is_gist_id(v) => return Some(CollectionRef::Gist(v.to_string())),
+            "r" => {
+                let (owner, repo) = v.split_once('/')?;
+                if is_gh_owner(owner) && is_gh_repo(repo) {
+                    return Some(CollectionRef::Repo {
+                        owner: owner.to_string(),
+                        repo: repo.to_string(),
+                    });
+                }
+                return None;
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// GitHub usernames/orgs: alphanumeric + hyphen, ≤39 chars (no dots — that's how we
@@ -342,16 +430,16 @@ pub fn readme(c: &Collection, page_url: &str, source_url: &str) -> String {
         s.push_str("\n\n");
     }
     s.push_str(
-        "A Farming Simulator 25 mod collection, shareable with [Silo](https://silo.hllmr.com).\n\n",
+        "A Farming Simulator 25 mod set, shareable with [Silo](https://silo.hllmr.com).\n\n",
     );
     if let Some(a) = c.author.as_deref().filter(|a| !a.trim().is_empty()) {
         s.push_str(&format!("Curated by **{a}**.\n\n"));
     }
     s.push_str("## Open in Silo\n\n");
     s.push_str(&format!(
-        "**[▶ Open this collection in Silo]({page_url})**\n\n"
+        "**[▶ Open this mod set in Silo]({page_url})**\n\n"
     ));
-    s.push_str("That page hands off to the Silo desktop app — install Silo first if you don't have it. You can also open **Collections → Open a shared link** in Silo and paste:\n\n");
+    s.push_str("That page hands off to the Silo desktop app — install Silo first if you don't have it. You can also open **Mod sets → Open a shared set** in Silo and paste:\n\n");
     s.push_str(&format!("```\n{source_url}\n```\n\n"));
     s.push_str(&format!("## Mods ({})\n\n", c.mods.len()));
     for m in &c.mods {
@@ -536,6 +624,69 @@ mod tests {
     #[test]
     fn down_imports_to_tech_names() {
         assert_eq!(sample().tech_names(), vec!["FS25_Foo", "FS25_Bar"]);
+    }
+
+    #[test]
+    fn the_share_page_link_opens_its_gist_or_repo() {
+        let id = "0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            parse_collection_ref(&gist_page_url(id)),
+            Some(CollectionRef::Gist(id.to_string()))
+        );
+        assert_eq!(
+            parse_collection_ref(&repo_page_url("hllmr", "silo-my-pack")),
+            Some(CollectionRef::Repo {
+                owner: "hllmr".into(),
+                repo: "silo-my-pack".into()
+            })
+        );
+        assert_eq!(
+            parse_collection_ref(&format!("  silo.hllmr.com/c?g={id}#x ")),
+            Some(CollectionRef::Gist(id.to_string()))
+        );
+        for bad in [
+            "https://silo.hllmr.com/c/?g=not-an-id".to_string(),
+            "https://silo.hllmr.com/c/?r=../etc".to_string(),
+            format!("https://evil.example/c/?g={id}"),
+            format!("https://silo.hllmr.com/x/?g={id}"),
+            "https://silo.hllmr.com/c/".to_string(),
+        ] {
+            assert_eq!(parse_page_ref(&bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_silo_set_file_reads_as_a_collection_of_bare_names() {
+        let c = parse_set_file(
+            r#"{ "silo": 1, "name": " Weekend ", "mods": ["FS25_A", " FS25_B ", "FS25_A", ""] }"#,
+        )
+        .unwrap();
+        assert_eq!(c.schema, SCHEMA);
+        assert_eq!(c.name, "Weekend");
+        assert_eq!(c.tech_names(), ["FS25_A", "FS25_B"]);
+        assert!(c.mods.iter().all(|m| m.manifest_hash.is_none()));
+    }
+
+    #[test]
+    fn a_collection_document_reads_as_itself() {
+        let json = r#"{ "schema": "silo.collection/1", "name": "x", "mods": [{ "techName": "FS25_A", "version": "1.0" }] }"#;
+        assert_eq!(parse_set_file(json).unwrap(), parse(json).unwrap());
+    }
+
+    #[test]
+    fn anything_else_is_not_a_mod_set() {
+        for bad in [
+            "not json",
+            r#"{ "silo": 1, "name": "  ", "mods": [] }"#,
+            r#"{ "schema": "silo.loadout/1", "name": "x", "mods": [] }"#,
+            r#"{ "name": "x", "mods": ["FS25_A"] }"#,
+        ] {
+            assert_eq!(
+                parse_set_file(bad).unwrap_err(),
+                "That file isn't a Silo mod set",
+                "{bad}"
+            );
+        }
     }
 
     #[test]

@@ -399,25 +399,36 @@ export function deleteLoadout(id: number): Promise<void> {
   return invoke("delete_loadout", { id });
 }
 
-/** Prompt for a path and export the loadout as a .silo file. Returns false if cancelled. */
-export async function exportLoadoutFile(id: number, name: string): Promise<boolean> {
+/** Save an automatic "Before …" snapshot (the newest 5 are kept). Returns its id. */
+export function saveAutoSnapshot(name: string, mods: string[]): Promise<number> {
+  return invoke<number>("save_auto_snapshot", { name, mods });
+}
+
+/** Prompt for a path and save a mod set as a .silo file. Returns false if cancelled. */
+export async function exportSetFile(name: string, mods: string[]): Promise<boolean> {
   const path = await save({
-    defaultPath: `${name}.silo`,
-    filters: [{ name: "Silo loadout", extensions: ["silo"] }],
+    defaultPath: `${safeFileStem(name)}.silo`,
+    filters: [{ name: "Silo mod set", extensions: ["silo"] }],
   });
   if (!path) return false;
-  await invoke("export_loadout", { id, path });
+  await invoke("export_set_file", { name, mods, path });
   return true;
 }
 
-/** Prompt for a .silo file and import it as a new loadout. Returns the new id or null. */
-export async function importLoadoutFile(): Promise<number | null> {
+/** A name made safe to suggest as a file name (the user can still change it). */
+export function safeFileStem(name: string): string {
+  const s = name.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim();
+  return s || "mod set";
+}
+
+/** Prompt for a shared mod set file (.silo, .silomp or a collection .json). Null if cancelled. */
+export async function pickSharedSetFile(): Promise<string | null> {
   const path = await open({
     multiple: false,
-    filters: [{ name: "Silo loadout", extensions: ["silo", "json"] }],
+    filters: [{ name: "Silo mod set", extensions: ["silo", "silomp", "json"] }],
   });
   if (!path || Array.isArray(path)) return null;
-  return await invoke<number>("import_loadout", { path });
+  return path;
 }
 
 export function getSavegames(): Promise<Savegame[]> {
@@ -646,13 +657,17 @@ export function generateBridge(spec: BridgeSpec): Promise<string> {
 
 // ── Multiplayer mod-set sync ──
 /** Prompt for a path and export a manifest of the active set. Returns count, or null if cancelled. */
-export async function mpExport(mods: MpModRef[]): Promise<number | null> {
+export async function mpExport(mods: MpModRef[], name = "my mod set"): Promise<number | null> {
   const path = await save({
-    defaultPath: "my-modset.silomp",
+    defaultPath: `${safeFileStem(name)}.silomp`,
     filters: [{ name: "Silo mod-set", extensions: ["silomp", "json"] }],
   });
   if (!path) return null;
   return await invoke<number>("mp_export", { mods, path });
+}
+/** Check the active set against a Multiplayer check file the user already picked. */
+export function mpVerifyPath(path: string, local: MpModRef[]): Promise<MpVerifyReport> {
+  return invoke<MpVerifyReport>("mp_verify_file", { path, local });
 }
 /** Prompt for a manifest file and verify the active set against it. Null if cancelled. */
 export async function mpVerify(local: MpModRef[]): Promise<MpVerifyReport | null> {
@@ -729,8 +744,9 @@ export function collectionDelete(kind: string, reference: string): Promise<void>
 export function collectionImportPreview(
   urlOrId: string,
   installed: { techName: string; version: string | null }[],
+  file: string | null = null,
 ): Promise<ImportPlan> {
-  return invoke<ImportPlan>("collection_import_preview", { urlOrId, installed });
+  return invoke<ImportPlan>("collection_import_preview", { urlOrId, installed, file });
 }
 
 /**
@@ -741,8 +757,9 @@ export function collectionApply(
   urlOrId: string,
   installed: { techName: string; version: string | null }[],
   fingerprint: string,
+  file: string | null = null,
 ): Promise<ApplyReport> {
-  return invoke<ApplyReport>("collection_apply", { urlOrId, installed, fingerprint, root: null });
+  return invoke<ApplyReport>("collection_apply", { urlOrId, installed, fingerprint, root: null, file });
 }
 
 /**

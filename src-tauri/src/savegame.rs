@@ -27,6 +27,8 @@ pub struct Savegame {
     pub folder: String,
     pub name: String,
     pub map_title: Option<String>,
+    /// When the game last saved it (`settings/saveDate`, e.g. "2026-08-02"), as the game wrote it.
+    pub save_date: Option<String>,
     pub mods: Vec<SaveMod>,
 }
 
@@ -45,6 +47,7 @@ fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
 fn parse(xml: &str, index: u32, folder: &str) -> Savegame {
     let mut name = String::new();
     let mut map_title = None;
+    let mut save_date = None;
     let mut mods = Vec::new();
 
     let mut reader = Reader::from_str(xml);
@@ -92,6 +95,8 @@ fn parse(xml: &str, index: u32, folder: &str) -> Savegame {
                         name = txt.to_string();
                     } else if parent == "settings" && last == "mapTitle" {
                         map_title = Some(txt.to_string());
+                    } else if parent == "settings" && last == "saveDate" && !txt.is_empty() {
+                        save_date = Some(txt.to_string());
                     }
                 }
             }
@@ -108,6 +113,7 @@ fn parse(xml: &str, index: u32, folder: &str) -> Savegame {
         folder: folder.to_string(),
         name,
         map_title,
+        save_date,
         mods,
     }
 }
@@ -209,6 +215,7 @@ mod tests {
         <settings>
             <savegameName>My game save</savegameName>
             <mapTitle>Riverbend Springs</mapTitle>
+            <saveDate>2026-08-02</saveDate>
         </settings>
         <mod modName="pdlc_vredoPack" title="Vredo Pack" version="1.1.0.0" required="false" fileHash="abc"/>
         <mod modName="FS25_precisionFarming" title="Precision Farming" version="1.5.0.0" required="true" fileHash="def"/>
@@ -219,6 +226,7 @@ mod tests {
         let s = parse(SAMPLE, 1, "savegame1");
         assert_eq!(s.name, "My game save");
         assert_eq!(s.map_title.as_deref(), Some("Riverbend Springs"));
+        assert_eq!(s.save_date.as_deref(), Some("2026-08-02"));
         assert_eq!(s.mods.len(), 2);
         let pf = s
             .mods

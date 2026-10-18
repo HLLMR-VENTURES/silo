@@ -3,8 +3,8 @@ import { activeSetDiff, findLoadoutByName, loadoutNameCheck, sameMods } from "./
 
 describe("loadoutNameCheck", () => {
   it("rejects an empty or blank name", () => {
-    expect(loadoutNameCheck("", [])).toEqual({ error: "Give the loadout a name" });
-    expect(loadoutNameCheck("   ", ["A"])).toEqual({ error: "Give the loadout a name" });
+    expect(loadoutNameCheck("", [])).toEqual({ error: "Give the set a name" });
+    expect(loadoutNameCheck("   ", ["A"])).toEqual({ error: "Give the set a name" });
   });
 
   it("accepts a new name", () => {
@@ -13,7 +13,7 @@ describe("loadoutNameCheck", () => {
 
   it("warns on a duplicate, ignoring case and spaces, naming the existing loadout", () => {
     expect(loadoutNameCheck("  harvest ", ["Planting", "Harvest"])).toEqual({
-      warn: "You already have a loadout called Harvest. Replace it?",
+      warn: "You already have a set called Harvest. Replace it?",
       confirm: "Replace",
     });
   });

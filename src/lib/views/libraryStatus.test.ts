@@ -1,6 +1,6 @@
 // Status chip counts, the Play menu's active-set line and the Library status strip (#230).
 import { describe, expect, it } from "vitest";
-import { activeSetLine, libraryStatusCounts, stripItemSpecs, stripLeft } from "./libraryStatus";
+import { libraryStatusCounts, stripItemSpecs, stripLeft } from "./libraryStatus";
 
 const none = {
   criticalConflicts: 0,
@@ -35,15 +35,6 @@ describe("libraryStatusCounts", () => {
       problems: 0,
       review: 3,
     });
-  });
-});
-
-describe("activeSetLine", () => {
-  it("names the loadout the active set matches", () => {
-    expect(activeSetLine("Harvest 2026")).toBe("Harvest 2026, unchanged");
-  });
-  it("says so when no loadout matches", () => {
-    expect(activeSetLine(null)).toBe("No mod set");
   });
 });
 

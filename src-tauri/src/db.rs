@@ -76,21 +76,33 @@ pub struct OrganizedRow {
     pub active: bool,
 }
 
-/// A named, saved set of active mods.
+/// A named, saved set of active mods (a "mod set" in the app).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Loadout {
     pub id: i64,
     pub name: String,
     pub mods: Vec<String>,
+    /// `"user"` for a set the user saved, `"auto"` for a "Before …" snapshot Silo took before a
+    /// switch (only the newest `AUTO_SNAPSHOTS_KEPT` are kept).
+    pub kind: String,
+    /// When it was created (unix ms); None for sets saved before schema version 2.
+    pub created_at: Option<i64>,
 }
+
+/// The kind of a set the user saved.
+pub const KIND_USER: &str = "user";
+/// The kind of an automatic "Before …" snapshot.
+pub const KIND_AUTO: &str = "auto";
+/// How many automatic snapshots are kept; saving another drops the oldest.
+pub const AUTO_SNAPSHOTS_KEPT: i64 = 5;
 
 /// The schema this build reads and writes. Every migration added to `migrate` bumps it. Version
 /// 0 is every database from before versioning (Silo 0.9 and older), whatever its shape.
 ///
 /// Keep migrations additive where possible so an older Silo can still read the file; when one
 /// can't be, the version gate in `open` is what protects the user.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 fn newer_schema(found: i64) -> String {
     format!(
@@ -147,6 +159,7 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
         tests::count_migration_step(&tx);
         match v {
             0 => migrate_0_to_1(&tx)?,
+            1 => migrate_1_to_2(&tx)?,
             other => return Err(format!("no migration from database version {other}")),
         }
         tx.pragma_update(None, "user_version", v + 1)
@@ -221,6 +234,23 @@ fn migrate_0_to_1(tx: &Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
     scope_by_root(tx)
+}
+
+/// Version 2 = mod set kinds: `loadout.kind` (`user` / `auto`, every existing set is `user`)
+/// and `loadout.created_at`. Additive, so an older Silo's queries still work on the file.
+fn migrate_1_to_2(tx: &Connection) -> Result<(), String> {
+    if !has_column(tx, "loadout", "kind") {
+        tx.execute(
+            "ALTER TABLE loadout ADD COLUMN kind TEXT NOT NULL DEFAULT 'user'",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if !has_column(tx, "loadout", "created_at") {
+        tx.execute("ALTER TABLE loadout ADD COLUMN created_at INTEGER", [])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 // ── damaged-database recovery and snapshots ──
@@ -555,7 +585,7 @@ fn recover(db_path: &Path, snapshots: &Path) -> Result<String, String> {
         Some(snap) => match restore(&snap, db_path) {
             Ok(()) => Ok(format!(
                 "Silo's library database was damaged, so Silo restored its latest automatic backup \
-                 ({}). Tags, notes or loadouts changed after that backup may be missing. The \
+                 ({}). Tags, notes or mod sets changed after that backup may be missing. The \
                  damaged file was kept at {}.",
                 snap.file_name().unwrap_or_default().to_string_lossy(),
                 kept.display()
@@ -571,7 +601,7 @@ fn recover(db_path: &Path, snapshots: &Path) -> Result<String, String> {
         None => Ok(format!(
             "Silo's library database was damaged and no backup copy could be used, so Silo \
              started a new one. Your mods are untouched and the next scan finds them again; tags, \
-             notes, ratings and loadouts couldn't be recovered. The damaged file was kept at {}.",
+             notes, ratings and mod sets couldn't be recovered. The damaged file was kept at {}.",
             kept.display()
         )),
     }
@@ -965,18 +995,19 @@ pub fn set_tags(conn: &mut Connection, tech_name: &str, tags: &[String]) -> Resu
 
 /// Load all saved loadouts with their mod lists.
 pub fn load_loadouts(conn: &Connection) -> Vec<Loadout> {
-    let Ok(mut stmt) = conn.prepare("SELECT id, name FROM loadout ORDER BY name COLLATE NOCASE")
+    let Ok(mut stmt) = conn
+        .prepare("SELECT id, name, kind, created_at FROM loadout ORDER BY name COLLATE NOCASE, id")
     else {
         return Vec::new();
     };
-    let heads: Vec<(i64, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+    let heads: Vec<(i64, String, String, Option<i64>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
         .map(|r| r.flatten().collect())
         .unwrap_or_default();
 
     heads
         .into_iter()
-        .map(|(id, name)| {
+        .map(|(id, name, kind, created_at)| {
             let mods = conn
                 .prepare("SELECT tech_name FROM loadout_mod WHERE loadout_id = ?1")
                 .and_then(|mut s| {
@@ -984,12 +1015,19 @@ pub fn load_loadouts(conn: &Connection) -> Vec<Loadout> {
                         .map(|rows| rows.flatten().collect::<Vec<_>>())
                 })
                 .unwrap_or_default();
-            Loadout { id, name, mods }
+            Loadout {
+                id,
+                name,
+                mods,
+                kind,
+                created_at,
+            }
         })
         .collect()
 }
 
-/// Create (id None) or update (id Some) a loadout; returns its id.
+/// Create (id None) or update (id Some) a loadout; returns its id. A new one is a user set; an
+/// update keeps the set's kind.
 pub fn save_loadout(
     conn: &mut Connection,
     id: Option<i64>,
@@ -997,6 +1035,46 @@ pub fn save_loadout(
     mods: &[String],
 ) -> Result<i64, String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let id = write_loadout(&tx, id, name, mods, KIND_USER)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+/// Save an automatic "Before …" snapshot of the active mods, then drop all but the newest
+/// `AUTO_SNAPSHOTS_KEPT` automatic ones, in one transaction. User sets are never touched.
+pub fn save_auto_snapshot(
+    conn: &mut Connection,
+    name: &str,
+    mods: &[String],
+) -> Result<i64, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let id = write_loadout(&tx, None, name, mods, KIND_AUTO)?;
+    let stale: Vec<i64> = {
+        let mut stmt = tx
+            .prepare("SELECT id FROM loadout WHERE kind = ?1 ORDER BY id DESC LIMIT -1 OFFSET ?2")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![KIND_AUTO, AUTO_SNAPSHOTS_KEPT], |r| {
+                r.get(0)
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<_>>()
+            .map_err(|e| e.to_string())?
+    };
+    for old in stale {
+        remove_loadout(&tx, old)?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+fn write_loadout(
+    tx: &Connection,
+    id: Option<i64>,
+    name: &str,
+    mods: &[String],
+    kind: &str,
+) -> Result<i64, String> {
     let id = match id {
         Some(id) => {
             tx.execute(
@@ -1009,30 +1087,35 @@ pub fn save_loadout(
             id
         }
         None => {
-            tx.execute("INSERT INTO loadout(name) VALUES(?1)", [name])
-                .map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO loadout(name, kind, created_at) VALUES(?1, ?2, ?3)",
+                rusqlite::params![name, kind, now_ms() as i64],
+            )
+            .map_err(|e| e.to_string())?;
             tx.last_insert_rowid()
         }
     };
-    {
-        let mut stmt = tx
-            .prepare("INSERT OR IGNORE INTO loadout_mod(loadout_id, tech_name) VALUES(?1, ?2)")
+    let mut stmt = tx
+        .prepare("INSERT OR IGNORE INTO loadout_mod(loadout_id, tech_name) VALUES(?1, ?2)")
+        .map_err(|e| e.to_string())?;
+    for m in mods {
+        stmt.execute(rusqlite::params![id, m])
             .map_err(|e| e.to_string())?;
-        for m in mods {
-            stmt.execute(rusqlite::params![id, m])
-                .map_err(|e| e.to_string())?;
-        }
     }
-    tx.commit().map_err(|e| e.to_string())?;
     Ok(id)
 }
 
-pub fn delete_loadout(conn: &mut Connection, id: i64) -> Result<(), String> {
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+fn remove_loadout(tx: &Connection, id: i64) -> Result<(), String> {
     tx.execute("DELETE FROM loadout_mod WHERE loadout_id = ?1", [id])
         .map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM loadout WHERE id = ?1", [id])
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_loadout(conn: &mut Connection, id: i64) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    remove_loadout(&tx, id)?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -1536,6 +1619,96 @@ mod tests {
         assert!(snapshot_ms("silo-before-v0.db").is_none());
     }
 
+    /// A schema version 1 database (Silo 0.11) holding one loadout with two mods.
+    fn v1_database(path: &Path) {
+        let c = rusqlite::Connection::open(path).unwrap();
+        c.execute_batch(BASE_SCHEMA).unwrap();
+        c.execute_batch(
+            "ALTER TABLE curation ADD COLUMN rating INTEGER NOT NULL DEFAULT 0;
+             INSERT INTO loadout(id, name) VALUES (7, 'Harvest 2026');
+             INSERT INTO loadout_mod VALUES (7, 'FS25_A'), (7, 'FS25_B');
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn migrating_to_v2_keeps_every_set_as_a_user_set() {
+        let path = temp_db("v1_to_v2");
+        v1_database(&path);
+        let conn = open(&path).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 2);
+        let sets = load_loadouts(&conn);
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].id, 7);
+        assert_eq!(sets[0].name, "Harvest 2026");
+        assert_eq!(sets[0].kind, KIND_USER);
+        assert_eq!(sets[0].created_at, None, "no date was recorded before v2");
+        let mut mods = sets[0].mods.clone();
+        mods.sort();
+        assert_eq!(mods, ["FS25_A", "FS25_B"]);
+        drop(conn);
+        // The pre-migration copy is the v1 file as it was.
+        let copy = snapshot_dir(&path).join("silo-before-v1.db");
+        let c = Connection::open(&copy).unwrap();
+        assert_eq!(schema_version(&c).unwrap(), 1);
+        assert!(
+            !has_column(&c, "loadout", "kind"),
+            "taken before the migration"
+        );
+        drop(c);
+        // Opening again changes nothing.
+        let conn = open(&path).unwrap();
+        assert_eq!(load_loadouts(&conn).len(), 1);
+    }
+
+    #[test]
+    fn only_the_newest_five_automatic_snapshots_are_kept() {
+        let path = temp_db("auto_snapshots");
+        let mut c = open(&path).unwrap();
+        let user = save_loadout(&mut c, None, "Harvest 2026", &["FS25_A".to_string()]).unwrap();
+        let ids: Vec<i64> = (0..8)
+            .map(|i| {
+                save_auto_snapshot(&mut c, &format!("Before {i}"), &[format!("FS25_{i}")]).unwrap()
+            })
+            .collect();
+        let sets = load_loadouts(&c);
+        let autos: Vec<&Loadout> = sets.iter().filter(|l| l.kind == KIND_AUTO).collect();
+        assert_eq!(autos.len(), AUTO_SNAPSHOTS_KEPT as usize);
+        let mut kept: Vec<i64> = autos.iter().map(|l| l.id).collect();
+        kept.sort();
+        assert_eq!(kept, ids[3..], "the oldest three were dropped");
+        assert!(autos.iter().all(|l| l.created_at.is_some()));
+        let u = sets
+            .iter()
+            .find(|l| l.id == user)
+            .expect("user sets are never pruned");
+        assert_eq!(u.kind, KIND_USER);
+        // A dropped snapshot's mod rows go with it.
+        let orphans: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM loadout_mod WHERE loadout_id NOT IN (SELECT id FROM loadout)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0);
+    }
+
+    #[test]
+    fn updating_a_set_keeps_its_kind() {
+        let path = temp_db("update_kind");
+        let mut c = open(&path).unwrap();
+        let auto = save_auto_snapshot(&mut c, "Before X", &["FS25_A".to_string()]).unwrap();
+        save_loadout(&mut c, Some(auto), "Before X", &["FS25_B".to_string()]).unwrap();
+        let l = load_loadouts(&c)
+            .into_iter()
+            .find(|l| l.id == auto)
+            .unwrap();
+        assert_eq!(l.kind, KIND_AUTO);
+        assert_eq!(l.mods, ["FS25_B"]);
+    }
+
     #[test]
     fn a_new_database_needs_no_pre_migration_copy() {
         let path = temp_db("premigrate_fresh");
@@ -1580,7 +1753,11 @@ mod tests {
             for h in handles {
                 h.join().unwrap().expect("every concurrent open succeeds");
             }
-            assert_eq!(migration_steps(&path), 1, "migrated exactly once");
+            assert_eq!(
+                migration_steps(&path),
+                SCHEMA_VERSION as usize,
+                "each step ran exactly once"
+            );
             let conn = open(&path).unwrap();
             let v: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))

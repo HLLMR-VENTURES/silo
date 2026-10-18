@@ -6,11 +6,9 @@
     Menu,
     ToastRegion,
     ask,
-    askText,
     askWithOption,
     EmptyState,
     toast,
-    type ConfirmFact,
   } from "./lib/ui";
   import {
     modsRootStatus,
@@ -23,7 +21,6 @@
     type ModsRootStatus,
     scanMods,
     onScanProgress,
-    parseCollectionDeepLink,
     getCuration,
     setCuration,
     getOverrides,
@@ -33,11 +30,6 @@
     setActive,
     flatten,
     clearScanCache,
-    getLoadouts,
-    saveLoadout,
-    deleteLoadout,
-    exportLoadoutFile,
-    importLoadoutFile,
     getSavegames,
     backupSavegame,
     detectConflicts,
@@ -85,13 +77,7 @@
   } from "./lib/api";
   import { ArchiveMove } from "./lib/archiveMove.svelte";
   import { capList, modsCount, problemLines, unDot } from "./lib/archiveMoveLogic";
-  import {
-    activeSetDiff,
-    findLoadoutByName,
-    loadoutNameCheck,
-    sameMods,
-    type ActiveSetDiff,
-  } from "./lib/loadoutSafety";
+  import { sameMods } from "./lib/loadoutSafety";
   import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { checkUpdate, installUpdate, type AvailableUpdate } from "./lib/updater";
@@ -109,7 +95,6 @@
     CurationRow,
     ModInput,
     PlannedMove,
-    Loadout,
     Savegame,
     Conflict,
     GameInfo,
@@ -216,15 +201,19 @@
   import ModBrowser from "./lib/components/ModBrowser.svelte";
   import LogTriage from "./lib/components/LogTriage.svelte";
   import BindingsView from "./lib/components/BindingsView.svelte";
-  import MpSync from "./lib/components/MpSync.svelte";
-  import Collections from "./lib/components/Collections.svelte";
   import BridgeTool from "./lib/components/BridgeTool.svelte";
   import ConflictsPanel from "./lib/components/panels/ConflictsPanel.svelte";
   import HealthPanel from "./lib/components/panels/HealthPanel.svelte";
   import StatsPanel from "./lib/components/panels/StatsPanel.svelte";
   import UpdatesPanel from "./lib/components/panels/UpdatesPanel.svelte";
-  import LoadoutsPanel from "./lib/components/panels/LoadoutsPanel.svelte";
-  import SavegamesPanel from "./lib/components/panels/SavegamesPanel.svelte";
+  import MySetsTab from "./lib/components/modsets/MySetsTab.svelte";
+  import SharedLinks from "./lib/components/modsets/SharedLinks.svelte";
+  import ShareDialog from "./lib/components/modsets/ShareDialog.svelte";
+  import OpenSharedTab from "./lib/components/modsets/OpenSharedTab.svelte";
+  import SavegamesTab from "./lib/components/modsets/SavegamesTab.svelte";
+  import { createModSets } from "./lib/modsets/modSetsStore.svelte";
+  import { activeSetLine, saveModStats, stripSetName } from "./lib/modsets/modSets";
+  import { listenForSharedSets } from "./lib/modsets/deepLink";
   import GeneralSettings from "./lib/components/settings/GeneralSettings.svelte";
   import ModsFolderSettings from "./lib/components/settings/ModsFolderSettings.svelte";
   import LibrarySettings from "./lib/components/settings/LibrarySettings.svelte";
@@ -275,7 +264,6 @@
   import HelpView from "./lib/views/HelpView.svelte";
   import Button from "./lib/ui/Button.svelte";
   import {
-    activeSetLine,
     libraryStatusCounts,
     stripItemSpecs,
     stripLeft,
@@ -460,28 +448,15 @@
   const organizedCount = $derived(mods.filter((m) => m.organized).length);
   const unorganizedCount = $derived(mods.filter(isFileable).length);
 
-  let loadouts = $state<Loadout[]>([]);
   let savegames = $state<Savegame[]>([]);
   let conflicts = $state<Conflict[]>([]);
   let conflictTimer: ReturnType<typeof setTimeout> | undefined;
-  // Set when a silo://collection?url=… deep link arrives — opens Mod sets → Share (Collections),
-  // pre-filled. Leaving that tab forgets it, as closing the Collections panel did.
-  let collImportUrl = $state<string | null>(null);
-  $effect(() => {
-    const onShare = nav.view === "modSets" && nav.tab.modSets === "share";
-    if (!onShare) untrack(() => (collImportUrl = null));
-  });
-
-  function handleDeepLinks(urls: string[] | null | undefined) {
-    if (!urls) return;
-    for (const raw of urls) {
-      const target = parseCollectionDeepLink(raw);
-      if (target) {
-        collImportUrl = target;
-        go("modSets", "share");
-        break;
-      }
-    }
+  // A silo://collection?url=… deep link: opens Mod sets → Open a shared set with a preview.
+  // `n` changes for every link, so the same link twice previews again.
+  let sharedRequest = $state<{ url: string; n: number } | null>(null);
+  function openSharedLink(url: string) {
+    sharedRequest = { url, n: (sharedRequest?.n ?? 0) + 1 };
+    go("modSets", "open");
   }
   // Active set as manifest refs for MP sync (techName, path, kind, version).
   const activeModRefs = $derived(
@@ -715,15 +690,8 @@
 
   const libraryTechNames = $derived(new Set(mods.map((m) => m.techName)));
 
-  // Cross-reference a save's user mods (non-DLC) against the library.
-  function saveStats(s: Savegame) {
-    const userMods = s.mods.filter((m) => !m.isDlc);
-    const present = userMods.filter((m) => libraryTechNames.has(m.modName));
-    const missing = userMods.filter((m) => !libraryTechNames.has(m.modName));
-    return { total: userMods.length, present, missing };
-  }
-
-  const saveRows = $derived(savegames.map((s) => ({ s, st: saveStats(s) })));
+  // Each save's user mods (DLC left out) against the library.
+  const saveRows = $derived(savegames.map((s) => ({ s, st: saveModStats(s, libraryTechNames) })));
 
   async function loadSavegames() {
     try {
@@ -747,8 +715,9 @@
     L.push("### By category");
     for (const c of libStats.cats) L.push(`- ${c.name}: ${c.count}  (${fmtSize(c.size)})`);
     L.push("");
-    const al = loadouts.find((l) => l.id === activeLoadoutId);
-    L.push(`## Active set${al ? `, loadout “${al.name}”` : ""} (${activeSet.size} mods)`, "");
+    const st = setStore.state;
+    const setPart = st.kind === "none" ? "" : `, mod set “${st.name}”${st.kind === "custom" ? ` with ${st.changes} changes` : ""}`;
+    L.push(`## Active set${setPart} (${activeSet.size} mods)`, "");
     L.push(`## Conflicts (${criticalCount} critical, ${conflicts.length} total)`);
     for (const c of conflicts.filter((x) => x.severity !== "info")) {
       L.push(`- [${c.severity}] ${c.kind} “${c.name}”: ${c.mods.join(", ")}`);
@@ -800,64 +769,6 @@
     }
   }
 
-  async function loadoutFromSave(s: Savegame) {
-    const { present, missing } = saveStats(s);
-    if (present.length === 0) {
-      refuse(`None of ${s.name}'s mods are in your library yet.`);
-      return;
-    }
-    const target = present.map((m) => m.modName);
-    const diff = activeSetDiff([...activeSet], target, libraryScanned ? libraryTechNames : undefined);
-    const sum = switchSummary(diff, missing.length);
-    const note =
-      missing.length > 0
-        ? ` ${modsCount(missing.length)} the save used ${missing.length === 1 ? "isn't" : "aren't"} in your library and ${missing.length === 1 ? "is" : "are"} left out.`
-        : "";
-    if (
-      !(await ask({
-        title: `Use ${s.name}'s mods?`,
-        body: `Silo saves ${modsCount(present.length)} from this save as a loadout called ${s.name} and switches to it. ${sum.body}${note}`,
-        facts: sum.facts,
-        list: sum.list,
-        confirm: "Switch",
-      }))
-    )
-      return;
-    try {
-      const id = await saveLoadout(null, s.name, target);
-      await loadLoadouts();
-      // Apply exactly the mods the confirmation showed (already confirmed above). The new
-      // loadout is found by its id, never by name: another loadout may share the save's name.
-      const name = loadouts.find((l) => l.id === id)?.name ?? s.name;
-      if (diff.on.length + diff.off.length === 0) toast({ message: `Already using ${name}` });
-      else await switchTo(name, target);
-    } catch (e) {
-      reportError(e, "Switching to the save's mods");
-    }
-  }
-
-  /**
-   * Body, facts and list for a "switch the active set" confirmation.
-   * @param diff what the switch changes (activeSetDiff)
-   * @param missingCount mods the target names that aren't in the library (default diff.missing)
-   */
-  function switchSummary(diff: ActiveSetDiff, missingCount = diff.missing.length) {
-    const titles = new Map(mods.map((m) => [m.techName, m.title ?? m.techName]));
-    const label = (t: string) => titles.get(t) ?? t;
-    const on = diff.on.length;
-    const off = diff.off.length;
-    const facts: ConfirmFact[] = [
-      { label: "Turn on", value: modsCount(on) },
-      { label: "Park", value: modsCount(off) },
-      ...(missingCount ? [{ label: "Not in your library", value: modsCount(missingCount) }] : []),
-    ];
-    const changed = [...diff.on.map((t) => `On: ${label(t)}`), ...diff.off.map((t) => `Park: ${label(t)}`)];
-    const list = changed.slice(0, 50);
-    if (changed.length > 50) list.push(`…and ${changed.length - 50} more`);
-    const body = `${modsCount(on)} ${on === 1 ? "turns" : "turn"} on and ${off} ${off === 1 ? "is" : "are"} parked. Nothing is deleted.`;
-    return { body, facts, list };
-  }
-
   /** Set the active set through the loadout apply path (optimistic set, then project it).
    *  @return true when it applied without errors (failures are reported), null when another
    *  library write was running so nothing changed */
@@ -895,92 +806,8 @@
     return null;
   }
 
-  /** Switch to a loadout's mods (already confirmed), then offer to switch back. Errors the
-   *  apply reports are reported on their own; the switch toast still shows so Undo is reachable. */
-  async function switchTo(name: string, techNames: string[]) {
-    switchUndo.dismiss();
-    const previous = [...activeSet];
-    const clean = await setActiveSetTo(techNames, `Switching to ${name}`);
-    if (clean === null) return; // refused: another write is running, nothing changed
-    switchUndo.offer({
-      message: clean ? `Switched to ${name}.` : `Switch to ${name} finished with problems.`,
-      tone: clean ? "neutral" : "warn",
-      previous,
-      expected: [...techNames],
-    });
-  }
-
-  /**
-   * After a loadout was overwritten, offer to put its previous mods back.
-   * @param prev the loadout as it was (id, name, mods)
-   * @param written the mods it was overwritten with; Undo refuses if it changed again since
-   */
-  function offerOverwriteUndo(prev: { id: number; name: string; mods: string[] }, written: string[]) {
-    toast({
-      message: `Saved your current mods to ${prev.name}.`,
-      action: {
-        label: "Undo",
-        run: async () => {
-          const now = loadouts.find((l) => l.id === prev.id);
-          if (!now || !sameMods(now.mods, written)) {
-            toast({ message: `Can't undo: ${prev.name} changed since.`, tone: "warn" });
-            return;
-          }
-          try {
-            await saveLoadout(prev.id, prev.name, prev.mods);
-            await loadLoadouts();
-          } catch (e) {
-            reportError(e, "Undoing the loadout change");
-          }
-        },
-      },
-    });
-  }
-
-  // The loadout whose mod set exactly matches the current active set (if any).
-  const activeLoadoutId = $derived.by(() => {
-    for (const l of loadouts) {
-      if (
-        l.mods.length === activeSet.size &&
-        l.mods.every((m) => activeSet.has(m))
-      ) {
-        return l.id;
-      }
-    }
-    return null;
-  });
-
-  async function loadLoadouts() {
-    try {
-      loadouts = await getLoadouts();
-    } catch (e) {
-      reportError(e, "Loading your loadouts", { retry: loadLoadouts, background: true });
-    }
-  }
-
-  async function applyLoadout(l: Loadout) {
-    // With no scan yet every mod would look missing, so only count missing once mods are known.
-    const diff = activeSetDiff([...activeSet], l.mods, libraryScanned ? libraryTechNames : undefined);
-    if (diff.on.length + diff.off.length === 0) {
-      toast({ message: `Already using ${l.name}` });
-      return;
-    }
-    const sum = switchSummary(diff);
-    if (
-      !(await ask({
-        title: `Switch to ${l.name}?`,
-        body: sum.body,
-        facts: sum.facts,
-        list: sum.list,
-        confirm: "Switch",
-      }))
-    )
-      return;
-    await switchTo(l.name, l.mods);
-  }
-
-  /** Loadout saves, replaces, deletes and imports wait for a foreground library change (the
-   *  panel's buttons are off then too); a library move doesn't stop them. True when refused. */
+  /** Saving, replacing and deleting mod sets wait for a foreground library change (their
+   *  buttons are off then too); a library move doesn't stop them. True when refused. */
   function loadoutEditRefused(): boolean {
     const fg = blockedForeground("library-write");
     if (!fg.blocked) return false;
@@ -988,118 +815,41 @@
     return true;
   }
 
-  async function saveCurrentLoadout() {
-    if (loadoutEditRefused()) return;
-    const name = await askText({
-      title: "Save current mods as a loadout",
-      label: "Name",
-      confirm: "Save",
-      validate: (v) =>
-        loadoutNameCheck(
-          v,
-          loadouts.map((l) => l.name),
-        ),
-    });
-    if (name === null || !name.trim()) return;
-    if (loadoutEditRefused()) return;
-    // A duplicate name was accepted with "Replace": overwrite that loadout, don't add a second.
-    const existing = findLoadoutByName(name, loadouts);
-    const current = [...activeSet];
-    try {
-      if (existing) {
-        const prev = { id: existing.id, name: existing.name, mods: [...existing.mods] };
-        await saveLoadout(existing.id, existing.name, current);
-        await loadLoadouts();
-        offerOverwriteUndo(prev, current);
-      } else {
-        await saveLoadout(null, name.trim(), current);
-        await loadLoadouts();
-      }
-    } catch (e) {
-      reportError(e, "Saving the loadout");
-    }
+  // Saved sets (loadouts), the remembered last-applied set and every Mod sets action. Switches
+  // go through setActiveSetTo and the switch Undo toast above.
+  const setStore = createModSets({
+    active: () => activeSet,
+    library: () => (libraryScanned ? libraryTechNames : undefined),
+    title: (t) => {
+      const m = mods.find((x) => x.techName === t);
+      return m?.title ?? t;
+    },
+    setActiveSetTo,
+    undo: switchUndo,
+    editRefused: loadoutEditRefused,
+    refuse,
+  });
+
+  /** The Share dialog's set (a saved set, or the active mods). */
+  let shareTarget = $state<{ name: string; mods: string[] } | null>(null);
+  let shareOpen = $state(false);
+  /** Bumped after a link is created, so Your shared links lists it. */
+  let sharedLinksKey = $state(0);
+  function openShare(name: string, setMods: string[]) {
+    shareTarget = { name, mods: [...setMods] };
+    shareOpen = true;
   }
 
-  async function overwriteLoadout(l: Loadout) {
-    if (loadoutEditRefused()) return;
-    const current = [...activeSet];
-    const d = activeSetDiff(l.mods, current);
-    if (
-      !(await ask({
-        title: `Replace ${l.name} with your current ${modsCount(current.length)}?`,
-        body:
-          `It had ${l.mods.length}. ${d.on.length} ${d.on.length === 1 ? "is" : "are"} added and ${d.off.length} removed. ` +
-          "Your active mods aren't changed.",
-        confirm: "Replace",
-      }))
-    )
-      return;
-    if (loadoutEditRefused()) return;
-    const prev = { id: l.id, name: l.name, mods: [...l.mods] };
-    try {
-      await saveLoadout(l.id, l.name, current);
-      await loadLoadouts();
-      offerOverwriteUndo(prev, current);
-    } catch (e) {
-      reportError(e, "Saving the loadout");
-    }
+  /** Find a mod in Browse by its tech name (Savegames, Open a shared set). */
+  function findInBrowse(techName: string, title: string | null = null) {
+    browseSeed = title ?? techName;
+    browseSeedTech = techName;
+    go("browse");
   }
 
-  async function removeLoadout(l: Loadout) {
-    if (loadoutEditRefused()) return;
-    if (
-      !(await ask({
-        title: `Delete ${l.name}?`,
-        body: "Your mods aren't affected.",
-        confirm: "Delete",
-        tone: "danger",
-      }))
-    )
-      return;
-    if (loadoutEditRefused()) return;
-    // Kept for Undo: saving it again recreates it with the same name and mods (under a new id).
-    const copy = { name: l.name, mods: [...l.mods] };
-    try {
-      await deleteLoadout(l.id);
-      await loadLoadouts();
-      toast({
-        message: `Deleted ${copy.name}.`,
-        action: {
-          label: "Undo",
-          run: async () => {
-            try {
-              await saveLoadout(null, copy.name, copy.mods);
-              await loadLoadouts();
-            } catch (e) {
-              reportError(e, "Restoring the loadout");
-            }
-          },
-        },
-      });
-    } catch (e) {
-      reportError(e, "Deleting the loadout");
-    }
-  }
-
-  async function exportLoadout(l: Loadout) {
-    try {
-      await exportLoadoutFile(l.id, l.name);
-    } catch (e) {
-      reportError(e, "Exporting the loadout");
-    }
-  }
-
-  async function importLoadout() {
-    if (loadoutEditRefused()) return;
-    try {
-      const id = await importLoadoutFile();
-      if (id !== null) {
-        await loadLoadouts();
-        go("modSets", "sets");
-      }
-    } catch (e) {
-      reportError(e, "Importing a loadout");
-    }
+  /** Turn a single mod on or park it (the Multiplayer check's fix list), with Undo. */
+  function setModActive(techName: string, on: boolean) {
+    if (activeSet.has(techName) !== on) void toggleActive(techName);
   }
 
   function fileName(path: string): string {
@@ -2998,7 +2748,6 @@
 
   onMount(() => {
     let unlisten: (() => void) | undefined;
-    let dlUnlisten: (() => void) | undefined;
     let focusUnlisten: (() => void) | undefined;
     let moveUnlisten: (() => void) | undefined;
     let closeUnlisten: (() => void) | undefined;
@@ -3011,6 +2760,10 @@
       e.preventDefault();
     };
     window.addEventListener("contextmenu", onCtx);
+    // Shared-set links (silo://collection?url=…) are heard before any startup work below, so one
+    // that arrives while Silo loads isn't lost; a cold launch from a link is read right after.
+    // They open Mod sets → Open a shared set with a preview only.
+    const deepLinks = listenForSharedSets(openSharedLink, { onOpenUrl, getCurrent });
     (async () => {
       unlisten = await onScanProgress((p) => {
         progress = p;
@@ -3027,7 +2780,7 @@
         await loadTags();
         await loadRepos();
         await loadSources();
-        await loadLoadouts();
+        await setStore.load();
         await loadSavegames();
         gameInfo = await detectGame();
         userDir = await userDirPath();
@@ -3090,19 +2843,6 @@
       } catch {
         /* non-critical */
       }
-      // Deep links: a silo://collection?url=… link (from a shared collection's web page)
-      // opens the import panel pre-filled. getCurrent() catches a cold launch via link;
-      // onOpenUrl fires while the app is already running.
-      try {
-        handleDeepLinks(await getCurrent());
-      } catch {
-        /* not a desktop deep-link context */
-      }
-      try {
-        dlUnlisten = await onOpenUrl(handleDeepLinks);
-      } catch {
-        /* ignore */
-      }
       // Auto-refresh on window focus: a mod downloaded in a browser lands while Silo is in the
       // background, so pick it up when the user returns instead of waiting for a manual rescan.
       // Throttled (skip during a library write or scan, or scanned <4s ago) so alt-tabbing doesn't thrash; the
@@ -3147,7 +2887,7 @@
     })();
     return () => {
       unlisten?.();
-      dlUnlisten?.();
+      void deepLinks.then((stop) => stop());
       focusUnlisten?.();
       moveUnlisten?.();
       closeUnlisten?.();
@@ -3270,9 +3010,8 @@
   // The chip's counts only mean something once a scan of this folder has succeeded.
   const libraryRead = $derived(libraryReadState({ scanning, scanned: libraryScanned, failed: scanFailed }));
 
-  const activeLoadoutName = $derived(
-    activeLoadoutId !== null ? (loadouts.find((l) => l.id === activeLoadoutId)?.name ?? null) : null,
-  );
+  /** Which mod set the active mods are on ("Harvest 2026", or Custom since it). */
+  const setState = $derived(setStore.state);
 
   // Play keeps the old Launch button's guards: off during a foreground library write or while an
   // archive move is copying (launching would race it).
@@ -3294,11 +3033,22 @@
         separatorBefore: i === 0 && items.length > 0,
       });
     });
+    // Custom since a set: keep the change in that set, or save it as a new one.
+    if (setState.kind === "custom") {
+      items.push({
+        id: "set-update",
+        label: `Update ${setState.name} from current mods`,
+        icon: "rescan",
+        disabled: !!fgLock.reason,
+        separatorBefore: items.length > 0,
+      });
+      items.push({ id: "set-save", label: "Save current mods as a new set", icon: "modSets", disabled: !!fgLock.reason });
+    }
     items.push({
       id: "mod-sets",
       label: "Manage mod sets",
       icon: "modSets",
-      separatorBefore: items.length > 0,
+      separatorBefore: items.length > 0 && setState.kind !== "custom",
     });
     return items;
   });
@@ -3306,7 +3056,11 @@
     if (id === "game-folder")
       openKnownFolder("gameInstall").catch((e) => reportError(e, "Opening the game folder"));
     else if (id.startsWith("save:")) go("modSets", "savegames");
-    else if (id === "mod-sets") go("modSets");
+    else if (id === "mod-sets") go("modSets", "sets");
+    else if (id === "set-update") {
+      const set = setStore.current;
+      if (set) void setStore.updateFromCurrent(set);
+    } else if (id === "set-save") void setStore.saveCurrent();
   }
 
   /** Why the old "Organize N" button was off: a library write, a scan, or an unfinished move. */
@@ -3337,7 +3091,7 @@
       ready: !!gameInfo && !playOffReason && criticalCount === 0,
       active: activeSet.size,
       total: mods.length,
-      setName: activeLoadoutName,
+      setName: stripSetName(setState),
     }),
   );
 
@@ -3499,7 +3253,7 @@
             onplay={launch}
             menuItems={playMenuItems}
             onmenuselect={playMenuSelect}
-            activeSetLine={activeSetLine(activeLoadoutName)}
+            activeSetLine={activeSetLine(setState)}
           />
         {/if}
       {/snippet}
@@ -3708,52 +3462,71 @@
     {#snippet modSets()}
       <ModSetsView>
         {#snippet setsTab()}
-          <ViewBoundary name="Loadouts">
-            <LoadoutsPanel
-              {loadouts}
-              activeCount={activeSet.size}
-              {activeLoadoutId}
+          <ViewBoundary name="My sets">
+            <MySetsTab
+              sets={setStore.sets}
+              active={activeSet}
+              library={libraryScanned ? libraryTechNames : undefined}
+              state={setState}
               lockReason={fgLock.reason}
-              onApply={applyLoadout}
-              onOverwrite={overwriteLoadout}
-              onExport={exportLoadout}
-              onRemove={removeLoadout}
-              onSaveCurrent={saveCurrentLoadout}
-              onImport={importLoadout}
+              onSwitch={setStore.switchTo}
+              onUpdate={setStore.updateFromCurrent}
+              onDelete={setStore.remove}
+              onShare={openShare}
+              onSaveCurrent={setStore.saveCurrent}
+              onOpenShared={() => go("modSets", "open")}
+            >
+              {#snippet after()}
+                <SharedLinks active={activeModRefs} refreshKey={sharedLinksKey} />
+              {/snippet}
+            </MySetsTab>
+          </ViewBoundary>
+        {/snippet}
+        {#snippet openTab()}
+          <ViewBoundary name="Open a shared set">
+            <OpenSharedTab
+              library={mods}
+              active={activeSet}
+              activeRefs={activeModRefs}
+              request={sharedRequest}
+              onSaveAsSet={setStore.saveShared}
+              onSwitchTo={(id) => {
+                const set = setStore.sets.find((l) => l.id === id);
+                if (set) void setStore.switchTo(set);
+              }}
+              onImported={() => {
+                void setStore.load();
+                void runScan(false);
+              }}
+              onTurnOn={(t) => setModActive(t, true)}
+              onPark={(t) => setModActive(t, false)}
+              onFindInBrowse={(t) => findInBrowse(t, mods.find((m) => m.techName === t)?.title ?? null)}
             />
-          </ViewBoundary>
-        {/snippet}
-        {#snippet shareTab()}
-          <ViewBoundary name="Collections">
-            <div class="page-card">
-              <Collections
-                active={activeModRefs}
-                library={mods}
-                initialImportUrl={collImportUrl}
-                onImported={() => runScan(false)}
-              />
-            </div>
-          </ViewBoundary>
-        {/snippet}
-        {#snippet multiplayerTab()}
-          <ViewBoundary name="Multiplayer">
-            <div class="page-card">
-              <MpSync active={activeModRefs} />
-            </div>
           </ViewBoundary>
         {/snippet}
         {#snippet savegamesTab()}
           <ViewBoundary name="Savegames">
-            <SavegamesPanel
+            <SavegamesTab
               rows={saveRows}
               lockReason={fgLock.reason}
-              onConfigure={openSaveConfig}
+              onUse={setStore.useSave}
               onBackup={backupSave}
-              onLoadout={loadoutFromSave}
+              onSettings={openSaveConfig}
+              onFindInBrowse={findInBrowse}
             />
           </ViewBoundary>
         {/snippet}
       </ModSetsView>
+      {#if shareTarget}
+        <ShareDialog
+          bind:open={shareOpen}
+          name={shareTarget.name}
+          mods={shareTarget.mods}
+          library={mods}
+          onConnect={() => go("settings", "accounts")}
+          onShared={() => (sharedLinksKey += 1)}
+        />
+      {/if}
     {/snippet}
     {#snippet diagnose()}
       <!-- Last run's content is the KeepMounted below, docked into this tab's slot. -->

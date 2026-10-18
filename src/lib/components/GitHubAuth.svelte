@@ -90,14 +90,14 @@
             Read-only (update checks · 5,000 req/hr).
           {/if}
           {#if status.canGist}
-            · Collection sharing on.
+            · Sharing links on.
           {/if}
         </div>
       </div>
       <button class="gha-btn" onclick={disconnect}>Disconnect</button>
     </div>
     {#if flow}
-      <!-- Escalating scope (e.g. read-only → actions, or enabling collection sharing)
+      <!-- Escalating scope (e.g. read-only → actions, or enabling link sharing)
            while already connected: the code MUST show here, since the connected branch
            owns the render when status.user is set. -->
       {@render flowDisplay()}
@@ -116,11 +116,11 @@
       {#if !status.canGist}
         <div class="gha-row">
           <div class="gha-hint">
-            Enable sharing Collections. This grants the <code>gist</code> scope so a shared
-            mod set is saved to your own GitHub as a secret (unlisted) gist.
+            Share mod sets as links. This grants the <code>gist</code> scope so a shared set's
+            list is saved to your own GitHub as an unlisted page.
           </div>
           <button class="gha-btn primary" onclick={() => connect(status.canWrite, true)}>
-            Enable collection sharing
+            Enable sharing links
           </button>
         </div>
       {/if}
@@ -131,8 +131,8 @@
     <div class="gha-row">
       <div class="gha-hint">
         Connect your GitHub account for faster update checks (5,000 requests per hour). This
-        grants <code>read:user</code> only. Star / Watch (<code>public_repo</code>) and sharing
-        Collections (<code>gist</code>) are separate, optional steps.
+        grants <code>read:user</code> only. Star / Watch (<code>public_repo</code>) and sharing mod
+        sets as links (<code>gist</code>) are separate, optional steps.
       </div>
       <button class="gha-btn primary" onclick={() => connect()}>Connect GitHub</button>
     </div>

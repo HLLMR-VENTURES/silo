@@ -125,6 +125,11 @@ export interface Loadout {
   id: number;
   name: string;
   mods: string[];
+  /** "user": a set the user saved; "auto": a "Before …" snapshot Silo took before a switch
+   *  (only the newest 5 are kept). */
+  kind: "user" | "auto";
+  /** When it was created (unix ms); null for sets saved before Silo 1.0. */
+  createdAt: number | null;
 }
 
 export interface SaveMod {
@@ -141,6 +146,8 @@ export interface Savegame {
   folder: string;
   name: string;
   mapTitle: string | null;
+  /** When the game last saved it, as written in the save ("2026-08-02"), or null. */
+  saveDate: string | null;
   mods: SaveMod[];
 }
 
