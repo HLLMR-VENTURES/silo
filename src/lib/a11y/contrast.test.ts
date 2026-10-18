@@ -1,11 +1,10 @@
 // The contrast guard behind `npm run check` (scripts/check-contrast.mjs, #258): the WCAG maths,
 // token resolution (var() and the color-mix soft tints), the real tokens.css passing, and a
 // lowered token failing with a readable line.
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { check, contrast, parseHex, resolve, themes } from "../../../scripts/check-contrast.mjs";
+import { check, contrast, parseHex, readTokens, resolve, themes } from "../../../scripts/check-contrast.mjs";
 
-const css = readFileSync(new URL("../styles/tokens.css", import.meta.url), "utf8");
+const css = readTokens();
 
 describe("check-contrast", () => {
   it("computes WCAG ratios", () => {

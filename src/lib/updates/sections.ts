@@ -82,8 +82,10 @@ export function installedSinceCheck(mod: LibraryModLike, row: UpdateRow): boolea
   return normVersion(mod.version) === normVersion(row.latest);
 }
 
-const byTitle = (a: { title: string }, b: { title: string }) =>
-  a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+// One shared collator: localeCompare with an options object builds a new one per call, which is
+// tens of ms on a 2,500-mod "Not tracked" list (#258).
+const titleCollator = new Intl.Collator(undefined, { sensitivity: "base" });
+const byTitle = (a: { title: string }, b: { title: string }) => titleCollator.compare(a.title, b.title);
 
 /**
  * Sort one check's rows into the Updates view's sections.

@@ -1,6 +1,7 @@
 // Types for the exports of check-contrast.mjs (used by src/lib/a11y/contrast.test.ts), so the type
 // checker reads these instead of type-checking the Node script itself.
 export type Rgb = [number, number, number];
+export declare function readTokens(): string;
 export declare function stripComments(css: string): string;
 export declare function blockVars(css: string, selector: string): Record<string, string>;
 export declare function parseHex(v: string): Rgb | null;

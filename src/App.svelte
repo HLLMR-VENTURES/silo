@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { get } from "svelte/store";
   import {
     DialogHost,
@@ -165,6 +165,8 @@
   import ModListRow, { ROW_HEIGHTS, type Density } from "./lib/components/library/ModListRow.svelte";
   import ModCard, { CARD_HEIGHT } from "./lib/components/library/ModCard.svelte";
   import { rowBadges } from "./lib/components/library/rowBadges";
+  import { searchMods, sortMods, type SortKey } from "./lib/components/library/libraryList";
+  import { markStart, measureFrom, timed } from "./lib/perf";
   import type { MenuTarget, SelectIntent } from "./lib/components/library/roving";
   import {
     loadLibraryDensity,
@@ -1886,24 +1888,18 @@
     libFilters = { ...NO_FILTERS };
     if (alsoSearch) query = "";
   }
-  const filtered = $derived.by(() => {
-    let list = effectiveMods;
-    if (libCat) {
-      list = list.filter(
-        (m) => m.category === libCat && (!libSub || m.subcategory === libSub),
-      );
-    }
-    list = filterMods(list, libFilters, filterCtx);
-    if (q !== "") {
-      list = list.filter(
-        (m) =>
-          (m.title ?? "").toLowerCase().includes(q) ||
-          m.techName.toLowerCase().includes(q) ||
-          (m.author ?? "").toLowerCase().includes(q),
-      );
-    }
-    return list;
-  });
+  const filtered = $derived.by(() =>
+    timed("silo:library-filter", () => {
+      let list: readonly ModEntry[] = effectiveMods;
+      if (libCat) {
+        list = list.filter(
+          (m) => m.category === libCat && (!libSub || m.subcategory === libSub),
+        );
+      }
+      list = filterMods(list, libFilters, filterCtx);
+      return searchMods(list, q);
+    }),
+  );
   /** How many mods "Needs attention" would show (hidden ones aside), for its chip. */
   const attentionCount = $derived(
     effectiveMods.reduce((n, m) => {
@@ -1919,7 +1915,6 @@
     }, 0),
   );
 
-  type SortKey = "name" | "category" | "size" | "added" | "version" | "rating";
   let sortBy = $state<SortKey>("added");
   let sortDir = $state<"asc" | "desc">("desc");
   // Library view: the list (default, for every library size) or cards; remembered per machine.
@@ -1984,40 +1979,9 @@
     });
   }
 
-  const visible = $derived.by(() => {
-    const arr = [...filtered];
-    const mul = sortDir === "desc" ? -1 : 1;
-    const name = (m: ModEntry) => (m.title ?? m.techName).toLowerCase();
-    arr.sort((a, b) => {
-      let r = 0;
-      switch (sortBy) {
-        case "name":
-          r = name(a).localeCompare(name(b));
-          break;
-        case "size":
-          r = a.size - b.size;
-          break;
-        case "added":
-          r = a.mtimeMs - b.mtimeMs;
-          break;
-        case "version":
-          r = (a.version ?? "").localeCompare(b.version ?? "", undefined, { numeric: true });
-          break;
-        case "rating":
-          // My own star rating (0 = unrated sorts last on desc, which is the default use).
-          r = cur(a.techName).rating - cur(b.techName).rating;
-          break;
-        case "category":
-          r =
-            a.category.localeCompare(b.category) ||
-            (a.subcategory ?? "").localeCompare(b.subcategory ?? "") ||
-            name(a).localeCompare(name(b));
-          break;
-      }
-      return r * mul || name(a).localeCompare(name(b));
-    });
-    return arr;
-  });
+  const visible = $derived.by(() =>
+    timed("silo:library-sort", () => sortMods(filtered, sortBy, sortDir, (t) => cur(t).rating)),
+  );
 
   const visibleKeys = $derived(visible.map(modKey));
   /** The selected mods, in list order. */
@@ -2244,6 +2208,27 @@
   const pct = $derived(
     progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0,
   );
+
+  // A scan, from outside runScan: one screen-reader line when it starts and one when it ends (not
+  // every tick), and the §5.5 timing from its start to the Library painted with the result
+  // (DevTools → Performance → Timings, "silo:scan-to-render").
+  let scanSaid = $state("");
+  let scanTimed = false;
+  $effect(() => {
+    if (scanning) {
+      scanTimed = true;
+      markStart("silo:scan-to-render");
+      scanSaid = "Scanning your mods…";
+    } else if (scanTimed) {
+      scanTimed = false;
+      const n = untrack(() => mods.length);
+      scanSaid = `Scan finished: ${n.toLocaleString()} mod${n === 1 ? "" : "s"}.`;
+      // After the DOM update, then after the frame that paints it.
+      void tick().then(() =>
+        requestAnimationFrame(() => setTimeout(() => measureFrom("silo:scan-to-render"), 0)),
+      );
+    }
+  });
 
   /** Why switching folders isn't safe right now, or null. */
   function switchBlockReason(): Promise<string | null> {
@@ -3290,10 +3275,18 @@
   {/snippet}
 
   {#snippet notices()}
+    <p class="sr-only" role="status">{scanSaid}</p>
     {#if scanning}
-      <div class="progress">
+      <div
+        class="progress"
+        role="progressbar"
+        aria-label="Scanning mods"
+        aria-valuemin={0}
+        aria-valuemax={progress.total || undefined}
+        aria-valuenow={progress.total ? progress.done : undefined}
+      >
         <div class="bar" style="width: {pct}%"></div>
-        <span class="progress-text tnum">{progress.done} / {progress.total}</span>
+        <span class="progress-text tnum" aria-hidden="true">{progress.done} / {progress.total}</span>
       </div>
     {/if}
     {#if statusOp}

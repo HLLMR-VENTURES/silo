@@ -13,6 +13,11 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const TOKENS = join(here, "..", "src", "lib", "styles", "tokens.css");
 
+/** tokens.css as text. */
+export function readTokens() {
+  return readFileSync(TOKENS, "utf8");
+}
+
 // ── Parsing ─────────────────────────────────────────────────────────────────────────────────
 
 /** Strips comments so a commented-out token never counts. */
@@ -196,7 +201,7 @@ export function check(css) {
 // ── CLI ─────────────────────────────────────────────────────────────────────────────────────
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const { failures, rows } = check(readFileSync(TOKENS, "utf8"));
+  const { failures, rows } = check(readTokens());
   if (process.argv.includes("--report")) {
     for (const r of rows)
       console.log(
