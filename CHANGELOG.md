@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Keyboard navigation in the Library.** The mod list is one Tab stop: ↑/↓, Home, End and
+  PageUp/PageDown move between mods, Enter opens a mod's details, Space turns it on or off and
+  Shift+F10 (or the Menu key) opens its menu. In card view ←/→ move between cards. Closing the
+  details puts focus back on that mod's row. (#242)
+
 - **Open log folder.** Settings → Diagnostics opens the folder that holds Silo's log
   (`silo.log`), for when a bug report asks for it. (#238)
 
@@ -39,6 +44,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running. (#226)
 
 ### Changed
+
+- **The Library opens as a list.** List view is now the default for every library size; card
+  view is still in the toolbar, and Silo remembers which one you picked. Rows were rebuilt: icon,
+  name, then author, version, category and size; up to three badges (problems first, then status,
+  then info) and "+n" for the rest; an **Active** switch with the word Active or Parked beside it;
+  and an always-visible **⋯** that opens the same menu as right-click. Favorite, Hide, Flag,
+  Change category, Edit settings and Find in Browse moved into that menu. Parked mods show a grey
+  icon and "Parked" instead of fading the whole row, so their text stays readable. Cards follow
+  the same rules. (#242)
 
 - **Wider Library and Browse on large screens.** On a wide window the Library and Browse grow to
   1920px instead of 1280px: the Library shows three tiles across and Browse more cards per row,

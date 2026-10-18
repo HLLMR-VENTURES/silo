@@ -207,7 +207,7 @@ start below it).
 - [ ] `[app]` Savegame config editor · game.xml editor · Per-mod settings form · Organize preview · Category menu · Row context menu · Diagnostics "Export report".
 
 ## 16. Look, type & accessibility (design foundations, #224)
-- [ ] `[app]` **Focus ring.** Press Tab through the sidebar, the header and then a mod row (the active toggle button, name, row actions) → a visible outline is on every control as you reach it, in both the light and dark themes. Clicking a button with the mouse shows no outline (text fields show it, as they should).
+- [ ] `[app]` **Focus ring.** Press Tab through the sidebar, the header and then into the Library list (one Tab stop: the row itself, see §20) → a visible outline is on every control as you reach it, in both the light and dark themes. Clicking a button with the mouse shows no outline (text fields show it, as they should).
 - [ ] `[app]` **UI size.** Settings → General → Appearance → UI size: switch to 90%, 110% and 125% → text and icons scale together; nothing clips or overlaps (header, sidebar, mod rows, drawer, Settings). Back to 100% restores the original look, and the choice survives a restart.
 - [ ] `[app]` **Fonts.** Headings (the "Silo" title, panel titles) render in Fraunces and body text in Hanken Grotesk — not Georgia or Segoe UI. Works with the network off.
 - [ ] `[app]` **Icons.** Icons sit beside their words (sidebar, Settings, drawer actions); every icon-only button shows a tooltip on hover. No leftover symbol characters (⛓ ⟳ ⚑ ◆ and the like) where an icon should be.
@@ -292,6 +292,20 @@ Sidebar: Library · Browse · Mod sets · Diagnose · Updates, then Tools · Set
   - **Esc** closes the mod drawer (or Browse's drawer) and focus goes back to the list (not lost to the window); with a dialog, a **⋯** menu or a right-click menu open over a drawer, Esc closes only that and the drawer stays open.
   - **?** opens the Keyboard shortcuts dialog (Help → **Keyboard shortcuts** opens the same one); typing **?** in the search box stays text. With the dialog open, no other shortcut fires.
   - A screen reader announces the shortcut on the search box (Control+K /), the sidebar items (Alt+1…5, Settings Control+,) and Library **⋯** → Rescan (F5).
+
+## 20. Library list and cards (#242)  _(auto-verified: keyed virtual list/grid, roving focus and keys, row switch name / parked text / capped badges, badge order, view preference)_
+
+- [ ] `[app]` **List by default.** With no saved choice (fresh profile, or clear `silo.library.view` from localStorage) the Library opens as a list, for any library size. Switch to **Card view** in the toolbar, restart → it reopens on cards; switch back → list again.
+- [ ] `[app]` **Row content.** Each row: icon, title (a ★ after it when it's a favorite), then "author · version · category · size"; on the right at most three badges then "+n" (pointing at "+n" lists the rest), problems first (Modified, Can't load, Ignored name, Conflict, Flagged), then status (Verified build, Update, Folder mod, Hidden), then info (Map, Has settings, N scripts); the Active switch with the word **Active** or **Parked**; and an always-visible **⋯**. Below ~640 px of list width the badges give way to the title.
+- [ ] `[app]` **Parked rows.** A parked mod's icon is grey and the word "Parked" is muted, but its title and meta text are full strength (not faded) in both themes. Hidden mods (with **Hidden** on) show a Hidden badge instead of fading.
+- [ ] `[app]` **Switch.** Clicking the switch activates / parks the mod (the drawer doesn't open); while a library move or other foreground change runs it says why and nothing changes. A screen reader names it "Active: <mod name>, switch, on/off".
+- [ ] `[app]` **One Tab stop.** Tab from the toolbar lands on one row (the last one you were on, else the first on screen); the next Tab leaves the list. **↑/↓** move between rows, **Home/End** jump to the first/last mod (the list scrolls to keep it in view, with a little room), **PageUp/PageDown** move a screen. Scroll the focused row far away with the wheel and press ↓ → focus continues from it, never from the top of the window.
+- [ ] `[app]` **Row keys.** On a focused row: **Enter** opens the drawer; **Space** turns the mod on or off; **Shift+F10** or the Menu key opens the row's menu under the row; Esc closes it and focus is back on the row. Shift+↑/↓ and Ctrl+Space do nothing visible yet (selection comes next).
+- [ ] `[app]` **⋯ and right-click are the same menu.** Activate / Park, Open details, Find in Browse, Change category…, Edit settings… (mods with settings), Favorite / Remove favorite, Hide / Unhide, Flag / Remove flag. Each does what it says; Change category… opens the category menu next to the row.
+- [ ] `[app]` **Checkbox.** Hovering or focusing a row shows a checkbox at its left (nothing happens yet when you click it; selection comes next). The row's text doesn't move when it appears.
+- [ ] `[app]` **Drawer hands focus back.** Open a mod with Enter, scroll the list far away, press Esc (or ✕) → the list scrolls back to that mod's row and it has focus. With the mod filtered out meanwhile, focus goes to the page instead (never lost to the window).
+- [ ] `[app]` **Cards.** Card view shows the same switch, ⋯ menu, ≤3 badges and hover checkbox, a grey image for parked mods, and 1 column below 600 px, 2 at the regular width, more on a wide window. **←/→** move by one card, **↑/↓** by a row, Enter / Space / Shift+F10 as in the list.
+- [ ] `[app]` **Fast with a big library.** On the 700+ mod library, scrolling the list and holding ↓ stay smooth; icons fill in as rows appear.
 
 ## Sign-off
 - [ ] All `[app]` items pass.

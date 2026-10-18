@@ -30,7 +30,8 @@
     disabled: boolean;
     /** Shown as the switch's tooltip while it's off for a reason ("Silo is moving mods."). */
     disabledReason?: string;
-    libView: "tiles" | "rows";
+    /** List (the default) or cards. */
+    libView: "list" | "cards";
     /** The one "show only" facet in effect, or "". */
     statFilter?: StatFilter;
     statCounts: Record<Exclude<StatFilter, "">, number>;
@@ -89,23 +90,23 @@
   <div class="viewtog" role="group" aria-label="View">
     <button
       class="vt"
-      class:on={libView === "tiles"}
-      use:tooltip={"Tile view"}
-      aria-label="Tile view"
-      aria-pressed={libView === "tiles"}
-      onclick={() => (libView = "tiles")}
+      class:on={libView === "list"}
+      use:tooltip={"List view"}
+      aria-label="List view"
+      aria-pressed={libView === "list"}
+      onclick={() => (libView = "list")}
     >
-      <Icon name="grid" size={14} />
+      <Icon name="list" size={14} />
     </button>
     <button
       class="vt"
-      class:on={libView === "rows"}
-      use:tooltip={"List view"}
-      aria-label="List view"
-      aria-pressed={libView === "rows"}
-      onclick={() => (libView = "rows")}
+      class:on={libView === "cards"}
+      use:tooltip={"Card view"}
+      aria-label="Card view"
+      aria-pressed={libView === "cards"}
+      onclick={() => (libView = "cards")}
     >
-      <Icon name="list" size={14} />
+      <Icon name="grid" size={14} />
     </button>
   </div>
 </div>

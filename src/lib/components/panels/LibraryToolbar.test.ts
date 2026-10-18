@@ -12,7 +12,7 @@ const props = {
   allActive: false,
   activeInFilter: 0,
   disabled: false,
-  libView: "tiles" as const,
+  libView: "list" as const,
   statCounts: { maps: 2, scripts: 5, unique: 1, active: 7 },
   onSelectAll: () => {},
   onClearTag: () => {},

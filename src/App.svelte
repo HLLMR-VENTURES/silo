@@ -3,6 +3,7 @@
   import { get } from "svelte/store";
   import {
     DialogHost,
+    Menu,
     ToastRegion,
     ask,
     askText,
@@ -154,10 +155,18 @@
     "Scripts & Tools",
     "Other",
   ];
-  import VirtualList from "./lib/components/VirtualList.svelte";
-  import ModRow from "./lib/components/ModRow.svelte";
-  import ModTile from "./lib/components/ModTile.svelte";
-  import { chunk, tileColumns } from "./lib/views/tileGrid";
+  import VirtualList from "./lib/components/library/VirtualList.svelte";
+  import VirtualGrid from "./lib/components/library/VirtualGrid.svelte";
+  import ModListRow, { ROW_HEIGHTS, type Density } from "./lib/components/library/ModListRow.svelte";
+  import ModCard, { CARD_HEIGHT } from "./lib/components/library/ModCard.svelte";
+  import { rowBadges } from "./lib/components/library/rowBadges";
+  import type { MenuTarget, SelectIntent } from "./lib/components/library/roving";
+  import {
+    loadLibraryView,
+    saveLibraryView,
+    type LibraryViewMode,
+  } from "./lib/components/library/viewPref";
+  import { getVerdict } from "./lib/provenanceCache.svelte";
   import FilterBar from "./lib/components/FilterBar.svelte";
   import ModSettings from "./lib/components/ModSettings.svelte";
   import ModDetail from "./lib/components/ModDetail.svelte";
@@ -182,7 +191,6 @@
   import MaintenanceSettings from "./lib/components/settings/MaintenanceSettings.svelte";
   import AboutSettings from "./lib/components/settings/AboutSettings.svelte";
   import CategoryMenu from "./lib/components/panels/CategoryMenu.svelte";
-  import ContextMenu, { type ContextMenuItem } from "./lib/components/ContextMenu.svelte";
   import LibraryToolbar, { type StatFilter } from "./lib/components/panels/LibraryToolbar.svelte";
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
   import NoticeArea from "./lib/components/NoticeArea.svelte";
@@ -1350,8 +1358,20 @@
     editing = { techName, x: ev.clientX, y: ev.clientY };
   }
 
-  // ── Library row right-click menu ──
-  let rowMenu = $state<{ mod: ModEntry; ev: MouseEvent } | null>(null);
+  // ── Library row menu: the ⋯ button, right-click and Shift+F10 open the same items ──
+  let rowMenu = $state<{ mod: ModEntry; at: MenuTarget } | null>(null);
+  let rowMenuOpen = $state(false);
+  // Kept outside the reactive state: Menu calls onclose (which clears rowMenu) before onselect.
+  let rowMenuRun: ((id: string) => void) | null = null;
+  function openRowMenu(mod: ModEntry, at: MenuTarget) {
+    rowMenuRun = rowMenuFor(mod, at).run;
+    rowMenu = { mod, at };
+    rowMenuOpen = true;
+  }
+  // Forget the menu once it has closed, after its close handling (focus return reads the anchor).
+  $effect(() => {
+    if (!rowMenuOpen) untrack(() => (rowMenu = null));
+  });
   // Seeds ModBrowser's catalog search when "Find in Browse" is used. ModBrowser remounts
   // on every view switch, so setting this before switching views seeds the fresh mount.
   let browseSeed = $state<string | null>(null);
@@ -1373,50 +1393,55 @@
     detailMod = mod; // open this mod's drawer
   }
 
-  function rowMenuItems(mod: ModEntry, ev: MouseEvent): ContextMenuItem[] {
+  /**
+   * The row menu for one mod: its items, and what each id does.
+   * @param mod the row's mod
+   * @param at where the menu opened (the category menu opens there too)
+   */
+  function rowMenuFor(mod: ModEntry, at: MenuTarget): { items: MenuItem[]; run: (id: string) => void } {
     const c = cur(mod.techName);
     const isActive = activeSet.has(mod.techName);
-    const items: ContextMenuItem[] = [
-      {
-        label: isActive ? "Park (deactivate)" : "Activate",
-        icon: isActive ? "circle" : "dot",
-        onClick: () => toggleActive(mod.techName),
-      },
-      { label: "Open details", icon: "info", onClick: () => (detailMod = mod) },
-      { label: "Find in Browse", icon: "search", onClick: () => openInBrowse(mod) },
-      { separator: true },
-      { label: "Change category…", icon: "tag", onClick: () => openEditor(mod.techName, ev) },
+    const hasSettings = settingsModsSet.has(mod.techName);
+    const items: MenuItem[] = [
+      { id: "active", label: isActive ? "Park (deactivate)" : "Activate", icon: isActive ? "circle" : "dot" },
+      { id: "details", label: "Open details", icon: "info" },
+      { id: "browse", label: "Find in Browse", icon: "search" },
+      { id: "category", label: "Change category…", icon: "tag", separatorBefore: true },
     ];
-    if (settingsModsSet.has(mod.techName)) {
-      items.push({
-        label: "Edit settings…",
-        icon: "modSettings",
-        onClick: () =>
-          (settingsMod = { techName: mod.techName, title: mod.title ?? mod.techName }),
-      });
-    }
+    if (hasSettings) items.push({ id: "settings", label: "Edit settings…", icon: "modSettings" });
     items.push(
-      { separator: true },
-      {
-        label: c.favorite ? "Remove favorite" : "Favorite",
-        icon: "favorite",
-        iconFilled: c.favorite,
-        onClick: () => toggleCuration(mod.techName, "favorite"),
-      },
-      {
-        label: c.hidden ? "Unhide" : "Hide",
-        icon: "hidden",
-        onClick: () => toggleCuration(mod.techName, "hidden"),
-      },
-      {
-        label: c.broken ? "Remove flag" : "Flag",
-        icon: "flagged",
-        danger: !c.broken,
-        onClick: () => toggleCuration(mod.techName, "broken"),
-      },
+      { id: "favorite", label: c.favorite ? "Remove favorite" : "Favorite", icon: "favorite", separatorBefore: true },
+      { id: "hidden", label: c.hidden ? "Unhide" : "Hide", icon: c.hidden ? "visible" : "hidden" },
+      { id: "broken", label: c.broken ? "Remove flag" : "Flag", icon: "flagged", danger: !c.broken },
     );
-    return items;
+    const run = (id: string) => {
+      switch (id) {
+        case "active":
+          return void toggleActive(mod.techName);
+        case "details":
+          detailMod = mod;
+          return;
+        case "browse":
+          return openInBrowse(mod);
+        case "category": {
+          const r = at.anchor?.getBoundingClientRect();
+          const x = at.point?.x ?? r?.left ?? 0;
+          const y = at.point?.y ?? r?.bottom ?? 0;
+          editing = { techName: mod.techName, x, y };
+          return;
+        }
+        case "settings":
+          settingsMod = { techName: mod.techName, title: mod.title ?? mod.techName };
+          return;
+        case "favorite":
+        case "hidden":
+        case "broken":
+          return void toggleCuration(mod.techName, id);
+      }
+    };
+    return { items, run };
   }
+  const rowMenuSpec = $derived(rowMenu ? rowMenuFor(rowMenu.mod, rowMenu.at) : null);
 
   async function setCategory(
     techName: string,
@@ -1746,9 +1771,28 @@
   type SortKey = "name" | "category" | "size" | "added" | "version" | "rating";
   let sortBy = $state<SortKey>("added");
   let sortDir = $state<"asc" | "desc">("desc");
-  // Library view: landscape tiles (default) or compact rows.
-  let libView = $state<"tiles" | "rows">("tiles");
-  const TILE_ROW_H = 216;
+  // Library view: the list (default, for every library size) or cards; remembered per machine.
+  let libView = $state<LibraryViewMode>(loadLibraryView());
+  $effect(() => saveLibraryView(libView));
+  // Row density: comfortable (56px) by default; compact (44px) awaits a Settings toggle.
+  const libDensity: Density = "comfortable";
+  // The rendered list or grid, so the drawer can hand focus back to the row it was opened from.
+  let libList = $state<{ focusKey: (key: string) => boolean }>();
+  const modKey = (m: ModEntry) => m.path;
+  // Selection lands in Task 2 of #242; the rows and keys already report the gestures.
+  function selectMod(_key: string, _intent: SelectIntent) {}
+  // A row's badges: problems, then status, then info (the row caps them at three).
+  function badgesFor(mod: ModEntry) {
+    const c = cur(mod.techName);
+    return rowBadges(mod, {
+      verdict: getVerdict(mod)?.status,
+      hasUpdate: updatesSet.has(mod.techName),
+      hasSettings: settingsModsSet.has(mod.techName),
+      conflicted: conflictedSet.has(mod.techName),
+      flagged: c.broken,
+      hidden: c.hidden,
+    });
+  }
 
   const visible = $derived.by(() => {
     const arr = [...filtered];
@@ -1784,11 +1828,6 @@
     });
     return arr;
   });
-  // The landscape grid: as many tiles per virtualized row as fit the list's width (two at the
-  // regular content width, more on a wide window, one when narrow).
-  let listWidth = $state(0);
-  const tileCols = $derived(tileColumns(listWidth));
-  const visibleTileRows = $derived(chunk(visible, tileCols));
 
   // Select-all checkbox state over the filtered view.
   const filteredActiveCount = $derived(
@@ -2435,7 +2474,7 @@
     let closeUnlisten: (() => void) | undefined;
     // Suppress the WebView's built-in right-click menu (reload/inspect junk) app-wide,
     // but keep the native cut/copy/paste menu inside editable fields. Our own row menu
-    // (ModRow → ContextMenu) still opens; it sets its own handler on the row.
+    // (ModListRow / ModCard → Menu) still opens; it sets its own handler on the row.
     const onCtx = (e: MouseEvent) => {
       const t = e.target as HTMLElement | null;
       if (t && (t.isContentEditable || t.closest("input, textarea, select"))) return;
@@ -2826,23 +2865,30 @@
     ),
   );
 
-  // The mod drawer hands focus back when it closes (✕, Esc, Open in Browse…): to what had it in
-  // the list when the drawer opened, else to the main area, so focus never drops to <body>. Left
-  // alone when focus is still somewhere real (a rail click that left the Library).
+  // The mod drawer hands focus back when it closes (✕, Esc, Open in Browse…): to the row of the
+  // mod it showed (by key, scrolled into view), else to what had focus in the main area when it
+  // opened, else to the main area, so focus never drops to <body>. Left alone when focus is still
+  // somewhere real (a rail click that left the Library).
   let drawerWasOpen = false;
   let drawerOpener: HTMLElement | null = null;
+  let drawerModKey: string | null = null;
   $effect(() => {
     const open = !!detailMod && nav.view === "library";
+    const key = detailMod ? modKey(detailMod) : null;
     untrack(() => {
+      if (open) drawerModKey = key; // follows the shown mod (Find in Library can swap it)
       if (open && !drawerWasOpen) {
         const a = document.activeElement;
         drawerOpener = a instanceof HTMLElement && regionOf(a) === "main" ? a : null;
       } else if (!open && drawerWasOpen) {
         const opener = drawerOpener;
+        const back = drawerModKey;
         drawerOpener = null;
+        drawerModKey = null;
         void tick().then(() => {
           const a = document.activeElement;
           if (a && a !== document.body && a.isConnected) return;
+          if (back && libList?.focusKey(back)) return;
           (opener?.isConnected ? opener : document.getElementById("main"))?.focus();
         });
       }
@@ -3048,64 +3094,70 @@
           />
         {/snippet}
         {#snippet list()}
-          <div class="list-body" bind:clientWidth={listWidth}>
+          <div class="list-body">
             {#if filtered.length === 0 && !scanning}
               <div class="empty">
                 {mods.length === 0
                   ? "No mods found yet. Point Silo at your mods folder and rescan."
                   : "No mods match your filter."}
               </div>
-            {:else if libView === "tiles"}
-              <VirtualList items={visibleTileRows} rowHeight={TILE_ROW_H} bottomPad={16}>
-                {#snippet row(tileRow)}
-                  <div class="tile-row" style:--tile-cols={tileCols}>
-                    {#each tileRow as mod (mod.techName)}
-                      <ModTile
-                        {mod}
-                        curation={cur(mod.techName)}
-                        overridden={!!overrideMap[mod.techName]}
-                        organized={mod.organized}
-                        active={activeSet.has(mod.techName)}
-                        hasSettings={settingsModsSet.has(mod.techName)}
-                        hasUpdate={updatesSet.has(mod.techName)}
-                        tags={tagsOf(mod.techName)}
-                        onToggle={(flag) => toggleCuration(mod.techName, flag)}
-                        onToggleActive={() => toggleActive(mod.techName)}
-                        onEditCategory={(ev) => openEditor(mod.techName, ev)}
-                        onOpenSettings={() =>
-                          (settingsMod = { techName: mod.techName, title: mod.title ?? mod.techName })}
-                        onOpenDetail={() => (detailMod = mod)}
-                        onFindInBrowse={() => openInBrowse(mod)}
-                        onContextMenu={(ev) => {
-                          ev.preventDefault();
-                          rowMenu = { mod, ev };
-                        }}
-                      />
-                    {/each}
-                  </div>
-                {/snippet}
-              </VirtualList>
-            {:else}
-              <VirtualList items={visible} rowHeight={76} bottomPad={16}>
-                {#snippet row(mod)}
-                  <ModRow
+            {:else if libView === "cards"}
+              <VirtualGrid
+                bind:this={libList}
+                items={visible}
+                getKey={modKey}
+                itemHeight={CARD_HEIGHT}
+                bottomPad={16}
+                label="Mods"
+                onopen={(mod) => (detailMod = mod)}
+                ontoggle={(mod) => toggleActive(mod.techName)}
+                onselect={(mod, intent) => selectMod(modKey(mod), intent)}
+                onmenu={(mod, anchor) => openRowMenu(mod, { anchor })}
+              >
+                {#snippet item(mod)}
+                  {@const c = cur(mod.techName)}
+                  <ModCard
                     {mod}
-                    curation={cur(mod.techName)}
-                    overridden={!!overrideMap[mod.techName]}
-                    organized={mod.organized}
                     active={activeSet.has(mod.techName)}
-                    hasSettings={settingsModsSet.has(mod.techName)}
-                    tags={tagsOf(mod.techName)}
-                    onToggle={(flag) => toggleCuration(mod.techName, flag)}
-                    onToggleActive={() => toggleActive(mod.techName)}
-                    onEditCategory={(ev) => openEditor(mod.techName, ev)}
-                    onOpenSettings={() =>
-                      (settingsMod = { techName: mod.techName, title: mod.title ?? mod.techName })}
-                    onOpenDetail={() => (detailMod = mod)}
-                    onContextMenu={(ev) => {
-                      ev.preventDefault();
-                      rowMenu = { mod, ev };
-                    }}
+                    badges={badgesFor(mod)}
+                    favorite={c.favorite}
+                    flagged={c.broken}
+                    rating={c.rating}
+                    menuOpen={rowMenuOpen && rowMenu?.mod.path === mod.path}
+                    onToggle={() => toggleActive(mod.techName)}
+                    onOpen={() => (detailMod = mod)}
+                    onMenu={(at) => openRowMenu(mod, at)}
+                    onSelect={selectMod}
+                  />
+                {/snippet}
+              </VirtualGrid>
+            {:else}
+              <VirtualList
+                bind:this={libList}
+                items={visible}
+                getKey={modKey}
+                rowHeight={ROW_HEIGHTS[libDensity]}
+                bottomPad={16}
+                label="Mods"
+                onopen={(mod) => (detailMod = mod)}
+                ontoggle={(mod) => toggleActive(mod.techName)}
+                onselect={(mod, intent) => selectMod(modKey(mod), intent)}
+                onmenu={(mod, anchor) => openRowMenu(mod, { anchor })}
+              >
+                {#snippet row(mod)}
+                  {@const c = cur(mod.techName)}
+                  <ModListRow
+                    {mod}
+                    active={activeSet.has(mod.techName)}
+                    badges={badgesFor(mod)}
+                    density={libDensity}
+                    favorite={c.favorite}
+                    flagged={c.broken}
+                    menuOpen={rowMenuOpen && rowMenu?.mod.path === mod.path}
+                    onToggle={() => toggleActive(mod.techName)}
+                    onOpen={() => (detailMod = mod)}
+                    onMenu={(at) => openRowMenu(mod, at)}
+                    onSelect={selectMod}
                   />
                 {/snippet}
               </VirtualList>
@@ -3410,12 +3462,15 @@
     />
   {/if}
 
-  {#if rowMenu}
-    <ContextMenu
-      x={rowMenu.ev.clientX}
-      y={rowMenu.ev.clientY}
-      items={rowMenuItems(rowMenu.mod, rowMenu.ev)}
-      onClose={() => (rowMenu = null)}
+  {#if rowMenu && rowMenuSpec}
+    <Menu
+      bind:open={rowMenuOpen}
+      anchor={rowMenu?.at.anchor ?? null}
+      point={rowMenu?.at.point ?? null}
+      placement="bottom-end"
+      items={rowMenuSpec?.items ?? []}
+      label="Actions for {rowMenu?.mod.title ?? rowMenu?.mod.techName}"
+      onselect={(id) => rowMenuRun?.(id)}
     />
   {/if}
 
@@ -3517,13 +3572,6 @@
   .lib-clear:hover {
     color: var(--primary-text);
     text-decoration: underline;
-  }
-  .tile-row {
-    display: grid;
-    grid-template-columns: repeat(var(--tile-cols, 2), minmax(0, 1fr));
-    gap: 16px; /* TILE_GAP in tileGrid.ts */
-    height: 100%;
-    padding-bottom: 16px;
   }
   .list-body {
     height: 100%;
