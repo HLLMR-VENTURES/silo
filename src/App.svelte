@@ -1650,7 +1650,12 @@
 
   /** A failure as Updates shows it in a row: logged, worded, and the "Copy details" text. */
   function explainUpdateError(e: unknown, op: string): ExplainedError {
-    return { message: inlineError(e, op), detail: formatDetail(describeError(e, op).detail) };
+    const d = describeError(e, op);
+    return {
+      message: inlineError(e, op),
+      detail: formatDetail(d.detail),
+      offline: d.code === "NET_OFFLINE" || d.code === "NET_TIMEOUT",
+    };
   }
 
   const updateCheckDeps = {
@@ -1673,7 +1678,8 @@
       updateResults = res.rows;
       updateRowStates = {};
       updateCatalogError = res.catalogError;
-      updateCheckedAt = Date.now();
+      // A failed catalog request isn't a check: keep the last good time (or "Not checked yet").
+      if (!res.catalogError) updateCheckedAt = Date.now();
     } finally {
       updateChecking = false;
       updateProgress = null;
