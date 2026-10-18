@@ -175,9 +175,7 @@
   import SettingsPanel from "./lib/components/panels/SettingsPanel.svelte";
   import CategoryMenu from "./lib/components/panels/CategoryMenu.svelte";
   import ContextMenu, { type ContextMenuItem } from "./lib/components/ContextMenu.svelte";
-  import Topbar from "./lib/components/panels/Topbar.svelte";
-  import StatBar from "./lib/components/panels/StatBar.svelte";
-  import LibraryToolbar from "./lib/components/panels/LibraryToolbar.svelte";
+  import LibraryToolbar, { type StatFilter } from "./lib/components/panels/LibraryToolbar.svelte";
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
   import NoticeArea from "./lib/components/NoticeArea.svelte";
   import ViewBoundary from "./lib/components/ViewBoundary.svelte";
@@ -193,6 +191,8 @@
   import DiagnoseView from "./lib/views/DiagnoseView.svelte";
   import UpdatesView from "./lib/views/UpdatesView.svelte";
   import ToolsView from "./lib/views/ToolsView.svelte";
+  import SettingsView from "./lib/views/SettingsView.svelte";
+  import HelpView from "./lib/views/HelpView.svelte";
   import Button from "./lib/ui/Button.svelte";
   import {
     activeSetLine,
@@ -261,9 +261,9 @@
   let conflictedOnly = $state(false);
   let hasSettingsOnly = $state(false);
   let needsUpdateOnly = $state(false);
-  // A single categorical facet from the stat bar (maps/scripts/uniqueType/active) —
-  // click a count to scope the list to it; click again (or another) to switch/clear.
-  let statFilter = $state<"" | "maps" | "scripts" | "unique" | "active">("");
+  // A single categorical facet (maps/scripts/uniqueType/active), from LibraryToolbar's "show only"
+  // counts (they were the stat bar's) — click one to scope the list to it; again to clear.
+  let statFilter = $state<StatFilter>("");
   let editing = $state<{ techName: string; x: number; y: number } | null>(null);
   let activeSet = $state<Set<string>>(new Set());
   // Library writes hold the "library-write" op class, one at a time: a second is refused with the
@@ -387,7 +387,6 @@
   let savegames = $state<Savegame[]>([]);
   let conflicts = $state<Conflict[]>([]);
   let conflictTimer: ReturnType<typeof setTimeout> | undefined;
-  let settingsOpen = $state(false);
   // Set when a silo://collection?url=… deep link arrives — opens Mod sets → Share (Collections),
   // pre-filled. Leaving that tab forgets it, as closing the Collections panel did.
   let collImportUrl = $state<string | null>(null);
@@ -419,8 +418,6 @@
   // True while a guided bisection is running (snapshot saved, test halves applied). The
   // focus rescan holds off meanwhile so returning from FS25 can't rewrite the active set.
   let bisecting = $state(false);
-  // Measured by the Topbar (still bound until it is removed).
-  let topbarH = $state(0);
   // The current view is nav.view (lib/state/nav). The mod drawer belongs to the Library: leaving
   // it closes the drawer, as switching to Browse did. The Browse drawer lives inside ModBrowser,
   // which unmounts on switch, so it closes itself.
@@ -498,7 +495,6 @@
 
   function openGameGraphics() {
     if (!userDir) return;
-    settingsOpen = false;
     configEditor = {
       title: "Graphics settings — game.xml",
       path: `${userDir}/game.xml`,
@@ -1821,7 +1817,6 @@
   async function optimizeLinks() {
     const op = beginWrite("Optimizing links", true);
     if (!op) return;
-    settingsOpen = false;
     let unlisten: (() => void) | null = null;
     let done = "";
     /** `done` explains why nothing changed (an info toast), not a result (a success toast). */
@@ -2077,7 +2072,7 @@
 
   // The startup read gave up: try once more whenever Settings opens.
   $effect(() => {
-    if (settingsOpen && archiveMove.loadFailed) void archiveMove.refresh();
+    if (nav.view === "settings" && archiveMove.loadFailed) void archiveMove.refresh();
   });
 
   /** Point Silo at another archive folder (`path`, or null = the default) without moving
@@ -2127,7 +2122,6 @@
       } finally {
         op.end();
       }
-      settingsOpen = false;
       await archiveMove.refresh();
       modsStatus = await modsRootStatus().catch(() => modsStatus);
       await runScan();
@@ -2195,7 +2189,6 @@
         }))
       )
         return;
-      settingsOpen = false;
       archiveMove.startTracking();
       await archiveMove.drive(() => archiveMoveStart(path));
     } catch (e) {
@@ -2225,7 +2218,6 @@
       }))
     )
       return;
-    settingsOpen = false;
     archiveMove.startTracking();
     await archiveMove.drive(() => archiveUseDefault());
   }
@@ -2595,6 +2587,34 @@
 
   // ── App shell: header search, status chip, Play, the Library strip and menu (#230) ──
 
+  // A Silo update that's ready: a notice (it was a top-bar button) driven by the same state, with
+  // the same action in Settings → About. Dismissed, it stays down until the next launch.
+  let updateNoticeDismissed = $state(false);
+  $effect(() => {
+    syncNotice(
+      "self-update",
+      update && !updateNoticeDismissed
+        ? {
+            level: "info",
+            icon: "update",
+            title: `Silo ${update.version} is ready`,
+            body: updating ? (updatePct != null ? `Updating… ${updatePct}%` : "Updating…") : undefined,
+            actions: [
+              {
+                label: "Restart to update",
+                run: applyUpdate,
+                primary: true,
+                disabled: updating,
+                title: updating ? "Silo is updating." : `Download and install Silo ${update.version}, then restart`,
+              },
+            ],
+            dismissible: true,
+            onDismiss: () => (updateNoticeDismissed = true),
+          }
+        : null,
+    );
+  });
+
   /** Browse's catalog search text (the header search while Browse is open). */
   let browseQuery = $state("");
   /** The header search shows the current view's search: the catalog on Browse, else the library's. */
@@ -2800,44 +2820,6 @@
   {/snippet}
 
   {#snippet notices()}
-    <Topbar
-      bind:topbarH
-      view={nav.view === "browse" ? "browse" : "library"}
-      {appVer}
-      {update}
-      {updating}
-      {updatePct}
-      onApplyUpdate={applyUpdate}
-      hasSavegames={savegames.length > 0}
-      savesOpen={nav.view === "modSets" && nav.tab.modSets === "savegames"}
-      loadoutsOpen={nav.view === "modSets" && (nav.tab.modSets ?? "sets") === "sets"}
-      activeLoadoutName={activeLoadoutId !== null
-        ? loadouts.find((l) => l.id === activeLoadoutId)?.name ?? null
-        : null}
-      mpOpen={nav.view === "modSets" && nav.tab.modSets === "multiplayer"}
-      collectionsOpen={nav.view === "modSets" && nav.tab.modSets === "share"}
-      showOrganize={unorganizedCount > 0 && !autoFileNew}
-      {unorganizedCount}
-      hasMods={mods.length > 0}
-      {updateChecking}
-      {scanning}
-      lockReason={fgLock.reason}
-      launchBlocked={archiveMove.running}
-      organizeBlocked={archiveMove.unfinished}
-      hasGame={!!gameInfo}
-      activeCount={activeSet.size}
-      {settingsOpen}
-      onSwitchView={(v) => go(v)}
-      onToggleSaves={() => go("modSets", "savegames")}
-      onToggleLoadouts={() => go("modSets", "sets")}
-      onToggleMp={() => go("modSets", "multiplayer")}
-      onToggleCollections={() => go("modSets", "share")}
-      onOrganize={organizeNew}
-      onCheckUpdates={checkAllUpdates}
-      onRescan={() => runScan()}
-      onLaunch={launch}
-      onToggleSettings={() => (settingsOpen = !settingsOpen)}
-    />
     {#if scanning}
       <div class="progress">
         <div class="bar" style="width: {pct}%"></div>
@@ -2929,6 +2911,13 @@
             disabled={writeLock.blocked || filtered.length === 0}
             disabledReason={writeLock.reason}
             bind:libView
+            bind:statFilter
+            statCounts={{
+              maps: stats.maps,
+              scripts: stats.scripts,
+              unique: stats.unique,
+              active: activeSet.size,
+            }}
             onSelectAll={setActiveForFiltered}
             onClearTag={() => (selectedTag = null)}
           />
@@ -2942,7 +2931,7 @@
                   : "No mods match your filter."}
               </div>
             {:else if libView === "tiles"}
-              <VirtualList items={visiblePairs} rowHeight={TILE_ROW_H} bottomPad={62}>
+              <VirtualList items={visiblePairs} rowHeight={TILE_ROW_H} bottomPad={16}>
                 {#snippet row(pair)}
                   <div class="tile-pair">
                     {#each pair as mod (mod.techName)}
@@ -2972,7 +2961,7 @@
                 {/snippet}
               </VirtualList>
             {:else}
-              <VirtualList items={visible} rowHeight={76} bottomPad={62}>
+              <VirtualList items={visible} rowHeight={76} bottomPad={16}>
                 {#snippet row(mod)}
                   <ModRow
                     {mod}
@@ -2998,27 +2987,6 @@
             {/if}
           </div>
 
-          <!-- Stats + tools as a content-width footer that floats over the scrolling list. -->
-          <div class="statbar-footer">
-            <StatBar
-              modCount={mods.length}
-              mapsCount={stats.maps}
-              scriptsCount={stats.scripts}
-              uniqueCount={stats.unique}
-              activeCount={activeSet.size}
-              conflictCount={conflicts.length}
-              {criticalCount}
-              {healthCount}
-              tookMs={result ? result.tookMs : null}
-              bind:statFilter
-              onOpenStats={() => go("tools", "stats")}
-              onOpenConflicts={() => go("diagnose", "conflicts")}
-              onOpenHealth={() => go("diagnose", "problems")}
-              onOpenLog={() => go("diagnose", "lastRun")}
-              onOpenBindings={() => go("tools", "controls")}
-              onOpenBridge={() => go("tools", "bridge")}
-            />
-          </div>
         {/snippet}
       </LibraryView>
     {/snippet}
@@ -3027,7 +2995,7 @@
         <ModBrowser
           installed={libraryTechNames}
           onInstalled={() => runScan(true)}
-          onNeedAuth={() => (settingsOpen = true)}
+          onNeedAuth={() => go("settings")}
           onFindInLibrary={openInLibrary}
           seed={browseSeed}
           seedTech={browseSeedTech}
@@ -3173,53 +3141,56 @@
         {/snippet}
       </ToolsView>
     {/snippet}
+    {#snippet settings()}
+      <SettingsView>
+        <SettingsPanel
+          {theme}
+          {uiScale}
+          {roots}
+          {gameInfo}
+          {userDir}
+          {appVer}
+          {autoFileNew}
+          {organizedCount}
+          {unorganizedCount}
+          {cloudSynced}
+          lockReason={fgLock.reason}
+          {scanning}
+          onSetTheme={setTheme}
+          onSetUiScale={setUiScale}
+          onOpenGameGraphics={() => go("tools", "graphics")}
+          onExportReport={exportReport}
+          onCopyDiagnostics={copyDiagnostics}
+          onSetAutoFile={setAutoFile}
+          onOrganize={organizeNew}
+          onRebuild={rebuildLibrary}
+          onRestoreVanilla={restoreVanilla}
+          onOptimizeLinks={optimizeLinks}
+          {modsStatus}
+          onChangeModsFolder={changeModsFolder}
+          onUseGameFolder={useGameFolder}
+          onSwitchModsFolder={switchModsFolder}
+          archive={archiveMove.archive}
+          moveUnfinished={archiveMove.unfinished}
+          archiveLoadFailed={archiveMove.loadFailed}
+          onChangeArchive={changeArchive}
+          onArchiveDefault={archiveDefault}
+          scanMs={result ? result.tookMs : null}
+          {update}
+          {updating}
+          {updatePct}
+          onApplyUpdate={applyUpdate}
+        />
+      </SettingsView>
+    {/snippet}
+    {#snippet help()}
+      <HelpView
+        onopen={(url) => openExternal(url).catch((e) => reportError(e, "Opening the link"))}
+        oncopydiagnostics={copyDiagnostics}
+      />
+    {/snippet}
   </ViewOutlet>
 </AppShell>
-
-  {#if settingsOpen}
-    <ViewBoundary name="Settings" overlay onClose={() => (settingsOpen = false)}>
-      <SettingsPanel
-        {theme}
-        {uiScale}
-        {roots}
-        {gameInfo}
-        {userDir}
-        {appVer}
-        {autoFileNew}
-        {organizedCount}
-        {unorganizedCount}
-        {cloudSynced}
-        lockReason={fgLock.reason}
-        {scanning}
-        onSetTheme={setTheme}
-        onSetUiScale={setUiScale}
-        onOpenGameGraphics={openGameGraphics}
-        onExportReport={exportReport}
-        onCopyDiagnostics={copyDiagnostics}
-        onSetAutoFile={setAutoFile}
-        onOrganize={() => {
-          settingsOpen = false;
-          organizeNew();
-        }}
-        onRebuild={rebuildLibrary}
-        onRestoreVanilla={() => {
-          settingsOpen = false;
-          restoreVanilla();
-        }}
-        onOptimizeLinks={optimizeLinks}
-        onClose={() => (settingsOpen = false)}
-        {modsStatus}
-        onChangeModsFolder={changeModsFolder}
-        onUseGameFolder={useGameFolder}
-        onSwitchModsFolder={switchModsFolder}
-        archive={archiveMove.archive}
-        moveUnfinished={archiveMove.unfinished}
-        archiveLoadFailed={archiveMove.loadFailed}
-        onChangeArchive={changeArchive}
-        onArchiveDefault={archiveDefault}
-      />
-    </ViewBoundary>
-  {/if}
 
   {#if settingsMod}
     <ViewBoundary name="Mod settings" overlay onClose={() => (settingsMod = null)}>
@@ -3325,7 +3296,7 @@
   .tool-note .muted {
     color: var(--muted);
   }
-  /* ── Library view (LibraryView lays out the column; a floating footer stat bar over the list) ── */
+  /* ── Library view (LibraryView lays out the column) ── */
   .lib-toggles {
     display: flex;
     flex-wrap: wrap;
@@ -3386,16 +3357,6 @@
     .tile-pair {
       grid-template-columns: 1fr;
     }
-  }
-  .statbar-footer {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 5;
-    border-radius: var(--radius) var(--radius) 0 0;
-    overflow: hidden;
-    box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.14);
   }
   .list-body {
     height: 100%;

@@ -1,6 +1,13 @@
+<script lang="ts" module>
+  /** A "show only" facet: maps, script mods, uniqueType, the active set; "" for none. */
+  export type StatFilter = "" | "maps" | "scripts" | "unique" | "active";
+</script>
+
 <script lang="ts">
-  // Slim toolbar above the list: the "activate everything in view" master switch, the active
-  // tag chip, and the shown count. Category + sort now live in the shared FilterBar.
+  // Slim toolbar above the list: the "activate everything in view" master switch, the "show only"
+  // facets (maps, script mods, uniqueType, active: one at a time, click again to clear; they were
+  // the stat bar's counts), the active tag chip, and the shown count. Category + sort live in
+  // the shared FilterBar.
   import Icon from "../../ui/Icon.svelte";
   let {
     selectedTag,
@@ -10,6 +17,8 @@
     disabled,
     disabledReason = "",
     libView = $bindable(),
+    statFilter = $bindable(""),
+    statCounts,
     onSelectAll,
     onClearTag,
   }: {
@@ -21,9 +30,19 @@
     /** Shown as the switch's tooltip while it's off for a reason ("Silo is moving mods."). */
     disabledReason?: string;
     libView: "tiles" | "rows";
+    /** The one "show only" facet in effect, or "". */
+    statFilter?: StatFilter;
+    statCounts: Record<Exclude<StatFilter, "">, number>;
     onSelectAll: (checked: boolean) => void;
     onClearTag: () => void;
   } = $props();
+
+  const FACETS: { id: Exclude<StatFilter, "">; label: string; title: string }[] = [
+    { id: "maps", label: "maps", title: "Filter to maps only" },
+    { id: "scripts", label: "script mods", title: "Filter to script mods only" },
+    { id: "unique", label: "uniqueType", title: "Filter to mods that declare a uniqueType" },
+    { id: "active", label: "active", title: "Filter to the active set only" },
+  ];
 
   let selectAllEl = $state<HTMLInputElement>();
   $effect(() => {
@@ -45,6 +64,20 @@
     />
     Active
   </label>
+  <div class="facets" role="group" aria-label="Show only">
+    {#each FACETS as f (f.id)}
+      <button
+        class="facet"
+        class:on={statFilter === f.id}
+        aria-pressed={statFilter === f.id}
+        title={f.title}
+        onclick={() => (statFilter = statFilter === f.id ? "" : f.id)}
+      >
+        <span class="tnum">{statCounts[f.id]}</span>
+        {f.label}
+      </button>
+    {/each}
+  </div>
   {#if selectedTag}
     <button class="crumb-tag" onclick={onClearTag} title="Clear tag filter">
       #{selectedTag} <Icon name="close" size={12} />
@@ -114,6 +147,30 @@
     margin: 0;
     accent-color: var(--primary);
     cursor: pointer;
+  }
+  .facets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .facet {
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-muted);
+    padding: 3px 8px;
+    border-radius: 999px;
+    font: inherit;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .facet:hover {
+    color: var(--text);
+  }
+  .facet.on {
+    background: color-mix(in srgb, var(--primary) 14%, transparent);
+    border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
+    color: var(--primary-text);
   }
   .tb-spacer {
     flex: 1 1 auto;
