@@ -55,6 +55,13 @@ describe("BulkBar", () => {
     render(BulkBar, { count: 12, shownCount: 140, ...h, ...extra });
     return { user: userEvent.setup(), ...h };
   }
+  it("clears the selection on Esc", async () => {
+    const { user, onclear } = setup();
+    screen.getByRole("button", { name: /turn on/i }).focus();
+    await user.keyboard("{Escape}");
+    expect(onclear).toHaveBeenCalledTimes(1);
+  });
+
 
   it("shows the count and runs each action", async () => {
     const { user, ...h } = setup();

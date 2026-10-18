@@ -12,6 +12,7 @@
   // switch and the ⋯ menu. Everything else (favorite, hide, flag, category, settings, Find in
   // Browse) lives in the ⋯ / right-click menu. Parked rows desaturate the icon and say "Parked";
   // their text stays full strength. Inner controls are tabindex -1: the row is the tab stop.
+  import { tick } from "svelte";
   import Checkbox from "../../ui/Checkbox.svelte";
   import Icon from "../../ui/Icon.svelte";
   import IconButton from "../../ui/IconButton.svelte";
@@ -102,9 +103,13 @@
   }
 
   function onCheck(e: MouseEvent) {
-    // The parent owns `selected`: the click only asks.
-    e.preventDefault();
+    // The parent owns `selected`: the click only asks. Don't preventDefault: the browser would undo
+    // the tick after Svelte had already applied the parent's answer. Re-sync once it has settled.
+    const box = e.currentTarget as HTMLInputElement;
     onSelect?.(mod.path, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey });
+    void tick().then(() => {
+      box.checked = selected;
+    });
   }
 </script>
 

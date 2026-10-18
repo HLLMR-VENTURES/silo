@@ -218,6 +218,18 @@ const rowProps = (over: Record<string, unknown> = {}) => ({
 });
 
 describe("ModListRow", () => {
+  it("shows the checkbox ticked once the parent selects the row", async () => {
+    let rerender: (p: Record<string, unknown>) => Promise<void>;
+    const onSelect = vi.fn(() => void rerender({ selected: true, selectionMode: true }));
+    const r = render(ModListRow, rowProps({ selected: false, onSelect }));
+    rerender = (p) => r.rerender(p);
+    const box = screen.getByRole("checkbox", { name: "Select Courseplay" }) as HTMLInputElement;
+    await userEvent.setup().click(box);
+    await new Promise((res) => setTimeout(res, 0));
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(box.checked).toBe(true);
+  });
+
   it("has an Active switch named for the mod that only asks to flip", async () => {
     const props = rowProps();
     render(ModListRow, props);

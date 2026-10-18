@@ -65,6 +65,12 @@
   });
   function onkeydown(e: KeyboardEvent) {
     if (e.altKey || e.ctrlKey || e.metaKey) return;
+    // Esc in the selection bar clears the selection, as it does in the list.
+    if (e.key === "Escape" && !e.defaultPrevented) {
+      e.preventDefault();
+      onclear();
+      return;
+    }
     const bs = buttons();
     const i = bs.findIndex((b) => b === document.activeElement);
     if (i < 0 || bs.length === 0) return;

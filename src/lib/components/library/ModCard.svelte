@@ -8,6 +8,7 @@
   // Same rules as ModListRow: the Active switch (named "Active: <title>"), the ⋯ menu (also on
   // right-click) for everything else, at most three badges then "+n", a checkbox on hover/focus
   // (always once anything is selected), and parked cards desaturate the image, never the text.
+  import { tick } from "svelte";
   import Checkbox from "../../ui/Checkbox.svelte";
   import Icon from "../../ui/Icon.svelte";
   import IconButton from "../../ui/IconButton.svelte";
@@ -88,8 +89,13 @@
   }
 
   function onCheck(e: MouseEvent) {
-    e.preventDefault();
+    // The parent owns `selected`: the click only asks. Don't preventDefault: the browser would undo
+    // the tick after Svelte had already applied the parent's answer. Re-sync once it has settled.
+    const box = e.currentTarget as HTMLInputElement;
     onSelect?.(mod.path, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey });
+    void tick().then(() => {
+      box.checked = selected;
+    });
   }
 </script>
 
