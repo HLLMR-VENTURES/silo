@@ -26,7 +26,7 @@
   import UpdatesPanel from "../../components/panels/UpdatesPanel.svelte";
   import StatsPanel from "../../components/panels/StatsPanel.svelte";
   import ConflictsPanel from "../../components/panels/ConflictsPanel.svelte";
-  import HealthPanel from "../../components/panels/HealthPanel.svelte";
+  import ProblemsPanel from "../../components/panels/ProblemsPanel.svelte";
   import MySetsTab from "../../components/modsets/MySetsTab.svelte";
   import SavegamesTab from "../../components/modsets/SavegamesTab.svelte";
   import GeneralSettings from "../../components/settings/GeneralSettings.svelte";
@@ -177,11 +177,28 @@
   />
 {/snippet}
 
-{#snippet conflictsTab()}<ConflictsPanel conflicts={[]} criticalCount={0} activeCount={active.size} />{/snippet}
+{#snippet conflictsTab()}
+  <ConflictsPanel
+    conflicts={[
+      {
+        id: "uniqueType:seedSlot:FS25_A,FS25_B",
+        severity: "critical",
+        kind: "uniqueType",
+        name: "seedSlot",
+        explanation: "These mods use the same exclusive slot.",
+        mods: ["Seeder A", "Seeder B"],
+        techNames: ["FS25_A", "FS25_B"],
+      },
+    ]}
+    activeCount={active.size}
+    onOpen={() => {}}
+    onPark={() => {}}
+  />
+{/snippet}
 {#snippet problemsTab()}
-  <HealthPanel
+  <ProblemsPanel
     health={{ missingDeps: mods.length ? [{ mod: mods[0], missing: ["FS25_gone"] }] : [], corrupt: [], ignored: [], foreign: [] }}
-    healthCount={1}
+    onFindInBrowse={() => {}}
     onResolveForeign={asyncNoop}
   />
 {/snippet}
