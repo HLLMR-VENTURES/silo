@@ -107,10 +107,10 @@ function props(over: Record<string, unknown> = {}) {
   };
 }
 
-let unlisten: ReturnType<typeof vi.fn>;
+let unlisten: ReturnType<typeof vi.fn<() => void>>;
 
 beforeEach(() => {
-  unlisten = vi.fn();
+  unlisten = vi.fn<() => void>();
   vi.mocked(onInstallProgress).mockResolvedValue(unlisten);
   vi.mocked(browseMods).mockReset();
 });
