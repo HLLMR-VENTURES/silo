@@ -157,6 +157,7 @@
   import VirtualList from "./lib/components/VirtualList.svelte";
   import ModRow from "./lib/components/ModRow.svelte";
   import ModTile from "./lib/components/ModTile.svelte";
+  import { chunk, tileColumns } from "./lib/views/tileGrid";
   import FilterBar from "./lib/components/FilterBar.svelte";
   import ModSettings from "./lib/components/ModSettings.svelte";
   import ModDetail from "./lib/components/ModDetail.svelte";
@@ -1783,12 +1784,11 @@
     });
     return arr;
   });
-  // Two tiles per virtualized row for the landscape grid.
-  const visiblePairs = $derived.by(() => {
-    const out: ModEntry[][] = [];
-    for (let i = 0; i < visible.length; i += 2) out.push(visible.slice(i, i + 2));
-    return out;
-  });
+  // The landscape grid: as many tiles per virtualized row as fit the list's width (two at the
+  // regular content width, more on a wide window, one when narrow).
+  let listWidth = $state(0);
+  const tileCols = $derived(tileColumns(listWidth));
+  const visibleTileRows = $derived(chunk(visible, tileCols));
 
   // Select-all checkbox state over the filtered view.
   const filteredActiveCount = $derived(
@@ -2909,6 +2909,7 @@
 <AppShell
   badges={{ updates: availableUpdates.length, diagnose: bisecting ? BISECT_BADGE : undefined }}
   fill={nav.view === "library"}
+  wide={nav.view === "library" || nav.view === "browse"}
   drawer={detailMod && nav.view === "library" ? modDrawer : undefined}
   drawerLabel="Mod details"
 >
@@ -3047,7 +3048,7 @@
           />
         {/snippet}
         {#snippet list()}
-          <div class="list-body">
+          <div class="list-body" bind:clientWidth={listWidth}>
             {#if filtered.length === 0 && !scanning}
               <div class="empty">
                 {mods.length === 0
@@ -3055,10 +3056,10 @@
                   : "No mods match your filter."}
               </div>
             {:else if libView === "tiles"}
-              <VirtualList items={visiblePairs} rowHeight={TILE_ROW_H} bottomPad={16}>
-                {#snippet row(pair)}
-                  <div class="tile-pair">
-                    {#each pair as mod (mod.techName)}
+              <VirtualList items={visibleTileRows} rowHeight={TILE_ROW_H} bottomPad={16}>
+                {#snippet row(tileRow)}
+                  <div class="tile-row" style:--tile-cols={tileCols}>
+                    {#each tileRow as mod (mod.techName)}
                       <ModTile
                         {mod}
                         curation={cur(mod.techName)}
@@ -3517,17 +3518,12 @@
     color: var(--primary-text);
     text-decoration: underline;
   }
-  .tile-pair {
+  .tile-row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
+    grid-template-columns: repeat(var(--tile-cols, 2), minmax(0, 1fr));
+    gap: 16px; /* TILE_GAP in tileGrid.ts */
     height: 100%;
     padding-bottom: 16px;
-  }
-  @media (max-width: 720px) {
-    .tile-pair {
-      grid-template-columns: 1fr;
-    }
   }
   .list-body {
     height: 100%;

@@ -9,7 +9,8 @@
     withDrawer = false,
     withNotices = true,
     pin,
-  }: { withDrawer?: boolean; withNotices?: boolean; pin?: RailPin } = $props();
+    wide = false,
+  }: { withDrawer?: boolean; withNotices?: boolean; pin?: RailPin; wide?: boolean } = $props();
 </script>
 
 {#snippet header()}
@@ -23,7 +24,7 @@
 
 {#snippet drawer()}<p>Drawer body</p>{/snippet}
 
-<AppShell {header} notices={withNotices ? notices : undefined} drawer={withDrawer ? drawer : undefined} {pin}>
+<AppShell {header} notices={withNotices ? notices : undefined} drawer={withDrawer ? drawer : undefined} {pin} {wide}>
   <ViewHeader title="Library" description="Your mods." />
   <button type="button">In content</button>
 </AppShell>

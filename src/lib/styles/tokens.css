@@ -80,6 +80,8 @@
   --rail-w-collapsed: 64px;
   --header-h: 56px;
   --content-max: 1280px;
+  /* Grid views (Library, Browse) on large screens: more columns instead of wide margins. */
+  --content-max-wide: 1920px;
   --drawer-w: 440px;
 
   /* Motion */

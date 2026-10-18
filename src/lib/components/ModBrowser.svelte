@@ -498,10 +498,10 @@
 </div>
 
 <style>
+  /* No width cap of its own: AppShell's wide content cap bounds Browse, and the auto-fill grid
+     adds columns as the window grows. */
   .browse {
     padding: 16px 20px 40px;
-    max-width: 1200px;
-    margin: 0 auto;
   }
   .browse-head {
     display: flex;
