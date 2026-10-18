@@ -116,27 +116,27 @@
   }
   .sg-name {
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-sm);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .sg-meta {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     margin-top: 2px;
   }
   .sg-missing {
-    color: var(--warn);
+    color: var(--warn-text);
   }
   .sg-make {
     flex: 0 0 auto;
     border: 1px solid var(--border);
     background: var(--bg);
-    color: var(--primary);
+    color: var(--primary-text);
     padding: 7px 12px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .sg-make:hover:not(:disabled) {

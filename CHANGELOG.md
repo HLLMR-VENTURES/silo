@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **UI size setting.** Settings → Appearance lets you make text and icons smaller or larger
+  (90%, 100%, 110% or 125%). (#224)
+
+- **The silo mark.** Silo's own logo, a grain silo with the sun rising behind it, now sits in the
+  top bar. (#224)
+
+### Changed
+
+- **Sharper text and better contrast.** Secondary text, warnings, links and buttons are easier to
+  read in both the light and dark themes, and nothing is smaller than 12 px. (#224)
+
+- **Silo's fonts ship with the app.** Headings and text use Silo's own fonts on every computer,
+  with no download needed. (#224)
+
+- **A visible focus outline.** When you move around with the keyboard, the control you are on is
+  always outlined, in both themes. (#224)
+
+- **Consistent icons.** Icons throughout the app now come from one set, the same icon always
+  means the same thing, and buttons that show only an icon have a name for screen readers. (#224)
+
 ### Fixed
 
 - **Filing errors stay on screen.** When filing loose mods into the library failed (Organize,

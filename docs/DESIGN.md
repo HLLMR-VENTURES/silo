@@ -33,13 +33,15 @@ truth for look, feel, stack, and language.
 - **Styling: hand-authored CSS with design tokens** (CSS custom properties), no
   heavyweight UI kit. The farm aesthetic must be ours, not a themed Bootstrap. A
   tiny set of primitives (Button, Card, Field, Toggle, Tag, Toast) built in-house.
-- **Icons:** Lucide, used **sparingly and always with a label** where it matters.
-  Icons accent meaning; they don't replace words.
+- **Icons:** Lucide (`@lucide/svelte`), used **sparingly and always with a label**
+  where it matters. Icons accent meaning; they don't replace words. See
+  [Icons](#icons).
 - **Charts/graphs (later):** lightweight SVG / the `dataviz` approach — for the
   dependency graph, disk-usage, and library-health views.
 - **Fonts (self-hosted, offline-bundled):** display/headings **Fraunces** (a warm,
   slightly rustic humanist serif — craft and character); UI/body **Hanken Grotesk**
-  or **Inter** (clean, legible, neutral). Numbers **tabular** in all data views.
+  (clean, legible, neutral); code and hashes in the system monospace. Numbers
+  **tabular** in all data views. See [Typography](#typography).
 - **Motion:** gentle, natural easing (wind, not springs). 150–250ms. Respect
   `prefers-reduced-motion`.
 
@@ -51,40 +53,114 @@ gold** as the accent that draws the eye; **sky blue** for calm information;
 **barn red / terracotta** for danger — warm, never a fire-engine alarm. Two themes
 are one idea at two times of day.
 
-### Neutrals (warm — soil & linen, never pure gray)
-| Token | Light (Daybreak) | Dark (Dusk) | Use |
+Everything lives in `src/lib/styles/tokens.css`. Views use the **semantic slots**
+below, never the raw ramps, so both themes come for free.
+
+### Semantic slots (both themes)
+| Slot | Light (Daybreak) | Dark (Dusk) | Use |
 |---|---|---|---|
 | `--bg` | `#F6F3EC` oat | `#171A14` loam | app background |
 | `--surface` | `#FCFAF4` linen | `#1F231C` tilled earth | cards, panels |
-| `--surface-raised` | `#FFFFFF` | `#282D24` | menus, modals |
+| `--raised` | `#FFFFFF` | `#282D24` | menus, modals |
+| `--sunken` | `#EFEADF` | `#13160F` | wells, inputs, inset areas |
 | `--border` | `#E4DECE` | `#39402F` | hairlines, dividers |
+| `--border-strong` | `#8F8875` | `#767E66` | ≈3:1 control edges; the border under high contrast |
 | `--text` | `#2A2A22` | `#EDEBE0` | primary text |
-| `--text-muted` | `#6B6A5C` | `#A8A897` | secondary text |
+| `--muted` | `#5E5D50` | `#ADAC9C` | secondary text, AA (5.5:1 or better on every surface) |
+| `--primary` | `#4A7330` field | `#7FAE55` (dark-theme primary) | Play, primary buttons, active nav |
+| `--primary-hover` | `#395A25` forest | `#9CC06E` | hover/pressed primary |
+| `--primary-text` | `#3F6529` | `#9CC06E` | green used as text |
+| `--on-primary` | `#FFFFFF` | `#12180E` | text on primary |
+| `--accent` | `#E3B23C` wheat | `#E3B23C` wheat | update dots, selection, "new" — a fill, never text in light |
+| `--accent-text` | `#8A5F12` | `#F2D26B` | the rare gold-toned text |
+| `--on-accent` | `#2A2A22` | `#2A2A22` | text on gold |
+| `--info` | `#2F6893` | `#8CBDE0` | neutral info, links, "syncing" |
+| `--success` | `#3F6529` | `#9CC06E` | done, verified |
+| `--warn-text` | `#94560A` | `#F0B45C` | caution, out-of-date, soft conflict |
+| `--danger` | `#A63D2C` | `#EE9481` | destructive, critical conflict |
+| `--on-danger` | `#FFFFFF` | `#1A0E0B` | text on danger |
+| `--focus` | `#2F5A1D` | `#F2D26B` | the focus ring |
+| `--scrim` | loam at 45 % | loam at 60 % | behind modals and drawers |
 
-### Brand & semantic scales (anchor values; build 50→900 ramps in tokens.css)
-| Role | Color | Hex | Meaning |
-|---|---|---|---|
-| **Primary — Field green** | pasture | `#5C8A3A` | growth, "go", the brand |
-| | field (600) | `#4A7330` | primary buttons, active nav |
-| | forest (700) | `#395A25` | pressed, emphasis |
-| **Accent — Harvest gold** | wheat | `#E3B23C` | highlight, focus, "new", CTA glow |
-| | amber (600) | `#C9922A` | hover on accent |
-| **Info — Sky** | sky | `#4A90C2` | neutral info, links, "syncing" |
-| **Warn — Squash** | squash | `#D98A1F` | caution, out-of-date, soft conflict |
-| **Danger — Barn red** | barn | `#B34A38` | destructive, critical conflict |
-| **Earth — Soil brown** | soil | `#8A6A45` | tertiary warmth, disabled-warm |
+Soft tints (`--info-soft`, `--success-soft`, `--warn-soft`, `--danger-soft`,
+`--accent-soft`) mix 12 % of the slot into `--surface`. High-contrast mode
+(`prefers-contrast: more`) strengthens borders: `--border` becomes
+`--border-strong`. Earth slots (`--earth`, `--earth-strong`, `--earth-text`,
+`--on-earth`) carry soil-brown warmth. The rest of the system is tokens too: spacing
+`--sp-1..8` on the 8px grid, radius `--r-sm/md/lg/pill`, elevation `--e1..3`, layers
+`--z-*`, motion `--dur-1..3` + `--ease`, and the type scale `--fs-xs..3xl`.
+
+### Brand anchors (the ramps behind the slots)
+| Role | Hex | Meaning |
+|---|---|---|
+| **Field green** | `#5C8A3A` pasture · `#4A7330` field · `#395A25` forest | growth, "go", the brand |
+| **Harvest gold** | `#E3B23C` wheat · `#C9922A` amber | the scarce attention color |
+| **Sky** | `#4A90C2` | calm information |
+| **Squash** | `#D98A1F` | caution |
+| **Barn red** | `#B34A38` | danger — warm, never alarm red |
+| **Soil brown** | `#8A6A45` | tertiary warmth |
 
 ### Rules
 - **Never encode meaning by color alone.** Conflict severity, status, and tags
   always pair color with an icon/shape/label (FS players include colorblind users;
-  the game ships a colorblind mode — we honor that). Provide a colorblind-safe
-  palette variant.
-- Target **WCAG AA** (4.5:1 body, 3:1 large/UI). Validate every text-on-surface
-  pair in both themes; the anchors above are chosen to pass but ramps must be
-  checked.
-- Harvest gold is the **scarce** color — reserve it for the single thing that most
-  wants attention on a screen. Overusing it kills its power.
+  the game ships a colorblind mode — we honor that).
+- **WCAG AA everywhere**, in both themes: 4.5:1 body text, 3:1 large text and UI
+  edges. Every text/background pairing in the slots above is checked; a new pairing
+  gets checked before it ships.
+- **Play is field green; gold is the scarce attention color** (update dots,
+  selection). Reserve gold for the single thing that most wants attention on a
+  screen — overusing it kills its power. **Gold is never text in the light theme**
+  (it fails contrast on linen); use `--accent-text` when gold-toned text is needed.
 - Dark theme is warm dark (loam), **not** black. Elevation = getting lighter/warmer.
+
+## Typography
+
+- **Fraunces** (variable, with the SOFT axis) for headings and the wordmark;
+  **Hanken Grotesk** for all UI and body text. Both ship inside the app as woff2
+  with their OFL licences — no network needed, no fallback font in practice.
+  Code, hashes and paths use the **system monospace**.
+- **rem type scale** `--fs-xs` (12 px) → `--fs-3xl` (36 px) at the default size.
+  **12 px is the floor** — nothing smaller, anywhere.
+- **Tabular numerals** in data views (sizes, versions, counts) so columns line up.
+- **UI size setting** — Settings → Appearance offers 90% / 100% / 110% / 125%. It
+  scales the root size, so text, icons and the silo mark all follow; layouts must
+  not clip at 125%.
+
+## Focus
+
+One visible focus ring everywhere: a 2 px `--focus` outline on `:focus-visible`,
+set once globally. Components don't remove it or invent their own. Keyboard users
+should always see where they are, in both themes.
+
+## Icons
+
+- **Lucide**, through `src/lib/ui/icons.ts` and `<Icon name="…" />`. Views never
+  import Lucide directly.
+- **One icon per concept**, the same everywhere. The concepts: library, browse,
+  modSets, diagnose, update, tools, settings, help, activity, play, search, problem,
+  info, ok, check, verifiedBuild, verifiedAuthor, modified, favorite, hidden,
+  visible, flagged, modSettings, showFile, archive, share, download, external, undo,
+  rescan, more, controls, bridge, cloud, copy, bug, close, chevrons, tag, grid,
+  list, menu, fork, swap, target, arrows, dot, circle, link. A new concept gets a
+  new entry; an existing concept never gets a second icon.
+- **Sizes:** 13–14 px inline with text, 16 px in icon buttons, 18–20 px in the
+  top bar. Stroke 1.75. Icons are sized in rem so they follow UI size.
+- Icons sit **beside their words**. An **icon-only control needs a label**
+  (`aria-label`, plus a tooltip) — no exceptions.
+
+## Silo mark
+
+The mark is a cream grain silo with a domed cap and banded body, a golden-hour sun
+rising behind it. Source files live in `src/assets/brand/`; in the app use
+`<SiloMark />` (`src/lib/ui/SiloMark.svelte`), which inlines the same drawing.
+
+- **Tile** — the silo on a field-green rounded square. App icon, top bar.
+- **Glyph** — silo and sun only, no tile, for light backgrounds and small places.
+- **Wordmark** — glyph plus "Silo" in Fraunces 600 (SOFT 50).
+- **Clear space** around the mark equals the dome height.
+- **Minimum size:** 16 px for the glyph, 24 px for the tile.
+- The mark uses fixed brand colors and looks the same in both themes. **The sun
+  stays gold**, except in single-color use, where the whole glyph takes one color.
 
 ## Layout & density
 
@@ -148,4 +224,4 @@ evangelize it:
 In the first ten seconds, it should read as: it opened
 instantly; the library is calm and beautiful, not a grid of tiny boxes; it clearly
 knows my mods (icons, versions, conflicts) without me configuring anything; and the
-one big warm-gold button tells me exactly what to do next. Fast, honest, handsome.
+one big field-green Play button tells me exactly what to do next. Fast, honest, handsome.

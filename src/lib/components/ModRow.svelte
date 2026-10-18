@@ -5,6 +5,7 @@
 </script>
 
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { ModEntry, CurationRow } from "../types";
   import { getModIcon } from "../api";
   import { getVerdict } from "../provenanceCache.svelte";
@@ -109,7 +110,7 @@
     <div class="titleline">
       <span class="title">{mod.title ?? mod.techName}</span>
       {#if mod.version}<span class="ver tnum">v{mod.version.replace(/^v/i, "")}</span>{/if}
-      {#if curation.rating > 0}<span class="rating">{"★".repeat(curation.rating)}</span>{/if}
+      {#if curation.rating > 0}<span class="rating" role="img" aria-label={`${curation.rating} of 5 stars`}>{#each Array.from({ length: curation.rating }) as _, i (i)}<Icon name="favorite" size={11} filled />{/each}</span>{/if}
     </div>
     <div class="sub">
       <span class="author">{mod.author ?? "Unknown author"}</span>
@@ -136,9 +137,9 @@
     {/if}
     {#if organized && !active}<span class="badge parked">parked</span>{/if}
     {#if verdict?.status === "verified"}
-      <span class="badge verified" title="Verified against the published build">✓ Verified</span>
+      <span class="badge verified" title="Verified against the published build"><Icon name="verifiedBuild" size={12} /> Verified</span>
     {:else if verdict?.status === "modified"}
-      <span class="badge modded" title="Modified from the published build">⚠ Modified</span>
+      <span class="badge modded" title="Modified from the published build"><Icon name="modified" size={12} /> Modified</span>
     {/if}
     {#if mod.isMap}<span class="badge map">Map</span>{/if}
     {#if mod.mpSupported}<span class="badge mp">MP</span>{/if}
@@ -170,34 +171,38 @@
       <button
         class="act on"
         title="Edit this mod's settings"
+        aria-label="Edit this mod's settings"
         onclick={onOpenSettings}
       >
-        ⚙
+        <Icon name="modSettings" />
       </button>
     {/if}
     <button
       class="act star"
       class:on={curation.favorite}
       title={curation.favorite ? "Remove favorite" : "Favorite"}
+      aria-label={curation.favorite ? "Remove favorite" : "Favorite"}
       onclick={() => onToggle("favorite")}
     >
-      {curation.favorite ? "★" : "☆"}
+      <Icon name="favorite" filled={curation.favorite} />
     </button>
     <button
       class="act"
       class:on={curation.hidden}
       title={curation.hidden ? "Unhide" : "Hide"}
+      aria-label={curation.hidden ? "Unhide" : "Hide"}
       onclick={() => onToggle("hidden")}
     >
-      ⊘
+      <Icon name="hidden" />
     </button>
     <button
       class="act warn"
       class:on={curation.broken}
       title={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
+      aria-label={curation.broken ? "Clear broken flag" : "Mark broken/unfinished"}
       onclick={() => onToggle("broken")}
     >
-      ⚠
+      <Icon name="problem" />
     </button>
   </div>
 
@@ -245,14 +250,15 @@
     display: grid;
     place-items: center;
     font-family: var(--font-display);
-    font-size: 20px;
+    font-size: var(--fs-xl);
     font-weight: 600;
     color: var(--on-primary);
-    background: linear-gradient(135deg, var(--green-500), var(--green-700));
+    background: linear-gradient(135deg, var(--primary), var(--primary-hover));
     box-shadow: var(--shadow-1);
   }
   .tile.map {
-    background: linear-gradient(135deg, var(--soil-500), var(--soil-700));
+    background: linear-gradient(135deg, var(--earth), var(--earth-strong));
+    color: var(--on-earth);
   }
   .tile.img {
     object-fit: cover;
@@ -265,13 +271,13 @@
     cursor: pointer;
   }
   .rating {
-    color: var(--accent);
-    font-size: 11px;
+    color: var(--accent-text);
+    font-size: var(--fs-xs);
     letter-spacing: -1px;
   }
   .rowtag {
     color: var(--info);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     opacity: 0.85;
   }
   .titleline {
@@ -287,11 +293,11 @@
   }
   .ver {
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--fs-xs);
   }
   .sub {
     color: var(--text-muted);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     display: flex;
     gap: 6px;
     white-space: nowrap;
@@ -308,16 +314,17 @@
     align-items: center;
   }
   .badge {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
     color: var(--text-muted);
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
   .badge.cat {
-    color: var(--primary);
+    color: var(--primary-text);
     background: color-mix(in srgb, var(--primary) 12%, transparent);
     border-color: color-mix(in srgb, var(--primary) 30%, var(--border));
     cursor: pointer;
@@ -327,23 +334,23 @@
     background: color-mix(in srgb, var(--primary) 22%, transparent);
   }
   .badge.cat.overridden {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   }
   .badge.map {
-    color: var(--soil-500);
-    border-color: color-mix(in srgb, var(--soil-500) 40%, var(--border));
+    color: var(--earth-text);
+    border-color: color-mix(in srgb, var(--earth) 40%, var(--border));
   }
   .badge.verified {
-    color: var(--primary);
+    color: var(--primary-text);
     background: color-mix(in srgb, var(--primary) 12%, transparent);
     border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
   }
   .badge.modded {
-    color: var(--warn);
-    background: color-mix(in srgb, var(--warn) 14%, transparent);
-    border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+    color: var(--warn-text);
+    background: color-mix(in srgb, var(--warn-text) 14%, transparent);
+    border-color: color-mix(in srgb, var(--warn-text) 40%, var(--border));
   }
   .badge.mp {
     color: var(--info);
@@ -351,19 +358,19 @@
   }
   .badge.unique,
   .badge.warn {
-    color: var(--warn);
-    border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+    color: var(--warn-text);
+    border-color: color-mix(in srgb, var(--warn-text) 45%, var(--border));
   }
   .badge.err {
     color: var(--danger);
     border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
   }
   .badge.dep {
-    color: var(--accent);
+    color: var(--accent-text);
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
   }
   .badge.dev {
-    color: var(--accent);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   }
@@ -372,7 +379,7 @@
     width: 64px;
     text-align: right;
     color: var(--text-muted);
-    font-size: 12px;
+    font-size: var(--fs-xs);
   }
   .has-error {
     background: color-mix(in srgb, var(--danger) 5%, transparent);
@@ -387,8 +394,8 @@
     border: none;
     background: transparent;
     color: var(--text-muted);
-    font-size: 15px;
-    line-height: 1;
+    display: inline-grid;
+    place-items: center;
     width: 26px;
     height: 26px;
     border-radius: var(--radius-sm);
@@ -408,7 +415,7 @@
     opacity: 1;
   }
   .act.star.on {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .act.warn.on {
     color: var(--danger);

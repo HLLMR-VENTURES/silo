@@ -3,6 +3,7 @@
   // a link someone sent you — preview what you have / need, then install + verify the set.
   // Unlike Multiplayer sync (which matches your ACTIVE set to a host's for a session),
   // Collections are about sharing groups of mods, independent of any session.
+  import Icon from "../ui/Icon.svelte";
   import {
     collectionExport,
     collectionImportPreview,
@@ -294,7 +295,7 @@
         is shared; no mod files are uploaded.
       </p>
     </div>
-    <button class="x" title="Close" onclick={onClose}>✕</button>
+    <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
   </div>
 
   <div class="share">
@@ -318,7 +319,7 @@
         <a class="mn link" href={r.url} onclick={(e) => { e.preventDefault(); openExternal(r.url); }}>
           {r.url}
         </a>
-        <button class="btn" onclick={copyLink}>{copied ? "Copied ✓" : "Copy link"}</button>
+        <button class="btn" onclick={copyLink}>{#if copied}Copied <Icon name="check" size={14} />{:else}Copy link{/if}</button>
       </div>
       <p class="caveat">
         {#if sharePublic}
@@ -389,10 +390,10 @@
             </div>
             <div class="coll-actions">
               <button class="mini" onclick={() => copyShareLink(c)}>
-                {copiedRef === c.reference ? "Copied ✓" : "Copy link"}
+                {#if copiedRef === c.reference}Copied <Icon name="check" size={12} />{:else}Copy link{/if}
               </button>
-              <button class="mini" onclick={() => openExternal(c.pageUrl)} title="Open the share page">Page ↗</button>
-              <button class="mini" onclick={() => openExternal(c.sourceUrl)} title="Open on GitHub">GitHub ↗</button>
+              <button class="mini" onclick={() => openExternal(c.pageUrl)} title="Open the share page">Page <Icon name="external" size={12} /></button>
+              <button class="mini" onclick={() => openExternal(c.sourceUrl)} title="Open on GitHub">GitHub <Icon name="external" size={12} /></button>
               <button
                 class="mini"
                 onclick={() => doUpdate(c)}
@@ -415,7 +416,7 @@
                   onclick={() => openExternal(c.sourceUrl)}
                   title="Public collection repos are deleted on GitHub"
                 >
-                  Delete on GitHub ↗
+                  Delete on GitHub <Icon name="external" size={12} />
                 </button>
               {/if}
             </div>
@@ -478,7 +479,7 @@
           <div class="sec" style="margin-top:0">Heads-up (from the mods you already have)</div>
           {#each preflightConflicts as c (c.kind + c.mods.join())}
             <div class="row">
-              <span class="mn">⚠ {c.name}</span>
+              <span class="mn"><Icon name="problem" size={13} /> {c.name}</span>
               <span class="rt">{c.mods.join(" ↔ ")}</span>
             </div>
           {/each}
@@ -529,9 +530,9 @@
           <div class="row">
             <span class="mn">{r.techName}</span>
             <span class="rt">
-              {#if r.status === "failed"}⚠ {r.detail ?? "failed"}
-              {:else if r.verdict === "verified"}✓ verified
-              {:else if r.verdict === "modified"}⚠ modified — differs from the shared build
+              {#if r.status === "failed"}<Icon name="problem" size={13} /> {r.detail ?? "failed"}
+              {:else if r.verdict === "verified"}<Icon name="verifiedBuild" size={13} /> verified
+              {:else if r.verdict === "modified"}<Icon name="modified" size={13} /> modified — differs from the shared build
               {:else}installed (unverified){/if}
             </span>
           </div>
@@ -565,7 +566,7 @@
   .sub {
     margin: 4px 0 0;
     color: var(--text-muted);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     line-height: 1.5;
     max-width: 56ch;
   }
@@ -584,6 +585,7 @@
     color: var(--text-muted);
     font-size: 0.85rem;
     margin-bottom: 8px;
+    font-variant-numeric: tabular-nums;
   }
   .err {
     background: color-mix(in srgb, var(--danger) 12%, transparent);
@@ -596,7 +598,7 @@
   }
   .ok-note {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
     border-radius: var(--radius-sm);
     padding: 8px 12px;
     margin-bottom: 10px;
@@ -634,7 +636,7 @@
   }
   .caveat {
     margin: 12px 0 0;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .share {
@@ -665,7 +667,7 @@
     display: flex;
     gap: 16px;
     margin: 8px 0;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     color: var(--text-muted);
   }
   .vis-row label {
@@ -710,11 +712,12 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 0.76rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
   }
   .kind {
-    font-size: 0.64rem;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -743,7 +746,7 @@
     background: var(--surface);
     color: var(--text);
     font: inherit;
-    font-size: 0.76rem;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .mini:hover:not(:disabled) {
@@ -788,7 +791,7 @@
     margin-top: 12px;
   }
   .sec {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -808,11 +811,12 @@
   .mn {
     color: var(--text);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .rt {
     color: var(--text-muted);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
 </style>

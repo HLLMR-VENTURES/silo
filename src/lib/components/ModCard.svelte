@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { BrowseMod, ModSourceOption } from "../types";
   import { label, shortLabel, gatedReason, fmtCount, fmtMB, loadCatalogImage } from "../browse";
 
@@ -56,13 +57,13 @@
       <div class="stats">
         {#if m.rating != null}
           <span class="stat" title="Rating">
-            ⭐ {m.rating.toFixed(1)}{#if m.ratingCount}<span class="stat-sub"
+            <Icon name="favorite" size={12} filled label="rating" /> {m.rating.toFixed(1)}{#if m.ratingCount}<span class="stat-sub"
                 >&nbsp;({fmtCount(m.ratingCount)})</span
               >{/if}
           </span>
         {/if}
         {#if m.downloads != null}
-          <span class="stat" title="Downloads">⬇ {fmtCount(m.downloads)}</span>
+          <span class="stat" title="Downloads"><Icon name="download" size={12} label="downloads" /> {fmtCount(m.downloads)}</span>
         {/if}
       </div>
     {/if}
@@ -101,8 +102,8 @@
             onFindInLibrary?.();
           }}
         >
-          <span class="srcbtn-name">⌕ Find in Library</span>
-          <span class="srcbtn-icon">↗</span>
+          <span class="srcbtn-name"><Icon name="search" size={12} /> Find in Library</span>
+          <span class="srcbtn-icon"><Icon name="external" size={12} /></span>
         </button>
       {:else}
         {#each m.sources as s (s.source)}
@@ -122,7 +123,7 @@
           >
             <span class="srcbtn-name">{shortLabel(s.source)}</span>
             {#if s.version}<span class="srcbtn-ver tnum">{s.version}</span>{/if}
-            <span class="srcbtn-icon">{s.installable ? "⬇" : "↗"}</span>
+            <span class="srcbtn-icon"><Icon name={s.installable ? "download" : "external"} size={12} /></span>
           </button>
         {:else}
           <span class="srcbar-none">No sources</span>
@@ -179,7 +180,7 @@
     right: 8px;
     background: var(--primary);
     color: var(--on-primary);
-    font-size: 0.7rem;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 2px 8px;
     border-radius: 999px;
@@ -205,7 +206,7 @@
     display: flex;
     gap: 8px;
     align-items: center;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     color: var(--text-muted);
   }
   .card-meta .ver {
@@ -216,7 +217,7 @@
     display: flex;
     gap: 10px;
     align-items: center;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
   }
@@ -230,9 +231,9 @@
   }
   .chip {
     align-self: flex-start;
-    font-size: 0.72rem;
-    color: var(--soil-700);
-    background: color-mix(in srgb, var(--soil-500) 16%, transparent);
+    font-size: var(--fs-xs);
+    color: var(--earth-text);
+    background: color-mix(in srgb, var(--earth) 16%, transparent);
     padding: 2px 8px;
     border-radius: 999px;
   }
@@ -268,7 +269,7 @@
     }
   }
   .dl-text {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     white-space: nowrap;
   }
@@ -281,7 +282,7 @@
     padding-top: 8px;
   }
   .srcbar-none {
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .srcbtn {
@@ -294,7 +295,7 @@
     background: var(--surface);
     color: var(--text-muted);
     font: inherit;
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s, color 0.15s;
   }
@@ -305,7 +306,7 @@
   /* Directly installable reads as the primary action; the rest are link-outs. */
   .srcbtn.can-install {
     border-color: var(--primary);
-    color: var(--primary);
+    color: var(--primary-text);
     font-weight: 600;
   }
   .srcbtn.can-install:hover:not(:disabled) {
@@ -316,7 +317,7 @@
     flex: 1 1 auto;
     justify-content: center;
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
-    color: var(--primary);
+    color: var(--primary-text);
     font-weight: 600;
   }
   .srcbtn.find-lib:hover {
@@ -335,6 +336,6 @@
   }
   .srcbtn-icon {
     opacity: 0.7;
-    font-size: 0.7rem;
+    font-size: var(--fs-xs);
   }
 </style>

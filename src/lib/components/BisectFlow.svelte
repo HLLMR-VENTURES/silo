@@ -4,6 +4,7 @@
   // set changes + launch; the player provides the verdict each round (a crash is
   // auto-detected from the log). The player's real mod set is snapshotted first and
   // restored on finish/cancel — nothing here is destructive.
+  import Icon from "../ui/Icon.svelte";
   import { onDestroy } from "svelte";
   import {
     bisectPlan,
@@ -212,7 +213,7 @@
 <div class="bf">
   <div class="bf-head">
     <h3>Guided bisection</h3>
-    <button class="x" title="Cancel & restore" onclick={finish} disabled={!!working}>✕</button>
+    <button class="x" title="Cancel & restore" aria-label="Cancel & restore" onclick={finish} disabled={!!working}><Icon name="close" /></button>
   </div>
 
   {#if working}
@@ -256,7 +257,7 @@
       </ol>
     {/if}
     <div class="actions">
-      <button class="btn" onclick={launch} disabled={!!working}>▶ Launch FS25</button>
+      <button class="btn" onclick={launch} disabled={!!working}><Icon name="play" size={14} /> Launch FS25</button>
       <button class="btn primary" onclick={backFromGame} disabled={!!working}>
         I've quit the game →
       </button>
@@ -341,7 +342,7 @@
   }
   .working {
     color: var(--text-muted);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     margin-bottom: 8px;
   }
   .err {
@@ -363,11 +364,12 @@
     display: inline-block;
     background: var(--primary);
     color: var(--on-primary);
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 1px 8px;
     border-radius: 999px;
     margin-right: 6px;
+    font-variant-numeric: tabular-nums;
   }
   .steps {
     margin: 0 0 14px;
@@ -377,7 +379,7 @@
     line-height: 1.6;
   }
   .hint {
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     padding: 7px 11px;
     border-radius: var(--radius-sm);
     margin-bottom: 12px;
@@ -388,7 +390,7 @@
   }
   .hint.good {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .result {
     border: 1px solid var(--border);
@@ -401,7 +403,7 @@
     background: color-mix(in srgb, var(--danger) 8%, transparent);
   }
   .result-title {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted);
@@ -448,7 +450,7 @@
   }
   .btn.ok {
     background: color-mix(in srgb, var(--primary) 16%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
     border-color: color-mix(in srgb, var(--primary) 35%, transparent);
     font-weight: 600;
   }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../../ui/Icon.svelte";
   let {
     modCount,
     mapsCount,
@@ -101,7 +102,7 @@
     title="Crash & log triage: did the last run crash, and which mod is at fault?"
     onclick={onOpenLog}
   >
-    <span class="stat-num">◆</span>
+    <span class="stat-num"><Icon name="diagnose" size={20} /></span>
     <span class="stat-label">diagnose</span>
   </button>
   <button
@@ -109,7 +110,7 @@
     title="The full control-binding map — every action and key, grouped by device"
     onclick={onOpenBindings}
   >
-    <span class="stat-num">⌨</span>
+    <span class="stat-num"><Icon name="controls" size={20} /></span>
     <span class="stat-label">bindings</span>
   </button>
   <button
@@ -117,7 +118,7 @@
     title="Filltype bridge: make a stubborn map filltype work with your equipment"
     onclick={onOpenBridge}
   >
-    <span class="stat-num">⛓</span>
+    <span class="stat-num"><Icon name="bridge" size={20} /></span>
     <span class="stat-label">bridge</span>
   </button>
   {#if tookMs !== null}
@@ -146,15 +147,15 @@
   }
   .stat-num {
     font-family: var(--font-display);
-    font-size: 18px;
+    font-size: var(--fs-xl);
     font-weight: 600;
   }
   .stat-label {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .stat.flag .stat-num {
-    color: var(--warn);
+    color: var(--warn-text);
   }
   .statbtn {
     border: none;
@@ -168,21 +169,21 @@
   }
   /* A stat acting as an active filter — highlight the number + underline the label. */
   .statbtn.sel .stat-num {
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .statbtn.sel .stat-label {
-    color: var(--primary);
+    color: var(--primary-text);
     text-decoration: underline;
     text-underline-offset: 2px;
   }
   .statbtn.flag .stat-num {
-    color: var(--warn);
+    color: var(--warn-text);
   }
   .statbtn.crit .stat-num {
     color: var(--danger);
   }
   .took {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     margin-left: auto;
   }

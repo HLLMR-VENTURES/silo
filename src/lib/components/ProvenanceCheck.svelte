@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { ModEntry, VerifyResult } from "../types";
   import { verifyMod } from "../api";
   import { getVerdict, setVerdict } from "../provenanceCache.svelte";
@@ -84,7 +85,7 @@
     {@const r = result}
     {#if r.status === "verified"}
       <div class="verdict ok">
-        <span class="dot">✓</span>
+        <span class="dot"><Icon name="verifiedBuild" /></span>
         <div>
           <div class="v-label">Verified</div>
           <div class="v-sub">
@@ -94,7 +95,7 @@
       </div>
     {:else if r.status === "modified"}
       <div class="verdict warn">
-        <span class="dot">⚠</span>
+        <span class="dot"><Icon name="modified" /></span>
         <div>
           <div class="v-label">Modified from the published build</div>
           <div class="v-sub">
@@ -145,7 +146,7 @@
     margin-bottom: 6px;
   }
   .prov-title {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted);
@@ -155,7 +156,7 @@
     background: var(--primary);
     color: var(--on-primary);
     font: inherit;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 4px 11px;
     border-radius: var(--radius-sm);
@@ -171,13 +172,13 @@
     filter: brightness(1.05);
   }
   .prov-run {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .prov-note,
   .prov-fine,
   .prov-err {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     color: var(--text-muted);
     margin: 0;
@@ -187,7 +188,7 @@
   }
   .prov-fine {
     margin-top: 10px;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     opacity: 0.85;
   }
   .verdict {
@@ -208,14 +209,14 @@
     border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
   }
   .verdict.ok .dot {
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .verdict.warn {
-    background: color-mix(in srgb, var(--warn) 12%, transparent);
-    border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+    background: color-mix(in srgb, var(--warn-text) 12%, transparent);
+    border-color: color-mix(in srgb, var(--warn-text) 40%, var(--border));
   }
   .verdict.warn .dot {
-    color: var(--warn);
+    color: var(--warn-text);
   }
   .verdict.muted .dot {
     color: var(--text-muted);
@@ -226,14 +227,14 @@
     color: var(--text);
   }
   .v-sub {
-    font-size: 0.76rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.4;
     margin-top: 1px;
   }
   .diff {
     margin-top: 6px;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
   }
   .diff summary {
     cursor: pointer;
@@ -257,11 +258,11 @@
   }
   .diff li.mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     word-break: break-all;
   }
   .diff li.more {
     font-style: italic;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
   }
 </style>

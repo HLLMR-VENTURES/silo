@@ -2,6 +2,7 @@
   // Crash / log triage: read FS25's log.txt and tell the user, in plain terms, whether
   // the last run crashed and which mods are actually at fault — separating real breakage
   // from cosmetic noise. The thing no other FS25 manager does.
+  import Icon from "../ui/Icon.svelte";
   import { onMount } from "svelte";
   import { scanLog, revealInFolder, userDirPath } from "../api";
   import type { LogReport, LogModHealth } from "../types";
@@ -90,10 +91,10 @@
     <div class="lt-head-actions">
       {#if mode === "report"}
         <button class="btn" onclick={scan} disabled={loading}>
-          {loading ? "Reading…" : "↻ Re-read log"}
+          {#if loading}Reading…{:else}<Icon name="rescan" size={14} /> Re-read log{/if}
         </button>
       {/if}
-      <button class="x" title="Close" onclick={onClose}>✕</button>
+      <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
     </div>
   </div>
 
@@ -131,7 +132,7 @@
           onclick={() => (mode = "bisect")}
           title={canBisect ? "" : "Need at least 2 active non-map mods to bisect"}
         >
-          ◆ Run guided bisection ({pool.length} mods)
+          <Icon name="diagnose" size={14} /> Run guided bisection ({pool.length} mods)
         </button>
       {/if}
     {:else if culprits.length > 0}
@@ -165,7 +166,7 @@
 
     {#if cosmeticOnly.length > 0}
       <button class="disclosure" onclick={() => (showCosmetic = !showCosmetic)}>
-        {showCosmetic ? "▾" : "▸"}
+        <Icon name={showCosmetic ? "chevronDown" : "chevronRight"} size={14} />
         {cosmeticOnly.length} mod{cosmeticOnly.length === 1 ? "" : "s"} with cosmetic warnings
         only — safe to ignore
       </button>
@@ -237,7 +238,8 @@
   .sub {
     margin: 2px 0 0;
     color: var(--text-muted);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
+    font-variant-numeric: tabular-nums;
   }
   .lt-head-actions {
     display: flex;
@@ -289,15 +291,15 @@
     border-color: color-mix(in srgb, var(--primary) 35%, transparent);
   }
   .verdict.warn {
-    background: color-mix(in srgb, var(--warn) 14%, transparent);
-    border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+    background: color-mix(in srgb, var(--warn-text) 14%, transparent);
+    border-color: color-mix(in srgb, var(--warn-text) 40%, transparent);
   }
   .verdict.bad {
     background: color-mix(in srgb, var(--danger) 12%, transparent);
     border-color: color-mix(in srgb, var(--danger) 40%, transparent);
   }
   .sec {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted);
@@ -315,7 +317,7 @@
     border-left-color: var(--danger);
   }
   .modrow.warn {
-    border-left-color: var(--warn);
+    border-left-color: var(--warn-text);
   }
   .modrow.muted {
     opacity: 0.7;
@@ -337,7 +339,7 @@
     flex-shrink: 0;
   }
   .pill {
-    font-size: 0.68rem;
+    font-size: var(--fs-xs);
     padding: 1px 7px;
     border-radius: 999px;
     white-space: nowrap;
@@ -348,8 +350,8 @@
     font-weight: 600;
   }
   .pill.warnp {
-    background: color-mix(in srgb, var(--warn) 18%, transparent);
-    color: var(--squash-500);
+    background: color-mix(in srgb, var(--warn-text) 18%, transparent);
+    color: var(--warn-text);
   }
   .pill.benign {
     background: var(--bg);
@@ -358,7 +360,7 @@
   .sample {
     margin-top: 5px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.74rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
@@ -372,7 +374,7 @@
     background: transparent;
     color: var(--text-muted);
     font: inherit;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     padding: 8px 2px;
     cursor: pointer;
     margin-top: 6px;
@@ -386,7 +388,7 @@
   .foot {
     margin-top: 14px;
     color: var(--text-muted);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .link {
     border: none;
@@ -405,7 +407,7 @@
     border: 1px solid var(--primary);
     border-radius: var(--radius-sm);
     background: color-mix(in srgb, var(--primary) 12%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
     font: inherit;
     font-weight: 600;
     cursor: pointer;

@@ -206,6 +206,14 @@ top header bar (the drawer/backdrop must start below it).
 **Every remaining modal opens + closes cleanly:**
 - [ ] `[app]` Crash triage · Guided bisection intro · Bindings map · Multiplayer sync · Filltype bridge · Savegame config editor · Per-mod settings form · Updates · Diagnostics "Export report".
 
+## 16. Look, type & accessibility (design foundations, #224)
+- [ ] `[app]` **Focus ring.** Press Tab through the top bar and then a mod row (the active toggle button, name, row actions) → a visible outline is on every control as you reach it, in both the light and dark themes. Clicking a button with the mouse shows no outline (text fields show it, as they should).
+- [ ] `[app]` **UI size.** Settings → Appearance → UI size: switch to 90%, 110% and 125% → text and icons scale together; nothing clips or overlaps (top bar, rail, mod rows, drawer, Settings). Back to 100% restores the original look, and the choice survives a restart.
+- [ ] `[app]` **Fonts.** Headings (the "Silo" title, panel titles) render in Fraunces and body text in Hanken Grotesk — not Georgia or Segoe UI. Works with the network off.
+- [ ] `[app]` **Icons.** Icons sit beside their words (top bar, Settings, drawer actions); every icon-only button shows a tooltip on hover. No leftover symbol characters (⛓ ⟳ ⚑ ◆ and the like) where an icon should be.
+- [ ] `[app]` **Both themes readable.** In light and in dark, secondary (muted) text, warning text and links are easy to read on their backgrounds; gold is never used for text in the light theme.
+- [ ] `[app]` **Silo mark.** The top bar shows the silo mark (green tile, cream silo, gold sun) in place of the old "S" box, the same size as before, and it looks the same in both themes.
+
 ## Sign-off
 - [ ] All `[app]` items pass.
 - [ ] All `[game]`/`[net]` items pass (or known-limitations noted below).

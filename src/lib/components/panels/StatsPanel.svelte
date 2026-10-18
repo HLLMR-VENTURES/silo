@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../../ui/Icon.svelte";
   import type { ModEntry } from "../../types";
   import { fmtSize } from "../../format";
 
@@ -43,7 +44,7 @@
     <div class="st-tile"><b class="tnum">{libStats.tagged}</b><span>tagged</span></div>
     <div class="st-tile">
       <b class="tnum">{libStats.avgRating ? libStats.avgRating.toFixed(1) : "–"}</b>
-      <span>avg ★ ({libStats.rated})</span>
+      <span>avg <Icon name="favorite" size={11} filled label="stars" /> ({libStats.rated})</span>
     </div>
   </div>
 
@@ -101,12 +102,12 @@
     font-weight: 600;
   }
   .lp-sub {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     font-family: var(--font-ui);
   }
   .hz-group {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -129,10 +130,10 @@
   .st-tile b {
     display: block;
     font-family: var(--font-display);
-    font-size: 20px;
+    font-size: var(--fs-xl);
   }
   .st-tile span {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .st-cat {
@@ -141,12 +142,12 @@
   .st-cat-top {
     display: flex;
     justify-content: space-between;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     margin-bottom: 3px;
   }
   .st-cat-size {
     color: var(--text-muted);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
   }
   .st-bar {
     height: 6px;
@@ -162,7 +163,7 @@
   .st-big {
     display: flex;
     justify-content: space-between;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     padding: 4px 8px;
   }
   .st-big-size {

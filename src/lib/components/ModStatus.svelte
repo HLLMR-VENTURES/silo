@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { ModEntry, LogModHealth, CatalogUpdate } from "../types";
   import { scanLog, catalogCheckUpdates, openExternal } from "../api";
 
@@ -63,7 +64,7 @@
     {@const c = catalog}
     <div class="d-log warn">
       Update available: you have {mod.version ?? "?"}, catalog has <b>{c.latest}</b>{c.source ? ` (${c.source})` : ""}.
-      {#if c.downloadUrl}<button class="d-cat-link" onclick={() => openExternal(c.downloadUrl!)}>Get it ↗</button>{/if}
+      {#if c.downloadUrl}<button class="d-cat-link" onclick={() => openExternal(c.downloadUrl!)}>Get it <Icon name="external" size={12} /></button>{/if}
     </div>
   {:else}
     <div class="d-log ok">Up to date with the catalog{catalog.latest ? ` (${catalog.latest})` : ""}.</div>
@@ -76,7 +77,7 @@
     border-top: 1px solid var(--border);
   }
   .d-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -96,7 +97,7 @@
     opacity: 0.85;
   }
   .d-log.warn {
-    color: var(--squash-500);
+    color: var(--warn-text);
   }
   .d-log.bad {
     color: var(--danger);
@@ -104,7 +105,7 @@
   .d-log-sample {
     margin-top: 4px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;

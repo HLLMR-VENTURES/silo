@@ -2,6 +2,7 @@
   // Multiplayer mod-set sync: export a manifest of your active set to share, or verify
   // your set against a friend's — turning FS's "mod mismatch" join error into a fix-list.
   // (Sharing curated mod sets as a link lives in Collections, a separate panel.)
+  import Icon from "../ui/Icon.svelte";
   import { mpExport, mpVerify } from "../api";
   import type { MpModRef, MpVerifyReport } from "../types";
 
@@ -59,7 +60,7 @@
         that's the #1 "can't join" cause. Match sets here instead of guessing.
       </p>
     </div>
-    <button class="x" title="Close" onclick={onClose}>✕</button>
+    <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
   </div>
 
   {#if busy}<div class="busy">{busy}</div>{/if}
@@ -157,7 +158,7 @@
   .sub {
     margin: 4px 0 0;
     color: var(--text-muted);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     line-height: 1.5;
     max-width: 52ch;
   }
@@ -188,7 +189,7 @@
   }
   .ok-note {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
     border-radius: var(--radius-sm);
     padding: 8px 12px;
     margin-bottom: 10px;
@@ -241,7 +242,7 @@
   }
   .caveat {
     margin: 12px 0 0;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .verdict {
@@ -260,7 +261,7 @@
     border-color: color-mix(in srgb, var(--danger) 35%, transparent);
   }
   .sec {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -280,11 +281,12 @@
   .mn {
     color: var(--text);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .rt {
     color: var(--text-muted);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
 </style>

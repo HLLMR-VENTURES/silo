@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { CurationRow } from "../types";
   import { setCuration, setTags } from "../api";
 
@@ -58,7 +59,7 @@
   <div class="d-label">Rating</div>
   <div class="d-stars">
     {#each [1, 2, 3, 4, 5] as s (s)}
-      <button class="star" class:on={curation.rating >= s} onclick={() => setRating(s)} aria-label={`${s} stars`}>★</button>
+      <button class="star" class:on={curation.rating >= s} onclick={() => setRating(s)} aria-label={`${s} stars`}><Icon name="favorite" size={22} filled={curation.rating >= s} /></button>
     {/each}
   </div>
 </div>
@@ -69,7 +70,7 @@
     {#each tags as t (t)}
       <span class="d-tag">
         <button class="d-tag-name" onclick={() => onFilterTag(t)} title="Filter by this tag">{t}</button>
-        <button class="d-tag-x" onclick={() => removeTag(t)} aria-label="Remove tag">✕</button>
+        <button class="d-tag-x" onclick={() => removeTag(t)} title="Remove tag" aria-label="Remove tag"><Icon name="close" size={12} /></button>
       </span>
     {/each}
     <input
@@ -93,7 +94,7 @@
     border-top: 1px solid var(--border);
   }
   .d-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -108,12 +109,12 @@
     border: none;
     background: transparent;
     color: var(--border);
-    font-size: 22px;
-    line-height: 1;
+    display: inline-grid;
+    place-items: center;
     padding: 0 2px;
   }
   .star.on {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .d-tags {
     display: flex;
@@ -133,7 +134,7 @@
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 4px 4px 4px 10px;
   }
@@ -141,7 +142,7 @@
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 4px 8px 4px 4px;
     opacity: 0.7;
   }
@@ -154,7 +155,7 @@
     color: var(--text);
     border-radius: 999px;
     padding: 5px 12px;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-family: inherit;
     width: 100px;
   }
@@ -168,6 +169,6 @@
     color: var(--text);
     padding: 8px 10px;
     font-family: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
   }
 </style>

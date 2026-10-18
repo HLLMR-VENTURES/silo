@@ -4,6 +4,7 @@
   // never handles Giants credentials or automates a review; the rating shown comes from
   // the catalog aggregate (SiloAPI ingests it politely, server-side), and the action
   // sends the user to the real page to log in and rate. This is the ethical line.
+  import Icon from "../ui/Icon.svelte";
   import { openExternal } from "../api";
 
   let {
@@ -26,14 +27,14 @@
   <div class="src-head">
     <span class="src-name">ModHub</span>
     <button class="src-link" onclick={() => openExternal(sourceUrl)} title="Open on ModHub">
-      farming-simulator.com ↗
+      farming-simulator.com <Icon name="external" size={12} />
     </button>
   </div>
 
   <div class="src-nums tnum">
     {#if rating != null}
       <span title="Community rating on ModHub">
-        ⭐ {rating.toFixed(1)}{#if ratingCount}<span class="sub">&nbsp;({fmt(ratingCount)})</span>{/if}
+        <Icon name="favorite" size={13} filled label="rating" /> {rating.toFixed(1)}{#if ratingCount}<span class="sub">&nbsp;({fmt(ratingCount)})</span>{/if}
       </span>
     {:else}
       <span class="muted">Rating not synced yet</span>
@@ -41,7 +42,7 @@
   </div>
 
   <div class="src-actions">
-    <button class="act" onclick={() => openExternal(sourceUrl)}>Rate on ModHub ↗</button>
+    <button class="act" onclick={() => openExternal(sourceUrl)}>Rate on ModHub <Icon name="external" size={12} /></button>
   </div>
   <p class="why">Reviews are left on ModHub — Silo links you there to sign in and rate.</p>
 </div>
@@ -64,13 +65,13 @@
   }
   .src-name {
     font-weight: 700;
-    font-size: 13px;
+    font-size: var(--fs-sm);
   }
   .src-link {
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 0;
     cursor: pointer;
@@ -85,7 +86,7 @@
   .src-nums {
     display: flex;
     gap: 14px;
-    font-size: 13px;
+    font-size: var(--fs-sm);
     color: var(--text);
     flex-wrap: wrap;
   }
@@ -94,7 +95,7 @@
   }
   .muted {
     color: var(--text-muted);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
   }
   .src-actions {
     display: flex;
@@ -107,17 +108,17 @@
     color: var(--text);
     padding: 6px 12px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
   .act:hover {
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .why {
     margin: 0;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.45;
   }

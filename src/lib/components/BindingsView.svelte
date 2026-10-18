@@ -3,6 +3,7 @@
   // for every device, searchable, with inputs that drive multiple actions highlighted
   // for review. A view, not a verdict — reused inputs are usually legitimate context
   // bindings, so we surface them and let the player decide.
+  import Icon from "../ui/Icon.svelte";
   import { onMount } from "svelte";
   import { scanBindings } from "../api";
   import type { BindingReport } from "../types";
@@ -69,7 +70,7 @@
       {/if}
     </div>
     <div class="bv-head-actions">
-      <button class="x" title="Close" onclick={onClose}>✕</button>
+      <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
     </div>
   </div>
 
@@ -150,7 +151,8 @@
   .sub {
     margin: 2px 0 0;
     color: var(--text-muted);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
+    font-variant-numeric: tabular-nums;
   }
   .x {
     border: none;
@@ -203,7 +205,7 @@
     margin-bottom: 8px;
   }
   .sec {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted);
@@ -236,8 +238,8 @@
   .key,
   .b-key {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
-    color: var(--primary);
+    font-size: var(--fs-sm);
+    color: var(--primary-text);
     white-space: nowrap;
   }
   .grid {

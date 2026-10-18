@@ -7,6 +7,7 @@
   //
   // Top line:    category (parent · child) · search · sort · direction
   // Bottom line: facets (in `facetOrder`) · year · Clear all
+  import Icon from "../ui/Icon.svelte";
 
   export interface CatChild {
     name: string;
@@ -164,7 +165,7 @@
         : "Sort direction — coming with a catalog update (silo-api)"}
       aria-label="Toggle sort direction"
     >
-      {sortDir === "desc" ? "↓" : "↑"}
+      <Icon name={sortDir === "desc" ? "arrowDown" : "arrowUp"} size={14} />
     </button>
   </div>
 
@@ -198,7 +199,7 @@
         />
       {/if}
       {#if showClear && filterCount > 0}
-        <button class="clear-filters" onclick={() => onClear?.()}>Clear all ✕</button>
+        <button class="clear-filters" onclick={() => onClear?.()}>Clear all <Icon name="close" size={13} /></button>
       {/if}
     </div>
   {/if}
@@ -229,7 +230,7 @@
     cursor: pointer;
   }
   .fb-sel.on {
-    color: var(--primary);
+    color: var(--primary-text);
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
     background: color-mix(in srgb, var(--primary) 10%, transparent);
     font-weight: 600;
@@ -245,15 +246,11 @@
     font: inherit;
     font-size: 0.85rem;
   }
-  .fb-search:focus {
-    outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
-    outline-offset: 1px;
-  }
   /* Sort is ordering, not filtering — contrasting tint (matches the app's primary accent). */
   .fb-sort {
     border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
     background: color-mix(in srgb, var(--primary) 14%, var(--surface-raised));
-    color: var(--primary);
+    color: var(--primary-text);
     font-weight: 700;
   }
   .fb-sort:hover {
@@ -289,13 +286,13 @@
     background: transparent;
     color: var(--text-muted);
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     font-weight: 600;
     cursor: pointer;
     padding: 6px;
   }
   .clear-filters:hover {
-    color: var(--primary);
+    color: var(--primary-text);
     text-decoration: underline;
   }
 </style>

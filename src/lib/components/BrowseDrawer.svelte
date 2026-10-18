@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { CatalogModDetail, ModSourceOption } from "../types";
   import { resizable } from "../resize";
   import GithubCard from "./GithubCard.svelte";
@@ -69,7 +70,7 @@
         {/if}
         {#if d.techName}<div class="dh-tech tnum">{d.techName}</div>{/if}
       </div>
-      <button class="drawer-x" title="Close" onclick={onClose}>✕</button>
+      <button class="drawer-x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
     </div>
     <div class="drawer-body">
       {#if cover}
@@ -80,7 +81,7 @@
         {#if d.rating != null}
           <dt>Rating</dt>
           <dd class="tnum">
-            ⭐ {d.rating.toFixed(1)}{#if d.ratingCount}
+            <Icon name="favorite" size={13} filled label="rating" /> {d.rating.toFixed(1)}{#if d.ratingCount}
               &nbsp;({fmtCount(d.ratingCount)}){/if}
           </dd>
         {/if}
@@ -126,9 +127,9 @@
                   {#if hasLocally(d)}
                     In library
                   {:else if s.installable}
-                    {installingId === d.id ? "Installing…" : "Install ⬇"}
+                    {#if installingId === d.id}Installing…{:else}Install <Icon name="download" size={13} />{/if}
                   {:else}
-                    Open page ↗
+                    Open page <Icon name="external" size={13} />
                   {/if}
                 </button>
               </div>
@@ -181,7 +182,7 @@
           <span>Already in your library</span>
           {#if d.techName && onFindInLibrary}
             <button class="find-lib-btn" onclick={() => onFindInLibrary?.(d.techName!)}>
-              ⌕ Find in Library ↗
+              <Icon name="search" size={13} /> Find in Library <Icon name="external" size={13} />
             </button>
           {/if}
         </div>
@@ -234,18 +235,18 @@
   }
   .dh-title {
     font-family: var(--font-display);
-    font-size: 18px;
+    font-size: var(--fs-xl);
     font-weight: 600;
     line-height: 1.2;
     color: var(--text);
   }
   .dh-sub {
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     margin-top: 2px;
   }
   .dh-tech {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     opacity: 0.75;
     margin-top: 2px;
@@ -282,7 +283,7 @@
     margin: 0 0 12px;
     padding: 10px 0;
     border-top: 1px solid var(--border);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
   }
   .facts dt {
     color: var(--text-muted);
@@ -309,7 +310,7 @@
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     font-weight: 600;
     padding: 0;
     margin: 0 0 14px;
@@ -320,7 +321,7 @@
   }
   /* Match the Library drawer's section labels so both read as one system. */
   .drawer-sec {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     font-weight: 700;
@@ -334,7 +335,7 @@
     margin: 0 0 14px;
   }
   .dtag {
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
@@ -378,7 +379,7 @@
     color: var(--text);
   }
   .src-ver {
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .src-action {
@@ -388,7 +389,7 @@
     background: var(--surface);
     color: var(--text-muted);
     font: inherit;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     padding: 4px 9px;
     cursor: pointer;
     white-space: nowrap;
@@ -409,12 +410,12 @@
   /* Why this source can't be installed directly — names who's responsible. */
   .src-why {
     margin: 6px 0 0;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     line-height: 1.4;
     color: var(--text-muted);
   }
   .drawer-hint {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     color: var(--text-muted);
     background: var(--bg);
@@ -436,7 +437,7 @@
   .find-lib-btn {
     border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--border));
     background: var(--surface);
-    color: var(--primary);
+    color: var(--primary-text);
     font: inherit;
     font-weight: 600;
     padding: 7px 14px;

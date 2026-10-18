@@ -1,6 +1,7 @@
 <script lang="ts">
   // "Where it came from" (#196): the page the user downloaded this mod from. Silo only keeps
   // the address. It never requests the page; Open page hands it to the user's browser.
+  import Icon from "../ui/Icon.svelte";
   import type { ModEntry, SourceRow } from "../types";
   import { setModSource, getModSources, markSourceChecked, openExternal } from "../api";
   import { sourceHost, checkedDate } from "../sources";
@@ -108,7 +109,7 @@
       <button class="src-host" title={source.url} onclick={() => openExternal(source.url)}>
         {sourceHost(source.url)}
       </button>
-      <button class="src-open" onclick={() => openExternal(source.url)}>Open page ↗</button>
+      <button class="src-open" onclick={() => openExternal(source.url)}>Open page <Icon name="external" size={12} /></button>
       <button class="src-btn" onclick={startChange}>Change</button>
       <button class="src-btn" onclick={remove}>Remove</button>
     </div>
@@ -129,7 +130,7 @@
     border-top: 1px solid var(--border);
   }
   .d-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -148,7 +149,7 @@
     color: var(--text);
     border-radius: var(--radius-sm);
     padding: 7px 10px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-family: inherit;
   }
   .src-btn {
@@ -158,12 +159,12 @@
     color: var(--text);
     padding: 7px 12px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .src-btn:hover:not(:disabled) {
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .src-btn:disabled {
     opacity: 0.5;
@@ -182,7 +183,7 @@
     border: none;
     background: transparent;
     color: var(--text);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 0;
     margin-right: 4px;
@@ -199,20 +200,20 @@
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .src-open:hover {
     text-decoration: underline;
   }
   .src-when {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     margin-right: 4px;
   }
   .src-help {
     margin-top: 6px;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .src-note {
@@ -221,6 +222,6 @@
   .src-err {
     margin-top: 8px;
     color: var(--danger);
-    font-size: 12px;
+    font-size: var(--fs-xs);
   }
 </style>

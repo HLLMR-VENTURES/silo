@@ -1,6 +1,7 @@
 <script lang="ts">
   // Slim toolbar above the list: the "activate everything in view" master switch, the active
   // tag chip, and the shown count. Category + sort now live in the shared FilterBar.
+  import Icon from "../../ui/Icon.svelte";
   let {
     selectedTag,
     shownCount,
@@ -43,7 +44,7 @@
   </label>
   {#if selectedTag}
     <button class="crumb-tag" onclick={onClearTag} title="Clear tag filter">
-      #{selectedTag} ✕
+      #{selectedTag} <Icon name="close" size={12} />
     </button>
   {/if}
   <span class="tb-spacer"></span>
@@ -53,19 +54,21 @@
       class="vt"
       class:on={libView === "tiles"}
       title="Tile view"
+      aria-label="Tile view"
       aria-pressed={libView === "tiles"}
       onclick={() => (libView = "tiles")}
     >
-      ▦
+      <Icon name="grid" size={14} />
     </button>
     <button
       class="vt"
       class:on={libView === "rows"}
       title="List view"
+      aria-label="List view"
       aria-pressed={libView === "rows"}
       onclick={() => (libView = "rows")}
     >
-      ☰
+      <Icon name="list" size={14} />
     </button>
   </div>
 </div>
@@ -82,13 +85,13 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-muted);
     cursor: pointer;
   }
   .crumb-count {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .crumb-tag {
@@ -97,7 +100,7 @@
     color: var(--info);
     border-radius: 999px;
     padding: 3px 10px;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
@@ -126,8 +129,8 @@
     width: 26px;
     height: 22px;
     border-radius: 5px;
-    font-size: 13px;
-    line-height: 1;
+    display: inline-grid;
+    place-items: center;
     cursor: pointer;
   }
   .vt:hover {
@@ -135,6 +138,6 @@
   }
   .vt.on {
     background: color-mix(in srgb, var(--primary) 16%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
   }
 </style>

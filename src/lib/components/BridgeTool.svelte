@@ -1,6 +1,7 @@
 <script lang="ts">
   // Filltype compatibility bridge: generate a companion mod that adds a custom fill type
   // into the categories your equipment accepts — the "nothing can haul my sugar beets" fix.
+  import Icon from "../ui/Icon.svelte";
   import { generateBridge } from "../api";
 
   interface Props {
@@ -93,7 +94,7 @@
         mod that adds it to the categories your equipment accepts — no editing other mods.
       </p>
     </div>
-    <button class="x" title="Close" onclick={onClose}>✕</button>
+    <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
   </div>
 
   {#if done}
@@ -128,8 +129,8 @@
         <div class="grp-label">{g.label}</div>
         <div class="opts">
           {#each g.cats as c (c.id)}
-            <button class="opt" class:on={selected.has(c.id)} onclick={() => toggle(c.id)}>
-              {selected.has(c.id) ? "✓" : "+"} {c.label}
+            <button class="opt" class:on={selected.has(c.id)} aria-pressed={selected.has(c.id)} onclick={() => toggle(c.id)}>
+              {#if selected.has(c.id)}<Icon name="check" size={13} />{:else}+{/if} {c.label}
             </button>
           {/each}
         </div>
@@ -176,7 +177,7 @@
   .sub {
     margin: 4px 0 0;
     color: var(--text-muted);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     line-height: 1.5;
     max-width: 56ch;
   }
@@ -216,7 +217,7 @@
   .field label,
   .lbl {
     display: block;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -238,7 +239,7 @@
   }
   .hint {
     margin: 5px 0 0;
-    font-size: 0.76rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.45;
   }
@@ -250,9 +251,9 @@
   }
   .chip {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--soil-700);
+    color: var(--earth-text);
     padding: 2px 8px;
     border-radius: 999px;
   }
@@ -260,7 +261,7 @@
     margin-bottom: 10px;
   }
   .grp-label {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text);
     font-weight: 600;
     margin-bottom: 5px;
@@ -277,18 +278,18 @@
     background: var(--surface);
     color: var(--text-muted);
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     cursor: pointer;
   }
   .opt.on {
     border-color: var(--primary);
     background: color-mix(in srgb, var(--primary) 14%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
     font-weight: 600;
   }
   .caveat {
     margin-top: 14px;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.5;
     border-left: 2px solid var(--border);

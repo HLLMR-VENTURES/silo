@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../../ui/Icon.svelte";
   import type { UpdateRow } from "../../types";
   import { checkedDate, type CheckYourselfRow } from "../../sources";
 
@@ -79,7 +80,7 @@
             </div>
           </div>
           <div class="up-acts">
-            <button class="sg-make" onclick={() => onOpenSource(s)}>Open page ↗</button>
+            <button class="sg-make" onclick={() => onOpenSource(s)}>Open page <Icon name="external" size={12} /></button>
             <button class="sg-make" onclick={() => onMarkChecked(s)}>I checked it</button>
           </div>
         </div>
@@ -120,18 +121,18 @@
     font-weight: 600;
   }
   .lp-sub {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     font-family: var(--font-ui);
   }
   .lp-empty {
     padding: 10px 8px 14px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.5;
   }
   .hz-group {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -147,12 +148,13 @@
   }
   .hz-name {
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-sm);
   }
   .hz-detail {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     margin-top: 2px;
+    font-variant-numeric: tabular-nums;
   }
   .up-row {
     display: flex;
@@ -161,7 +163,7 @@
     gap: 12px;
   }
   .up-new {
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .up-acts {
     display: flex;
@@ -169,13 +171,13 @@
     flex: 0 0 auto;
   }
   .up-note {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     padding: 0 8px 6px;
     line-height: 1.5;
   }
   .up-src {
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -190,10 +192,10 @@
     flex: 0 0 auto;
     border: 1px solid var(--border);
     background: var(--bg);
-    color: var(--primary);
+    color: var(--primary-text);
     padding: 7px 12px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .sg-make:hover:not(:disabled) {

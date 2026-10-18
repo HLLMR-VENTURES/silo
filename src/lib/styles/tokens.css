@@ -1,6 +1,9 @@
-/* Silo design tokens — "Golden Hour on the Farm" (see docs/DESIGN.md).
-   Warm neutrals (soil/linen/loam), field green primary, harvest gold accent,
-   sky blue info, barn red danger. Light = daybreak, dark = warm dusk. */
+/* Silo design tokens v2 — "Golden Hour on the Farm" (see docs/DESIGN.md).
+   Warm neutrals, field green primary, harvest gold accent, sky blue info, barn red danger.
+   Light = Daybreak, dark = warm Dusk. Every text/background pairing in the semantic slots is
+   contrast-checked to WCAG AA (4.5:1 body text, 3:1 large text and UI edges).
+   Play is field green (--primary); gold (--accent) is the scarce attention color — use it
+   sparingly so it keeps meaning "look here". Views use the semantic slots, never the ramps. */
 
 :root {
   /* Brand — field green */
@@ -32,15 +35,88 @@
   --soil-500: #8a6a45;
   --soil-700: #5e472e;
 
-  --radius: 10px;
-  --radius-sm: 7px;
-  --gap: 8px;
-  --font-ui: "Hanken Grotesk", "Inter", system-ui, -apple-system, Segoe UI, Roboto,
-    sans-serif;
-  --font-display: "Fraunces", Georgia, serif;
+  /* Soft tints — resolve per theme because the referenced slots do. */
+  --info-soft: color-mix(in srgb, var(--info) 12%, var(--surface));
+  --success-soft: color-mix(in srgb, var(--success) 12%, var(--surface));
+  --warn-soft: color-mix(in srgb, var(--warn-text) 12%, var(--surface));
+  --danger-soft: color-mix(in srgb, var(--danger) 12%, var(--surface));
+  --accent-soft: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  --selection: color-mix(in srgb, var(--accent) 40%, transparent);
 
+  /* Spacing */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+  --sp-8: 64px;
+  --gap: 8px;
+
+  /* Radius */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+
+  /* Elevation */
+  --e1: 0 0 0 1px var(--border), 0 1px 2px rgb(0 0 0 / 0.06);
+  --e2: 0 8px 24px rgb(0 0 0 / 0.12);
+  --e3: 0 16px 48px rgb(0 0 0 / 0.18);
+
+  /* Layers */
+  --z-rail: 10;
+  --z-header: 20;
+  --z-drawer: 30;
+  --z-popover: 40;
+  --z-scrim: 50;
+  --z-dialog: 60;
+  --z-toast: 70;
+  --z-tooltip: 80;
+
+  /* Layout */
+  --rail-w: 216px;
+  --rail-w-collapsed: 64px;
+  --header-h: 56px;
+  --content-max: 1280px;
+  --drawer-w: 440px;
+
+  /* Motion */
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 240ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+
+  /* Type scale (rem, so it follows the UI size setting) */
+  --fs-xs: max(0.75rem, 12px); /* 12px floor holds at 90% UI size */
+  --lh-xs: 1.35;
+  --fs-sm: max(0.8125rem, 12px);
+  --lh-sm: 1.4;
+  --fs-md: 0.875rem;
+  --lh-md: 1.45;
+  --fs-lg: 1rem;
+  --lh-lg: 1.4;
+  --fs-xl: 1.25rem;
+  --lh-xl: 1.3;
+  --fs-2xl: 1.75rem;
+  --lh-2xl: 1.2;
+  --fs-3xl: 2.25rem;
+  --lh-3xl: 1.15;
+
+  /* Fonts (bundled — see fonts.css) */
+  --font-ui: "Hanken Grotesk", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Fraunces", Georgia, serif;
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+
+  /* legacy names; removed as views adopt the new slots (P2) */
+  --text-muted: var(--muted);
+  --surface-raised: var(--raised);
+  --warn: var(--warn-text);
+  --radius: var(--r-md);
+  --radius-sm: var(--r-sm);
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06), 0 2px 8px rgba(0, 0, 0, 0.05);
-  --shadow-2: 0 4px 20px rgba(0, 0, 0, 0.12);
+  --shadow-2: var(--e2);
 }
 
 /* Light theme — Daybreak */
@@ -48,17 +124,30 @@
 :root[data-theme="light"] {
   --bg: #f6f3ec;
   --surface: #fcfaf4;
-  --surface-raised: #ffffff;
+  --raised: #ffffff;
+  --sunken: #efeadf;
   --border: #e4dece;
+  --border-strong: #8f8875;
   --text: #2a2a22;
-  --text-muted: #6b6a5c;
-  --primary: var(--green-600);
-  --primary-hover: var(--green-700);
+  --muted: #5e5d50;
+  --primary: #4a7330;
+  --primary-hover: #395a25;
+  --primary-text: #3f6529;
   --on-primary: #ffffff;
-  --accent: var(--gold-500);
-  --info: var(--sky-600);
-  --warn: var(--squash-500);
-  --danger: var(--barn-500);
+  --accent: #e3b23c;
+  --accent-text: #8a5f12;
+  --on-accent: #2a2a22;
+  --info: #2f6893;
+  --success: #3f6529;
+  --warn-text: #94560a;
+  --danger: #a63d2c;
+  --on-danger: #ffffff;
+  --earth: #8a6a45;
+  --earth-strong: #5e472e;
+  --earth-text: #5e472e;
+  --on-earth: #fcfaf4;
+  --focus: #2f5a1d;
+  --scrim: rgb(20 22 16 / 0.45);
   color-scheme: light;
 }
 
@@ -67,17 +156,30 @@
   :root:not([data-theme="light"]) {
     --bg: #171a14;
     --surface: #1f231c;
-    --surface-raised: #282d24;
+    --raised: #282d24;
+    --sunken: #13160f;
     --border: #39402f;
+    --border-strong: #767e66;
     --text: #edebe0;
-    --text-muted: #a8a897;
-    --primary: var(--green-500);
-    --primary-hover: var(--green-300);
+    --muted: #adac9c;
+    --primary: #7fae55;
+    --primary-hover: #9cc06e;
+    --primary-text: #9cc06e;
     --on-primary: #12180e;
-    --accent: var(--gold-500);
-    --info: var(--sky-500);
-    --warn: var(--squash-500);
-    --danger: var(--barn-500);
+    --accent: #e3b23c;
+    --accent-text: #f2d26b;
+    --on-accent: #2a2a22;
+    --info: #8cbde0;
+    --success: #9cc06e;
+    --warn-text: #f0b45c;
+    --danger: #ee9481;
+    --on-danger: #1a0e0b;
+    --earth: #8a6a45;
+    --earth-strong: #6e5437;
+    --earth-text: #d2b48c;
+    --on-earth: #fcfaf4;
+    --focus: #f2d26b;
+    --scrim: rgb(20 22 16 / 0.6);
     color-scheme: dark;
   }
 }
@@ -85,16 +187,37 @@
 :root[data-theme="dark"] {
   --bg: #171a14;
   --surface: #1f231c;
-  --surface-raised: #282d24;
+  --raised: #282d24;
+  --sunken: #13160f;
   --border: #39402f;
+  --border-strong: #767e66;
   --text: #edebe0;
-  --text-muted: #a8a897;
-  --primary: var(--green-500);
-  --primary-hover: var(--green-300);
+  --muted: #adac9c;
+  --primary: #7fae55;
+  --primary-hover: #9cc06e;
+  --primary-text: #9cc06e;
   --on-primary: #12180e;
-  --accent: var(--gold-500);
-  --info: var(--sky-500);
-  --warn: var(--squash-500);
-  --danger: var(--barn-500);
+  --accent: #e3b23c;
+  --accent-text: #f2d26b;
+  --on-accent: #2a2a22;
+  --info: #8cbde0;
+  --success: #9cc06e;
+  --warn-text: #f0b45c;
+  --danger: #ee9481;
+  --on-danger: #1a0e0b;
+  --earth: #8a6a45;
+  --earth-strong: #6e5437;
+  --earth-text: #d2b48c;
+  --on-earth: #fcfaf4;
+  --focus: #f2d26b;
+  --scrim: rgb(20 22 16 / 0.6);
   color-scheme: dark;
+}
+
+/* Higher contrast on request: visible borders. The tripled :root outranks the theme blocks
+   above (`:root[data-theme]`, `:root:not(...)`), which also set --border. Soft tints stay at 12%. */
+@media (prefers-contrast: more) {
+  :root:root:root {
+    --border: var(--border-strong);
+  }
 }

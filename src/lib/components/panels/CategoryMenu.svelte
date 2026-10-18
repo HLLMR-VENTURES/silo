@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../../ui/Icon.svelte";
   let {
     categories,
     x,
@@ -32,7 +33,7 @@
     </button>
   {/each}
   <button class="menu-item reset" onclick={onReset}>
-    ↺ Reset to auto
+    <Icon name="undo" size={13} /> Reset to auto
   </button>
 </div>
 
@@ -56,7 +57,7 @@
     scrollbar-width: thin;
   }
   .menu-head {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted);
@@ -71,11 +72,11 @@
     color: var(--text);
     padding: 8px 10px;
     border-radius: var(--radius-sm);
-    font-size: 13px;
+    font-size: var(--fs-sm);
   }
   .menu-item:hover {
     background: color-mix(in srgb, var(--primary) 14%, transparent);
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .menu-item.reset {
     margin-top: 4px;

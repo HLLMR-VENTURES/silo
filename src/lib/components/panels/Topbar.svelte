@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Icon from "../../ui/Icon.svelte";
+  import SiloMark from "../../ui/SiloMark.svelte";
   let {
     topbarH = $bindable(),
     view,
@@ -78,7 +80,7 @@
   <!-- Main row: identity + view tabs on the left, app actions on the right. -->
   <div class="topbar-main">
     <div class="brand">
-      <div class="logo">S</div>
+      <SiloMark variant="tile" size={40} label={false} />
       <div>
         <h1>
           Silo{#if appVer}<span class="ver" title="Silo version {appVer}">v{appVer}</span>{/if}
@@ -108,7 +110,7 @@
         {#if updating}
           {updatePct != null ? `Updating… ${updatePct}%` : "Updating…"}
         {:else}
-          ⬆ Update to {update.version}
+          <Icon name="update" size={14} /> Update to {update.version}
         {/if}
       </button>
     {/if}
@@ -130,7 +132,7 @@
         onclick={onCheckUpdates}
         disabled={!!busy || updateChecking}
       >
-        {updateChecking ? "Checking…" : "⟳ Updates"}
+        {#if updateChecking}Checking…{:else}<Icon name="update" size={14} /> Updates{/if}
       </button>
     {/if}
     <button class="btn" onclick={onRescan} disabled={scanning || !!busy}>
@@ -145,7 +147,7 @@
         onclick={onLaunch}
         disabled={!!busy || launchBlocked}
       >
-        ▶ Launch{activeCount ? ` (${activeCount})` : ""}
+        <Icon name="play" size={14} /> Launch{activeCount ? ` (${activeCount})` : ""}
       </button>
     {/if}
     <button
@@ -156,7 +158,7 @@
       onclick={onToggleSettings}
       disabled={!!busy}
     >
-      ⚙
+      <Icon name="settings" size={18} />
     </button>
   </div>
 
@@ -175,7 +177,7 @@
       disabled={!!busy}
     >
       {#if activeLoadoutName !== null}
-        ● {activeLoadoutName}
+        <Icon name="dot" size={12} /> {activeLoadoutName}
       {:else}
         Loadouts
       {/if}
@@ -242,34 +244,22 @@
     align-items: center;
     gap: 12px;
   }
-  .logo {
-    width: 40px;
-    height: 40px;
-    border-radius: var(--radius);
-    display: grid;
-    place-items: center;
-    font-family: var(--font-display);
-    font-weight: 600;
-    font-size: 22px;
-    color: var(--on-primary);
-    background: linear-gradient(135deg, var(--green-500), var(--green-700));
-    box-shadow: var(--shadow-1);
-  }
   h1 {
-    font-size: 20px;
+    font-size: var(--fs-xl);
     line-height: 1.1;
   }
   .ver {
     margin-left: 6px;
     font-family: var(--font-mono, monospace);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-muted);
     vertical-align: super;
+    font-variant-numeric: tabular-nums;
   }
   .tagline {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .btn {
@@ -321,11 +311,11 @@
   }
   .icon-btn {
     padding: 9px 12px;
-    font-size: 16px;
-    line-height: 1;
+    display: inline-grid;
+    place-items: center;
   }
   .icon-btn.on {
-    color: var(--primary);
+    color: var(--primary-text);
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
   }
   .launch-btn {
@@ -333,14 +323,14 @@
   }
   .update-btn {
     font-weight: 700;
-    color: var(--gold-700);
-    border-color: color-mix(in srgb, var(--gold-500) 55%, var(--border));
-    background: color-mix(in srgb, var(--gold-500) 14%, var(--surface-raised));
+    color: var(--accent-text);
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+    background: color-mix(in srgb, var(--accent) 14%, var(--surface-raised));
   }
   .update-btn:hover:not(:disabled) {
-    color: var(--gold-700);
-    border-color: var(--gold-500);
-    background: color-mix(in srgb, var(--gold-500) 22%, var(--surface-raised));
+    color: var(--accent-text);
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 22%, var(--surface-raised));
   }
   .btn:hover:not(:disabled):not(.primary) {
     color: var(--text);
@@ -352,6 +342,6 @@
   }
   .loadout-btn.on {
     border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
-    color: var(--primary);
+    color: var(--primary-text);
   }
 </style>

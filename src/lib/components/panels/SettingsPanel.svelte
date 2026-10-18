@@ -1,9 +1,11 @@
 <script lang="ts">
+  import Icon from "../../ui/Icon.svelte";
   import { onMount } from "svelte";
   import type { GameInfo } from "../../types";
   import { openKnownFolder, secretStorageSecure } from "../../api";
   import type { ModsRootStatus, ArchiveStatus } from "../../api";
   import GitHubAuth from "../GitHubAuth.svelte";
+  import { UI_SCALES, parseUiScale, type UiScale } from "../../uiScale";
 
   // When the OS keychain is unavailable, connecting an account falls back to storing the
   // token in the local DB unencrypted — warn before the user connects rather than silently.
@@ -18,6 +20,7 @@
 
   let {
     theme,
+    uiScale,
     roots,
     gameInfo,
     userDir,
@@ -29,6 +32,7 @@
     busy,
     scanning,
     onSetTheme,
+    onSetUiScale,
     onOpenGameGraphics,
     onExportReport,
     onCopyDiagnostics,
@@ -49,6 +53,7 @@
     onArchiveDefault,
   }: {
     theme: "system" | "light" | "dark";
+    uiScale: UiScale;
     roots: string[];
     gameInfo: GameInfo | null;
     userDir: string | null;
@@ -60,6 +65,7 @@
     busy: string | null;
     scanning: boolean;
     onSetTheme: (t: "system" | "light" | "dark") => void;
+    onSetUiScale: (s: UiScale) => void;
     onOpenGameGraphics: () => void;
     onExportReport: () => void;
     onCopyDiagnostics: () => void;
@@ -119,6 +125,19 @@
         </button>
       {/each}
     </div>
+    <div class="set-row ui-size">
+      <label class="set-label" for="set-ui-size">UI size</label>
+      <select
+        id="set-ui-size"
+        class="set-select"
+        value={String(uiScale)}
+        onchange={(e) => onSetUiScale(parseUiScale(e.currentTarget.value))}
+      >
+        {#each UI_SCALES as s (s)}
+          <option value={String(s)}>{Math.round(s * 100)}%</option>
+        {/each}
+      </select>
+    </div>
   </div>
 
   <div class="set-section">
@@ -126,7 +145,7 @@
       <div class="set-label">Mods folder</div>
       {#if roots.length}
         <button class="set-link" onclick={() => openFolder("modsFolder")}>
-          Open ↗
+          Open <Icon name="external" size={12} />
         </button>
       {/if}
       <button class="set-link" disabled={locked} title={lockTitle} onclick={onChangeModsFolder}>
@@ -176,7 +195,7 @@
       <div class="set-label">Library archive</div>
       {#if archive?.path && archive.available}
         <button class="set-link" onclick={() => openFolder("archive")}>
-          Open ↗
+          Open <Icon name="external" size={12} />
         </button>
       {/if}
       <button class="set-link" disabled={locked || !archive?.path} title={lockTitle} onclick={onChangeArchive}>
@@ -217,7 +236,7 @@
       <div class="set-label">Game</div>
       {#if gameInfo}
         <button class="set-link" onclick={() => openFolder("gameInstall")}>
-          Open ↗
+          Open <Icon name="external" size={12} />
         </button>
       {/if}
     </div>
@@ -235,7 +254,7 @@
     <div class="set-section">
       <div class="set-row">
         <div class="set-label">Graphics &amp; performance</div>
-        <button class="set-link" onclick={onOpenGameGraphics}>Edit game.xml ↗</button>
+        <button class="set-link" onclick={onOpenGameGraphics}>Edit game.xml <Icon name="external" size={12} /></button>
       </div>
       <div class="set-hint">
         Tune graphics settings (presets: Performance / Balanced / Quality) without launching the game.
@@ -246,7 +265,7 @@
   {#if !keychainOk}
     <div class="set-section">
       <div class="keychain-warn">
-        ⚠ No OS keychain is available on this machine, so a connected GitHub token
+        <Icon name="problem" size={13} /> No OS keychain is available on this machine, so a connected GitHub token
         would be stored <strong>unencrypted</strong> in Silo's local database. Connect an account
         only if you're comfortable with that; disconnecting removes the stored token.
       </div>
@@ -261,7 +280,7 @@
   <div class="set-section">
     <div class="set-row">
       <div class="set-label">Diagnostics</div>
-      <button class="set-link" onclick={onExportReport}>Export report ↗</button>
+      <button class="set-link" onclick={onExportReport}>Export report <Icon name="external" size={12} /></button>
       <button class="set-link" onclick={onCopyDiagnostics}>Copy diagnostics</button>
     </div>
     <div class="set-hint">
@@ -303,7 +322,7 @@
         Organize {unorganizedCount > 0 ? unorganizedCount : "library"}
       </button>
       <button class="set-btn" onclick={onRebuild} disabled={!!busy || scanning}>
-        ↻ Rebuild categories
+        <Icon name="rescan" size={13} /> Rebuild categories
       </button>
     </div>
     <div class="set-hint" style="margin-top:8px">
@@ -312,7 +331,7 @@
     </div>
     {#if organizedCount > 0 && cloudSynced}
       <div class="set-hint" style="margin-top:10px">
-        ☁ Your mods folder is on a cloud-synced drive (OneDrive / Google Drive / Proton Drive),
+        <Icon name="cloud" size={13} /> Your mods folder is on a cloud-synced drive (OneDrive / Google Drive / Proton Drive),
         which doesn't support hardlinks — so Silo projects active mods as <b>copies</b>. That works,
         but uses more disk. Excluding this folder from cloud sync lets Silo use hardlinks instead
         (no duplication).
@@ -325,7 +344,7 @@
         disabled={locked}
         title={lockTitle}
       >
-        ⛓ Optimize links (reclaim space)
+        <Icon name="link" size={13} /> Optimize links (reclaim space)
       </button>
       <div class="set-hint" style="margin-top:8px">
         Collapses any active mod that was projected as a full copy (rather than a hardlink) back
@@ -389,23 +408,23 @@
     border-top: none;
   }
   .set-label {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text);
     margin-bottom: 6px;
   }
   .set-hint {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.5;
     margin-bottom: 8px;
   }
   .keychain-warn {
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     color: var(--text);
-    background: color-mix(in srgb, var(--barn-500) 12%, var(--surface-raised));
-    border: 1px solid color-mix(in srgb, var(--barn-500) 45%, var(--border));
+    background: color-mix(in srgb, var(--danger) 12%, var(--surface-raised));
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
     border-radius: var(--radius);
     padding: 10px 12px;
   }
@@ -413,7 +432,7 @@
     padding: 10px 4px 4px;
     text-align: center;
     font-family: var(--font-mono, monospace);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     border-top: 1px solid var(--border);
     margin-top: 4px;
@@ -422,7 +441,7 @@
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .set-link:hover {
@@ -443,17 +462,33 @@
     color: var(--text-muted);
     padding: 6px;
     border-radius: 5px;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: capitalize;
   }
+  .ui-size {
+    margin-top: 10px;
+  }
+  .ui-size .set-label {
+    margin-bottom: 0;
+  }
+  .set-select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 5px 8px;
+    font: inherit;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+  }
   .seg-btn.on {
     background: var(--surface-raised);
-    color: var(--primary);
+    color: var(--primary-text);
     box-shadow: var(--shadow-1);
   }
   .set-path {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     background: var(--bg);
     border: 1px solid var(--border);
@@ -511,13 +546,13 @@
     color: var(--text);
     padding: 9px 12px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
   .set-btn:hover:not(:disabled) {
     border-color: var(--primary);
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .set-btn:disabled {
     opacity: 0.55;
@@ -529,7 +564,7 @@
     color: var(--danger);
     padding: 9px 12px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     width: 100%;
     cursor: pointer;

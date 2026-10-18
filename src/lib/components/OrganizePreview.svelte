@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { PlannedMove } from "../types";
 
   let {
@@ -51,7 +52,7 @@
 >
   <div class="modal-head">
     <h3>{adopt ? `File ${noun(plan.length)} into your library` : `Organize ${noun(plan.length)}`}</h3>
-    <button class="drawer-x" title="Close" onclick={onCancel}>✕</button>
+    <button class="drawer-x" title="Close" aria-label="Close" onclick={onCancel}><Icon name="close" /></button>
   </div>
 
   <div class="modal-body">
@@ -182,7 +183,7 @@
   }
   .lead code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     background: var(--bg);
     padding: 1px 4px;
     border-radius: 4px;
@@ -212,11 +213,11 @@
   }
   .grp-name {
     font-weight: 600;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     color: var(--text);
   }
   .grp-count {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--on-primary);
     background: var(--primary);
     border-radius: 999px;
@@ -235,7 +236,7 @@
     align-items: center;
     gap: 7px;
     padding: 3px 11px;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text);
   }
   .fn {
@@ -257,7 +258,7 @@
   }
   .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.72rem;
+    font-size: var(--fs-xs);
   }
   .modal-foot {
     display: flex;
@@ -272,7 +273,7 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    font-size: 0.76rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     cursor: pointer;
   }

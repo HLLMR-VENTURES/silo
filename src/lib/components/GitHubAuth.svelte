@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import {
     ghStatus,
     ghSetClientId,
@@ -123,7 +124,7 @@
   {#if status.user}
     <div class="gha-row">
       <div>
-        <div class="gha-connected">✓ Connected as {status.user}</div>
+        <div class="gha-connected"><Icon name="ok" size={14} /> Connected as {status.user}</div>
         <div class="gha-hint">
           {#if status.canWrite}
             Star &amp; Watch actions enabled · 5,000 req/hr.
@@ -146,7 +147,7 @@
       {#if !status.canWrite}
         <div class="gha-row">
           <div class="gha-hint">
-            Enable ⭐ Star / 👁 Watch on mod pages — grants the <code>public_repo</code>
+            Enable Star / Watch on mod pages — grants the <code>public_repo</code>
             scope so actions land on your GitHub account.
           </div>
           <button class="gha-btn primary" onclick={() => connect(true, status.canGist)}>
@@ -194,7 +195,7 @@
         GitHub sign-in isn't configured in this build. (One-time: register a GitHub OAuth App with
         Device Flow enabled and add its Client ID.)
         <button class="gha-link" onclick={() => openExternal("https://github.com/settings/applications/new")}>
-          Register an OAuth App ↗
+          Register an OAuth App <Icon name="external" size={12} />
         </button>
       </div>
       <div class="gha-row">
@@ -216,7 +217,7 @@
           class="gha-link"
           onclick={() => openExternal("https://github.com/settings/personal-access-tokens/new")}
         >
-          Create one ↗
+          Create one <Icon name="external" size={12} />
         </button>
       </div>
       <div class="gha-row">
@@ -246,14 +247,14 @@
     gap: 12px;
   }
   .gha-hint {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.5;
   }
   .gha-connected {
-    font-size: 13px;
+    font-size: var(--fs-sm);
     font-weight: 600;
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .gha-btn {
     flex: 0 0 auto;
@@ -262,7 +263,7 @@
     color: var(--text);
     padding: 7px 14px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .gha-btn.primary {
@@ -272,13 +273,13 @@
   }
   .gha-btn:hover:not(.primary) {
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .gha-link {
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 0;
   }
@@ -293,7 +294,7 @@
     color: var(--text);
     border-radius: var(--radius-sm);
     padding: 7px 10px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-family: inherit;
   }
   .gha-setup {
@@ -309,17 +310,17 @@
     padding: 6px 0;
   }
   .gha-code {
-    font-size: 26px;
+    font-size: var(--fs-2xl);
     font-weight: 700;
     letter-spacing: 4px;
-    color: var(--accent);
+    color: var(--accent-text);
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 8px 16px;
   }
   .gha-msg {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--danger);
   }
 </style>

@@ -150,18 +150,18 @@
     font-weight: 600;
   }
   .lp-sub {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     font-family: var(--font-ui);
   }
   .lp-empty {
     padding: 10px 8px 14px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.5;
   }
   .hz-group {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -177,15 +177,15 @@
   }
   .hz-name {
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-sm);
   }
   .hz-detail {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     margin-top: 2px;
   }
   .hz-dep {
-    color: var(--warn);
+    color: var(--warn-text);
     font-weight: 600;
   }
   .hz-vers {
@@ -193,7 +193,7 @@
     flex-wrap: wrap;
     gap: 16px;
     margin-top: 6px;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .hz-ver b {
@@ -209,7 +209,7 @@
     background: var(--surface);
     color: var(--text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 5px 10px;
     border-radius: var(--radius-sm);

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import type { ModEntry, CurationRow, Conflict, CatalogModDetail, SourceRow } from "../types";
   import type { ForeignFile } from "../api";
   import { getModIcon, revealInFolder, catalogDetailByTech, openExternal } from "../api";
@@ -186,7 +187,7 @@
       </div>
       <div class="d-tech tnum">{mod.techName}</div>
     </div>
-    <button class="d-x" onclick={onClose} aria-label="Close">✕</button>
+    <button class="d-x" onclick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
   </div>
 
   {#if foreign}
@@ -202,7 +203,7 @@
       </div>
       <div class="d-foreign-actions">
         <button class="d-adopt" onclick={onAdoptForeign}>
-          ⬆ Adopt v{foreign.flatVersion ?? ""}
+          <Icon name="update" size={13} /> Adopt v{foreign.flatVersion ?? ""}
         </button>
         <button class="d-restore" onclick={onRestoreForeign}>
           Keep Silo's v{foreign.managedVersion ?? ""}
@@ -219,31 +220,32 @@
 
   <div class="d-actions">
     <button class="d-act" class:on={active} onclick={onToggleActive}>
-      {active ? "● Active" : "○ Parked"}
+      <Icon name={active ? "dot" : "circle"} size={13} />
+      {active ? "Active" : "Parked"}
     </button>
     <button class="d-act" class:on={curation.favorite} onclick={() => onToggle("favorite")}>
-      {curation.favorite ? "★" : "☆"} Favorite
+      <Icon name="favorite" size={13} filled={curation.favorite} /> Favorite
     </button>
     <button class="d-act" class:on={curation.broken} onclick={() => onToggle("broken")}>
-      ⚠ Broken
+      <Icon name="problem" size={13} /> Broken
     </button>
     <button class="d-act" class:on={curation.hidden} onclick={() => onToggle("hidden")}>
-      ⊘ Hidden
+      <Icon name="hidden" size={13} /> Hidden
     </button>
     {#if hasSettings}
-      <button class="d-act" onclick={onOpenSettings}>⚙ Settings</button>
+      <button class="d-act" onclick={onOpenSettings}><Icon name="modSettings" size={13} /> Settings</button>
     {:else if mod.hasSettings}
       <button
         class="d-act"
         disabled
         title="Silo edits these once they're written to modSettings/ — usually after you launch the mod once."
       >
-        ⚙ Has settings
+        <Icon name="modSettings" size={13} /> Has settings
       </button>
     {/if}
-    <button class="d-act" onclick={onFindInBrowse}>⌕ Find in Browse</button>
+    <button class="d-act" onclick={onFindInBrowse}><Icon name="search" size={13} /> Find in Browse</button>
     <button class="d-act" onclick={() => revealInFolder(mod.path).catch(() => {})}>
-      📂 Reveal
+      <Icon name="showFile" size={13} /> Reveal
     </button>
   </div>
 
@@ -251,13 +253,13 @@
     <div class="d-cat-info">
       {#if catalogNewer && !foreign}
         <div class="d-upd">
-          <span>⬆ Update available — catalog has <b>v{catalog.latestVersion}</b>{mod.version ? ` (you have v${mod.version})` : ""}</span>
+          <span><Icon name="update" size={13} /> Update available — catalog has <b>v{catalog.latestVersion}</b>{mod.version ? ` (you have v${mod.version})` : ""}</span>
           {#if catalog.pageUrl}
-            <button class="d-upd-link" onclick={() => openExternal(catalog!.pageUrl!)}>View source ↗</button>
+            <button class="d-upd-link" onclick={() => openExternal(catalog!.pageUrl!)}>View source <Icon name="external" size={12} /></button>
           {/if}
         </div>
       {:else if catalog.latestVersion}
-        <div class="d-uptodate">✓ Up to date <span class="d-mut">· catalog latest v{catalog.latestVersion}</span></div>
+        <div class="d-uptodate"><Icon name="ok" size={13} /> Up to date <span class="d-mut">· catalog latest v{catalog.latestVersion}</span></div>
       {/if}
 
       {#if summaryText}
@@ -272,7 +274,7 @@
           <span class="d-src-label">Available on</span>
           {#each catalog.sources as s (s.source + s.sourceUrl)}
             <button class="d-src" onclick={() => openExternal(s.sourceUrl)}>
-              {sourceLabel(s.source)}{s.version ? ` · ${s.version}` : ""} ↗
+              {sourceLabel(s.source)}{s.version ? ` · ${s.version}` : ""} <Icon name="external" size={12} />
             </button>
           {/each}
         </div>
@@ -305,7 +307,7 @@
         Save
       </button>
       {#if isOverridden}
-        <button class="d-cat-reset" onclick={onResetCategory}>↺ Reset to auto</button>
+        <button class="d-cat-reset" onclick={onResetCategory}><Icon name="undo" size={13} /> Reset to auto</button>
       {/if}
     </div>
   </div>
@@ -369,7 +371,7 @@
   <div class="fd-modal">
     <div class="fd-head">
       <span class="fd-title">{label}</span>
-      <button class="d-x" onclick={() => (showFullDesc = false)} aria-label="Close">✕</button>
+      <button class="d-x" onclick={() => (showFullDesc = false)} title="Close" aria-label="Close"><Icon name="close" /></button>
     </div>
     <div class="fd-body">{catalog.descriptionFull || catalog.description}</div>
   </div>
@@ -415,17 +417,17 @@
   }
   .d-title {
     font-family: var(--font-display);
-    font-size: 18px;
+    font-size: var(--fs-xl);
     font-weight: 600;
     line-height: 1.2;
   }
   .d-sub {
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     margin-top: 2px;
   }
   .d-tech {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     opacity: 0.7;
     margin-top: 2px;
@@ -437,7 +439,8 @@
     width: 30px;
     height: 30px;
     border-radius: var(--radius-sm);
-    font-size: 14px;
+    display: inline-grid;
+    place-items: center;
   }
   .d-x:hover {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
@@ -455,14 +458,14 @@
     color: var(--text-muted);
     padding: 6px 10px;
     border-radius: var(--radius-sm);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .d-act:hover {
     color: var(--text);
   }
   .d-act.on {
-    color: var(--primary);
+    color: var(--primary-text);
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
     background: color-mix(in srgb, var(--primary) 10%, transparent);
   }
@@ -486,19 +489,20 @@
     justify-content: space-between;
     gap: 10px;
     flex-wrap: wrap;
-    font-size: 12.5px;
-    color: var(--gold-700);
-    background: color-mix(in srgb, var(--gold-500) 12%, transparent);
-    border: 1px solid color-mix(in srgb, var(--gold-500) 40%, var(--border));
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
     border-radius: var(--radius-sm);
     padding: 8px 10px;
+    font-variant-numeric: tabular-nums;
   }
   .d-upd-link {
     border: none;
     background: transparent;
-    color: var(--gold-700);
+    color: var(--accent-text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
@@ -511,7 +515,7 @@
     border: 1px solid color-mix(in srgb, var(--primary) 40%, var(--border));
   }
   .d-foreign-msg {
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     color: var(--text);
   }
@@ -526,7 +530,7 @@
     background: var(--primary);
     color: var(--on-primary);
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     padding: 7px 14px;
     border-radius: var(--radius-sm);
@@ -540,7 +544,7 @@
     background: var(--surface);
     color: var(--text);
     font: inherit;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 7px 14px;
     border-radius: var(--radius-sm);
@@ -550,14 +554,14 @@
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
   }
   .d-uptodate {
-    font-size: 12px;
-    color: var(--primary);
+    font-size: var(--fs-xs);
+    color: var(--primary-text);
   }
   .d-mut {
     color: var(--text-muted);
   }
   .d-summary {
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     line-height: 1.55;
     color: var(--text);
     white-space: pre-wrap;
@@ -571,9 +575,9 @@
     align-self: flex-start;
     border: none;
     background: transparent;
-    color: var(--primary);
+    color: var(--primary-text);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
     padding: 0;
@@ -585,7 +589,7 @@
     gap: 6px;
   }
   .d-src-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -598,7 +602,7 @@
     padding: 4px 9px;
     border-radius: var(--radius-sm);
     font: inherit;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .d-src:hover {
@@ -640,7 +644,7 @@
   .fd-body {
     padding: 14px;
     overflow-y: auto;
-    font-size: 13px;
+    font-size: var(--fs-sm);
     line-height: 1.6;
     white-space: pre-wrap;
     color: var(--text);
@@ -649,7 +653,7 @@
   .d-meta {
     display: grid;
     gap: 6px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     padding: 10px 0;
     border-top: 1px solid var(--border);
   }
@@ -669,7 +673,7 @@
     border-top: 1px solid var(--border);
   }
   .d-label {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
@@ -677,8 +681,8 @@
     margin-bottom: 8px;
   }
   .d-ovr {
-    font-size: 9px;
-    color: var(--accent);
+    font-size: var(--fs-xs);
+    color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     padding: 1px 6px;
     border-radius: 999px;
@@ -718,7 +722,7 @@
     background: var(--primary);
     color: var(--on-primary);
     font: inherit;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     font-weight: 600;
     cursor: pointer;
   }
@@ -735,7 +739,7 @@
     background: var(--surface);
     color: var(--text-muted);
     font: inherit;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     cursor: pointer;
   }
   .d-dep,
@@ -743,33 +747,33 @@
     display: flex;
     justify-content: space-between;
     gap: 10px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     padding: 4px 0;
   }
   .d-dep-name {
     color: var(--text);
   }
   .d-ok {
-    color: var(--primary);
-    font-size: 11.5px;
+    color: var(--primary-text);
+    font-size: var(--fs-xs);
   }
   .d-missing {
-    color: var(--warn);
-    font-size: 11.5px;
+    color: var(--warn-text);
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .d-uniq {
-    font-size: 12.5px;
-    color: var(--warn);
+    font-size: var(--fs-xs);
+    color: var(--warn-text);
   }
   .d-conf {
     display: block;
-    border-left: 3px solid var(--warn);
+    border-left: 3px solid var(--warn-text);
     padding: 6px 10px;
     margin-bottom: 6px;
     border-radius: var(--radius-sm);
-    background: color-mix(in srgb, var(--warn) 6%, transparent);
-    font-size: 12px;
+    background: color-mix(in srgb, var(--warn-text) 6%, transparent);
+    font-size: var(--fs-xs);
   }
   .d-conf.crit {
     border-left-color: var(--danger);
@@ -777,9 +781,9 @@
   }
   .d-conf-sev {
     font-weight: 700;
-    font-size: 10px;
+    font-size: var(--fs-xs);
     text-transform: uppercase;
-    color: var(--warn);
+    color: var(--warn-text);
     margin-right: 6px;
   }
   .d-conf.crit .d-conf-sev {

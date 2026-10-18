@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../ui/Icon.svelte";
   import {
     getModSettings,
     saveModSettings,
@@ -79,7 +80,7 @@
       <div class="ms-title">{title}</div>
       <div class="ms-sub">Mod settings</div>
     </div>
-    <button class="ms-x" onclick={onClose} aria-label="Close">✕</button>
+    <button class="ms-x" onclick={onClose} title="Close" aria-label="Close"><Icon name="close" /></button>
   </div>
 
   {#if loading}
@@ -95,7 +96,7 @@
       <div class="ms-file-head">
         <span class="ms-file-name tnum">{file.name}</span>
         <div class="ms-file-actions">
-          {#if savedPath === file.path}<span class="ms-saved">saved ✓</span>{/if}
+          {#if savedPath === file.path}<span class="ms-saved">saved <Icon name="check" size={13} /></span>{/if}
           <button
             class="ms-link"
             onclick={() => (rawMode[file.path] = !rawMode[file.path])}
@@ -183,21 +184,22 @@
   }
   .ms-title {
     font-family: var(--font-display);
-    font-size: 17px;
+    font-size: var(--fs-lg);
     font-weight: 600;
   }
   .ms-sub {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .ms-x {
     border: none;
     background: transparent;
     color: var(--text-muted);
-    font-size: 15px;
     width: 30px;
     height: 30px;
     border-radius: var(--radius-sm);
+    display: inline-grid;
+    place-items: center;
   }
   .ms-x:hover {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
@@ -215,7 +217,7 @@
     margin-bottom: 10px;
   }
   .ms-file-name {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .ms-file-actions {
@@ -224,15 +226,15 @@
     gap: 10px;
   }
   .ms-saved {
-    font-size: 12px;
-    color: var(--primary);
+    font-size: var(--fs-xs);
+    color: var(--primary-text);
     font-weight: 600;
   }
   .ms-link {
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .ms-field {
@@ -243,7 +245,7 @@
     padding: 7px 0;
   }
   .ms-flabel {
-    font-size: 13px;
+    font-size: var(--fs-sm);
     color: var(--text);
     min-width: 0;
     word-break: break-word;
@@ -256,11 +258,7 @@
     background: var(--bg);
     color: var(--text);
     font-family: inherit;
-    font-size: 13px;
-  }
-  .ms-input:focus {
-    outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
-    outline-offset: 1px;
+    font-size: var(--fs-sm);
   }
   .switch {
     flex: 0 0 auto;
@@ -294,7 +292,7 @@
     min-height: 220px;
     resize: vertical;
     font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     padding: 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -309,7 +307,7 @@
     padding: 8px 16px;
     border-radius: var(--radius-sm);
     font-weight: 600;
-    font-size: 13px;
+    font-size: var(--fs-sm);
   }
   .ms-save:disabled {
     opacity: 0.5;
@@ -318,22 +316,22 @@
   .ms-empty {
     color: var(--text-muted);
     padding: 16px 0;
-    font-size: 13px;
+    font-size: var(--fs-sm);
   }
   .ms-empty.small {
     padding: 4px 0 0;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
   }
   .ms-error {
     color: var(--danger);
     padding: 8px 0;
-    font-size: 13px;
+    font-size: var(--fs-sm);
   }
   .ms-foot {
     margin-top: 16px;
     padding-top: 10px;
     border-top: 1px solid var(--border);
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
 </style>

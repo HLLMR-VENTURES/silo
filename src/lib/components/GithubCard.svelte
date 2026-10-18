@@ -1,8 +1,9 @@
 <script lang="ts">
   // One source card = one interactive widget between us and the source. Reads are live
-  // and public; actions (⭐ Star / 👁 Watch) run through the user's OWN GitHub token and
+  // and public; actions (Star / Watch) run through the user's OWN GitHub token and
   // land on GitHub's servers — Silo only reflects the state back. Nothing is stored on
   // our side. See SiloAPI docs/ENRICHMENT.md "scope boundary".
+  import Icon from "../ui/Icon.svelte";
   import { ghRepoStats, ghStar, ghWatch, openExternal } from "../api";
   import type { RepoStats } from "../types";
 
@@ -91,7 +92,7 @@
     </span>
     {#if stats}
       <button class="src-link" onclick={() => openExternal(stats!.htmlUrl)} title="Open on GitHub">
-        {stats.fullName} ↗
+        {stats.fullName} <Icon name="external" size={12} />
       </button>
     {:else}
       <span class="src-sub mono">{owner}/{repo}</span>
@@ -107,10 +108,10 @@
     </div>
   {:else if stats}
     <div class="src-nums tnum">
-      <span title="Stars">★ {fmt(stats.stars)}</span>
-      <span title="Forks">⑂ {fmt(stats.forks)}</span>
-      <span title="Watchers">👁 {fmt(stats.watchers)}</span>
-      <span title="Open issues">◎ {fmt(stats.openIssues)}</span>
+      <span title="Stars"><Icon name="favorite" size={13} filled label="stars" /> {fmt(stats.stars)}</span>
+      <span title="Forks"><Icon name="fork" size={13} label="forks" /> {fmt(stats.forks)}</span>
+      <span title="Watchers"><Icon name="visible" size={13} label="watchers" /> {fmt(stats.watchers)}</span>
+      <span title="Open issues"><Icon name="dot" size={13} label="open issues" /> {fmt(stats.openIssues)}</span>
       {#if stats.archived}<span class="archived" title="Archived repo">archived</span>{/if}
     </div>
 
@@ -122,7 +123,8 @@
           disabled={busy === "star"}
           onclick={toggleStar}
         >
-          {stats.youStarred ? "★ Starred" : "☆ Star"}
+          <Icon name="favorite" size={13} filled={!!stats.youStarred} />
+          {stats.youStarred ? "Starred" : "Star"}
         </button>
         <button
           class="act"
@@ -130,7 +132,8 @@
           disabled={busy === "watch"}
           onclick={toggleWatch}
         >
-          {stats.youWatching ? "👁 Watching" : "👁 Watch"}
+          <Icon name="visible" size={13} />
+          {stats.youWatching ? "Watching" : "Watch"}
         </button>
       {:else}
         <button class="act connect" onclick={() => onConnect?.()}>
@@ -160,20 +163,20 @@
   }
   .src-name {
     font-weight: 700;
-    font-size: 13px;
+    font-size: var(--fs-sm);
     display: inline-flex;
     align-items: center;
     gap: 6px;
   }
   .src-sub {
-    font-size: 12px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .src-link {
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 0;
     cursor: pointer;
@@ -186,7 +189,7 @@
     text-decoration: underline;
   }
   .src-body {
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     display: flex;
     align-items: center;
     gap: 10px;
@@ -197,7 +200,7 @@
   .src-nums {
     display: flex;
     gap: 14px;
-    font-size: 13px;
+    font-size: var(--fs-sm);
     color: var(--text);
     flex-wrap: wrap;
   }
@@ -216,18 +219,18 @@
     color: var(--text);
     padding: 6px 12px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
   }
   .act:hover:not(:disabled) {
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
-    color: var(--primary);
+    color: var(--primary-text);
   }
   .act.on {
     background: color-mix(in srgb, var(--accent, var(--primary)) 16%, transparent);
     border-color: var(--accent, var(--primary));
-    color: var(--accent, var(--primary));
+    color: var(--accent-text);
   }
   .act.connect {
     color: var(--info);
@@ -243,11 +246,11 @@
     color: var(--text);
     border-radius: var(--radius-sm);
     padding: 2px 8px;
-    font-size: 12px;
+    font-size: var(--fs-xs);
   }
   .err,
   .src-err {
     color: var(--danger);
-    font-size: 12px;
+    font-size: var(--fs-xs);
   }
 </style>

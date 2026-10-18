@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from "../../ui/Icon.svelte";
   import type { Loadout } from "../../types";
 
   let {
@@ -48,20 +49,27 @@
       <button
         class="lp-icon"
         title="Overwrite with current active set"
-        onclick={() => onOverwrite(l)}>⭯</button
+        aria-label="Overwrite with current active set"
+        onclick={() => onOverwrite(l)}><Icon name="rescan" size={14} /></button
       >
-      <button class="lp-icon" title="Export to a .silo file" onclick={() => onExport(l)}
-        >⇪</button
+      <button
+        class="lp-icon"
+        title="Export to a .silo file"
+        aria-label="Export to a .silo file"
+        onclick={() => onExport(l)}><Icon name="share" size={14} /></button
       >
-      <button class="lp-icon danger" title="Delete loadout" onclick={() => onRemove(l)}
-        >✕</button
+      <button
+        class="lp-icon danger"
+        title="Delete loadout"
+        aria-label="Delete loadout"
+        onclick={() => onRemove(l)}><Icon name="close" size={14} /></button
       >
     </div>
   {/each}
   <button class="lp-save" onclick={onSaveCurrent} disabled={activeCount === 0}>
     + Save current active set as a loadout
   </button>
-  <button class="lp-import" onclick={onImport}>↧ Import a .silo file</button>
+  <button class="lp-import" onclick={onImport}><Icon name="download" size={13} /> Import a .silo file</button>
 </div>
 
 <style>
@@ -94,13 +102,13 @@
     font-weight: 600;
   }
   .lp-sub {
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     font-family: var(--font-ui);
   }
   .lp-empty {
     padding: 10px 8px 14px;
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.5;
   }
@@ -124,7 +132,7 @@
     color: var(--text);
     padding: 9px 10px;
     border-radius: var(--radius-sm);
-    font-size: 13px;
+    font-size: var(--fs-sm);
   }
   .lp-apply:hover {
     background: color-mix(in srgb, var(--primary) 10%, transparent);
@@ -150,7 +158,7 @@
   }
   .lp-count {
     flex: 0 0 auto;
-    font-size: 11.5px;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .lp-icon {
@@ -161,7 +169,8 @@
     width: 28px;
     height: 30px;
     border-radius: var(--radius-sm);
-    font-size: 14px;
+    display: inline-grid;
+    place-items: center;
   }
   .lp-icon:hover {
     background: color-mix(in srgb, var(--primary) 12%, transparent);
@@ -177,10 +186,10 @@
     margin-top: 6px;
     border: 1px dashed var(--border);
     background: transparent;
-    color: var(--primary);
+    color: var(--primary-text);
     padding: 10px;
     border-radius: var(--radius-sm);
-    font-size: 12.5px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .lp-save:hover:not(:disabled) {
@@ -199,7 +208,7 @@
     color: var(--text-muted);
     padding: 8px;
     border-radius: var(--radius-sm);
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .lp-import:hover {
