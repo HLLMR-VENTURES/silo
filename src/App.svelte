@@ -1836,8 +1836,11 @@
         errorMsg = String(e);
       }
       // Where the library archive lives, and any unfinished move (paused before a restart).
-      // Awaited so the first scan's auto-file guard sees a move left paused before a restart.
-      await archiveMove.load();
+      // Awaited when there is a folder to scan, so the first scan's auto-file guard sees a move
+      // left paused before a restart. With nothing to scan (the mods-folder status failed or is
+      // unavailable), deep links, bisect recovery and the focus listener don't wait on it.
+      const archiveReady = archiveMove.load();
+      if (roots.length) await archiveReady;
       try {
         const notes = await takeStartupNotices();
         if (notes.length) infoMsg = appendInfo(infoMsg, notes);

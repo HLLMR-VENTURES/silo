@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   auto-file, or turning off a loose mod), the rescan that followed cleared the error, so it never
   showed. It now appears after the rescan. (#PR)
 
+- **Faster start when there's nothing to scan.** When Silo can't read your mods folder at startup,
+  it no longer waits up to 30 seconds on the library archive before opening links or offering to
+  restore an unfinished guided bisection. (#PR)
+
 ## [0.11.0] - 2026-10-17
 
 ### Added
