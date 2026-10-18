@@ -722,7 +722,7 @@
     background: var(--primary);
     color: var(--on-primary);
     font: inherit;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     font-weight: 600;
     cursor: pointer;
   }
@@ -739,7 +739,7 @@
     background: var(--surface);
     color: var(--text-muted);
     font: inherit;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     cursor: pointer;
   }
   .d-dep,

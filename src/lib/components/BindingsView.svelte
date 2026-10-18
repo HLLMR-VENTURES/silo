@@ -151,7 +151,7 @@
   .sub {
     margin: 2px 0 0;
     color: var(--text-muted);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     font-variant-numeric: tabular-nums;
   }
   .x {
@@ -238,7 +238,7 @@
   .key,
   .b-key {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     color: var(--primary-text);
     white-space: nowrap;
   }

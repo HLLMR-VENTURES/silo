@@ -566,7 +566,7 @@
   .sub {
     margin: 4px 0 0;
     color: var(--text-muted);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     line-height: 1.5;
     max-width: 56ch;
   }
@@ -636,7 +636,7 @@
   }
   .caveat {
     margin: 12px 0 0;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .share {
@@ -667,7 +667,7 @@
     display: flex;
     gap: 16px;
     margin: 8px 0;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     color: var(--text-muted);
   }
   .vis-row label {
@@ -712,7 +712,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 0.76rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
   }
@@ -746,7 +746,7 @@
     background: var(--surface);
     color: var(--text);
     font: inherit;
-    font-size: 0.76rem;
+    font-size: var(--fs-xs);
     cursor: pointer;
   }
   .mini:hover:not(:disabled) {
@@ -811,11 +811,11 @@
   .mn {
     color: var(--text);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .rt {
     color: var(--text-muted);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }

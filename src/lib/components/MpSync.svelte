@@ -158,7 +158,7 @@
   .sub {
     margin: 4px 0 0;
     color: var(--text-muted);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     line-height: 1.5;
     max-width: 52ch;
   }
@@ -242,7 +242,7 @@
   }
   .caveat {
     margin: 12px 0 0;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .verdict {
@@ -281,11 +281,11 @@
   .mn {
     color: var(--text);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .rt {
     color: var(--text-muted);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }

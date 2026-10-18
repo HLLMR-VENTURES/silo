@@ -310,7 +310,7 @@
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     font-weight: 600;
     padding: 0;
     margin: 0 0 14px;
@@ -379,7 +379,7 @@
     color: var(--text);
   }
   .src-ver {
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .src-action {
@@ -389,7 +389,7 @@
     background: var(--surface);
     color: var(--text-muted);
     font: inherit;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     padding: 4px 9px;
     cursor: pointer;
     white-space: nowrap;
@@ -415,7 +415,7 @@
     color: var(--text-muted);
   }
   .drawer-hint {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     color: var(--text-muted);
     background: var(--bg);

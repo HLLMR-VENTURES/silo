@@ -238,7 +238,7 @@
   .sub {
     margin: 2px 0 0;
     color: var(--text-muted);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     font-variant-numeric: tabular-nums;
   }
   .lt-head-actions {
@@ -374,7 +374,7 @@
     background: transparent;
     color: var(--text-muted);
     font: inherit;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     padding: 8px 2px;
     cursor: pointer;
     margin-top: 6px;
@@ -388,7 +388,7 @@
   .foot {
     margin-top: 14px;
     color: var(--text-muted);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
   }
   .link {
     border: none;

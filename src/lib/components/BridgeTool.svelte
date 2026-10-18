@@ -177,7 +177,7 @@
   .sub {
     margin: 4px 0 0;
     color: var(--text-muted);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     line-height: 1.5;
     max-width: 56ch;
   }
@@ -239,7 +239,7 @@
   }
   .hint {
     margin: 5px 0 0;
-    font-size: 0.76rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.45;
   }
@@ -251,7 +251,7 @@
   }
   .chip {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     color: var(--earth-text);
     padding: 2px 8px;
@@ -261,7 +261,7 @@
     margin-bottom: 10px;
   }
   .grp-label {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text);
     font-weight: 600;
     margin-bottom: 5px;
@@ -278,7 +278,7 @@
     background: var(--surface);
     color: var(--text-muted);
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     cursor: pointer;
   }
   .opt.on {
@@ -289,7 +289,7 @@
   }
   .caveat {
     margin-top: 14px;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.5;
     border-left: 2px solid var(--border);

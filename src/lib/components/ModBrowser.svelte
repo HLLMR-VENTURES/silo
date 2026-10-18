@@ -500,12 +500,12 @@
     flex-wrap: wrap;
   }
   .showing {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .source-note {
     color: var(--text-muted);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     margin-left: auto;
     opacity: 0.8;
   }
@@ -516,7 +516,7 @@
   }
   .more.end {
     color: var(--text-muted);
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
   }
   .more-btn {
     padding: 9px 22px;

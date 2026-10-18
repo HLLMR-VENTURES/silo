@@ -286,7 +286,7 @@
     background: transparent;
     color: var(--text-muted);
     font: inherit;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     font-weight: 600;
     cursor: pointer;
     padding: 6px;

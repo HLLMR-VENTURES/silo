@@ -142,7 +142,7 @@
     border: none;
     background: transparent;
     color: var(--info);
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     padding: 4px 8px 4px 4px;
     opacity: 0.7;
   }

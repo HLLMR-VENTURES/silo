@@ -206,7 +206,7 @@
     display: flex;
     gap: 8px;
     align-items: center;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     color: var(--text-muted);
   }
   .card-meta .ver {
@@ -217,7 +217,7 @@
     display: flex;
     gap: 10px;
     align-items: center;
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
   }
@@ -282,7 +282,7 @@
     padding-top: 8px;
   }
   .srcbar-none {
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .srcbtn {
@@ -295,7 +295,7 @@
     background: var(--surface);
     color: var(--text-muted);
     font: inherit;
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s, color 0.15s;
   }

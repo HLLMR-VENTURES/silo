@@ -183,7 +183,7 @@
   }
   .lead code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     background: var(--bg);
     padding: 1px 4px;
     border-radius: 4px;
@@ -213,11 +213,11 @@
   }
   .grp-name {
     font-weight: 600;
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     color: var(--text);
   }
   .grp-count {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--on-primary);
     background: var(--primary);
     border-radius: 999px;
@@ -236,7 +236,7 @@
     align-items: center;
     gap: 7px;
     padding: 3px 11px;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text);
   }
   .fn {
@@ -273,7 +273,7 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    font-size: 0.76rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     cursor: pointer;
   }

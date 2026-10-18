@@ -342,7 +342,7 @@
   }
   .working {
     color: var(--text-muted);
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     margin-bottom: 8px;
   }
   .err {
@@ -379,7 +379,7 @@
     line-height: 1.6;
   }
   .hint {
-    font-size: 0.82rem;
+    font-size: var(--fs-sm);
     padding: 7px 11px;
     border-radius: var(--radius-sm);
     margin-bottom: 12px;

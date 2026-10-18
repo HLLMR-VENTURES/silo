@@ -156,7 +156,7 @@
     background: var(--primary);
     color: var(--on-primary);
     font: inherit;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 4px 11px;
     border-radius: var(--radius-sm);
@@ -172,13 +172,13 @@
     filter: brightness(1.05);
   }
   .prov-run {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .prov-note,
   .prov-fine,
   .prov-err {
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
     line-height: 1.45;
     color: var(--text-muted);
     margin: 0;
@@ -227,14 +227,14 @@
     color: var(--text);
   }
   .v-sub {
-    font-size: 0.76rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
     line-height: 1.4;
     margin-top: 1px;
   }
   .diff {
     margin-top: 6px;
-    font-size: 0.78rem;
+    font-size: var(--fs-xs);
   }
   .diff summary {
     cursor: pointer;

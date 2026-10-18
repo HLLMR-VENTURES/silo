@@ -111,7 +111,7 @@
   .modal-loading,
   .modal-empty {
     color: var(--text-muted) !important;
-    font-size: 0.8rem !important;
+    font-size: var(--fs-sm) !important;
     margin-top: 10px !important;
   }
   .modal-foot {
@@ -124,7 +124,7 @@
     border-top: 1px solid var(--border);
   }
   .modal-note {
-    font-size: 0.75rem;
+    font-size: var(--fs-xs);
     color: var(--text-muted);
   }
   .modal-link {
@@ -134,7 +134,7 @@
     color: var(--info);
     padding: 6px 12px;
     border-radius: var(--radius-sm);
-    font-size: 0.8rem;
+    font-size: var(--fs-sm);
     font-weight: 600;
     cursor: pointer;
   }
