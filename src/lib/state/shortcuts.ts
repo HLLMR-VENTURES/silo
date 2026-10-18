@@ -172,6 +172,10 @@ export const SHORTCUT_DOCS: readonly ShortcutDoc[] = [
   { keys: [["Alt", "←"]], label: "Back to the previous page" },
   { keys: [["F6"], ["Shift", "F6"]], label: "Move between the sidebar, header, notices, page and details" },
   { keys: [["Esc"]], label: "Close the mod details, a menu or a dialog" },
+  { keys: [["↑"], ["↓"], ["Home"], ["End"]], label: "Library: move between mods" },
+  { keys: [["Enter"]], label: "Library: open the mod's details" },
+  { keys: [["Space"]], label: "Library: turn the mod on or off (Active / Parked)" },
+  { keys: [["Shift", "F10"]], label: "Library: the mod's actions menu" },
   { keys: [["?"]], label: "Show keyboard shortcuts" },
 ];
 

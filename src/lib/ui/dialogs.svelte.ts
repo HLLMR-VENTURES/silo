@@ -2,6 +2,7 @@
 // in App.svelte). Requests queue FIFO and show one at a time.
 //   if (await ask({ title: "Delete mod set?", body: "...", confirm: "Delete", tone: "danger" })) ...
 //   const name = await askText({ title: "Rename", label: "Name", value: old, confirm: "Rename" });
+//   const { confirmed, checked } = await askWithOption({ ..., checkbox: { label: "Don't ask again" } });
 // Deliberately not named `confirm`, so it never shadows the global (see scripts/check-confirm.mjs).
 // Before the host first mounts, requests wait in the queue; check `dialogHostMounted()` to fall
 // back to the OS dialog (`askOrOs` in confirm.ts) in code that can run that early. If the host
@@ -29,6 +30,14 @@ export interface ConfirmOptions {
   cancel?: string;
   /** "danger": red confirm button and initial focus on Cancel. Default "neutral". */
   tone?: "neutral" | "danger";
+  /** A checkbox under the body ("Don't explain this again"). Only `askWithOption()` reports it. */
+  checkbox?: { label: string; checked?: boolean };
+}
+
+/** What `askWithOption()` resolves to: the answer, and the checkbox as it was when answered. */
+export interface ConfirmWithOption {
+  confirmed: boolean;
+  checked: boolean;
 }
 
 /** What `validate` may return: null = ok; a string or {error} blocks; {warn, confirm} asks for a second submit. */
@@ -46,7 +55,7 @@ export interface PromptOptions {
 }
 
 export type DialogRequest =
-  | { id: number; kind: "confirm"; opts: ConfirmOptions; resolve: (ok: boolean) => void }
+  | { id: number; kind: "confirm"; opts: ConfirmOptions; resolve: (ok: boolean, checked: boolean) => void }
   | { id: number; kind: "prompt"; opts: PromptOptions; resolve: (value: string | null) => void };
 
 let nextId = 1;
@@ -163,6 +172,27 @@ export async function ask(opts: ConfirmOptions): Promise<boolean> {
   });
 }
 
+/**
+ * Ask the user to confirm an action, with a checkbox under the body (`opts.checkbox`).
+ * @param opts as for `ask`, plus `checkbox: { label, checked? }`
+ * @returns `confirmed` as `ask` would give it, and whether the box was ticked. After the host
+ *   failed, the OS dialog asks instead (it has no checkbox, so `checked` is false).
+ */
+export async function askWithOption(opts: ConfirmOptions): Promise<ConfirmWithOption> {
+  if (hostLost()) return { confirmed: await askOs(opts), checked: false };
+  return await new Promise((resolve) => {
+    queue = [
+      ...queue,
+      {
+        id: nextId++,
+        kind: "confirm",
+        opts,
+        resolve: (ok, checked) => resolve({ confirmed: ok, checked }),
+      },
+    ];
+  });
+}
+
 /** Alias of `ask`. */
 export const confirmAction = ask;
 
@@ -190,11 +220,12 @@ export async function askText(opts: PromptOptions): Promise<string | null> {
  * Resolve a request and drop it from the queue. Safe to call twice; the first answer wins.
  * @param req the request being answered
  * @param value boolean for confirm requests, string | null for prompts
+ * @param checked a confirm's checkbox (`opts.checkbox`) when it was answered
  */
-export function settleDialog(req: DialogRequest, value: boolean | string | null): void {
+export function settleDialog(req: DialogRequest, value: boolean | string | null, checked = false): void {
   if (!queue.includes(req)) return;
   queue = queue.filter((r) => r !== req);
-  if (req.kind === "confirm") req.resolve(value === true);
+  if (req.kind === "confirm") req.resolve(value === true, checked);
   else req.resolve(typeof value === "string" ? value : null);
 }
 
@@ -211,7 +242,7 @@ export function registerDialogHost(): () => void {
     const pending = queue;
     queue = [];
     for (const req of pending) {
-      if (req.kind === "confirm") req.resolve(false);
+      if (req.kind === "confirm") req.resolve(false, false);
       else req.resolve(null);
     }
   };

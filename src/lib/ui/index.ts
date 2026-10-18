@@ -38,10 +38,12 @@ export type { ChoiceOption, FieldControlProps, TabItem } from "./types";
 export {
   ask,
   askText,
+  askWithOption,
   confirmAction,
   dialogHostMounted,
   type ConfirmFact,
   type ConfirmOptions,
+  type ConfirmWithOption,
   type PromptOptions,
   type PromptValidation,
 } from "./dialogs.svelte";

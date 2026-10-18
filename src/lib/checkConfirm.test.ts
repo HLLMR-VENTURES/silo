@@ -15,6 +15,9 @@ describe("check-confirm lineProblem", () => {
     expect(lineProblem(`const ok = confirmAction(opts);`)).toBe("un-awaited confirmAction()");
     expect(lineProblem(`const v = askText(opts);`)).toBe("un-awaited askText()");
     expect(lineProblem(`if (askOrOs(opts)) go();`)).toBe("un-awaited askOrOs()");
+    expect(lineProblem(`const r = askWithOption(opts);`)).toBe("un-awaited askWithOption()");
+    expect(lineProblem(`const { confirmed } = await askWithOption(opts);`)).toBeNull();
+    expect(lineProblem(`import { askWithOption as explain } from "./lib/ui";`)).toBe("aliased askWithOption");
   });
 
   it("flags member calls and the OS confirm wrappers", () => {

@@ -1,39 +1,83 @@
 // @vitest-environment jsdom
-// LibraryToolbar's "show only" facets (moved from the stat bar, #230): one at a time, click again
-// to clear.
-import { describe, expect, it } from "vitest";
+// LibraryToolbar (#242): the All / Active / Parked segment, the Favorites and Needs attention
+// chips, and the Filters popover's checkboxes and tag select. App owns the filters, so each
+// control calls onchange with the next filters (Needs update goes through onneedsupdate).
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import LibraryToolbar from "./LibraryToolbar.svelte";
+import { NO_FILTERS, type LibraryFilters } from "../library/filters";
 
-const props = {
-  selectedTag: null,
-  shownCount: 10,
-  allActive: false,
-  activeInFilter: 0,
-  disabled: false,
-  libView: "tiles" as const,
-  statCounts: { maps: 2, scripts: 5, unique: 1, active: 7 },
-  onSelectAll: () => {},
-  onClearTag: () => {},
-};
+function setup(filters: LibraryFilters = { ...NO_FILTERS }, extra: Record<string, unknown> = {}) {
+  const onchange = vi.fn();
+  const onneedsupdate = vi.fn();
+  const user = userEvent.setup();
+  render(LibraryToolbar, {
+    filters,
+    onchange,
+    onneedsupdate,
+    shownCount: 10,
+    libView: "list" as const,
+    counts: { attention: 3, maps: 2, conflicted: 0 },
+    ...extra,
+  });
+  return { user, onchange, onneedsupdate };
+}
 
-describe("LibraryToolbar facets", () => {
-  it("shows the counts and toggles one facet at a time", async () => {
-    const user = userEvent.setup();
-    render(LibraryToolbar, props);
-    const maps = screen.getByRole("button", { name: "2 maps" });
-    const scripts = screen.getByRole("button", { name: "5 script mods" });
-    expect(screen.getByRole("button", { name: "1 uniqueType" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "7 active" })).toBeInTheDocument();
-    expect(maps).toHaveAttribute("aria-pressed", "false");
+beforeEach(() => {
+  document.body.innerHTML = "";
+});
 
-    await user.click(maps);
-    expect(maps).toHaveAttribute("aria-pressed", "true");
-    await user.click(scripts);
-    expect(maps).toHaveAttribute("aria-pressed", "false");
-    expect(scripts).toHaveAttribute("aria-pressed", "true");
-    await user.click(scripts);
-    expect(scripts).toHaveAttribute("aria-pressed", "false");
+describe("LibraryToolbar", () => {
+  it("offers All / Active / Parked and reports the choice", async () => {
+    const { user, onchange } = setup();
+    const group = screen.getByRole("radiogroup", { name: "Show" });
+    expect([...group.querySelectorAll("[role=radio]")].map((r) => r.textContent?.trim())).toEqual([
+      "All",
+      "Active",
+      "Parked",
+    ]);
+    await user.click(screen.getByRole("radio", { name: "Parked" }));
+    expect(onchange).toHaveBeenLastCalledWith({ ...NO_FILTERS, status: "parked" });
+  });
+
+  it("toggles the Favorites and Needs attention chips (aria-pressed)", async () => {
+    const { user, onchange } = setup({ ...NO_FILTERS, favorites: true });
+    const fav = screen.getByRole("button", { name: "Favorites" });
+    expect(fav).toHaveAttribute("aria-pressed", "true");
+    await user.click(fav);
+    expect(onchange).toHaveBeenLastCalledWith({ ...NO_FILTERS, favorites: false });
+    const attention = screen.getByRole("button", { name: "Needs attention (3)" });
+    expect(attention).toHaveAttribute("aria-pressed", "false");
+    await user.click(attention);
+    expect(onchange).toHaveBeenLastCalledWith({ ...NO_FILTERS, favorites: true, attention: true });
+  });
+
+  it("opens the Filters popover with the old toggles as checkboxes", async () => {
+    const { user, onchange, onneedsupdate } = setup({ ...NO_FILTERS, hidden: true }, { tags: ["harvest"] });
+    expect(screen.getByRole("button", { name: "Filters (1)" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Filters (1)" }));
+    const panel = await screen.findByRole("dialog", { name: "Filters" });
+    for (const name of ["Hidden", "Flagged", "In conflict", "Has settings", "Needs update", "Maps (2)", "Script mods"]) {
+      expect(screen.getByRole("checkbox", { name })).toBeInTheDocument();
+    }
+    expect(screen.getByRole("checkbox", { name: "Hidden" })).toBeChecked();
+    // No conflicts: In conflict can't narrow anything.
+    expect(screen.getByRole("checkbox", { name: "In conflict" })).toBeDisabled();
+    await user.click(screen.getByRole("checkbox", { name: "Maps (2)" }));
+    expect(onchange).toHaveBeenLastCalledWith({ ...NO_FILTERS, hidden: true, maps: true });
+    await user.click(screen.getByRole("checkbox", { name: "Needs update" }));
+    expect(onneedsupdate).toHaveBeenCalledWith(true);
+    await user.selectOptions(panel.querySelector("select")!, "harvest");
+    expect(onchange).toHaveBeenLastCalledWith({ ...NO_FILTERS, hidden: true, tag: "harvest" });
+  });
+
+  it("keeps a checkbox showing what's in effect when App doesn't switch it on", async () => {
+    const { user } = setup();
+    await user.click(screen.getByRole("button", { name: "Filters" }));
+    const box = await screen.findByRole("checkbox", { name: "Needs update" });
+    await user.click(box);
+    // onneedsupdate found nothing to update, so the filters stay as they were: unchecked.
+    expect(box).not.toBeChecked();
   });
 });

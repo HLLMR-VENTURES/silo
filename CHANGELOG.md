@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Library filters you can see.** Show All, Active or Parked mods; Favorites and Needs attention
+  (mods that can't load, conflict, were modified, are flagged or have an update) are one click;
+  the rest (Hidden, Flagged, In conflict, Has settings, Needs update, Maps, Script mods, uniqueType
+  and a tag) are under **Filters**. Each filter in effect shows as a chip you can remove, with
+  Clear filters. Silo remembers All / Active / Parked. (#242)
+
+- **Select several mods at once.** Tick a mod's checkbox, Shift+click for a range, Ctrl+click to
+  add one (or Shift+↑/↓ and Ctrl+Space from the keyboard), then Turn on, Park, Favorite or Hide
+  them together, or Select all shown. Esc clears the selection. Changing more than 25 mods at
+  once asks first. (#242)
+
+- **Undo after switching mods.** Turning a mod on or parking it (one, or several at once) shows a
+  toast with Undo for 10 seconds. Undo refuses if your active mods changed since. (#242)
+
+- **List density.** Settings → General → List density: Comfortable or Compact. (#242)
+
+- **Keyboard navigation in the Library.** The mod list is one Tab stop: ↑/↓, Home, End and
+  PageUp/PageDown move between mods, Enter opens a mod's details, Space turns it on or off and
+  Shift+F10 (or the Menu key) opens its menu. In card view ←/→ move between cards. Closing the
+  details puts focus back on that mod's row. (#242)
+
 - **Open log folder.** Settings → Diagnostics opens the folder that holds Silo's log
   (`silo.log`), for when a bug report asks for it. (#238)
 
@@ -40,8 +61,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Parking a loose mod explains itself.** The first time you park a mod Silo hasn't filed yet, it
+  says it moves the mod into your library folder (it stays in your library) and asks, with
+  "Don't explain this again". (#242)
+
+- **Parking several mods that include loose ones always says it moves files.** Park from the
+  selection bar with mods Silo hasn't filed yet among them, and one dialog says how many are filed
+  into your library folder (each into its category folder in archive), lists them, and notes when
+  the library folder is on another drive; it asks every time ("Don't explain this again" only
+  covers parking one mod) and replaces the separate "more than 25" question. The loose mods are
+  filed first; if Silo is busy, nothing changes. If some couldn't be filed, the toast says so
+  ("Parked 5 mods, but 2 couldn't be filed.") and Undo still puts them back. (#242)
+
+- **Focus stays put in the Library.** When the mod you were on is filtered out, focus moves to the
+  mod now in its place; clearing the selection puts focus back on your row; removing the last
+  filter chip moves it to Filters; switching between list and cards keeps your place. The
+  selection bar is one Tab stop, with ←/→ between its buttons, and each row is named with its
+  state ("Courseplay, active"). Favorite / Hide on many mods only shows what was saved, and says
+  how many couldn't be. (#242)
+
+- **Library toolbar.** The row of six filter buttons and the "Active" select-all checkbox are
+  replaced by the filters above and the selection bar; empty states now offer what to do next
+  (Clear filters, or Browse mods / Open mods folder / Choose another folder). (#242)
+
+- **The Library opens as a list.** List view is now the default for every library size; card
+  view is still in the toolbar, and Silo remembers which one you picked. Rows were rebuilt: icon,
+  name, then author, version, category and size; up to three badges (problems first, then status,
+  then info) and "+n" for the rest; an **Active** switch with the word Active or Parked beside it;
+  and an always-visible **⋯** that opens the same menu as right-click. Favorite, Hide, Flag,
+  Change category, Edit settings and Find in Browse moved into that menu. Parked mods show a grey
+  icon and "Parked" instead of fading the whole row, so their text stays readable. Cards follow
+  the same rules. (#242)
+
 - **Wider Library and Browse on large screens.** On a wide window the Library and Browse grow to
-  1920px instead of 1280px: the Library shows three tiles across and Browse more cards per row,
+  1920px instead of 1280px: the Library shows three cards across and Browse more cards per row,
   instead of wide empty margins. Other pages keep their width. (#238)
 
 - **Clearer status text.** Messages, hints and tooltips read as plain sentences ("Links are

@@ -2,6 +2,8 @@
   // On/off switch: <Switch bind:checked label="Show hidden mods" />.
   // A native <button role="switch">, so Space and Enter both toggle. Give it a visible `label`,
   // or `ariaLabel` when the text naming it lives elsewhere.
+  // `controlled`: a click only asks (onchange gets the wanted value) and `checked` follows the
+  // parent, for a switch whose change can be refused or lands later (a mod's Active switch).
   import type { HTMLButtonAttributes } from "svelte/elements";
 
   interface Props
@@ -13,6 +15,8 @@
     ariaLabel?: string;
     disabled?: boolean;
     onchange?: (checked: boolean) => void;
+    /** Don't flip `checked` on click; the parent sets it (after onchange). */
+    controlled?: boolean;
     class?: string;
   }
 
@@ -22,11 +26,16 @@
     ariaLabel,
     disabled = false,
     onchange,
+    controlled = false,
     class: className = "",
     ...rest
   }: Props = $props();
 
   function toggle() {
+    if (controlled) {
+      onchange?.(!checked);
+      return;
+    }
     checked = !checked;
     onchange?.(checked);
   }

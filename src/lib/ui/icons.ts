@@ -51,6 +51,9 @@ import Check from "@lucide/svelte/icons/check";
 import Circle from "@lucide/svelte/icons/circle";
 import CircleDot from "@lucide/svelte/icons/circle-dot";
 import Link from "@lucide/svelte/icons/link";
+import MapIcon from "@lucide/svelte/icons/map";
+import FileCode from "@lucide/svelte/icons/file-code";
+import Folder from "@lucide/svelte/icons/folder";
 
 export const ICONS = {
   library: Library,
@@ -105,6 +108,9 @@ export const ICONS = {
   dot: CircleDot,
   circle: Circle,
   link: Link,
+  map: MapIcon,
+  script: FileCode,
+  folder: Folder,
 } as const;
 
 export type IconName = keyof typeof ICONS;

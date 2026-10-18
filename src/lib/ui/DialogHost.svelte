@@ -14,7 +14,7 @@
   {#key req.id}
     {#if req.kind === "confirm"}
       {@const r = req}
-      <ConfirmDialog open {...r.opts} onresult={(ok) => settleDialog(r, ok)} />
+      <ConfirmDialog open {...r.opts} onresult={(ok, checked) => settleDialog(r, ok, checked)} />
     {:else}
       {@const r = req}
       <PromptDialog open {...r.opts} onresult={(v) => settleDialog(r, v)} />

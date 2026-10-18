@@ -141,8 +141,8 @@ should always see where they are, in both themes.
   info, ok, check, verifiedBuild, verifiedAuthor, modified, favorite, hidden,
   visible, flagged, modSettings, showFile, archive, share, download, external, undo,
   rescan, more, controls, bridge, cloud, copy, bug, close, chevrons, tag, grid,
-  list, menu, fork, swap, target, arrows, dot, circle, link. A new concept gets a
-  new entry; an existing concept never gets a second icon.
+  list, menu, fork, swap, target, arrows, dot, circle, link, map, script, folder.
+  A new concept gets a new entry; an existing concept never gets a second icon.
 - **Sizes:** 13–14 px inline with text, 16 px in icon buttons, 18–20 px in the
   top bar. Stroke 1.75. Icons are sized in rem so they follow UI size.
 - Icons sit **beside their words**. An **icon-only control needs a label**

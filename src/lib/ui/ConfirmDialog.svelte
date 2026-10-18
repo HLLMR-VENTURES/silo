@@ -1,12 +1,14 @@
 <script lang="ts">
   // Yes/no dialog with a verb button. Usually reached through `ask()`; standalone:
   //   <ConfirmDialog bind:open title="Delete?" confirm="Delete" tone="danger" onresult={...} />
-  // Layout: body, optional facts table, optional scrolling list, footer [Cancel] [Verb].
+  // Layout: body, optional facts table, optional scrolling list, optional checkbox
+  // ("Don't explain this again", reported through askWithOption), footer [Cancel] [Verb].
   // The body is the dialog's accessible description; a danger confirm is an alertdialog.
   // The verb button only answers ARM_MS after opening (see dialogs.svelte.ts), and never to a
   // held-down (repeating) Enter or Space.
-  import type { Snippet } from "svelte";
+  import { untrack, type Snippet } from "svelte";
   import Button from "./Button.svelte";
+  import Checkbox from "./Checkbox.svelte";
   import Dialog from "./Dialog.svelte";
   import { armTimer, type ConfirmFact } from "./dialogs.svelte";
 
@@ -19,8 +21,10 @@
     confirm: string;
     cancel?: string;
     tone?: "neutral" | "danger";
+    /** A checkbox under the body; its state is the second argument of `onresult`. */
+    checkbox?: { label: string; checked?: boolean };
     /** true = confirm button; false = Cancel, Esc, scrim, or closed from outside. */
-    onresult?: (ok: boolean) => void;
+    onresult?: (ok: boolean, checked: boolean) => void;
   }
 
   let {
@@ -32,8 +36,15 @@
     confirm,
     cancel = "Cancel",
     tone = "neutral",
+    checkbox,
     onresult,
   }: Props = $props();
+
+  /** The checkbox's state; DialogHost mounts a fresh dialog per request, so it starts as asked. */
+  let optionChecked = $state(false);
+  $effect.pre(() => {
+    if (open) optionChecked = untrack(() => checkbox?.checked ?? false);
+  });
 
   const uid = $props.id();
   const bodyId = `${uid}-body`;
@@ -51,11 +62,11 @@
   function answer(ok: boolean) {
     answered = true;
     open = false;
-    onresult?.(ok);
+    onresult?.(ok, optionChecked);
   }
 
   function onclose() {
-    if (!answered) onresult?.(false);
+    if (!answered) onresult?.(false, optionChecked);
     answered = false;
   }
 
@@ -101,6 +112,9 @@
       {#each list as item, i (i)}<li>{item}</li>{/each}
     </ul>
   {/if}
+  {#if checkbox}
+    <div class="option"><Checkbox bind:checked={optionChecked} label={checkbox.label} /></div>
+  {/if}
   {#snippet footer()}
     <Button data-autofocus={danger ? "" : undefined} onclick={() => answer(false)}>{cancel}</Button>
     <Button
@@ -145,6 +159,10 @@
     border: 1px solid var(--border);
     border-radius: var(--r-sm);
     background: var(--sunken);
+    font-size: var(--fs-sm);
+  }
+  .option {
+    margin-top: var(--sp-3);
     font-size: var(--fs-sm);
   }
   .list li {
