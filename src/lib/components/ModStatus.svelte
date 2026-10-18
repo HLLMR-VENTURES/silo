@@ -6,7 +6,19 @@
   import type { ModEntry, CatalogUpdate } from "../types";
   import { openExternal } from "../api";
 
-  let { mod, catalog, checked }: { mod: ModEntry; catalog: CatalogUpdate | null; checked: boolean } = $props();
+  let {
+    mod,
+    catalog,
+    checked,
+    pageUrl = null,
+  }: {
+    mod: ModEntry;
+    catalog: CatalogUpdate | null;
+    checked: boolean;
+    /** The catalog's page for the mod, offered when there's no download link. */
+    pageUrl?: string | null;
+  } = $props();
+  const link = $derived(catalog?.downloadUrl ?? pageUrl);
 </script>
 
 <div class="d-section">
@@ -21,8 +33,8 @@
       Update available: you have {mod.version ?? "an unknown version"}, the catalog has <b>{c.latest}</b>{c.source
         ? ` (${c.source})`
         : ""}.
-      {#if c.downloadUrl}<button class="d-cat-link" onclick={() => openExternal(c.downloadUrl!)}
-          >Get it <Icon name="external" size={12} /><span class="vh"> (opens in your browser)</span></button
+      {#if link}<button class="d-cat-link" onclick={() => openExternal(link)}
+          >{c.downloadUrl ? "Get it" : "View source"} <Icon name="external" size={12} /><span class="vh"> (opens in your browser)</span></button
         >{/if}
     </div>
   {:else}

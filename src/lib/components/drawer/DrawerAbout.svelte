@@ -10,13 +10,19 @@
 
   let { catalog, title }: { catalog: CatalogModDetail | null; title: string } = $props();
 
+  const uid = $props.id();
   let showFull = $state(false);
   let cover = $state("");
   $effect(() => {
     const url = catalog?.imageUrl;
     cover = "";
     showFull = false;
-    if (url) loadCatalogImage(url).then((u) => { if (catalog?.imageUrl === url) cover = u; });
+    if (url)
+      loadCatalogImage(url)
+        .then((u) => {
+          if (catalog?.imageUrl === url) cover = u;
+        })
+        .catch(() => {}); // no cover is fine
   });
 
   const summary = $derived((catalog?.descriptionFull || catalog?.description || "").trim());
@@ -24,8 +30,8 @@
 </script>
 
 {#if catalog && (cover || summary || catalog.sources?.length)}
-  <section class="sec" aria-labelledby="drawer-about">
-    <h3 id="drawer-about" class="h">About</h3>
+  <section class="sec" aria-labelledby="{uid}-about">
+    <h3 id="{uid}-about" class="h">About</h3>
     {#if cover}<img class="cover" src={cover} alt="" />{/if}
     {#if summary}
       <p class="summary">{summary}</p>

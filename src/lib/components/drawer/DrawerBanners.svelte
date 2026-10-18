@@ -7,7 +7,7 @@
   import type { ForeignFile } from "../../api";
   import type { Conflict, LogModHealth } from "../../types";
   import { plural, formatCount } from "../../plural";
-  import { versionLabel } from "./drawerText";
+  import { conflictKindLabel, versionLabel } from "./drawerText";
 
   interface Props {
     foreign: ForeignFile | null;
@@ -43,6 +43,9 @@
   }: Props = $props();
 
   const v = (s: string | null) => (s ? versionLabel(s) : "an unknown version");
+  const keepLabel = $derived(
+    foreign?.managedVersion ? `Keep Silo's ${versionLabel(foreign.managedVersion)}` : "Keep Silo's copy",
+  );
   const others = (c: Conflict) => c.mods.filter((m) => !selfNames.includes(m)).join(", ");
 </script>
 
@@ -52,12 +55,12 @@
       <div class="banner info" role="group" aria-label="A different build">
         <p class="msg">
           <b>{foreignIsNewer ? "A newer build is in your mods folder" : "A different build is in your mods folder"}</b>:
-          {v(foreign.flatVersion)}. Silo keeps {v(foreign.managedVersion)}. This is how ModHub updates
+          {v(foreign.flatVersion)}. Silo keeps {foreign.managedVersion ? versionLabel(foreign.managedVersion) : "its own copy"}. This is how ModHub updates
           arrive: you download the zip into the folder.
         </p>
         <div class="row">
           <Button size="sm" variant="primary" icon="update" onclick={onAdoptForeign}>Use this version</Button>
-          <Button size="sm" onclick={onRestoreForeign}>Keep Silo's {v(foreign.managedVersion)}</Button>
+          <Button size="sm" onclick={onRestoreForeign}>{keepLabel}</Button>
         </div>
       </div>
     {/if}
@@ -85,7 +88,7 @@
           {#each conflicts as c (c.kind + c.name)}
             <li class:crit={c.severity === "critical"}>
               <span class="sev">{c.severity === "critical" ? "Problem" : "Review"}</span>
-              {c.kind} “{c.name}”, with {others(c)}
+              {conflictKindLabel(c.kind)} “{c.name}”, with {others(c)}
             </li>
           {/each}
         </ul>

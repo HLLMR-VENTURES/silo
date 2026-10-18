@@ -12,7 +12,7 @@ export type DrawerMenuId = "favorite" | "broken" | "hidden" | "category" | "show
 export function drawerMenuItems(c: Pick<CurationRow, "favorite" | "hidden" | "broken">): MenuItem[] {
   return [
     { id: "favorite", label: c.favorite ? "Remove favorite" : "Favorite", icon: "favorite" },
-    { id: "broken", label: c.broken ? "Remove flag" : "Flag as broken", icon: "flagged", danger: !c.broken },
+    { id: "broken", label: c.broken ? "Remove flag" : "Flag", icon: "flagged", danger: !c.broken },
     { id: "hidden", label: c.hidden ? "Unhide" : "Hide", icon: c.hidden ? "visible" : "hidden" },
     { id: "category", label: "Change category…", icon: "tag", separatorBefore: true },
     { id: "showFile", label: "Show file", icon: "showFile" },

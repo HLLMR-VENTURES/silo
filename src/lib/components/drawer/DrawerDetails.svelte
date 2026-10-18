@@ -18,18 +18,24 @@
   }
 
   let { mod, organized, libraryTechNames, lastRun }: Props = $props();
+  const uid = $props.id();
 
   const type = $derived(mod.isMap ? "Map" : mod.kind === "dir" ? "Folder mod" : "Zip");
 
   const lastRunText = $derived.by(() => {
     if (lastRun === undefined) return null;
-    if (lastRun === null) return "No errors or warnings";
+    if (lastRun === null) return "Nothing in the last game's log";
     if (lastRun.errors > 0) return `${formatCount(lastRun.errors)} ${plural(lastRun.errors, { one: "error", other: "errors" })}`;
     const real = lastRun.warnings - lastRun.benign;
     if (real > 0) return `${formatCount(real)} ${plural(real, { one: "warning", other: "warnings" })}`;
     if (lastRun.benign > 0) return "Cosmetic warnings only";
     return "No errors or warnings";
   });
+
+  // The log's sample line for warnings (errors have their own banner with it).
+  const lastRunSample = $derived(
+    lastRun && lastRun.errors === 0 && lastRun.warnings - lastRun.benign > 0 ? lastRun.sample : "",
+  );
 
   async function copyId() {
     try {
@@ -41,8 +47,8 @@
   }
 </script>
 
-<section class="sec" aria-labelledby="drawer-details">
-  <h3 id="drawer-details" class="h">Details</h3>
+<section class="sec" aria-labelledby="{uid}-details">
+  <h3 id="{uid}-details" class="h">Details</h3>
   <dl class="kv">
     <div><dt>Category</dt><dd>{mod.category}{mod.subcategory ? ` · ${mod.subcategory}` : ""}</dd></div>
     <div><dt>Size</dt><dd class="tnum">{formatSize(mod.size)}</dd></div>
@@ -52,6 +58,7 @@
     <div><dt>Multiplayer</dt><dd>{mod.mpSupported ? "Supported" : "Not marked"}</dd></div>
     {#if organized}<div><dt>Library</dt><dd>Organized</dd></div>{/if}
     {#if lastRunText}<div><dt>Last run</dt><dd>{lastRunText}</dd></div>{/if}
+    {#if lastRunSample}<p class="sample">{lastRunSample}</p>{/if}
     <div class="id">
       <dt>Mod ID</dt>
       <dd>
@@ -117,6 +124,12 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
+    overflow-wrap: anywhere;
+  }
+  .sample {
+    margin: 0;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
     overflow-wrap: anywhere;
   }
   .mono {

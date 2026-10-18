@@ -50,7 +50,7 @@ export function drawerBadges(mod: BadgeMod, ctx: DrawerBadgeContext = {}): Badge
       tone: "danger",
       icon: "problem",
       group: "problem",
-      title: "In a critical conflict or named by the last crash. See the notes below.",
+      title: "In a critical conflict or named by the last crash. See below.",
     });
   }
   // Stable: keeps rowBadges' order inside each group.

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick, untrack } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { get } from "svelte/store";
   import {
     DialogHost,

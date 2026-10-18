@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { conflictPartners, drawerBadges, isProblem, modifiedFileCount } from "./drawerBadges";
 import { drawerMenuItems } from "./drawerMenu";
-import { versionLabel, versionNewer } from "./drawerText";
+import { conflictKindLabel, versionLabel, versionNewer } from "./drawerText";
 import type { Conflict, LogReport, VerifyResult } from "../../types";
 
 const mod = { error: null, ignoredDigitPrefix: false, kind: "zip" as const, isMap: true, scriptCount: 3 };
@@ -44,13 +44,14 @@ describe("drawerBadges", () => {
     expect(drawerBadges(mod, { verify: verify("modified", { removed: ["x"] }) })[0].label).toBe("Modified (1 file)");
   });
 
-  it("orders problems before status, like the Library rows, and caps at three", () => {
+  it("orders problems before status, like the Library rows, and never has more than three", () => {
     const b = drawerBadges(mod, { verify: verify("modified", { changed: ["a"] }), hasUpdate: true, problem: true });
     expect(b.map((x) => x.id)).toEqual(["modified", "problem", "update"]);
     expect(b.find((x) => x.id === "update")!.label).toBe("Update available");
     const ok = drawerBadges(mod, { verify: verify("verified"), hasUpdate: true, problem: true });
     expect(ok.map((x) => x.id)).toEqual(["problem", "verified", "update"]);
     expect(ok.find((x) => x.id === "problem")).toMatchObject({ tone: "danger", icon: "problem" });
+    expect(ok.length).toBeLessThanOrEqual(3);
   });
 });
 
@@ -87,7 +88,7 @@ describe("drawerMenuItems", () => {
     expect(off.map((i) => i.id)).toEqual(["favorite", "broken", "hidden", "category", "showFile", "browse"]);
     expect(off.map((i) => i.label)).toEqual([
       "Favorite",
-      "Flag as broken",
+      "Flag",
       "Hide",
       "Change category…",
       "Show file",
@@ -99,6 +100,11 @@ describe("drawerMenuItems", () => {
 });
 
 describe("drawerText", () => {
+  it("names conflict kinds in plain words", () => {
+    expect(conflictKindLabel("uniqueType")).toBe("Exclusive slot");
+    expect(conflictKindLabel("fillType")).toBe("Fill type");
+    expect(conflictKindLabel("somethingNew")).toBe("somethingNew");
+  });
   it("never doubles the v", () => {
     expect(versionLabel("1.2.0.0")).toBe("v1.2.0.0");
     expect(versionLabel("v1.2.0.0")).toBe("v1.2.0.0");

@@ -1,5 +1,18 @@
 // Small display helpers for the mod drawer. Pure.
 
+/** A conflict's kind in plain words: "uniqueType" -> "Exclusive slot". Unknown kinds pass through. */
+export function conflictKindLabel(kind: string): string {
+  const words: Record<string, string> = {
+    uniqueType: "Exclusive slot",
+    fillType: "Fill type",
+    script: "Script",
+    map: "Map",
+    specialization: "Specialization",
+    vehicleType: "Vehicle type",
+  };
+  return words[kind] ?? kind;
+}
+
 /** "1.2.0.0" or "v1.2.0.0" -> "v1.2.0.0" (never "vv…"). */
 export function versionLabel(v: string): string {
   return "v" + v.trim().replace(/^v/i, "");

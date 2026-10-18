@@ -19,6 +19,7 @@
   let { title, author, version, icon, badges, onClose }: Props = $props();
 
   let titleEl = $state<HTMLElement | null>(null);
+  const spoken = $derived(badges.map((b) => `${b.label}: ${b.title.replace(/\.$/, "")}.`).join(" "));
 
   /** Move focus to the title (it isn't in the tab order: tabindex -1). */
   export function focusTitle(): void {
@@ -34,7 +35,9 @@
       {author ?? "Unknown author"}{version ? ` · ${versionLabel(version)}` : ""}
     </div>
     {#if badges.length > 0}
-      <div class="badges"><BadgeRow {badges} /></div>
+      <!-- The pills' explanations are hover tooltips; screen readers get them as text instead. -->
+      <div class="badges" aria-hidden="true"><BadgeRow {badges} /></div>
+      <p class="vh">{spoken}</p>
     {/if}
   </div>
   <IconButton icon="close" label="Close details" onclick={onClose} />
@@ -80,6 +83,15 @@
     font-size: var(--fs-xs);
     color: var(--text-muted);
     margin-top: 2px;
+  }
+  .vh {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .badges {
     margin-top: var(--sp-2);

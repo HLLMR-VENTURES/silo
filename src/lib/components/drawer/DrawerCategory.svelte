@@ -13,6 +13,7 @@
   }
 
   let { mod, categories, isOverridden, onSetCategory, onResetCategory }: Props = $props();
+  const uid = $props.id();
 
   // Drafts follow the prop (and re-sync when the drawer switches mods).
   let catDraft = $state("");
@@ -33,8 +34,8 @@
   }
 </script>
 
-<section class="sec" aria-labelledby="drawer-category" bind:this={section}>
-  <h3 id="drawer-category" class="h">
+<section class="sec" aria-labelledby="{uid}-category" bind:this={section}>
+  <h3 id="{uid}-category" class="h">
     Category {#if isOverridden}<span class="ovr">Set by you</span>{/if}
   </h3>
   <div class="row">

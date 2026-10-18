@@ -134,6 +134,10 @@ describe("drawer header badges", () => {
     const words = [...header().querySelectorAll(".badge")].map((b) => b.textContent?.trim());
     expect(words).toEqual(["Problem", "Verified build", "Update available"]);
     expect(h.getByText("Problem")).toBeInTheDocument();
+    // The pills are hover-explained; a screen reader gets the explanations as text.
+    expect(h.getByText(/Problem: In a critical conflict/)).toBeInTheDocument();
+    // Conflict kinds are named in plain words.
+    expect(screen.getByText(/Map “two maps”, with FS25_Other/)).toBeInTheDocument();
     // The conflict banner names the other mod and links to Diagnose.
     expect(screen.getByText(/Conflicts with 1 active mod/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "See conflicts" })).toBeInTheDocument();
@@ -162,6 +166,31 @@ describe("drawer header badges", () => {
   });
 });
 
+describe("drawer lookups", () => {
+  it("ignores a catalog answer that arrives after the drawer moved to another mod", async () => {
+    let answer!: (rows: Awaited<ReturnType<typeof catalogCheckUpdates>>) => void;
+    vi.mocked(catalogCheckUpdates).mockImplementationOnce(() => new Promise((r) => (answer = r)));
+    const p = props(entry(20, { path: "C:/mods/stale20.zip" }));
+    const { rerender } = render(ModDetail, p);
+    await settle();
+    await rerender({ ...p, mod: entry(21, { path: "C:/mods/stale21.zip" }) });
+    await settle();
+    answer([{ techName: "FS25_Mod20", latest: "9.0.0.0", hasUpdate: true, downloadUrl: null, source: null }]);
+    await settle();
+    expect(within(header()).queryByText("Update available")).toBeNull();
+    expect(screen.getByText(/Not in Silo's catalog/)).toBeInTheDocument();
+  });
+
+  it("doesn't call a mod with no version outdated on the catalog's word alone", async () => {
+    vi.mocked(catalogCheckUpdates).mockImplementation(() =>
+      Promise.resolve([{ techName: "FS25_Mod22", latest: "1.0.0.0", hasUpdate: true, downloadUrl: null, source: null }]),
+    );
+    render(ModDetail, props(entry(22, { path: "C:/mods/nover22.zip", version: null })));
+    await settle();
+    expect(within(header()).queryByText("Update available")).toBeNull();
+  });
+});
+
 describe("drawer actions", () => {
   it("has the Active switch, Settings, and a ⋯ menu with the other actions", async () => {
     const user = userEvent.setup();
@@ -182,13 +211,13 @@ describe("drawer actions", () => {
     const menu = screen.getByRole("menu");
     expect(within(menu).getAllByRole("menuitem").map((i) => i.textContent?.trim())).toEqual([
       "Favorite",
-      "Flag as broken",
+      "Flag",
       "Hide",
       "Change category…",
       "Show file",
       "Find in Browse",
     ]);
-    await user.click(within(menu).getByRole("menuitem", { name: "Flag as broken" }));
+    await user.click(within(menu).getByRole("menuitem", { name: "Flag" }));
     expect(p.onToggle).toHaveBeenCalledWith("broken");
 
     await user.click(more);
@@ -236,6 +265,24 @@ describe("drawer focus", () => {
     await rerender({ ...p, mod: entry(9) });
     await settle();
     expect(screen.getByRole("heading", { level: 2, name: "Mod 9" })).toHaveFocus();
+  });
+
+  it("Esc with the ⋯ menu open closes only the menu", async () => {
+    const user = userEvent.setup();
+    const p = props(entry(10));
+    render(ModDetail, p);
+    await settle();
+    const more = screen.getByRole("button", { name: "More actions for Mod 10" });
+    await user.click(more);
+    await settle();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await settle();
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(p.onClose).not.toHaveBeenCalled();
+    expect(more).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(p.onClose).toHaveBeenCalledTimes(1);
   });
 
   it("Esc closes while focus is in the drawer, not while it's elsewhere", async () => {

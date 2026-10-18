@@ -20,6 +20,7 @@
     onFilterTag: (tag: string) => void;
   } = $props();
 
+  const uid = $props.id();
   let noteDraft = $state("");
   $effect(() => {
     noteDraft = curation.note ?? "";
@@ -57,8 +58,8 @@
 </script>
 
 <div class="d-section">
-  <h4 class="d-label" id="cur-rating">Rating</h4>
-  <div class="d-stars" role="group" aria-labelledby="cur-rating">
+  <h4 class="d-label" id="{uid}-rating">Rating</h4>
+  <div class="d-stars" role="group" aria-labelledby="{uid}-rating">
     {#each [1, 2, 3, 4, 5] as s (s)}
       <button class="star" class:on={curation.rating >= s} onclick={() => setRating(s)} aria-label={`${s} ${s === 1 ? "star" : "stars"}`} aria-pressed={curation.rating === s}><Icon name="favorite" size={22} filled={curation.rating >= s} /></button>
     {/each}
@@ -86,8 +87,8 @@
 </div>
 
 <div class="d-section">
-  <h4 class="d-label"><label for="cur-notes">Notes</label></h4>
-  <textarea id="cur-notes" class="d-note" bind:value={noteDraft} onblur={saveNote} placeholder="Personal notes about this mod…"></textarea>
+  <h4 class="d-label"><label for="{uid}-notes">Notes</label></h4>
+  <textarea id="{uid}-notes" class="d-note" bind:value={noteDraft} onblur={saveNote} placeholder="Personal notes about this mod…"></textarea>
 </div>
 
 <style>

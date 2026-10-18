@@ -10,7 +10,7 @@
   import type { ForeignFile } from "../api";
   import { revealInFolder, catalogDetailByTech, catalogCheckUpdates, scanLog } from "../api";
   import { resizable } from "../resize";
-  import { getVerdict } from "../provenanceCache.svelte";
+  import { getVerdict, provKey } from "../provenanceCache.svelte";
   import { go } from "../state/nav.svelte";
   import { layerCount } from "../ui/overlayStack";
   import { toast } from "../ui/toasts.svelte";
@@ -99,6 +99,7 @@
   }: Props = $props();
 
   const label = $derived(mod.title ?? mod.techName);
+  const uid = $props.id();
 
   // Is the dropped-in build newer than Silo's managed copy?
   const foreignIsNewer = $derived(
@@ -107,10 +108,11 @@
       : foreign?.flatVersion && !foreign?.managedVersion),
   );
 
-  // Everything below is looked up per mod (keyed by path, so a rescan that hands over a fresh
-  // entry for the same file doesn't reload), best effort: a missing log or an offline catalog
-  // just leaves its part out.
+  // Everything below is looked up per file (path, size and mtime: a rescan that hands over a fresh
+  // entry for the same file doesn't reload, a new build dropped in at the same name does), best
+  // effort: a missing log or an offline catalog just leaves its part out. Focus follows the path.
   const path = $derived(mod.path);
+  const fileId = $derived(provKey(mod));
 
   let icon = $state<string | null>(null);
   /** Silo's catalog record (About) and its version verdict (Source and updates, Update badge). */
@@ -120,7 +122,7 @@
   /** The last game log's triage; null until read (or when there's no log). */
   let report = $state<LogReport | null>(null);
   $effect(() => {
-    const p = path;
+    const id = fileId;
     untrack(() => {
       const m = mod;
       icon = cachedModIcon(m);
@@ -128,7 +130,7 @@
       catalogUpd = null;
       catalogChecked = false;
       report = null;
-      const still = () => mod.path === p;
+      const still = () => provKey(mod) === id;
       if (!icon) void loadModIcon(m).then((u) => {
         if (still()) icon = u;
       });
@@ -161,7 +163,8 @@
   const badges = $derived(
     drawerBadges(mod, {
       verify,
-      hasUpdate: hasUpdate || !!catalogUpd?.hasUpdate,
+      // The catalog counts any version as newer than none: trust it only for a versioned mod.
+      hasUpdate: hasUpdate || (!!mod.version && !!catalogUpd?.hasUpdate),
       problem: isProblem(mod, conflicts, report),
     }),
   );
@@ -250,15 +253,15 @@
 
   <ProvenanceCheck {mod} />
 
-  <section class="sec" aria-labelledby="drawer-source">
-    <h3 id="drawer-source" class="h">Source and updates</h3>
-    <ModStatus {mod} catalog={catalogUpd} checked={catalogChecked} />
+  <section class="sec" aria-labelledby="{uid}-source">
+    <h3 id="{uid}-source" class="h">Source and updates</h3>
+    <ModStatus {mod} catalog={catalogUpd} checked={catalogChecked} pageUrl={catalog?.pageUrl ?? null} />
     <ModSourceLink {mod} {source} {onSourceChange} {onRepoChange} />
     <ModRepoLink {mod} {repo} {onRepoChange} {onInstalled} />
   </section>
 
-  <section class="sec" aria-labelledby="drawer-notes">
-    <h3 id="drawer-notes" class="h">My notes</h3>
+  <section class="sec" aria-labelledby="{uid}-notes">
+    <h3 id="{uid}-notes" class="h">My notes</h3>
     <ModCuration techName={mod.techName} {curation} {tags} {onCurationChange} {onTagsChange} {onFilterTag} />
   </section>
 

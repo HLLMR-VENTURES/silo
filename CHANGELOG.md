@@ -100,8 +100,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   “x”." with **Clear search** when a search finds nothing. Install and loading errors use Silo's
   usual messages instead of raw text. (#246)
 
-- **Mod details, reordered.** The Active switch, Settings and a ⋯ menu (Favorite, Flag as broken,
-  Hide, Change category, Show file, Find in Browse) replace the row of seven buttons. What needs
+- **Mod details, reordered.** The Active switch, Settings and a ⋯ menu (Favorite, Flag, Hide,
+  Change category, Show file, Find in Browse) replace the row of seven buttons. What needs
   your attention comes next: a different build in your mods folder (Use this version or keep
   Silo's), errors from your last game (See in Diagnose) and conflicts with active mods (See
   conflicts). Then About, Details (with the Mod ID and a copy button, Exclusive slot and
