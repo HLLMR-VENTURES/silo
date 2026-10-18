@@ -223,7 +223,7 @@
     background: var(--sunken);
     color: var(--text);
   }
-  :global(.ms-save) {
+  .ms-file :global(.ms-save) {
     margin-top: 10px;
   }
   .ms-empty {

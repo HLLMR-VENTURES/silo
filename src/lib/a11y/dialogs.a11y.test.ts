@@ -122,6 +122,15 @@ describe("hand-rolled overlays, now dialogs", () => {
   });
 });
 
+it("Browse description: first focus is Close, not the external link", async () => {
+  render(DescModal, {
+    modal: { title: "Lizard Pack", text: "A pack.", url: "https://example.invalid", loading: false, source: "catalog" },
+    onClose: vi.fn(),
+  });
+  await settle();
+  await waitFor(() => expect(document.activeElement).toHaveTextContent("Close"));
+});
+
 describe("axe: app dialogs", () => {
   it("keyboard shortcuts", async () => {
     render(ShortcutsDialog, { open: true });

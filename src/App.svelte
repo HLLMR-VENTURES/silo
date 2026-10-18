@@ -1979,9 +1979,10 @@
     });
   }
 
-  const visible = $derived.by(() =>
-    timed("silo:library-sort", () => sortMods(filtered, sortBy, sortDir, (t) => cur(t).rating)),
-  );
+  const visible = $derived.by(() => {
+    const list = filtered; // read first, so a keystroke's filtering isn't counted as sorting
+    return timed("silo:library-sort", () => sortMods(list, sortBy, sortDir, (t) => cur(t).rating));
+  });
 
   const visibleKeys = $derived(visible.map(modKey));
   /** The selected mods, in list order. */
@@ -2209,23 +2210,46 @@
     progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0,
   );
 
-  // A scan, from outside runScan: one screen-reader line when it starts and one when it ends (not
-  // every tick), and the §5.5 timing from its start to the Library painted with the result
-  // (DevTools → Performance → Timings, "silo:scan-to-render").
+  // A scan, from outside runScan: one screen-reader line when a scan the user asked for starts
+  // and one when it ends (not every tick, and not the quiet rescans after every write), and the
+  // §5.5 timing from its start to the Library painted with the result (DevTools → Performance →
+  // Timings, "silo:scan-to-render").
   let scanSaid = $state("");
+  /** Set by the rescans the user starts (F5, Rescan, Try again, the first scan); read once. */
+  let announceNextScan = false;
+  let scanAnnounced = false;
   let scanTimed = false;
+  let scanSeq = 0;
+  /** runScan, announced to screen readers. */
+  function rescanAnnounced(auto = true) {
+    announceNextScan = true;
+    return runScan(auto);
+  }
   $effect(() => {
     if (scanning) {
       scanTimed = true;
+      scanSeq++;
       markStart("silo:scan-to-render");
-      scanSaid = "Scanning your mods…";
+      scanAnnounced = announceNextScan;
+      announceNextScan = false;
+      if (scanAnnounced) scanSaid = "Scanning your mods…";
     } else if (scanTimed) {
       scanTimed = false;
-      const n = untrack(() => mods.length);
-      scanSaid = `Scan finished: ${n.toLocaleString()} mod${n === 1 ? "" : "s"}.`;
-      // After the DOM update, then after the frame that paints it.
+      if (scanAnnounced) {
+        const n = untrack(() => mods.length);
+        scanSaid = untrack(() => scanFailed)
+          ? "The scan didn't finish."
+          : `Scan finished: ${n.toLocaleString()} mod${n === 1 ? "" : "s"}.`;
+      }
+      // After the DOM update, then after the frame that paints it; skipped if a newer scan has
+      // started meanwhile (its start mark isn't this scan's).
+      const seq = scanSeq;
       void tick().then(() =>
-        requestAnimationFrame(() => setTimeout(() => measureFrom("silo:scan-to-render"), 0)),
+        requestAnimationFrame(() =>
+          setTimeout(() => {
+            if (seq === scanSeq && !untrack(() => scanning)) measureFrom("silo:scan-to-render");
+          }, 0),
+        ),
       );
     }
   });
@@ -2733,7 +2757,7 @@
           level: "warning",
           title: d.title,
           body: d.body,
-          actions: [{ label: "Try again", run: () => runScan(false), primary: true }],
+          actions: [{ label: "Try again", run: () => rescanAnnounced(false), primary: true }],
           dismissible: true,
         });
     } finally {
@@ -2825,7 +2849,7 @@
       } catch {
         /* non-critical */
       }
-      if (roots.length) runScan();
+      if (roots.length) rescanAnnounced();
       // Checking for mod updates at startup is opt-in (Settings > General, offered once in
       // Updates): it sends mod names to the catalog. It runs after the first scan (see
       // startupCheckPending) and only checks; nothing is installed.
@@ -3122,7 +3146,7 @@
     { id: "rebuild", label: "Re-read every mod", disabled: !!fgLock.reason || scanning },
   ]);
   function libraryMenuSelect(id: string) {
-    if (id === "rescan") runScan();
+    if (id === "rescan") rescanAnnounced();
     else if (id === "rebuild") rebuildLibrary();
   }
 
@@ -3806,7 +3830,7 @@
         {scanning}
         scanned={libraryScanned}
         {scanFailed}
-        onRescan={() => runScan(false)}
+        onRescan={() => rescanAnnounced(false)}
         {progress}
         autoFileOn={autoFileNew}
         modCount={mods.length}

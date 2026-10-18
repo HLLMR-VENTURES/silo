@@ -6,7 +6,7 @@
 //
 //   node scripts/check-contrast.mjs            # check
 //   node scripts/check-contrast.mjs --report   # also print every pair and its ratio
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -200,7 +200,18 @@ export function check(css) {
 
 // ── CLI ─────────────────────────────────────────────────────────────────────────────────────
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+/** Run as a script (not imported by the tests)? Compares real paths, so a junction or symlink to
+ *  scripts/ still runs the check instead of silently passing. */
+function isMain() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+  } catch {
+    return false;
+  }
+}
+
+if (isMain()) {
   const { failures, rows } = check(readTokens());
   if (process.argv.includes("--report")) {
     for (const r of rows)

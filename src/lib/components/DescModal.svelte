@@ -42,7 +42,7 @@
     {#if modal.url}
       <Button icon="external" onclick={() => openExternal(modal.url!)}>Open full mod page</Button>
     {/if}
-    <Button variant="primary" onclick={() => (open = false)}>Close</Button>
+    <Button variant="primary" data-autofocus onclick={() => (open = false)}>Close</Button>
   {/snippet}
 </Dialog>
 
