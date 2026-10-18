@@ -3035,14 +3035,22 @@
     });
     // Custom since a set: keep the change in that set, or save it as a new one.
     if (setState.kind === "custom") {
+      // An automatic set is pruned later, so edits only go into a set the user saved.
+      if (setStore.current?.kind === "user")
+        items.push({
+          id: "set-update",
+          label: `Update ${setState.name} from current mods`,
+          icon: "rescan",
+          disabled: !!fgLock.reason,
+          separatorBefore: items.length > 0,
+        });
       items.push({
-        id: "set-update",
-        label: `Update ${setState.name} from current mods`,
-        icon: "rescan",
+        id: "set-save",
+        label: "Save current mods as a new set",
+        icon: "modSets",
         disabled: !!fgLock.reason,
-        separatorBefore: items.length > 0,
+        separatorBefore: setStore.current?.kind !== "user" && items.length > 0,
       });
-      items.push({ id: "set-save", label: "Save current mods as a new set", icon: "modSets", disabled: !!fgLock.reason });
     }
     items.push({
       id: "mod-sets",
@@ -3508,6 +3516,7 @@
           <ViewBoundary name="Savegames">
             <SavegamesTab
               rows={saveRows}
+              libraryRead={libraryScanned}
               lockReason={fgLock.reason}
               onUse={setStore.useSave}
               onBackup={backupSave}

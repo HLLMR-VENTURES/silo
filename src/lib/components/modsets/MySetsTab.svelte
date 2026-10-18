@@ -7,7 +7,7 @@
   import EmptyState from "../../ui/EmptyState.svelte";
   import type { MenuItem } from "../../ui/overlayTypes";
   import type { Loadout } from "../../types";
-  import { formatCount } from "../../plural";
+  import { formatCount, plural } from "../../plural";
   import { compareSet, shortDate, sortSets, type ActiveSetState } from "../../modsets/modSets";
   import type { Snippet } from "svelte";
 
@@ -51,6 +51,8 @@
     }),
   );
   const currentSet = $derived(state.kind === "custom" ? sets.find((s) => s.id === state.id) : undefined);
+  /** Only a set you saved can take your edits; an automatic one would be pruned later. */
+  const canUpdateCurrent = $derived(currentSet?.kind === "user");
 
   function menuFor(set: Loadout): MenuItem[] {
     const lock = !!lockReason;
@@ -87,20 +89,29 @@
     <Button icon="link" onclick={onOpenShared}>Open a shared set</Button>
   </div>
 
-  {#if state.kind === "custom" && currentSet}
-    <div class="custom" role="status">
-      <span
-        >Your active mods have {formatCount(state.changes)}
-        {state.changes === 1 ? "change" : "changes"} since <strong>{state.name}</strong>.</span
-      >
-      <Button size="sm" disabled={!!lockReason} title={lockReason || undefined} onclick={() => onUpdate(currentSet)}
-        >Update the set</Button
-      >
-      <Button size="sm" variant="ghost" disabled={!!lockReason} title={lockReason || undefined} onclick={onSaveCurrent}
-        >Save as new</Button
-      >
-    </div>
-  {/if}
+  <!-- Always in the page, so the change is announced when the banner's text appears. -->
+  <div role="status" class="custom-region">
+    {#if state.kind === "custom" && currentSet}
+      <div class="custom">
+        <span
+          >Your active mods have {formatCount(state.changes)}
+          {plural(state.changes, { one: "change", other: "changes" })} since <strong>{state.name}</strong>.</span
+        >
+        {#if canUpdateCurrent}
+          <Button size="sm" disabled={!!lockReason} title={lockReason || undefined} onclick={() => onUpdate(currentSet)}
+            >Update the set</Button
+          >
+        {/if}
+        <Button
+          size="sm"
+          variant={canUpdateCurrent ? "ghost" : "secondary"}
+          disabled={!!lockReason}
+          title={lockReason || undefined}
+          onclick={onSaveCurrent}>Save as new</Button
+        >
+      </div>
+    {/if}
+  </div>
 
   {#if rows.length === 0}
     <EmptyState
@@ -133,7 +144,8 @@
             </th>
             <td class="num tnum">{formatCount(set.mods.length)}</td>
             <td>
-              <span class="cmp tnum" class:same={cmp.same} aria-label={cmp.label}>{cmp.text}</span>
+              <span class="cmp tnum" class:same={cmp.same} aria-hidden="true">{cmp.text}</span>
+              <span class="sr-only">{cmp.label}</span>
               {#if missing > 0}
                 <span class="meta">{formatCount(missing)} not in your library</span>
               {/if}
@@ -189,6 +201,9 @@
     border-radius: var(--radius);
     background: var(--surface-raised);
     font-size: var(--fs-sm);
+  }
+  .custom-region:empty {
+    display: none;
   }
   .custom span {
     flex: 1 1 20rem;

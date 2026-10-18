@@ -102,6 +102,11 @@ pub fn build_manifest(mods: &[ModRef]) -> Manifest {
 }
 
 /// Diff a manifest against the joiner's already-hashed local set. Pure — unit-tested.
+/// True when `text` is a Multiplayer check file (a `Manifest`), not a mod set or anything else.
+pub fn is_manifest(text: &str) -> bool {
+    serde_json::from_str::<Manifest>(text).is_ok()
+}
+
 pub fn diff(manifest: &[ManifestEntry], local: &[ManifestEntry]) -> VerifyReport {
     use std::collections::HashMap;
     let local_by: HashMap<&str, &ManifestEntry> =
@@ -157,6 +162,19 @@ pub fn diff(manifest: &[ManifestEntry], local: &[ManifestEntry]) -> VerifyReport
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_check_file_is_told_from_a_mod_set_file() {
+        let m = build_manifest(&[]);
+        assert!(is_manifest(&serde_json::to_string(&m).unwrap()));
+        assert!(!is_manifest(
+            r#"{ "silo": 1, "name": "x", "mods": ["FS25_A"] }"#
+        ));
+        assert!(!is_manifest(
+            r#"{ "schema": "silo.collection/1", "name": "x", "mods": [] }"#
+        ));
+        assert!(!is_manifest("not json"));
+    }
 
     fn e(tech: &str, ver: &str, hash: &str) -> ManifestEntry {
         ManifestEntry {

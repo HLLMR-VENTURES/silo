@@ -177,7 +177,7 @@ export function compareSet(
   if (on + off === 0) return { text: "Same", label: "Same as your active mods", same: true, diff };
   return {
     text: `+${formatCount(on)} / −${formatCount(off)}`,
-    label: `${formatCount(on)} ${on === 1 ? "turns" : "turn"} on and ${formatCount(off)} ${off === 1 ? "is" : "are"} parked`,
+    label: `${formatCount(on)} ${plural(on, { one: "turns", other: "turn" })} on and ${formatCount(off)} ${plural(off, { one: "is", other: "are" })} parked`,
     same: false,
     diff,
   };
@@ -237,7 +237,8 @@ export function saveModsLine(st: SaveModStats): string {
 }
 
 /**
- * Whether a picked shared file is a Multiplayer check file (checked against your mods) or a
+ * By extension, whether a picked shared file is a Multiplayer check file (the fallback when Silo
+ * can't read the file to tell by its content) (checked against your mods) or a
  * mod set (previewed, then saved and maybe downloaded).
  */
 export function sharedFileKind(path: string): "multiplayer" | "set" {

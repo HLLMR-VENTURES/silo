@@ -11,6 +11,8 @@
 
   interface Props {
     rows: { s: Savegame; st: SaveModStats }[];
+    /** False until Silo has read the library: then nothing counts as missing yet. */
+    libraryRead?: boolean;
     /** Why Back up is off (a library write is running), or "". */
     lockReason?: string;
     onUse: (s: Savegame) => void;
@@ -19,7 +21,7 @@
     onFindInBrowse: (techName: string, title: string | null) => void;
   }
 
-  let { rows, lockReason = "", onUse, onBackup, onSettings, onFindInBrowse }: Props = $props();
+  let { rows, libraryRead = true, onUse, onBackup, onSettings, onFindInBrowse, lockReason = "" }: Props = $props();
 
   /** Folders whose missing-mod list is open. */
   let shown = $state<Record<string, boolean>>({});
@@ -46,14 +48,18 @@
           {#if s.mapTitle}<span><Icon name="map" size={14} /> {s.mapTitle}</span>{/if}
           {#if played}<span>Last played {played}</span>{/if}
         </p>
-        <p class="mods" class:warn={st.missing.length > 0}>
-          {saveModsLine(st)}{#if st.missing.length > 0}. {formatCount(st.missing.length)} missing{/if}
-        </p>
+        {#if libraryRead}
+          <p class="mods" class:warn={st.missing.length > 0}>
+            {saveModsLine(st)}{#if st.missing.length > 0}. {formatCount(st.missing.length)} missing{/if}
+          </p>
+        {:else}
+          <p class="mods">{st.total === 0 ? "Uses no mods" : `Uses ${formatCount(st.total)} ${st.total === 1 ? "mod" : "mods"}`}</p>
+        {/if}
         <div class="actions">
           <Button
             variant="primary"
             size="sm"
-            disabled={st.present.length === 0}
+            disabled={!libraryRead || st.present.length === 0}
             title={st.present.length === 0 ? "None of this save's mods are in your library yet" : undefined}
             onclick={() => onUse(s)}>Use this save's mods</Button
           >
@@ -61,19 +67,19 @@
             >Back up</Button
           >
           <Button size="sm" variant="ghost" icon="modSettings" onclick={() => onSettings(s)}>Game settings…</Button>
-          {#if st.missing.length > 0}
+          {#if libraryRead && st.missing.length > 0}
             <Button
               size="sm"
               variant="ghost"
               icon={shown[s.folder] ? "chevronUp" : "chevronDown"}
               aria-expanded={!!shown[s.folder]}
-              aria-controls={listId}
+              aria-controls={shown[s.folder] ? listId : undefined}
               onclick={() => (shown[s.folder] = !shown[s.folder])}
               >{shown[s.folder] ? "Hide missing mods" : "Show missing mods"}</Button
             >
           {/if}
         </div>
-        {#if st.missing.length > 0 && shown[s.folder]}
+        {#if libraryRead && st.missing.length > 0 && shown[s.folder]}
           <ul class="missing" id={listId}>
             {#each st.missing as m (m.modName)}
               <li>

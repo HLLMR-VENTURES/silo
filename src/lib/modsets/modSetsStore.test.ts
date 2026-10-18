@@ -29,7 +29,7 @@ const forestry: Loadout = { id: 2, name: "Forestry weekend", mods: ["C", "D", "Z
 
 function setup(active: string[] = ["A", "B"], library = ["A", "B", "C", "D"]) {
   let current = new Set(active);
-  const setActiveSetTo = vi.fn(async (mods: string[]) => {
+  const setActiveSetTo = vi.fn(async (mods: string[], _label?: string) => {
     current = new Set(mods);
     return true as boolean | null;
   });
@@ -142,6 +142,28 @@ describe("switchTo", () => {
   });
 });
 
+describe("Undo after a switch", () => {
+  it("names the set from before the switch once the previous mods are back", async () => {
+    const t = setup(["A", "B", "X"]);
+    vi.mocked(getLoadouts).mockResolvedValue([harvest, forestry]);
+    await t.store.load();
+    // Custom since Harvest: remembered as last applied.
+    await t.store.switchTo(harvest);
+    expect(t.store.state).toMatchObject({ kind: "set", name: "Harvest 2026" });
+    t.setActiveSetTo.mockClear();
+    await t.setActiveSetTo(["A", "B", "X"], "edit");
+    expect(t.store.state).toMatchObject({ kind: "custom", name: "Harvest 2026", changes: 1 });
+    const snap: Loadout = { id: 60, name: "Before Forestry weekend", mods: ["A", "B", "X"], kind: "auto", createdAt: 1 };
+    vi.mocked(getLoadouts).mockResolvedValue([harvest, forestry, snap]);
+    await t.store.switchTo(forestry);
+    expect(t.store.state).toMatchObject({ kind: "set", name: "Forestry weekend" });
+    // Undo puts the previous mods back (through App's reapply path).
+    const offer = t.undo.offer.mock.calls.at(-1)![0];
+    await t.setActiveSetTo(offer.previous, "Switching back");
+    expect(t.store.state).toEqual({ kind: "custom", id: 1, name: "Harvest 2026", changes: 1 });
+  });
+});
+
 describe("updateFromCurrent and remove", () => {
   it("replaces a set's mods after the confirmation, keeping its id", async () => {
     const t = setup(["A", "B", "C"]);
@@ -166,6 +188,14 @@ describe("updateFromCurrent and remove", () => {
     expect(undo.label).toBe("Undo");
     await undo.run();
     expect(saveLoadout).toHaveBeenCalledWith(null, "Forestry weekend", ["C", "D", "Z"]);
+  });
+
+  it("never writes your edits into an automatic set", async () => {
+    const t = setup();
+    await t.store.updateFromCurrent({ id: 9, name: "Before X", mods: [], kind: "auto", createdAt: 1 });
+    expect(t.refuse).toHaveBeenCalledWith("Before X is an automatic set. Save your current mods as a new set instead.");
+    expect(ask).not.toHaveBeenCalled();
+    expect(saveLoadout).not.toHaveBeenCalled();
   });
 
   it("refuses while a library change runs", async () => {

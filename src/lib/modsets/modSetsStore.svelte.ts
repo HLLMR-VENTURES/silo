@@ -9,7 +9,7 @@ import { ask, askText, toast, type ConfirmFact } from "../ui";
 import { reportError } from "../state/notify.svelte";
 import { deleteLoadout, getLoadouts, saveAutoSnapshot, saveLoadout } from "../api";
 import { activeSetDiff, findLoadoutByName, loadoutNameCheck, sameMods, type ActiveSetDiff } from "../loadoutSafety";
-import { modsCount } from "../archiveMoveLogic";
+import { formatCount, plural } from "../plural";
 import type { SwitchUndo } from "../state/switchUndo";
 import type { Loadout, Savegame } from "../types";
 import {
@@ -65,6 +65,11 @@ export interface ModSets {
   saveShared(name: string, mods: string[]): Promise<number | null>;
 }
 
+/** "1 mod" / "1,204 mods". */
+function modsCount(n: number): string {
+  return `${formatCount(n)} ${plural(n, { one: "mod", other: "mods" })}`;
+}
+
 /**
  * Body, facts and list for a "switch the active set" confirmation.
  * @param diff what the switch changes
@@ -88,9 +93,12 @@ export function switchSummary(
   const changed = [...diff.on.map((t) => `On: ${title(t)}`), ...diff.off.map((t) => `Park: ${title(t)}`)];
   const list = changed.slice(0, 50);
   if (changed.length > 50) list.push(`…and ${changed.length - 50} more`);
-  let body = `${modsCount(on)} ${on === 1 ? "turns" : "turn"} on and ${off} ${off === 1 ? "is" : "are"} parked. Nothing is deleted.`;
+  let body = `${modsCount(on)} ${plural(on, { one: "turns", other: "turn" })} on and ${formatCount(off)} ${plural(off, { one: "is", other: "are" })} parked. Nothing is deleted.`;
   if (missingCount)
-    body += ` ${modsCount(missingCount)} in this set ${missingCount === 1 ? "isn't" : "aren't"} in your library, so ${missingCount === 1 ? "it stays" : "they stay"} off until you get ${missingCount === 1 ? "it" : "them"}.`;
+    body += plural(missingCount, {
+      one: " 1 mod in this set isn't in your library, so it stays off until you get it.",
+      other: ` ${modsCount(missingCount)} in this set aren't in your library, so they stay off until you get them.`,
+    });
   if (snapshotName) body += ` Silo saves your current mods as “${snapshotName}” so you can switch back.`;
   return { body, facts, list };
 }
@@ -260,16 +268,21 @@ export function createModSets(deps: ModSetsDeps): ModSets {
   }
 
   async function updateFromCurrent(set: Loadout) {
+    // Automatic snapshots are pruned after five more switches: keep edits in a set of your own.
+    if (set.kind === "auto") {
+      deps.refuse(`${set.name} is an automatic set. Save your current mods as a new set instead.`);
+      return;
+    }
     if (deps.editRefused()) return;
     const current = [...deps.active()];
     const d = activeSetDiff(set.mods, current);
-    const added = d.on.length === 0 ? "none" : String(d.on.length);
-    const removed = d.off.length === 0 ? "none" : String(d.off.length);
+    const added = d.on.length === 0 ? "None" : formatCount(d.on.length);
+    const removed = d.off.length === 0 ? "none" : formatCount(d.off.length);
     if (
       !(await ask({
         title: `Replace ${set.name} with your current ${modsCount(current.length)}?`,
         body:
-          `It had ${set.mods.length}. ${added === "none" ? "None" : added} ${d.on.length === 1 ? "is" : "are"} added and ${removed} removed. ` +
+          `It had ${formatCount(set.mods.length)}. ${added} ${plural(d.on.length, { one: "is", other: "are" })} added and ${removed} removed. ` +
           "Your active mods aren't changed.",
         confirm: "Replace",
       }))
@@ -368,7 +381,10 @@ export function createModSets(deps: ModSetsDeps): ModSets {
     const sum = switchSummary(diff, deps.title, missing.length, deps.active().size ? snapshotName : null);
     const note =
       missing.length > 0
-        ? ` ${modsCount(missing.length)} the save used ${missing.length === 1 ? "isn't" : "aren't"} in your library and ${missing.length === 1 ? "is" : "are"} left out.`
+        ? plural(missing.length, {
+            one: " 1 mod the save used isn't in your library and is left out.",
+            other: ` ${modsCount(missing.length)} the save used aren't in your library and are left out.`,
+          })
         : "";
     if (
       !(await ask({

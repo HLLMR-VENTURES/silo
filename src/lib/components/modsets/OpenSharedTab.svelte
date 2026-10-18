@@ -1,3 +1,9 @@
+<script lang="ts" module>
+  // The last deep link handled, kept across remounts (the tab unmounts when you leave it), so
+  // coming back doesn't preview the same link again.
+  let handledRequest = 0;
+</script>
+
 <script lang="ts">
   // Mod sets → Open a shared set: paste a link, or choose a .silo / .silomp file. A link or .silo
   // file shows a preview (what you have, what Silo can download, what to get yourself); nothing is
@@ -14,7 +20,9 @@
     mpVerifyPath,
     onCollectionProgress,
     pickSharedSetFile,
+    sharedFileKindOf,
   } from "../../api";
+  import { errorCode } from "../../errors";
   import { inlineError } from "../../state/notify.svelte";
   import { blocked, tryStart } from "../../state/ops.svelte";
   import type {
@@ -30,7 +38,7 @@
   import { formatCount, plural } from "../../plural";
   import { baseName, sharedFileKind } from "../../modsets/modSets";
   import type { UnlistenFn } from "@tauri-apps/api/event";
-  import { onDestroy } from "svelte";
+  import { onDestroy, untrack } from "svelte";
 
   type Source = { kind: "link"; url: string } | { kind: "file"; path: string } | { kind: "multiplayer"; path: string };
 
@@ -79,6 +87,9 @@
   let savedId = $state<number | null>(null);
   let checking = $state(false);
   let mpReport = $state<MpVerifyReport | null>(null);
+  let saving = $state(false);
+  /** The download was refused because the set changed after the preview. */
+  let changed = $state(false);
   let unlisten: UnlistenFn | undefined;
 
   const installed = $derived(library.map((m) => ({ techName: m.techName, version: m.version })));
@@ -86,14 +97,33 @@
   const titleOf = $derived(new Map(library.map((m) => [m.techName, m.title ?? m.techName])));
   const count = (n: number) => `${formatCount(n)} ${plural(n, { one: "mod", other: "mods" })}`;
 
-  // A deep link: open it at once (preview only).
-  let lastRequest = 0;
+  // A deep link: open it at once (preview only), but not over a download that is running. One
+  // that arrived before Silo read the library (a cold start from the link) is previewed again
+  // once the library is there, unless something was already saved or downloaded from it.
+  let previewedEmpty = false;
   $effect(() => {
     const r = request;
-    if (!r || r.n === lastRequest) return;
-    lastRequest = r.n;
-    linkText = r.url;
-    void open({ kind: "link", url: r.url });
+    const hasLibrary = library.length > 0;
+    const busy = applying || saving;
+    untrack(() => {
+      if (!r || busy) return;
+      if (r.n !== handledRequest) {
+        handledRequest = r.n;
+        previewedEmpty = !hasLibrary;
+        linkText = r.url;
+        void open({ kind: "link", url: r.url });
+      } else if (
+        previewedEmpty &&
+        hasLibrary &&
+        source?.kind === "link" &&
+        source.url === r.url &&
+        report === null &&
+        savedId === null
+      ) {
+        previewedEmpty = false;
+        void open({ kind: "link", url: r.url });
+      }
+    });
   });
 
   function reset() {
@@ -102,6 +132,7 @@
     report = null;
     savedId = null;
     mpReport = null;
+    changed = false;
     preflightDeps = [];
     preflightConflicts = [];
   }
@@ -149,7 +180,14 @@
       return;
     }
     if (!path) return;
-    await open(sharedFileKind(path) === "multiplayer" ? { kind: "multiplayer", path } : { kind: "file", path });
+    // By content, so a check file saved as .json still opens as one; by extension if unreadable.
+    let kind = sharedFileKind(path);
+    try {
+      kind = await sharedFileKindOf(path);
+    } catch {
+      /* the preview will say what's wrong with the file */
+    }
+    await open(kind === "multiplayer" ? { kind: "multiplayer", path } : { kind: "file", path });
   }
 
   /** Every mod the shared set lists, in the preview's buckets. */
@@ -198,21 +236,31 @@
     error = "";
     progress = null;
     let done = false;
+    // Another set opened meanwhile (Open and Choose are off while this runs, but a deep link may
+    // land): the result belongs to this preview only, so it isn't shown on that one.
+    const my = seq;
     try {
       unlisten = await onCollectionProgress((p) => {
         progress = p;
         op.progress(p.done, p.total, p.current);
       });
-      report = await collectionApply(
+      const rep = await collectionApply(
         s.kind === "link" ? s.url : "",
         installed,
         plan.fingerprint,
         s.kind === "file" ? s.path : null,
       );
-      savedId = report.loadoutId;
+      if (my === seq) {
+        report = rep;
+        savedId = rep.loadoutId;
+      }
       done = true;
     } catch (e) {
-      error = inlineError(e, "Downloading the shared set's mods");
+      const msg = inlineError(e, "Downloading the shared set's mods");
+      if (my === seq) {
+        error = msg;
+        changed = errorCode(e) === "CHANGED_SINCE_PREVIEW";
+      }
     } finally {
       applying = false;
       progress = null;
@@ -225,12 +273,23 @@
   }
 
   async function saveOnly() {
-    if (!plan) return;
-    const id = await onSaveAsSet(plan.name, allMods(plan));
-    if (id !== null) {
-      savedId = id;
-      toast({ message: `Saved ${plan.name} as a set.` });
+    if (!plan || saving || applying) return;
+    const p = plan;
+    const my = seq;
+    saving = true;
+    try {
+      const id = await onSaveAsSet(p.name, allMods(p));
+      if (id !== null && my === seq) {
+        savedId = id;
+        toast({ message: `Saved ${p.name} as a set.` });
+      }
+    } finally {
+      saving = false;
     }
+  }
+
+  function previewAgain() {
+    if (source) void open(source.kind === "link" ? { kind: "link", url: source.url } : { ...source });
   }
 
   async function check() {
@@ -264,17 +323,23 @@
           if (e.key === "Enter") void openLink();
         }}
       />
-      <Button variant="primary" disabled={!linkText.trim() || reading} loading={reading && source?.kind === "link"} onclick={openLink}
-        >Open</Button
+      <Button
+        variant="primary"
+        disabled={!linkText.trim() || reading || applying || saving}
+        loading={reading && source?.kind === "link"}
+        onclick={openLink}>Open</Button
       >
-      <Button icon="showFile" disabled={reading} onclick={chooseFile}>Choose a file…</Button>
+      <Button icon="showFile" disabled={reading || applying || saving} onclick={chooseFile}>Choose a file…</Button>
     </div>
     <p class="hint">
       Opening a set only shows what's in it. Nothing is downloaded, saved or switched until you choose to.
     </p>
   </div>
 
-  {#if error}<p class="err" role="alert">{error}</p>{/if}
+  {#if error}
+    <p class="err" role="alert">{error}</p>
+    {#if changed}<Button size="sm" onclick={previewAgain}>Preview again</Button>{/if}
+  {/if}
 
   {#if source?.kind === "multiplayer"}
     <section class="result" aria-labelledby="mp-h">
@@ -389,12 +454,12 @@
       {:else if savedId === null}
         <div class="actions">
           {#if p.willInstall.length > 0}
-            <Button variant="primary" icon="download" loading={applying} disabled={applying} onclick={download}
+            <Button variant="primary" icon="download" loading={applying} disabled={applying || saving} onclick={download}
               >Download {formatCount(p.willInstall.length)} and save as a set</Button
             >
-            <Button variant="ghost" disabled={applying} onclick={saveOnly}>Save as a set without downloading</Button>
+            <Button variant="ghost" disabled={applying || saving} onclick={saveOnly}>Save as a set without downloading</Button>
           {:else}
-            <Button variant="primary" onclick={saveOnly}>Save as a set</Button>
+            <Button variant="primary" loading={saving} disabled={saving} onclick={saveOnly}>Save as a set</Button>
           {/if}
         </div>
         {#if applying && progress}

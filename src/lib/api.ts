@@ -421,6 +421,11 @@ export function safeFileStem(name: string): string {
   return s || "mod set";
 }
 
+/** Whether a picked shared file is a Multiplayer check file or a mod set, by its content. */
+export function sharedFileKindOf(path: string): Promise<"multiplayer" | "set"> {
+  return invoke<"multiplayer" | "set">("shared_file_kind", { path });
+}
+
 /** Prompt for a shared mod set file (.silo, .silomp or a collection .json). Null if cancelled. */
 export async function pickSharedSetFile(): Promise<string | null> {
   const path = await open({
@@ -660,7 +665,7 @@ export function generateBridge(spec: BridgeSpec): Promise<string> {
 export async function mpExport(mods: MpModRef[], name = "my mod set"): Promise<number | null> {
   const path = await save({
     defaultPath: `${safeFileStem(name)}.silomp`,
-    filters: [{ name: "Silo mod-set", extensions: ["silomp", "json"] }],
+    filters: [{ name: "Multiplayer check file", extensions: ["silomp"] }],
   });
   if (!path) return null;
   return await invoke<number>("mp_export", { mods, path });

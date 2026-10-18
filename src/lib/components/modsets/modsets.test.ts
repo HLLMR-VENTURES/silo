@@ -4,6 +4,7 @@
 // three ways (link, .silo file, Multiplayer check file).
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { AppError } from "../../errors";
 import { tick } from "svelte";
 
 vi.mock("../../api", async (importOriginal) => ({
@@ -14,6 +15,7 @@ vi.mock("../../api", async (importOriginal) => ({
   detectConflicts: vi.fn(() => Promise.resolve([])),
   mpVerifyPath: vi.fn(),
   pickSharedSetFile: vi.fn(),
+  sharedFileKindOf: vi.fn(() => Promise.reject(new Error("no backend"))),
   collectionExport: vi.fn(),
   exportSetFile: vi.fn(() => Promise.resolve(true)),
   mpExport: vi.fn(() => Promise.resolve(2)),
@@ -32,6 +34,7 @@ import {
   mpExport,
   mpVerifyPath,
   pickSharedSetFile,
+  sharedFileKindOf,
 } from "../../api";
 import type { ImportPlan, ModEntry } from "../../types";
 import OpenSharedTab from "./OpenSharedTab.svelte";
@@ -53,6 +56,10 @@ const plan: ImportPlan = {
   fingerprint: "fp1",
 };
 
+// Deep-link requests are remembered across mounts (by `n`), so every test uses a new one.
+let reqN = 0;
+const req = (url: string) => ({ url, n: ++reqN });
+
 function openTab(extra: Record<string, unknown> = {}) {
   const props = {
     library,
@@ -66,8 +73,8 @@ function openTab(extra: Record<string, unknown> = {}) {
     onFindInBrowse: vi.fn(),
     ...extra,
   };
-  render(OpenSharedTab, props);
-  return props;
+  const r = render(OpenSharedTab, props);
+  return Object.assign(props, { rerender: r.rerender, unmount: r.unmount });
 }
 
 beforeEach(() => {
@@ -98,14 +105,14 @@ describe("Open a shared set", () => {
   });
 
   it("a deep link request previews at once, and still applies nothing", async () => {
-    const p = openTab({ request: { url: "https://gist.github.com/u/abc", n: 1 } });
+    const p = openTab({ request: req("https://gist.github.com/u/abc") });
     expect(await screen.findByRole("heading", { name: "Weekend pack" })).toBeInTheDocument();
     expect(collectionApply).not.toHaveBeenCalled();
     expect(p.onSaveAsSet).not.toHaveBeenCalled();
   });
 
   it("Save as a set without downloading saves every listed mod, then offers Switch to it", async () => {
-    const p = openTab({ request: { url: "x", n: 1 } });
+    const p = openTab({ request: req("x") });
     await fireEvent.click(await screen.findByRole("button", { name: "Save as a set without downloading" }));
     await waitFor(() => expect(p.onSaveAsSet).toHaveBeenCalledWith("Weekend pack", ["A", "N", "H", "U"]));
     expect(collectionApply).not.toHaveBeenCalled();
@@ -115,7 +122,7 @@ describe("Open a shared set", () => {
 
   it("Download installs exactly what was previewed (its fingerprint)", async () => {
     vi.mocked(collectionApply).mockResolvedValue({ loadoutId: 5, installed: 1, failed: 0, rows: [] });
-    const p = openTab({ request: { url: "https://gist.github.com/u/abc", n: 1 } });
+    const p = openTab({ request: req("https://gist.github.com/u/abc") });
     await fireEvent.click(await screen.findByRole("button", { name: "Download 1 and save as a set" }));
     await waitFor(() => expect(p.onImported).toHaveBeenCalled());
     expect(collectionApply).toHaveBeenCalledWith("https://gist.github.com/u/abc", expect.any(Array), "fp1", null);
@@ -166,6 +173,80 @@ describe("Open a shared set", () => {
     await fireEvent.click(screen.getByRole("button", { name: "Choose a file…" }));
     await fireEvent.click(await screen.findByRole("button", { name: "Check my mods" }));
     expect(await screen.findByText(/You match\. You're ready to join\./)).toBeInTheDocument();
+  });
+});
+
+describe("Open a shared set: races and repeats", () => {
+  it("a deep link that lands during a download waits, and the download's result isn't shown on it", async () => {
+    let finish!: (r: unknown) => void;
+    vi.mocked(collectionApply).mockReturnValue(new Promise((res) => (finish = res)) as never);
+    const p = openTab({ request: req("https://gist.github.com/u/a") });
+    await fireEvent.click(await screen.findByRole("button", { name: "Download 1 and save as a set" }));
+    expect(screen.getByRole("button", { name: "Choose a file…" })).toBeDisabled();
+    vi.mocked(collectionImportPreview).mockResolvedValue({ ...plan, name: "Other pack" });
+    await p.rerender({ request: req("https://gist.github.com/u/b") });
+    await tick();
+    expect(collectionImportPreview).toHaveBeenCalledTimes(1);
+    finish({ loadoutId: 5, installed: 1, failed: 0, rows: [] });
+    expect(await screen.findByRole("heading", { name: "Other pack" })).toBeInTheDocument();
+    expect(collectionImportPreview).toHaveBeenLastCalledWith("https://gist.github.com/u/b", expect.any(Array), null);
+    expect(screen.queryByText(/Saved .* as a set\. Downloaded/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Switch to it" })).toBeNull();
+    expect(p.onImported).toHaveBeenCalled();
+  });
+
+  it("a deep link from a cold start previews again once the library is read", async () => {
+    const r = req("https://gist.github.com/u/cold");
+    const p = openTab({ library: [], request: r });
+    await screen.findByRole("heading", { name: "Weekend pack" });
+    expect(collectionImportPreview).toHaveBeenLastCalledWith(r.url, [], null);
+    await p.rerender({ library, request: r });
+    await waitFor(() => expect(collectionImportPreview).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(collectionImportPreview).mock.calls[1][1]).toHaveLength(3);
+    await p.rerender({ library: [...library, mod("C")], request: r });
+    await tick();
+    expect(collectionImportPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it("coming back to the tab doesn't preview the same deep link again", async () => {
+    const r = req("https://gist.github.com/u/again");
+    const p = openTab({ request: r });
+    await screen.findByRole("heading", { name: "Weekend pack" });
+    p.unmount();
+    openTab({ request: r });
+    await tick();
+    expect(collectionImportPreview).toHaveBeenCalledTimes(1);
+  });
+
+  it("a double click saves the set once", async () => {
+    let done!: (v: number) => void;
+    const onSaveAsSet = vi.fn(() => new Promise<number>((res) => (done = res)));
+    openTab({ request: req("x"), onSaveAsSet });
+    const btn = await screen.findByRole("button", { name: "Save as a set without downloading" });
+    await fireEvent.click(btn);
+    await fireEvent.click(btn);
+    done(9);
+    await screen.findByRole("button", { name: "Switch to it" });
+    expect(onSaveAsSet).toHaveBeenCalledTimes(1);
+  });
+
+  it("a set that changed since the preview offers Preview again", async () => {
+    vi.mocked(collectionApply).mockRejectedValue(
+      new AppError("CHANGED_SINCE_PREVIEW", "This set changed since you previewed it. Preview it again before installing."),
+    );
+    openTab({ request: req("https://gist.github.com/u/changed") });
+    await fireEvent.click(await screen.findByRole("button", { name: "Download 1 and save as a set" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "Preview again" }));
+    await waitFor(() => expect(collectionImportPreview).toHaveBeenCalledTimes(2));
+  });
+
+  it("a Multiplayer check file saved as .json still opens as one", async () => {
+    vi.mocked(pickSharedSetFile).mockResolvedValue("/x/server.json");
+    vi.mocked(sharedFileKindOf).mockResolvedValueOnce("multiplayer");
+    openTab();
+    await fireEvent.click(screen.getByRole("button", { name: "Choose a file…" }));
+    expect(await screen.findByRole("button", { name: "Check my mods" })).toBeInTheDocument();
+    expect(collectionImportPreview).not.toHaveBeenCalled();
   });
 });
 
@@ -270,11 +351,18 @@ describe("My sets", () => {
     expect(rows[0].textContent).toContain("Same");
     expect(rows[0].querySelector("button.btn, button")?.textContent).not.toContain("Switch");
     expect(rows[1].textContent).toContain("+1 / −2");
+    expect(rows[1].textContent).toContain("1 turns on and 2 are parked");
     expect(rows[1].textContent).toContain("1 not in your library");
     await fireEvent.click(screen.getByRole("button", { name: "Switch to this set" }));
     expect(p.onSwitch).toHaveBeenCalledWith(sets[1]);
     await fireEvent.click(screen.getByRole("button", { name: "Switch back" }));
     expect(p.onSwitch).toHaveBeenCalledWith(sets[2]);
+  });
+
+  it("Custom since an automatic set offers only Save as new", () => {
+    mySets({ state: { kind: "custom", id: 3, name: "Before Forestry weekend", changes: 1 } });
+    expect(screen.queryByRole("button", { name: "Update the set" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Save as new" })).toBeInTheDocument();
   });
 
   it("after edits offers Update the set and Save as new", async () => {

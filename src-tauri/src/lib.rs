@@ -3579,6 +3579,25 @@ async fn delete_loadout(app: tauri::AppHandle, id: i64) -> Result<(), error::App
     .map_err(error::AppError::from)
 }
 
+/// Whether a shared file the user picked is a Multiplayer check file (`"multiplayer"`: checked
+/// against the active mods) or a mod set (`"set"`: previewed). Decided by its content, so a check
+/// file saved as `.json` still opens as one.
+#[tauri::command]
+async fn shared_file_kind(path: String) -> Result<String, String> {
+    off_main(move || {
+        let p = std::path::Path::new(&path);
+        paths::safe_inbound(p, &["silo", "silomp", "json"])?;
+        let text = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
+        let kind = if mpsync::is_manifest(&text) {
+            "multiplayer"
+        } else {
+            "set"
+        };
+        Ok(kind.to_string())
+    })
+    .await
+}
+
 /// Save an automatic "Before …" snapshot of the active mods before a switch; only the newest
 /// few are kept (`db::AUTO_SNAPSHOTS_KEPT`).
 #[tauri::command]
@@ -3766,7 +3785,7 @@ async fn mp_verify_file(
         paths::safe_inbound(std::path::Path::new(&path), &["silomp", "json"])?;
         let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
         let manifest: mpsync::Manifest = serde_json::from_str(&text)
-            .map_err(|_| "That file isn't a valid Silo mod-set manifest".to_string())?;
+            .map_err(|_| "That file isn't a Silo Multiplayer check file".to_string())?;
         let local_hashed = mpsync::hash_mods(&local);
         Ok(mpsync::diff(&manifest.mods, &local_hashed))
     })
@@ -4026,8 +4045,6 @@ fn read_collection_json(
     read_collection_raw(url_or_id, token).map(|(c, _)| c)
 }
 
-/// `read_collection_json`, plus the file's exact text (for `collection::fingerprint`, so apply
-/// can refuse a collection that changed after its preview).
 /// A shared set to preview or install: a `.silo` / collection file the user picked (`file`), or
 /// else a gist / repo link. The returned text is what the fingerprint covers.
 fn read_set_source(
@@ -4044,6 +4061,8 @@ fn read_set_source(
     Ok((collection::parse_set_file(&json)?, json))
 }
 
+/// `read_collection_json`, plus the file's exact text (for `collection::fingerprint`, so apply
+/// can refuse a collection that changed after its preview).
 fn read_collection_raw(
     url_or_id: &str,
     token: Option<&str>,
@@ -5057,6 +5076,7 @@ pub fn run() {
             delete_loadout,
             save_auto_snapshot,
             export_set_file,
+            shared_file_kind,
             get_savegames,
             backup_savegame,
             detect_conflicts,
@@ -5170,6 +5190,41 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_shared_set_file_is_read_only_from_a_plain_silo_or_json_path() {
+        let dir = std::env::temp_dir().join(format!("silo_set_source_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("weekend.silo");
+        std::fs::write(
+            &good,
+            r#"{ "silo": 1, "name": "Weekend", "mods": ["FS25_A"] }"#,
+        )
+        .unwrap();
+        let (c, json) =
+            super::read_set_source("ignored", Some(good.to_str().unwrap()), None).unwrap();
+        assert_eq!(c.name, "Weekend");
+        assert!(
+            json.contains("FS25_A"),
+            "the fingerprint covers the file's text"
+        );
+        let txt = dir.join("weekend.txt");
+        std::fs::write(&txt, "{}").unwrap();
+        assert!(super::read_set_source("", Some(txt.to_str().unwrap()), None).is_err());
+        let up = format!(
+            "{}/../{}/weekend.silo",
+            dir.display(),
+            dir.file_name().unwrap().to_string_lossy()
+        );
+        assert!(
+            super::read_set_source("", Some(&up), None).is_err(),
+            "no .. segments"
+        );
+        let missing = dir.join("missing.silo");
+        assert!(super::read_set_source("", Some(missing.to_str().unwrap()), None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn fences() -> Fences {
         Fences {
