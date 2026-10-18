@@ -3265,7 +3265,7 @@
 
 <AppShell
   badges={{ updates: updatesBadge(updateSections, updateCheckedAt != null), diagnose: bisecting ? BISECT_BADGE : undefined }}
-  fill={nav.view === "library"}
+  fill={nav.view === "library" || nav.view === "browse"}
   wide={nav.view === "library" || nav.view === "browse"}
   drawer={detailMod && nav.view === "library" ? modDrawer : undefined}
   drawerLabel="Mod details"
@@ -3484,7 +3484,9 @@
       <BrowseView>
         <ModBrowser
           installed={libraryTechNames}
+          updates={updatesSet}
           onInstalled={() => runScan(true)}
+          onShowUpdates={() => go("updates")}
           onNeedAuth={() => go("settings", "accounts")}
           onFindInLibrary={openInLibrary}
           seed={browseSeed}
