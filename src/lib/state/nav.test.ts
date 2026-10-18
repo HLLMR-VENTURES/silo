@@ -11,6 +11,7 @@ import {
   NAV_RAIL_KEY,
   NAV_VIEW_KEY,
   nextRailPin,
+  pendingTabRequest,
   railCollapsedFor,
   resetNav,
   restoreNav,
@@ -18,6 +19,7 @@ import {
   searchTargetFor,
   setRailPin,
   setTab,
+  takeTabRequest,
 } from "./nav.svelte";
 
 function memoryStorage(): Storage {
@@ -107,6 +109,36 @@ describe("go / back", () => {
     expect(steps).toBe(HISTORY_MAX);
     // The oldest entry (the starting Library) was dropped.
     expect(nav.view).not.toBe("library");
+  });
+});
+
+describe("tab requests", () => {
+  it("go() with a tab leaves a request for that view until it is taken", () => {
+    go("settings", "accounts");
+    expect(pendingTabRequest("settings")).toBe("accounts");
+    expect(pendingTabRequest("tools")).toBeUndefined();
+    takeTabRequest("tools"); // another view's take leaves it alone
+    expect(pendingTabRequest("settings")).toBe("accounts");
+    takeTabRequest("settings");
+    expect(pendingTabRequest("settings")).toBeUndefined();
+  });
+
+  it("a repeat request while already there is still a request; tab clicks and plain go() aren't", () => {
+    go("settings", "accounts");
+    takeTabRequest("settings");
+    go("settings", "accounts"); // no navigation, but asked again
+    expect(pendingTabRequest("settings")).toBe("accounts");
+    takeTabRequest("settings");
+    setTab("settings", "general");
+    go("library");
+    go("settings");
+    expect(pendingTabRequest("settings")).toBeUndefined();
+  });
+
+  it("resetNav clears a pending request", () => {
+    go("settings", "accounts");
+    resetNav();
+    expect(pendingTabRequest("settings")).toBeUndefined();
   });
 });
 

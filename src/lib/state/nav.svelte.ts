@@ -30,11 +30,19 @@ export const VIEW_IDS: readonly ViewId[] = [
   "help",
 ];
 
-/** Known sub-tabs (views store them as plain strings in nav.tab). Settings uses section ids. */
+/** Known sub-tabs (views store them as plain strings in nav.tab). */
 export type ModSetsTab = "sets" | "share" | "multiplayer" | "savegames";
 /** Guided bisection runs inside Last run, so it has no tab of its own. */
 export type DiagnoseTab = "lastRun" | "conflicts" | "problems";
 export type ToolsTab = "stats" | "controls" | "bridge" | "graphics";
+export type SettingsTab =
+  | "general"
+  | "modsFolder"
+  | "library"
+  | "accounts"
+  | "diagnostics"
+  | "maintenance"
+  | "about";
 
 /** Rail preference: follow the window width, or stay expanded / collapsed. */
 export type RailPin = "auto" | "expanded" | "collapsed";
@@ -67,6 +75,14 @@ function emptyTabs(): Record<ViewId, string | undefined> {
 export const nav: NavState = $state({ view: DEFAULT_VIEW, tab: emptyTabs(), rail: "auto" });
 
 const history: HistoryEntry[] = $state([]);
+
+/** The tab the last go() named, until that view takes it (takeTabRequest). It tells an explicit
+ *  request (Browse's go("settings", "accounts")) apart from a tab click or a plain return to a
+ *  view, so a view can act on it once: Settings focuses the section it was sent to. */
+const tabRequest: { view: ViewId | null; tab: string | undefined } = $state({
+  view: null,
+  tab: undefined,
+});
 
 function storage(): Storage | null {
   try {
@@ -114,6 +130,8 @@ export function resetNav(): void {
   nav.tab = emptyTabs();
   nav.rail = "auto";
   history.length = 0;
+  tabRequest.view = null;
+  tabRequest.tab = undefined;
 }
 
 /**
@@ -122,6 +140,10 @@ export function resetNav(): void {
  * @param tab the view's sub-tab; leave undefined to keep the tab it last showed
  */
 export function go(view: ViewId, tab?: string): void {
+  if (tab !== undefined) {
+    tabRequest.view = view;
+    tabRequest.tab = tab;
+  }
   const sameView = view === nav.view;
   if (sameView && (tab === undefined || tab === nav.tab[view])) return;
   history.push({ view: nav.view, tab: nav.tab[nav.view] });
@@ -165,6 +187,25 @@ export function historyDepth(): number {
  */
 export function setTab(view: ViewId, tab: string | undefined): void {
   nav.tab[view] = tab;
+}
+
+/**
+ * The tab a go() asked `view` to open and nobody has taken yet (reactive).
+ * @param view the view asking
+ * @return the requested tab id, or undefined when there is no pending request for `view`
+ */
+export function pendingTabRequest(view: ViewId): string | undefined {
+  return tabRequest.view === view ? tabRequest.tab : undefined;
+}
+
+/**
+ * Mark `view`'s pending tab request handled, so it only acts once.
+ * @param view the view that handled it
+ */
+export function takeTabRequest(view: ViewId): void {
+  if (tabRequest.view !== view) return;
+  tabRequest.view = null;
+  tabRequest.tab = undefined;
 }
 
 /** Set and persist the rail pin. */

@@ -111,6 +111,8 @@
     gap: var(--sp-1);
     border-bottom: 1px solid var(--border);
     overflow-x: auto;
+    /* overflow-x: auto makes y auto too; without this the indicator showed a stray scrollbar. */
+    overflow-y: hidden;
   }
   .tab {
     position: relative;
@@ -138,7 +140,7 @@
     position: absolute;
     left: var(--sp-2);
     right: var(--sp-2);
-    bottom: -1px;
+    bottom: 0;
     height: 2px;
     border-radius: 2px 2px 0 0;
     background: var(--primary);
