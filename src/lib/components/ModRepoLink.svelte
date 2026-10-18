@@ -1,7 +1,8 @@
 <script lang="ts">
   import Icon from "../ui/Icon.svelte";
   import type { ModEntry, UpdateInfo } from "../types";
-  import { setModRepo, guessRepo, checkModUpdate, downloadUpdate, openExternal, confirmDialog } from "../api";
+  import { setModRepo, guessRepo, checkModUpdate, downloadUpdate, openExternal } from "../api";
+  import { ask } from "../ui";
 
   let {
     mod,
@@ -66,7 +67,13 @@
 
   async function installUpdate() {
     if (!update?.release.assetUrl) return;
-    if (!(await confirmDialog(`Download and install ${update.release.tag}? The current version is kept in your mods folder's backups.`)))
+    if (
+      !(await ask({
+        title: `Install ${update.release.tag}?`,
+        body: "Silo downloads it and replaces the installed version. The current version is kept in your mods folder's backups, so you can put it back from there.",
+        confirm: "Download and install",
+      }))
+    )
       return;
     installing = true;
     ghError = null;

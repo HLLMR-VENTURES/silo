@@ -162,6 +162,108 @@ rising behind it. Source files live in `src/assets/brand/`; in the app use
 - The mark uses fixed brand colors and looks the same in both themes. **The sun
   stays gold**, except in single-color use, where the whole glyph takes one color.
 
+## Components
+
+Views build from the primitives in `src/lib/ui/` (import them from the `index.ts` barrel)
+instead of styling raw elements. Each one carries the focus ring, the color slots and the
+keyboard behavior, so a view gets them for free. Each file's header comment shows its usage.
+
+**Controls**
+- **Button**: text button (primary / secondary / ghost / danger / link), optional icon; `loading`
+  shows a spinner, keeps the width and ignores clicks without dropping focus.
+- **IconButton**: icon-only button; its `label` is required and becomes the name and tooltip.
+- **Switch**: on/off for a setting that applies at once.
+- **Checkbox**: a choice inside a form or a selection (supports indeterminate).
+- **RadioGroup**: one of a few options, shown as native radios in a fieldset.
+- **Segmented**: one of two to four short options shown side by side (view, sort order).
+- **Select**: styled native dropdown for longer option lists.
+- **TextField**: single-line text input.
+- **Field**: label + control + hint + error, wired up with ids and `aria-describedby`.
+
+**Display**
+- **Badge**: Silo's verdict on a mod (Verified, Update, Broken) in a soft pill. Rows of
+  badges go through `capBadges()`: at most three, then "+n".
+- **Chip**: an active filter, with a remove button.
+- **Tag**: the user's own tag on a mod; neutral on purpose, because tags are their words.
+- **ProgressBar**: progress with visible text; indeterminate when there's no value.
+- **Skeleton**: loading placeholder; hidden from screen readers; the shimmer stops under reduced motion.
+- **EmptyState**: nothing here yet, with one sentence on what to do next.
+- **ErrorState**: something failed, with "Copy details" when there are details.
+- **Tabs**: tabs with one panel, roving focus with the arrow keys.
+- **Kbd**: a keyboard key.
+
+**Overlays**
+- **Dialog**: modal; everything behind it is inert. The base for the two below.
+- **ConfirmDialog**: yes/no with a verb button, optional facts table and affected-items list.
+  Reached through `ask()`.
+- **PromptDialog**: one text field with inline validation. Reached through `askText()`.
+- **Drawer**: non-modal side panel (mod details); the page behind stays usable; resizable.
+- **Popover**: floating panel anchored to an element or a point; flips to stay on screen.
+- **Menu** / **MenuButton**: action menu on a Popover, and a trigger button paired with one.
+- **Tooltip** / `use:tooltip`: a short hint on hover or keyboard focus. Never the only place for
+  information the user needs.
+- **Toast** / **ToastRegion**: short notices from `toast()`, optionally with one action (Undo).
+
+`DialogHost` and `ToastRegion` are mounted once, in `App.svelte`. Component tests
+(vitest + jsdom, `npm test`) live beside the primitives in `src/lib/ui/`.
+
+### Confirmations
+
+- **Always `await ask({...})`** (or `await askText({...})` for a name). An un-awaited call is a
+  Promise, which is always truthy, so a `!ask(...)` guard would never stop the action. The
+  build guard `scripts/check-confirm.mjs` fails on un-awaited `ask` / `askText` / `askOrOs` /
+  `confirmAction` / `confirmDialog` calls (member calls like `ui.ask(` included; the body of an
+  arrow counts only when the arrow is `async`), on importing one of them under another name, and
+  on any `confirm()`, `window.confirm`, `prompt()` or `window.prompt`.
+- **The button says the verb**, never "OK": "Delete", "Switch", "Move library", "Replace".
+  Cancel stays "Cancel" unless a clearer pair exists ("Keep going" / "Cancel move").
+- **The title is the action as a question** ("Delete Harvest 2026?", "Switch to Modded
+  farm?"). **The body says the consequence, then how to undo it** ("Your mods aren't
+  affected." / "To undo it, run Organize again."). If there is no way back, say so.
+- **Show what changes.** Counts go in the facts table and affected mods in the list, so the
+  user sees exactly what the button will do (switching a loadout lists the mods that turn on
+  and the mods that get parked).
+- **Danger tone only when Silo can't undo it** (deleting a collection from GitHub, forgetting
+  an interrupted diagnosis) or when the Undo is only a short-lived notice (deleting a
+  loadout). Danger makes the button red, puts the starting focus on Cancel and makes the dialog
+  an `alertdialog`. The body is the dialog's accessible description.
+- **Offer Undo after the fact** where Silo can put things back: a toast with an Undo action
+  after switching a loadout, using a savegame's mods, replacing a loadout's mods or deleting a
+  loadout. An Undo checks first that nothing moved on (the active set is still the one the
+  switch left, no diagnosis or library move is running, the loadout wasn't changed again) and
+  otherwise says why it can't undo instead of guessing. A new switch dismisses the previous
+  switch's Undo.
+- **One gesture answers one dialog.** A confirm's verb button (and a name dialog's submit)
+  ignores clicks and Enter/Space for `ARM_MS` (300 ms) after the dialog opens, and again after
+  a name dialog's button turns into "Replace", and never reacts to a held, repeating key. So a
+  double-click or a long Enter meant for one dialog can't answer the next one in the queue.
+  Cancel, Esc and the scrim work at once.
+- **The OS dialog is only for two cases**: the quit guard (it has to work whatever state the
+  window is in) and code that can run before the app shell mounts. The latter uses
+  `askOrOs()` from `src/lib/confirm.ts`, which asks in-app once the dialog host is up and
+  falls back to the OS dialog with the same text before that.
+
+### Focus in dialogs, menus and toasts
+
+- **Dialogs** trap Tab and make the page behind inert. Starting focus: Cancel for a danger
+  confirm, the verb button for any other confirm, the text field for a name dialog (its text
+  selected). Esc and the scrim cancel; the action does not run. On close, focus returns to
+  whatever had it before the dialog opened. Dialogs queue: one is on screen at a time.
+- **Esc goes to the top layer only.** Dialogs, popovers and menus share one overlay stack, so
+  Esc in a menu inside a dialog closes the menu, not the dialog.
+- **Menus** start on the first enabled item. Up/Down wrap, Home/End jump, typing a letter
+  jumps to the matching item, Enter/Space pick, Esc closes and returns focus to the trigger,
+  and Tab closes.
+- **Popovers** close on a click outside, on Esc (focus returns to the anchor) and when focus
+  tabs out of them.
+- **Drawers** move focus to their title when they open and return it on close, but don't trap
+  it; the page behind stays usable.
+- **Toasts never take focus.** They're announced through a live region that stays readable
+  while a dialog is open; their buttons are inert until it closes. Tab can reach their action
+  button, whose name says what it acts on ("Undo: Switched to Harvest."). The countdown pauses while the
+  toast is hovered or focused and while Silo's window is in the background, so alt-tabbing
+  away doesn't make an Undo disappear. A toast with an action stays 10 s, others 6 s.
+
 ## Layout & density
 
 - **8px spatial grid**; comfortable, roomy. Real padding on cards; no cramped rows.

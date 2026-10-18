@@ -63,7 +63,10 @@ async function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
 }
 
 /**
- * Ask the user to confirm. ALWAYS `await` this. tauri-plugin-dialog replaces the webview's
+ * Ask the user to confirm with the OS dialog. Views use `ask()` from `$lib/ui` (the in-app
+ * dialog) instead; this stays for the quit guard, which must work whatever state the window is
+ * in, and as the fallback `askOrOs()` (src/lib/confirm.ts) uses before the dialog host mounts.
+ * ALWAYS `await` this. tauri-plugin-dialog replaces the webview's
  * `window.confirm` with an async function, so calling it bare returns a Promise that is
  * always truthy and the action runs no matter what the user clicks (#177). Never call the
  * global confirm directly; `scripts/check-confirm.mjs` fails the build if one appears.

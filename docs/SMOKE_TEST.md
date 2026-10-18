@@ -214,6 +214,36 @@ top header bar (the drawer/backdrop must start below it).
 - [ ] `[app]` **Both themes readable.** In light and in dark, secondary (muted) text, warning text and links are easy to read on their backgrounds; gold is never used for text in the light theme.
 - [ ] `[app]` **Silo mark.** The top bar shows the silo mark (green tile, cream silo, gold sun) in place of the old "S" box, the same size as before, and it looks the same in both themes.
 
+## 17. Dialogs, menus and loadout safety (#226)  _(auto-verified: dialog/menu/toast component tests, loadout name check + switch diff, confirm build guard)_
+**Keyboard, in every in-app dialog:**
+- [ ] `[app]` **Focus starts in the right place.** A destructive confirm (Delete loadout, Delete collection, Forget the interrupted diagnosis) opens with focus on **Cancel**; any other confirm (Switch, Move library, Restore flat folder) opens with focus on the action button; a name dialog (Loadouts → Save current active set as a loadout) opens with focus in the text field.
+- [ ] `[app]` **Tab stays inside.** Tab and Shift+Tab cycle through the dialog's controls only; nothing behind the dialog can be reached or clicked.
+- [ ] `[app]` **Esc cancels.** Esc closes the dialog and the action does **not** happen (no loadout saved, switched or deleted; nothing moved).
+- [ ] `[app]` **Focus comes back.** After Cancel or Esc, focus is back on the button that opened the dialog.
+- [ ] `[app]` **Buttons say what they do.** No dialog has an "OK" button; each confirm button names its action ("Delete", "Switch", "Replace", "Move library").
+- [ ] `[app]` **One click answers one dialog.** Double-click a confirm button whose answer opens another confirm (or hold Enter on it) → only the first dialog is answered; the next one stays open until you click it again. A name dialog's **Replace** also needs a fresh click or Enter after it appears.
+
+**Loadouts:**
+- [ ] `[app]` **Save, empty name.** Loadouts → **+ Save current active set as a loadout**, leave the name empty and press Save → an error under the field ("Give the loadout a name"); the dialog stays open and nothing is saved.
+- [ ] `[app]` **Save, duplicate name.** Type the name of an existing loadout (try different capitals) → a warning that it already exists and the button changes to **Replace**. Press Replace → that loadout now holds your current mods, and the list still has **one** loadout of that name, not two. A notice offers **Undo**; pressing it puts the loadout's old mods back.
+- [ ] `[app]` **Switch shows what changes.** Pick a loadout that differs from your active mods → the dialog shows counts (Turn on / Park, plus Not in your library when some are missing) and the list of mods that change. **Cancel** → your active mods are exactly as before.
+- [ ] `[app]` **Switch, then Undo.** Switch again and confirm → the loadout's mods are active and a notice says "Switched to …" with **Undo** (or "Switch to … finished with problems." when some mods couldn't be applied; the error shows too). Press Undo → your previous active mods are back (check the active count and a few rows).
+- [ ] `[app]` **Undo refuses when things moved on.** Switch, then turn one mod on or off, then press the switch notice's Undo → a notice says it can't undo because your active mods changed, and nothing changes. Switching twice leaves only the newest switch's Undo notice.
+- [ ] `[app]` **Already in use.** Pick the loadout that matches your active mods → no dialog, just an "Already using …" notice.
+- [ ] `[game]` **Use a savegame's mods.** Savegames → "→ Loadout" on a save → the same what-changes dialog, plus a note about mods the save used that aren't in your library; Switch then Undo restores your previous active mods.
+- [ ] `[app]` **Overwrite asks.** Press a loadout's **Overwrite with current active set** button → a dialog says how many mods it had and how many are added and removed. Cancel leaves the loadout unchanged; Replace updates it and doesn't change your active mods, and a notice offers **Undo**, which puts the loadout's old mods back.
+- [ ] `[app]` **Delete, then Undo.** Press a loadout's **Delete loadout** button → a dialog with focus on Cancel. Delete → it leaves the list and a notice offers **Undo**. Press Undo → the loadout is back with the same name and mods.
+
+**Cancel truly cancels, and the quit guard:**
+- [ ] `[app]` **Library move.** Start moving the library archive, then press **Cancel move** in the move banner → the "Cancel the library move?" dialog; choose **Keep going** → the move carries on. (Choosing Cancel move puts moved mods back.)
+- [ ] `[net]` **Delete a collection.** Delete a collection and press **Cancel** (or Esc) → it is still in the list, on your GitHub, and its share link still works.
+- [ ] `[app]` **Quit guard is still a Windows dialog.** Close Silo while it's moving files → a Windows dialog (not Silo's in-app one) asks "Quit anyway?"; Keep Silo open keeps it running.
+
+**Notices (toasts):**
+- [ ] `[app]` **They don't steal focus.** When a notice appears, focus stays where it was (typing in a field carries on uninterrupted). Tab can still reach its Undo button.
+- [ ] `[app]` **Not behind a dialog.** With an Undo notice on screen, open any confirm dialog → clicking the notice's Undo or close button does nothing until the dialog is closed.
+- [ ] `[app]` **They wait for you.** Switch to a loadout, then alt-tab away for 20 seconds and come back → the Undo notice is still there and Undo still works. Pointing at a notice also keeps it on screen.
+
 ## Sign-off
 - [ ] All `[app]` items pass.
 - [ ] All `[game]`/`[net]` items pass (or known-limitations noted below).

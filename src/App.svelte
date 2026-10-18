@@ -1,6 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
+    DialogHost,
+    ToastRegion,
+    ask,
+    askText,
+    toast,
+    type ConfirmFact,
+    type ToastHandle,
+  } from "./lib/ui";
+  import {
     modsRootStatus,
     setModsRoot,
     clearModsRoot,
@@ -71,6 +80,13 @@
   } from "./lib/api";
   import { ArchiveMove } from "./lib/archiveMove.svelte";
   import { capList, modsCount, problemLines, unDot } from "./lib/archiveMoveLogic";
+  import {
+    activeSetDiff,
+    findLoadoutByName,
+    loadoutNameCheck,
+    sameMods,
+    type ActiveSetDiff,
+  } from "./lib/loadoutSafety";
   import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { checkUpdate, installUpdate, type AvailableUpdate } from "./lib/updater";
@@ -157,6 +173,9 @@
   let modsStatus = $state<ModsRootStatus | null>(null);
   let overrideNoticeOpen = $state(false);
   let mods = $state<ModEntry[]>([]);
+  // True once a scan of the current mods folder finished (even with no mods), so "not in your
+  // library" counts are only shown against a library Silo has actually read.
+  let libraryScanned = $state(false);
   let foreignFiles = $state<ForeignFile[]>([]);
   let scanning = $state(false);
   // Epoch-ms of the last scan attempt — throttles the auto-rescan-on-focus so alt-tabbing
@@ -440,9 +459,11 @@
   async function launch() {
     if (
       criticalCount > 0 &&
-      !(await confirmDialog(
-        `Your active set has ${criticalCount} critical conflict${criticalCount === 1 ? "" : "s"}. Launch anyway?`,
-      ))
+      !(await ask({
+        title: `Launch with ${criticalCount} critical conflict${criticalCount === 1 ? "" : "s"}?`,
+        body: "The game may crash or misbehave with these mods together. Launching changes nothing in your library; you can fix the conflicts after you quit.",
+        confirm: "Launch anyway",
+      }))
     )
       return;
     try {
@@ -605,26 +626,139 @@
       errorMsg = `None of “${s.name}”'s mods are in your library yet.`;
       return;
     }
+    const target = present.map((m) => m.modName);
+    const diff = activeSetDiff([...activeSet], target, libraryScanned ? libraryTechNames : undefined);
+    const sum = switchSummary(diff, missing.length);
     const note =
       missing.length > 0
-        ? `\n\nNote: ${missing.length} mod(s) the save used aren't in your library and will be left out.`
+        ? ` ${modsCount(missing.length)} the save used ${missing.length === 1 ? "isn't" : "aren't"} in your library and ${missing.length === 1 ? "is" : "are"} left out.`
         : "";
     if (
-      !(await confirmDialog(
-        `Create a loadout “${s.name}” with ${present.length} mod(s) from this save?${note}`,
-      ))
+      !(await ask({
+        title: `Use ${s.name}'s mods?`,
+        body: `Silo saves ${modsCount(present.length)} from this save as a loadout called ${s.name} and switches to it. ${sum.body}${note}`,
+        facts: sum.facts,
+        list: sum.list,
+        confirm: "Switch",
+      }))
     )
       return;
     try {
-      await saveLoadout(null, s.name, present.map((m) => m.modName));
+      const id = await saveLoadout(null, s.name, target);
       await loadLoadouts();
       savesOpen = false;
-      // Apply it immediately.
-      const created = loadouts.find((l) => l.name === s.name);
-      if (created) await applyLoadout(created);
+      // Apply exactly the mods the confirmation showed (already confirmed above). The new
+      // loadout is found by its id, never by name: another loadout may share the save's name.
+      const name = loadouts.find((l) => l.id === id)?.name ?? s.name;
+      if (diff.on.length + diff.off.length === 0) toast({ message: `Already using ${name}` });
+      else await switchTo(name, target);
     } catch (e) {
       errorMsg = String(e);
     }
+  }
+
+  /**
+   * Body, facts and list for a "switch the active set" confirmation.
+   * @param diff what the switch changes (activeSetDiff)
+   * @param missingCount mods the target names that aren't in the library (default diff.missing)
+   */
+  function switchSummary(diff: ActiveSetDiff, missingCount = diff.missing.length) {
+    const titles = new Map(mods.map((m) => [m.techName, m.title ?? m.techName]));
+    const label = (t: string) => titles.get(t) ?? t;
+    const on = diff.on.length;
+    const off = diff.off.length;
+    const facts: ConfirmFact[] = [
+      { label: "Turn on", value: modsCount(on) },
+      { label: "Park", value: modsCount(off) },
+      ...(missingCount ? [{ label: "Not in your library", value: modsCount(missingCount) }] : []),
+    ];
+    const changed = [...diff.on.map((t) => `On: ${label(t)}`), ...diff.off.map((t) => `Park: ${label(t)}`)];
+    const list = changed.slice(0, 50);
+    if (changed.length > 50) list.push(`…and ${changed.length - 50} more`);
+    const body = `${modsCount(on)} ${on === 1 ? "turns" : "turn"} on and ${off} ${off === 1 ? "is" : "are"} parked. Nothing is deleted.`;
+    return { body, facts, list };
+  }
+
+  /** Set the active set through the loadout apply path (optimistic set, then project it).
+   *  @return true when it applied without errors (failures go to the error banner) */
+  async function setActiveSetTo(techNames: string[], label: string): Promise<boolean> {
+    busy = label;
+    activeSet = new Set(techNames);
+    let clean = false;
+    try {
+      const rep = await applyActive(techNames);
+      clean = rep.errors.length === 0;
+    } catch (e) {
+      errorMsg = String(e);
+    }
+    busy = null;
+    return clean;
+  }
+
+  /** The Undo notice of the last loadout switch; a new switch dismisses it. */
+  let switchUndo: ToastHandle | null = null;
+
+  /**
+   * Why an Undo that puts the active set back can't run now, or null.
+   * @param expected the active set the Undo assumes (the one the switch left)
+   */
+  function activeUndoBlocked(expected: string[]): string | null {
+    if (bisecting) return "Can't undo while a diagnosis is running.";
+    if (archiveMove.running) return "Can't undo while a library move is running.";
+    if (!sameMods(expected, activeSet)) return "Can't undo: your active mods changed since the switch.";
+    return null;
+  }
+
+  /** Switch to a loadout's mods (already confirmed), then offer to switch back. Errors the
+   *  apply reports stay in the error banner; the toast still shows so Undo is reachable. */
+  async function switchTo(name: string, techNames: string[]) {
+    switchUndo?.dismiss();
+    switchUndo = null;
+    const previous = [...activeSet];
+    const clean = await setActiveSetTo(techNames, `Applying loadout “${name}”…`);
+    const switched = [...techNames];
+    switchUndo = toast({
+      message: clean ? `Switched to ${name}.` : `Switch to ${name} finished with problems.`,
+      tone: clean ? "neutral" : "warn",
+      action: {
+        label: "Undo",
+        run: async () => {
+          const why = activeUndoBlocked(switched);
+          if (why) {
+            toast({ message: why, tone: "warn" });
+            return;
+          }
+          await setActiveSetTo(previous, "Switching back…");
+        },
+      },
+    });
+  }
+
+  /**
+   * After a loadout was overwritten, offer to put its previous mods back.
+   * @param prev the loadout as it was (id, name, mods)
+   * @param written the mods it was overwritten with; Undo refuses if it changed again since
+   */
+  function offerOverwriteUndo(prev: { id: number; name: string; mods: string[] }, written: string[]) {
+    toast({
+      message: `Saved your current mods to ${prev.name}.`,
+      action: {
+        label: "Undo",
+        run: async () => {
+          const now = loadouts.find((l) => l.id === prev.id);
+          if (!now || !sameMods(now.mods, written)) {
+            toast({ message: `Can't undo: ${prev.name} changed since.`, tone: "warn" });
+            return;
+          }
+          try {
+            await saveLoadout(prev.id, prev.name, prev.mods);
+            await loadLoadouts();
+          } catch (e) {
+            errorMsg = String(e);
+          }
+        },
+      },
+    });
   }
 
   // The loadout whose mod set exactly matches the current active set (if any).
@@ -649,42 +783,110 @@
   }
 
   async function applyLoadout(l: Loadout) {
-    loadoutsOpen = false;
-    busy = `Applying loadout “${l.name}”…`;
-    activeSet = new Set(l.mods);
-    try {
-      await applyActive(l.mods);
-    } catch (e) {
-      errorMsg = String(e);
+    // With no scan yet every mod would look missing, so only count missing once mods are known.
+    const diff = activeSetDiff([...activeSet], l.mods, libraryScanned ? libraryTechNames : undefined);
+    if (diff.on.length + diff.off.length === 0) {
+      loadoutsOpen = false;
+      toast({ message: `Already using ${l.name}` });
+      return;
     }
-    busy = null;
+    const sum = switchSummary(diff);
+    if (
+      !(await ask({
+        title: `Switch to ${l.name}?`,
+        body: sum.body,
+        facts: sum.facts,
+        list: sum.list,
+        confirm: "Switch",
+      }))
+    )
+      return;
+    loadoutsOpen = false;
+    await switchTo(l.name, l.mods);
   }
 
   async function saveCurrentLoadout() {
-    const name = prompt("Name this loadout:", "");
-    if (!name || !name.trim()) return;
+    const name = await askText({
+      title: "Save current mods as a loadout",
+      label: "Name",
+      confirm: "Save",
+      validate: (v) =>
+        loadoutNameCheck(
+          v,
+          loadouts.map((l) => l.name),
+        ),
+    });
+    if (name === null || !name.trim()) return;
+    // A duplicate name was accepted with "Replace": overwrite that loadout, don't add a second.
+    const existing = findLoadoutByName(name, loadouts);
+    const current = [...activeSet];
     try {
-      await saveLoadout(null, name.trim(), [...activeSet]);
-      await loadLoadouts();
+      if (existing) {
+        const prev = { id: existing.id, name: existing.name, mods: [...existing.mods] };
+        await saveLoadout(existing.id, existing.name, current);
+        await loadLoadouts();
+        offerOverwriteUndo(prev, current);
+      } else {
+        await saveLoadout(null, name.trim(), current);
+        await loadLoadouts();
+      }
     } catch (e) {
       errorMsg = String(e);
     }
   }
 
   async function overwriteLoadout(l: Loadout) {
+    const current = [...activeSet];
+    const d = activeSetDiff(l.mods, current);
+    if (
+      !(await ask({
+        title: `Replace ${l.name} with your current ${modsCount(current.length)}?`,
+        body:
+          `It had ${l.mods.length}. ${d.on.length} ${d.on.length === 1 ? "is" : "are"} added and ${d.off.length} removed. ` +
+          "Your active mods aren't changed.",
+        confirm: "Replace",
+      }))
+    )
+      return;
+    const prev = { id: l.id, name: l.name, mods: [...l.mods] };
     try {
-      await saveLoadout(l.id, l.name, [...activeSet]);
+      await saveLoadout(l.id, l.name, current);
       await loadLoadouts();
+      offerOverwriteUndo(prev, current);
     } catch (e) {
       errorMsg = String(e);
     }
   }
 
   async function removeLoadout(l: Loadout) {
-    if (!(await confirmDialog(`Delete loadout “${l.name}”? (Your mods aren't affected.)`))) return;
+    if (
+      !(await ask({
+        title: `Delete ${l.name}?`,
+        body: "Your mods aren't affected.",
+        confirm: "Delete",
+        tone: "danger",
+      }))
+    )
+      return;
+    // Kept for Undo: saving it again recreates it with the same name and mods (under a new id).
+    const copy = { name: l.name, mods: [...l.mods] };
     try {
       await deleteLoadout(l.id);
       await loadLoadouts();
+      toast({
+        message: `Deleted ${copy.name}.`,
+        action: {
+          label: "Undo",
+          run: async () => {
+            try {
+              await saveLoadout(null, copy.name, copy.mods);
+              await loadLoadouts();
+            } catch (e) {
+              errorMsg = String(e);
+            }
+          },
+        },
+      });
     } catch (e) {
       errorMsg = String(e);
     }
@@ -918,9 +1120,11 @@
 
   async function restoreVanilla() {
     if (
-      !(await confirmDialog(
-        "Restore a vanilla flat mods/ folder?\n\nThis moves every mod back out of archive/ and removes all links. Your mods are not deleted — this just undoes Silo's organization.",
-      ))
+      !(await ask({
+        title: "Restore a plain, flat mods folder?",
+        body: "Every mod moves back out of archive/ and Silo's links are removed. Your mods are not deleted. To undo it, run Organize again.",
+        confirm: "Restore flat folder",
+      }))
     )
       return;
     busy = "Restoring vanilla layout…";
@@ -1406,7 +1610,16 @@
       const tail = cloudSynced
         ? " Your mods folder is cloud-synced, so each one is copied/removed individually — this can take a while."
         : "";
-      if (!(await confirmDialog(`${verb} all ${changing.length} mods in your library?${tail}`))) return;
+      if (
+        !(await ask({
+          title: `${verb} all ${changing.length} mods in your library?`,
+          body:
+            `Each one is ${active ? "linked into" : "removed from"} your mods folder; nothing is deleted from your library.${tail} ` +
+            `To undo it, ${active ? "deactivate" : "activate"} them again or switch to a loadout.`,
+          confirm: `${verb} ${changing.length} mods`,
+        }))
+      )
+        return;
     }
     const next = new Set(activeSet);
     for (const m of filtered) {
@@ -1515,6 +1728,7 @@
     if ((roots[0] ?? null) === prev) return;
     result = null;
     mods = [];
+    libraryScanned = false;
     activeSet = new Set();
     foreignFiles = [];
     if (roots.length) {
@@ -1535,9 +1749,11 @@
     try {
       if (
         (await folderLooksEmpty(path)) &&
-        !(await confirmDialog("This folder has no mods yet — use it anyway?", {
-          okLabel: "Use this folder",
-          cancelLabel: "Cancel",
+        !(await ask({
+          title: "Use an empty folder as your mods folder?",
+          body: "This folder has no mods yet, so your library will look empty here. Nothing is moved; switch back to your old folder any time in Settings.",
+          facts: [{ label: "Folder", value: path }],
+          confirm: "Use this folder",
         }))
       )
         return;
@@ -1548,12 +1764,18 @@
       if (
         st.mismatch &&
         st.canWriteGameSetting &&
-        (await confirmDialog(
-          `Point Farming Simulator at this folder too?\n\nFS25 currently reads:\n${st.gameReads ?? "(unknown)"}\n\n` +
-            "Silo keeps a backup of gameSettings.xml. Close FS25 first — the game rewrites that " +
-            "file when it exits.",
-          { okLabel: "Update FS25's setting", cancelLabel: "Only in Silo" },
-        ))
+        (await ask({
+          title: "Point Farming Simulator at this folder too?",
+          body:
+            "Silo updates FS25's gameSettings.xml and keeps a backup of it, so you can switch back later. " +
+            "Close FS25 first — the game rewrites that file when it exits.",
+          facts: [
+            { label: "FS25 reads now", value: st.gameReads ?? "(unknown)" },
+            { label: "Silo uses", value: path },
+          ],
+          confirm: "Update FS25's setting",
+          cancel: "Only in Silo",
+        }))
       ) {
         await pointGameHere();
       }
@@ -1634,19 +1856,39 @@
    *  missing, or it holds no mods and a move to `path` was refused (`refusal`: the first reason). */
   async function repointArchive(path: string | null, why: "missing" | "empty", refusal = "") {
     const old = archiveMove.archive?.path ?? "its old folder";
-    const msg =
+    const target = path ?? "The default archive inside your mods folder";
+    const ok = await ask(
       why === "empty"
-        ? `Silo can't move your library to ${path}${refusal ? ` (${unDot(refusal)})` : ""}. ` +
-          "Your current archive is empty, so Silo can use this folder as your library instead — nothing is moved."
-        : path === null
-          ? `Your library archive at ${old} isn't available. Start fresh with the default archive inside your mods folder?\n\n` +
-            "Nothing is moved or copied. Mods still on the old drive stay there, untouched — if you restored your archive somewhere, use Choose another and pick that folder instead."
-          : `Your library archive at ${old} isn't available. Use ${path} as your library archive instead?\n\n` +
-            "Nothing is moved or copied — use this if you moved or restored your archive there yourself. Mods still on the old drive stay there, untouched.";
-    const ok = await confirmDialog(msg, {
-      okLabel: path === null ? "Use default" : "Use this folder",
-      cancelLabel: "Cancel",
-    });
+        ? {
+            title:
+              path === null
+                ? "Use the default library archive?"
+                : `Use ${target} as your library archive?`,
+            body:
+              `Silo can't move your library there${refusal ? ` (${unDot(refusal)})` : ""}, but your current archive is empty, ` +
+              "so Silo can use this folder as your library instead. Nothing is moved; you can choose another archive folder later in Settings.",
+            facts: [
+              { label: "Current archive", value: old },
+              { label: "New archive", value: target },
+            ],
+            confirm: "Use this folder",
+          }
+        : {
+            title:
+              path === null
+                ? "Start fresh with the default library archive?"
+                : `Use ${target} as your library archive?`,
+            body:
+              path === null
+                ? "Your library archive isn't available. Nothing is moved or copied, and mods still on the old drive stay there, untouched. If you restored your archive somewhere, cancel, use Choose another and pick that folder instead."
+                : "Your library archive isn't available. Nothing is moved or copied — use this if you moved or restored your archive there yourself. Mods still on the old drive stay there, untouched, and you can point Silo back at it later in Settings.",
+            facts: [
+              { label: "Missing archive", value: old },
+              { label: "New archive", value: target },
+            ],
+            confirm: path === null ? "Use default" : "Use this folder",
+          },
+    );
     if (!ok) return;
     try {
       busy = "Pointing Silo at the archive…";
@@ -1691,18 +1933,32 @@
         else errorMsg = problemLines(pf.problems);
         return;
       }
-      let msg =
-        `Move your library (${pf.modCount} mods, ${fmtSize(pf.bytes)}) to ${path}?\n\n` +
+      let body =
         "Active mods stay playable — Silo links them into your mods folder" +
         (pf.sameDrive ? "." : " (or copies them if links aren't available).");
-      if (!pf.sameDrive && pf.freeBytes != null)
-        msg += `\n\n${fmtSize(pf.freeBytes)} free on that drive.`;
       if (!pf.sameDrive && !pf.symlinksAvailable)
-        msg += "\n\nTurn on Windows Developer Mode to link active mods instead of copying them.";
+        body += " Turn on Windows Developer Mode to link active mods instead of copying them.";
       if (pf.looseMods > 0)
-        msg += `\n\nThat folder already holds ${pf.looseMods === 1 ? "1 loose mod" : `${pf.looseMods} loose mods`} — Silo will offer to file ${pf.looseMods === 1 ? "it" : "them"} in afterwards.`;
-      msg += "\n\nClose Farming Simulator 25 first. You can pause the move to play and resume later.";
-      if (!(await confirmDialog(msg, { okLabel: "Move library", cancelLabel: "Cancel" }))) return;
+        body += ` That folder already holds ${pf.looseMods === 1 ? "1 loose mod" : `${pf.looseMods} loose mods`} — Silo will offer to file ${pf.looseMods === 1 ? "it" : "them"} in afterwards.`;
+      body +=
+        " Close Farming Simulator 25 first. You can pause the move to play and resume later, cancel it to put moved mods back, or move the library back afterwards.";
+      const facts = [
+        { label: "From", value: archiveMove.archive?.path ?? "(unknown)" },
+        { label: "To", value: path },
+        { label: "Mods", value: String(pf.modCount) },
+        { label: "Size", value: fmtSize(pf.bytes) },
+      ];
+      if (!pf.sameDrive && pf.freeBytes != null)
+        facts.push({ label: "Free on that drive", value: fmtSize(pf.freeBytes) });
+      if (
+        !(await ask({
+          title: `Move your library to ${path}?`,
+          body,
+          facts,
+          confirm: "Move library",
+        }))
+      )
+        return;
       settingsOpen = false;
       archiveMove.startTracking();
       await archiveMove.drive(() => archiveMoveStart(path));
@@ -1722,9 +1978,14 @@
       return;
     }
     if (
-      !(await confirmDialog("Move your library back into your mods folder?", {
-        okLabel: "Move library",
-        cancelLabel: "Cancel",
+      !(await ask({
+        title: "Move your library back into your mods folder?",
+        body: "Mods are moved, not copied, and active mods stay playable. Close Farming Simulator 25 first. You can pause or cancel the move, and move it out again later.",
+        facts: [
+          { label: "From", value: archiveMove.archive?.path ?? "(unknown)" },
+          { label: "To", value: roots[0] ? `Your mods folder (${roots[0]})` : "Your mods folder" },
+        ],
+        confirm: "Move library",
       }))
     )
       return;
@@ -1769,6 +2030,7 @@
       const r = await scanMods(roots.length ? roots : undefined);
       result = r;
       mods = r.mods;
+      libraryScanned = true;
       activeSet = new Set(r.mods.filter((m) => m.active).map((m) => m.techName));
       // Interrupted mod updates Silo finished or rolled back before scanning. Added to the
       // banner, so a startup notice (a database restored) isn't wiped by the first scan.
@@ -1968,10 +2230,13 @@
   /** Forget an interrupted bisection without restoring it (asked first: it can't be undone). */
   async function discardBisect() {
     if (!bisectRecovery) return;
-    const ok = await confirmDialog(
-      "Forget the interrupted diagnosis? Your active mods stay as they are now, and Silo won't offer to restore the earlier set again.",
-      { okLabel: "Discard", cancelLabel: "Keep it" },
-    );
+    const ok = await ask({
+      title: "Forget the interrupted diagnosis?",
+      body: "Your active mods stay as they are now, and Silo won't offer to restore the earlier set again. This can't be undone.",
+      confirm: "Discard",
+      cancel: "Keep it",
+      tone: "danger",
+    });
     if (!ok) return;
     try {
       await bisectSnapshotClear();
@@ -2599,6 +2864,9 @@
     />
   {/if}
 </div>
+
+<DialogHost />
+<ToastRegion />
 
 <style>
   .app {
