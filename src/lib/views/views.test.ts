@@ -13,7 +13,7 @@ import DiagnoseView from "./DiagnoseView.svelte";
 import ToolsView from "./ToolsView.svelte";
 import SettingsView from "./SettingsView.svelte";
 import UpdatesView from "./UpdatesView.svelte";
-import HelpView, { DISCORD_URL, DISCUSSIONS_URL, NEW_ISSUE_URL } from "./HelpView.svelte";
+import HelpView, { BUG_REPORT_URL, DISCORD_URL, DISCUSSIONS_URL } from "./HelpView.svelte";
 import { go, nav, resetNav, VIEW_IDS } from "../state/nav.svelte";
 
 // A working localStorage before nav.svelte loads (Node's own global one only warns under jsdom).
@@ -300,26 +300,88 @@ describe("UpdatesView", () => {
 });
 
 describe("HelpView", () => {
-  it("opens the community links and copies diagnostics", async () => {
+  it("opens the community links", async () => {
+    const user = userEvent.setup();
+    const onopen = vi.fn();
+    render(HelpView, { onopen, oncopydiagnostics: vi.fn() });
+    await user.click(screen.getByRole("button", { name: /GitHub Discussions/ }));
+    await user.click(screen.getByRole("button", { name: /Discord/ }));
+    expect(onopen.mock.calls.map((c) => c[0])).toEqual([DISCUSSIONS_URL, DISCORD_URL]);
+    expect(screen.queryByRole("button", { name: "Keyboard shortcuts" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "See what's new" })).not.toBeInTheDocument();
+  });
+
+  it("Report a problem copies the diagnostics first, then opens the bug form", async () => {
+    const user = userEvent.setup();
+    const order: string[] = [];
+    let finishCopy: () => void = () => {};
+    const oncopydiagnostics = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          order.push("copy started");
+          finishCopy = () => {
+            order.push("copied");
+            resolve();
+          };
+        }),
+    );
+    const onopen = vi.fn((url: string) => order.push(`open ${url}`));
+    render(HelpView, { onopen, oncopydiagnostics });
+    await user.click(screen.getByRole("button", { name: /^Report a problem/ }));
+    // The form waits for the copy.
+    expect(onopen).not.toHaveBeenCalled();
+    finishCopy();
+    await vi.waitFor(() => expect(onopen).toHaveBeenCalledOnce());
+    expect(order).toEqual(["copy started", "copied", `open ${BUG_REPORT_URL}`]);
+  });
+
+  it("Report a problem still opens the form when the copy fails", async () => {
+    const user = userEvent.setup();
+    const onopen = vi.fn();
+    render(HelpView, { onopen, oncopydiagnostics: vi.fn(() => Promise.reject(new Error("no clipboard"))) });
+    await user.click(screen.getByRole("button", { name: /^Report a problem/ }));
+    await vi.waitFor(() => expect(onopen).toHaveBeenCalledWith(BUG_REPORT_URL));
+  });
+
+  it("Copy diagnostics only copies", async () => {
     const user = userEvent.setup();
     const onopen = vi.fn();
     const oncopydiagnostics = vi.fn();
     render(HelpView, { onopen, oncopydiagnostics });
-    await user.click(screen.getByRole("button", { name: /GitHub Discussions/ }));
-    await user.click(screen.getByRole("button", { name: /Discord/ }));
-    await user.click(screen.getByRole("button", { name: /Report a problem/ }));
-    expect(onopen.mock.calls.map((c) => c[0])).toEqual([DISCUSSIONS_URL, DISCORD_URL, NEW_ISSUE_URL]);
-    await user.click(screen.getByRole("button", { name: /Copy diagnostics/ }));
+    await user.click(screen.getByRole("button", { name: /Copy diagnostics only/ }));
     expect(oncopydiagnostics).toHaveBeenCalledOnce();
-    expect(screen.queryByRole("button", { name: "Keyboard shortcuts" })).not.toBeInTheDocument();
+    expect(onopen).not.toHaveBeenCalled();
   });
 
-  it("opens the keyboard shortcuts list", async () => {
+  it("opens the keyboard shortcuts list and What's new", async () => {
     const user = userEvent.setup();
     const onshowshortcuts = vi.fn();
-    render(HelpView, { onopen: vi.fn(), oncopydiagnostics: vi.fn(), onshowshortcuts });
+    const onshowwhatsnew = vi.fn();
+    render(HelpView, { onopen: vi.fn(), oncopydiagnostics: vi.fn(), onshowshortcuts, onshowwhatsnew });
     expect(screen.getByRole("heading", { name: "Keyboard shortcuts" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Keyboard shortcuts" }));
     expect(onshowshortcuts).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("button", { name: "See what's new" }));
+    expect(onshowwhatsnew).toHaveBeenCalledOnce();
+  });
+
+  it("searching for loadouts finds Mod sets", async () => {
+    const user = userEvent.setup();
+    render(HelpView, { onopen: vi.fn(), oncopydiagnostics: vi.fn() });
+    await user.type(screen.getByRole("searchbox", { name: "Search help" }), "loadouts");
+    const topics = screen.getAllByRole("listitem").filter((li) => li.closest(".topics"));
+    expect(topics.map((li) => li.querySelector("summary")?.textContent)).toEqual(["Mod sets"]);
+    await user.clear(screen.getByRole("searchbox", { name: "Search help" }));
+    await user.type(screen.getByRole("searchbox", { name: "Search help" }), "zzzz");
+    expect(screen.getByText(/Nothing in Help matches/)).toBeInTheDocument();
+  });
+
+  it("About lists the third-party licenses, the fonts first", () => {
+    render(HelpView, { onopen: vi.fn(), oncopydiagnostics: vi.fn(), appVer: "1.0.0" });
+    expect(screen.getByText("Silo v1.0.0")).toBeInTheDocument();
+    const names = [...document.querySelectorAll(".lic-name")].map((e) => e.textContent);
+    expect(names.slice(0, 2)).toEqual(["Fraunces (font)", "Hanken Grotesk (font)"]);
+    expect(names).toContain("@lucide/svelte");
   });
 });
+

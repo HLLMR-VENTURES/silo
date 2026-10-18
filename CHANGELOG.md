@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **First run.** A new library opens a short setup: Silo shows the mods folder it found (and
+  sorts out a missing, unavailable or different folder right there), explains active and parked
+  mods and where parked mods live, then shows exactly what organizing would do before anything
+  moves. **Skip setup** or **Not now** goes straight to the Library with nothing moved. A library
+  that's already organized, or has favorites, hidden or flagged mods, doesn't see it. (#250)
+
+- **What's new in Silo 1.0.** Upgrading users with an organized library get a one-time card about the new layout, Mod
+  sets, Undo, keyboard shortcuts and plain-English errors; Help → What's new shows it again. (#250)
+
+- **Help.** Help topics you can search (an old name like "loadouts" finds Mod sets), What's new,
+  Keyboard shortcuts, **Report a problem** (copies Silo's diagnostics, then opens the GitHub bug
+  form), and About with Silo's license and the third-party licenses (the fonts' OFL texts,
+  Lucide's ISC license and the bundled packages). (#250)
+
 - **Updates, in sections.** Updates now lists **Ready to install**, **Download from ModHub**,
   **Check these yourself**, **Couldn't check** (with the reason, Try again and Copy details), and
   collapsed **Up to date** and **Not tracked** lists, with when you last checked. **Update all**
@@ -82,6 +96,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running. (#226)
 
 ### Changed
+
+- **The Organize dialog.** Review (in the Library's status strip) and Settings → Library →
+  Organize open a standard dialog: a summary first, the files grouped by category behind **See
+  every file**, and **File new mods automatically from now on**, which replaces "Don't preview
+  next time". Progress shows in the dialog while filing, a success toast confirms it, and mods
+  that couldn't be moved are listed in place with **Copy details**. (#250)
+
+- **Plainer messages.** Silo's own messages (errors, conflict descriptions, archive-move and
+  organize problems) no longer use dash asides. (#250)
 
 - **Updates' badge counts what you can act on.** The rail badge counts Ready to install plus
   Download from ModHub, appears only after a check, and drops as you update. A failed install
@@ -248,6 +271,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Checking for updates works again on libraries with more than 500 mods; Silo now asks its catalog in batches. When the catalog refuses a check, Silo says so instead of claiming it's offline, and keeps the last good "Last checked" time. (#252)
+
+- **Filing after a partial failure.** When some mods couldn't be filed, the ones that were filed
+  are linked back into the mods folder, so they stay active as promised. (#250)
 
 - **Browse no longer leaks a listener.** Leaving Browse before its install-progress listener
   was ready left it registered, one more per visit. (#246)

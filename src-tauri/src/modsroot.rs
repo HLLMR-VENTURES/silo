@@ -766,7 +766,7 @@ mod tests {
         assert!(active().is_none());
         assert!(
             resolved(),
-            "publishing — even \"no folder\" — marks the layout resolved"
+            "publishing (even \"no folder\") marks the layout resolved"
         );
     }
 

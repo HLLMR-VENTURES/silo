@@ -4,6 +4,7 @@
   import Icon from "../ui/Icon.svelte";
   import { inlineError } from "../state/notify.svelte";
   import { ghSetClientId, ghSetPat, ghLogout, openExternal } from "../api";
+  import { GITHUB_NEW_OAUTH_APP_URL, GITHUB_NEW_PAT_URL } from "../links";
   import {
     attachGithubView,
     cancelDeviceFlow,
@@ -151,7 +152,7 @@
       <div class="gha-hint">
         GitHub sign-in isn't configured in this build. (One-time: register a GitHub OAuth App with
         Device Flow enabled and add its Client ID.)
-        <button class="gha-link" onclick={() => openExternal("https://github.com/settings/applications/new")}>
+        <button class="gha-link" onclick={() => openExternal(GITHUB_NEW_OAUTH_APP_URL)}>
           Register an OAuth App <Icon name="external" size={12} />
         </button>
       </div>
@@ -172,7 +173,7 @@
         minimal-permission path, narrower than the OAuth scope.
         <button
           class="gha-link"
-          onclick={() => openExternal("https://github.com/settings/personal-access-tokens/new")}
+          onclick={() => openExternal(GITHUB_NEW_PAT_URL)}
         >
           Create one <Icon name="external" size={12} />
         </button>

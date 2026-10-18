@@ -450,12 +450,12 @@ pub fn resolve_download(
                         Ok(s)
                     } else {
                         Err(format!(
-                            "{name} doesn't allow direct downloads — open its page instead"
+                            "{name} doesn't allow direct downloads. Open its page instead."
                         ))
                     }
                 })?,
             None => detail.sources.iter().find(usable).ok_or_else(|| {
-                "No source allows a direct download — open the mod page".to_string()
+                "No source allows a direct download. Open the mod page.".to_string()
             })?,
         };
 
@@ -604,8 +604,9 @@ fn fetch_and_validate(
         let f = std::fs::File::open(part).map_err(|e| e.to_string())?;
         let mut ar = zip::ZipArchive::new(f)
             .map_err(|_| "Downloaded file isn't a valid .zip (corrupt or truncated)".to_string())?;
-        ar.by_name("modDesc.xml")
-            .map_err(|_| "Downloaded archive has no modDesc.xml — not an FS25 mod".to_string())?;
+        ar.by_name("modDesc.xml").map_err(|_| {
+            "Downloaded archive has no modDesc.xml, so it isn't an FS25 mod.".to_string()
+        })?;
     }
     // Identity: a valid ZIP of the WRONG mod is still the wrong mod. If the catalog has a
     // canonical hash for this exact mod+version, the bytes must match it byte-for-byte —
@@ -615,7 +616,7 @@ fn fetch_and_validate(
         if !got.eq_ignore_ascii_case(expected) {
             return Err(
                 "Downloaded file doesn't match the catalog's known build for this mod \
-                 (wrong or tampered file) — refusing it."
+                 (wrong or tampered file), so Silo refused it."
                     .to_string(),
             );
         }

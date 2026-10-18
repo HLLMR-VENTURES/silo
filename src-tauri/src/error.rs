@@ -539,12 +539,12 @@ mod tests {
             ),
             ("Bad credentials", UNIX, code::GITHUB_AUTH),
             (
-                "GitHub rejected the token — reconnect your account",
+                "GitHub rejected the token. Reconnect your account.",
                 WIN,
                 code::GITHUB_AUTH,
             ),
             (
-                "GitHub rate limit hit (60/hr unauthenticated) — try again later",
+                "GitHub rate limit hit (60/hr unauthenticated). Try again later.",
                 UNIX,
                 code::GITHUB_RATE_LIMIT,
             ),
@@ -555,7 +555,7 @@ mod tests {
             ),
             // Silo's own refusals
             (
-                "Silo is still loading your library — try again in a moment.",
+                "Silo is still loading your library. Try again in a moment.",
                 WIN,
                 code::STILL_LOADING,
             ),
@@ -570,7 +570,7 @@ mod tests {
                 code::MOVE_UNFINISHED,
             ),
             (
-                "Silo is moving your library archive — pause the move to play.",
+                "Silo is moving your library archive. Pause the move to play.",
                 UNIX,
                 code::MOVE_UNFINISHED,
             ),
@@ -590,7 +590,7 @@ mod tests {
                 code::MOVE_UNFINISHED,
             ),
             (
-                "An archive move is already unfinished — resume or cancel it first.",
+                "An archive move is already unfinished. Resume or cancel it first.",
                 UNIX,
                 code::MOVE_UNFINISHED,
             ),
@@ -600,7 +600,7 @@ mod tests {
                 code::GAME_RUNNING,
             ),
             (
-                "Close Farming Simulator 25 first — Silo won't move mods while the game is using them.",
+                "Close Farming Simulator 25 first. Silo won't move mods while the game is using them.",
                 UNIX,
                 code::GAME_RUNNING,
             ),
@@ -622,7 +622,7 @@ mod tests {
                 code::DB_NEWER,
             ),
             (
-                "the downloaded file isn't a Farming Simulator mod (no modDesc.xml) — it may be a source",
+                "the downloaded file isn't a Farming Simulator mod (no modDesc.xml). It may be a source archive or the wrong release asset.",
                 WIN,
                 code::NOT_A_MOD,
             ),

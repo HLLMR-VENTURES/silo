@@ -10,6 +10,7 @@ pub mod conflicts;
 pub mod db;
 mod diagnostics;
 pub mod error;
+pub mod firstrun;
 pub mod fsgame;
 mod fslog;
 pub mod gamelaunch;
@@ -1363,7 +1364,7 @@ async fn verify_mod(
             .find(|r| r.tech_name.as_deref() == Some(tech_name.as_str()))
         else {
             return Ok(provenance::VerifyResult::unverified(
-                "This mod isn't in the catalog yet — no trusted build to compare against.",
+                "This mod isn't in the catalog yet. No trusted build to compare against.",
             ));
         };
 
@@ -1390,7 +1391,7 @@ async fn verify_mod(
                 Ok(r)
             }
             None => Ok(provenance::VerifyResult::unverified(
-                "No hashed build for this version yet — coverage is GitHub-first and growing.",
+                "No hashed build for this version yet. Coverage is GitHub-first and growing.",
             )),
         }
     })
@@ -1514,7 +1515,7 @@ fn primary_layout(root: Option<String>) -> Result<organize::Layout, String> {
     })
 }
 
-const STILL_LOADING: &str = "Silo is still loading your library — try again in a moment.";
+const STILL_LOADING: &str = "Silo is still loading your library. Try again in a moment.";
 
 /// Refuse writes to the library while an archive move is unfinished — or before the active
 /// layout has been worked out (an unfinished move can't be ruled out yet). Once resolved with
@@ -2229,7 +2230,7 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
         Some(l) => match std::fs::read_to_string(l.user_dir.join("gameSettings.xml")) {
             Err(_) => (
                 None,
-                Some("gameSettings.xml not found — start FS25 once to create it".to_string()),
+                Some("gameSettings.xml not found. Start FS25 once to create it.".to_string()),
             ),
             Ok(xml) => match modsroot::read_override(&xml) {
                 Some(o) => (Some(o), None),
@@ -2837,7 +2838,7 @@ fn foreign_mods_problem(n: usize) -> String {
         (format!("{n} mods"), "them")
     };
     format!(
-        "This folder already has {count} in subfolders Silo doesn't manage — choose another folder, or move {them} to the folder's top level so Silo can file {them} in."
+        "This folder already has {count} in subfolders Silo doesn't manage. Choose another folder, or move {them} to the folder's top level so Silo can file {them} in."
     )
 }
 
@@ -2902,9 +2903,9 @@ struct MoveFacts {
 
 fn missing_mods_problem(n: usize) -> String {
     if n == 1 {
-        "1 mod in your library is missing from the archive — rescan first.".into()
+        "1 mod in your library is missing from the archive. Rescan first.".into()
     } else {
-        format!("{n} mods in your library are missing from the archive — rescan first.")
+        format!("{n} mods in your library are missing from the archive. Rescan first.")
     }
 }
 
@@ -3009,7 +3010,7 @@ fn move_outcome(what: &str, out: &Result<Option<relocate::MoveMarker>, String>) 
                 m.errors.len()
             )
         }
-        Err(e) => format!("archive move {what}: refused — {e}"),
+        Err(e) => format!("archive move {what}: refused: {e}"),
     }
 }
 
@@ -3337,7 +3338,7 @@ fn repoint_refusal(
         return Some("Finish or cancel the archive move first.".into());
     }
     if !layout.archive_missing() && holds_mods {
-        return Some("Your library archive holds mods — use Change… to move them instead.".into());
+        return Some("Your library archive holds mods. Use Change… to move them instead.".into());
     }
     None
 }
@@ -3528,7 +3529,7 @@ async fn archive_adopt_apply(
         for n in missing {
             report.skipped += 1;
             report.errors.push(format!(
-                "{n}: no longer a loose mod Silo can file in — left untouched"
+                "{n}: no longer a loose mod Silo can file in, so it was left untouched."
             ));
         }
         log::info!(
@@ -3642,7 +3643,7 @@ async fn detect_game() -> Result<Option<gamelaunch::GameInfo>, String> {
 #[tauri::command]
 async fn launch_game() -> Result<(), error::AppError> {
     if relocate::is_running() {
-        return Err("Silo is moving your library archive — pause the move to play.".into());
+        return Err("Silo is moving your library archive. Pause the move to play.".into());
     }
     tauri::async_runtime::spawn_blocking(gamelaunch::launch)
         .await
@@ -4421,7 +4422,7 @@ async fn collection_apply(
                     filename: None,
                     status: "skipped".into(),
                     verdict: None,
-                    detail: Some("Not in the catalog — find it manually.".into()),
+                    detail: Some("Not in the catalog. Find it manually.".into()),
                 });
                 continue;
             };
@@ -4608,7 +4609,7 @@ fn gated_row(tech_name: &str) -> ApplyRow {
         filename: None,
         status: "skipped".into(),
         verdict: None,
-        detail: Some("Download-gated — get it from its page.".into()),
+        detail: Some("Download-gated. Get it from its page.".into()),
     }
 }
 
@@ -4635,7 +4636,7 @@ async fn scan_log() -> Result<logscan::LogReport, String> {
         .ok_or_else(|| "Could not locate the FS25 user directory".to_string())?;
     tauri::async_runtime::spawn_blocking(move || -> Result<logscan::LogReport, String> {
         if !path.exists() {
-            return Err("No log.txt found — launch FS25 at least once first".to_string());
+            return Err("No log.txt found. Launch FS25 at least once first.".to_string());
         }
         // Logs are read as lossy UTF-8; FS writes mostly ASCII but paths can carry stray bytes.
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
@@ -4654,7 +4655,7 @@ async fn scan_bindings() -> Result<bindings::BindingReport, String> {
         .ok_or_else(|| "Could not locate the FS25 user directory".to_string())?;
     tauri::async_runtime::spawn_blocking(move || -> Result<bindings::BindingReport, String> {
         if !path.exists() {
-            return Err("No inputBinding.xml found — launch FS25 at least once first".to_string());
+            return Err("No inputBinding.xml found. Launch FS25 at least once first.".to_string());
         }
         let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
         Ok(bindings::parse(&String::from_utf8_lossy(&bytes)))
@@ -4978,6 +4979,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             scan_mods,
+            firstrun::first_run_state,
+            firstrun::set_first_run_flag,
             get_mod_icon,
             get_curation,
             set_curation,
@@ -5836,7 +5839,7 @@ mod tests {
         assert!(move_outcome("start", &Ok(Some(g))).contains("(Farming Simulator 25 started; 0"));
         assert_eq!(
             move_outcome("cancel", &Err("nope".into())),
-            "archive move cancel: refused — nope"
+            "archive move cancel: refused: nope"
         );
     }
 
@@ -5913,7 +5916,7 @@ mod tests {
         assert_eq!(p[1], "FS25_B.zip is filed twice");
         assert_eq!(p[2], "3 mods unknown");
         assert!(p[3].starts_with("2 mods in your library are missing from the archive"));
-        assert!(p[3].contains("rescan first"));
+        assert!(p[3].contains("Rescan first"));
         assert_eq!(p[4], "FS25_A: x already exists");
         assert!(p[5].starts_with("Not enough free space"));
     }

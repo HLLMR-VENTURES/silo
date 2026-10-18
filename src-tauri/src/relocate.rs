@@ -26,7 +26,7 @@ const OLD_SUFFIX: &str = ".silo-move-old";
 const RELINK_SUFFIX: &str = organize::RELINK_SUFFIX;
 
 const GAME_RUNNING: &str =
-    "Close Farming Simulator 25 first — Silo won't move mods while the game is using them.";
+    "Close Farming Simulator 25 first. Silo won't move mods while the game is using them.";
 
 /// Which way the mods are flowing: `Forward` = `from` → `to`; `Back` = a cancel, `to` → `from`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,7 +222,7 @@ fn remove_any(p: &Path) -> std::io::Result<()> {
 
 fn link_inside(p: &Path) -> String {
     format!(
-        "{} is a link inside a mod folder — Silo won't copy links; remove it, then retry",
+        "{} is a link inside a mod folder. Silo won't copy links; remove it, then retry.",
         p.display()
     )
 }
@@ -329,7 +329,7 @@ fn verify(src: &Path, dst: &Path, kind: &str) -> Result<bool, String> {
 fn place(tmp: &Path, dst: &Path, kind: &str) -> Result<(), String> {
     let taken = || {
         format!(
-            "place: something appeared at {} — move or rename it, then retry",
+            "place: something appeared at {}. Move or rename it, then retry.",
             dst.display()
         )
     };
@@ -523,7 +523,7 @@ impl Env<'_> {
 fn refuse_link(src: &Path) -> Result<(), StepErr> {
     match src.symlink_metadata() {
         Ok(m) if m.file_type().is_symlink() => Err(StepErr::Failed(format!(
-            "move: {} is a link, not a file — Silo won't move links",
+            "move: {} is a link, not a file. Silo won't move links.",
             src.display()
         ))),
         _ => Ok(()),
@@ -533,7 +533,7 @@ fn refuse_link(src: &Path) -> Result<(), StepErr> {
 /// "Something else is at `at`" — said without guessing who put it there.
 fn occupied(at: &Path) -> StepErr {
     StepErr::Failed(format!(
-        "move: a different copy is already at {} — Silo won't replace it; move or rename it, then retry",
+        "move: a different copy is already at {}. Silo won't replace it; move or rename it, then retry.",
         at.display()
     ))
 }
@@ -566,7 +566,7 @@ fn forward_one(
         (false, true) => {
             if !ours {
                 return Err(StepErr::Failed(format!(
-                    "move: the original is missing from the old location, and Silo won't adopt the copy at {} — check it, then retry",
+                    "move: the original is missing from the old location, and Silo won't adopt the copy at {}. Check it, then retry.",
                     dst.display()
                 )));
             }
@@ -762,12 +762,17 @@ pub fn filed_twice(unknown: &[PathBuf], rows: &[OrganizedRow]) -> Vec<String> {
         .collect()
 }
 
-/// "N mod(s) in your archive aren't in Silo's library yet — `then`".
+/// "N mod(s) in your archive aren't in Silo's library yet. `Then`".
 pub fn unknown_count_message(n: usize, then: &str) -> String {
+    let mut c = then.chars();
+    let then: String = c
+        .next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default();
     if n == 1 {
-        format!("1 mod in your archive isn't in Silo's library yet — {then}")
+        format!("1 mod in your archive isn't in Silo's library yet. {then}")
     } else {
-        format!("{n} mods in your archive aren't in Silo's library yet — {then}")
+        format!("{n} mods in your archive aren't in Silo's library yet. {then}")
     }
 }
 
@@ -782,7 +787,7 @@ pub fn unknown_messages(
     let twice = filed_twice(unknown, rows);
     let mut v: Vec<String> = twice
         .iter()
-        .map(|n| format!("{n} is filed twice in your archive — remove one copy, {then_twice}"))
+        .map(|n| format!("{n} is filed twice in your archive. Remove one copy, {then_twice}"))
         .collect();
     let rest = unknown.len() - twice.len();
     if rest > 0 {
@@ -1045,7 +1050,7 @@ pub fn collisions(new_archive: &Path, rows: &[OrganizedRow]) -> Vec<String> {
         if exact {
             format!("{dir} already has a different {what} named {name}.")
         } else {
-            format!("{dir} already has a {what} named {name} — another copy of {tech}.")
+            format!("{dir} already has a {what} named {name}. Another copy of {tech}.")
         }
     };
     rows.iter()
@@ -1137,7 +1142,7 @@ fn failed(e: StepErr) -> String {
 }
 
 const ALREADY_UNFINISHED: &str =
-    "An archive move is already unfinished — resume or cancel it first.";
+    "An archive move is already unfinished. Resume or cancel it first.";
 
 /// Start a new move of the archive `from` → `to` and run it until it finishes or pauses.
 /// Refuses while another move is running or unfinished, or while the game runs (nothing is
@@ -1220,8 +1225,8 @@ fn run_locked(
             marker.errors.extend(unknown_messages(
                 &unknown,
                 &rows,
-                "then resume",
-                "cancel the move, rescan, then start again",
+                "then resume.",
+                "cancel the move, rescan, then start again.",
             ));
             return pause(&env, marker);
         }
@@ -1243,7 +1248,7 @@ fn run_locked(
             for t in &snapshot {
                 if !rows.iter().any(|r| &r.tech_name == t) {
                     marker.errors.push(format!(
-                        "{t}: no longer in Silo's library — can't move it back"
+                        "{t}: no longer in Silo's library, so Silo can't move it back."
                     ));
                 }
             }
@@ -1327,7 +1332,7 @@ fn run_locked(
                 let d = organize::archive_path(&dst_root, &r.category, &r.file_name);
                 if !exists(&d) || exists(&s) {
                     marker.errors.push(format!(
-                        "{}: not fully moved — {} should exist and {} shouldn't",
+                        "{}: not fully moved. {} should exist and {} shouldn't",
                         r.tech_name,
                         d.display(),
                         s.display()
@@ -2508,7 +2513,7 @@ mod tests {
         assert!(
             out.errors
                 .iter()
-                .any(|e| e.contains("FS25_A.zip is filed twice") && e.contains("remove one copy")),
+                .any(|e| e.contains("FS25_A.zip is filed twice") && e.contains("Remove one copy")),
             "{:?}",
             out.errors
         );
@@ -2772,7 +2777,7 @@ mod tests {
         );
         assert_eq!(
             hits[1],
-            format!("{maps} already has a folder named FS25_Y — another copy of FS25_Y.")
+            format!("{maps} already has a folder named FS25_Y. Another copy of FS25_Y.")
         );
         let _ = std::fs::remove_dir_all(&f.base);
     }

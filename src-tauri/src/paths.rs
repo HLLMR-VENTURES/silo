@@ -182,7 +182,9 @@ fn backup_slot(dest: &Path, n: usize) -> PathBuf {
 /// used instead); that file is never replaced. Then shift `.bak` → `.bak.2` → `.bak.3` (the
 /// oldest drops) and copy `dest` to `.bak`. Any failure aborts before `dest` is touched.
 fn back_up_config(dest: &Path) -> Result<(), String> {
-    let abort = |e: std::io::Error| format!("aborted — couldn't back up the file first: {e}");
+    let abort = |e: std::io::Error| {
+        format!("Silo couldn't back up the file first, so it changed nothing: {e}")
+    };
     let original = with_suffix(dest, ".silo-original.bak");
     if !original.exists() {
         let source = if backup_slot(dest, 1).is_file() {

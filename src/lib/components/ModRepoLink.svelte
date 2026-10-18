@@ -3,6 +3,7 @@
   import { inlineError } from "../state/notify.svelte";
   import type { ModEntry, UpdateInfo } from "../types";
   import { setModRepo, guessRepo, checkModUpdate, downloadUpdate, openExternal } from "../api";
+  import { githubRepoUrl } from "../links";
   import { ask } from "../ui";
   import { blocked, tryStart } from "../state/ops.svelte";
 
@@ -132,7 +133,7 @@
       <button class="gh-btn" onclick={checkUpdate} disabled={checking}>
         {checking ? "Checking…" : "Check for update"}
       </button>
-      <button class="gh-open" onclick={() => openExternal(`https://github.com/${repo.owner}/${repo.repo}`)}>
+      <button class="gh-open" onclick={() => openExternal(githubRepoUrl(repo.owner, repo.repo))}>
         Open repo <Icon name="external" size={12} />
       </button>
     </div>

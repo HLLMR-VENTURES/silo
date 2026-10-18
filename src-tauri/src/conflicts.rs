@@ -170,7 +170,7 @@ fn map_conflict(map_labels: Vec<String>) -> Option<Conflict> {
         kind: "map".into(),
         name: format!("{} maps enabled", map_labels.len()),
         explanation:
-            "More than one map is active. FS loads a second map's scripts even when it isn't the one you're playing, which typically crashes on load — keep exactly one map enabled."
+            "More than one map is active. FS loads a second map's scripts even when it isn't the one you're playing, which typically crashes on load. Keep exactly one map enabled."
                 .into(),
         mods: map_labels,
     })
@@ -228,7 +228,7 @@ pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
             kind: "uniqueType".into(),
             name: ut.clone(),
             explanation: format!(
-                "These mods share the uniqueType \"{ut}\" — FS loads only one mod of a given uniqueType, so the others will not take effect.{}",
+                "These mods share the uniqueType \"{ut}\". FS loads only one mod of a given uniqueType, so the others will not take effect.{}",
                 if sa { note_same_author } else { "" }
             ),
             mods: labels,
@@ -247,7 +247,7 @@ pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
             kind,
             name: name.clone(),
             explanation: format!(
-                "Multiple mods register the {kl} \"{name}\". Only one registration wins at load — the others' behavior may break.{}",
+                "Multiple mods register the {kl} \"{name}\". Only one registration wins at load. The others' behavior may break.{}",
                 if sa { note_same_author } else { "" }
             ),
             mods: labels,
@@ -324,7 +324,7 @@ pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
             kind: "fillType".into(),
             name: name.clone(),
             explanation: format!(
-                "These mods each define the fillType \"{name}\". FS keeps only one definition — whichever loads last silently overrides the others' settings (capacity, price, etc.), so one mod may misbehave.{}",
+                "These mods each define the fillType \"{name}\". FS keeps only one definition. Whichever loads last silently overrides the others' settings (capacity, price, etc.), so one mod may misbehave.{}",
                 if sa { " Same author, so likely coordinated." } else { "" }
             ),
             mods: labels,

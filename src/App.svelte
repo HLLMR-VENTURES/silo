@@ -235,6 +235,21 @@
   import CategoryMenu from "./lib/components/panels/CategoryMenu.svelte";
   import LibraryToolbar from "./lib/components/panels/LibraryToolbar.svelte";
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
+  import Onboarding from "./lib/firstRun/Onboarding.svelte";
+  import WhatsNew from "./lib/firstRun/WhatsNew.svelte";
+  import {
+    fileInRuns,
+    filingFailures,
+    firstRunScreen,
+    firstRunState,
+    setFirstRunFlag,
+    type ArchiveChoice,
+    type FilingFailure,
+    type FinishHow,
+    type FilingRun,
+    type FirstRunFlag,
+    type OrganizeOutcome,
+  } from "./lib/firstRun/firstRun";
   import NoticeArea from "./lib/components/NoticeArea.svelte";
   import ViewBoundary from "./lib/components/ViewBoundary.svelte";
   import KeepMounted from "./lib/components/KeepMounted.svelte";
@@ -1241,10 +1256,58 @@
     };
   }
 
-  // Apply a prepared set of organize inputs. `keepActive` re-projects them so their
-  // loaded state is preserved (used by both the auto-filer and the manual button). `auto`: the
-  // auto-filer, which says nothing when another write is running (the next scan retries).
-  // `onStart` runs once the write is under way (parking dismisses the previous switch toast).
+  /** Mods per apply_organize call when filing with progress (the dialog and the setup flow). */
+  const FILE_RUN = 25;
+
+  /**
+   * File a prepared set of organize inputs into the library. `keepActive` re-projects the filed
+   * mods so their loaded state is preserved (the auto-filer and the manual paths). `auto`: the
+   * auto-filer, which says nothing when another write is running (the next scan retries).
+   * `onStart` runs once the write is under way (parking dismisses the previous switch toast).
+   * `onProgress` files in runs of FILE_RUN and reports mods done of total.
+   * @returns null when refused; else the report's problem lines and anything thrown
+   */
+  async function fileLoose(
+    inputs: ModInput[],
+    techNames: string[],
+    keepActive: boolean,
+    opts: { auto?: boolean; onStart?: () => void; onProgress?: (done: number, total: number) => void } = {},
+  ): Promise<FilingRun | null> {
+    if (inputs.length === 0) return null;
+    const op = beginWrite(`Filing ${modsCount(inputs.length)} into the library`, !!opts.onProgress, {
+      silent: opts.auto,
+    });
+    if (!op) return null;
+    opts.onStart?.();
+    let out: FilingRun;
+    try {
+      // With progress, in runs of FILE_RUN; otherwise in one call, as before.
+      const onProgress = opts.onProgress;
+      out = await fileInRuns(
+        inputs,
+        applyOrganize,
+        FILE_RUN,
+        onProgress &&
+          ((done, total) => {
+            op.progress(done, total);
+            onProgress(done, total);
+          }),
+      );
+      // Filed mods left the mods folder: link them back, after a partial failure too (the
+      // ones that failed are still loose, so set_active leaves them alone).
+      if (keepActive && out.changed > 0) {
+        const next = new Set([...activeSet, ...techNames]);
+        activeSet = next;
+        await applyActive([...next]); // reports its own problems
+      }
+    } finally {
+      op.end();
+    }
+    await runScan(false);
+    return out;
+  }
+
+  // Apply a prepared set of organize inputs, reporting any problem as a toast (with Try again).
   // Returns true when they were filed cleanly, false on a problem (reported), null when refused.
   async function applyLoose(
     inputs: ModInput[],
@@ -1253,29 +1316,11 @@
     auto = false,
     onStart?: () => void,
   ): Promise<boolean | null> {
-    if (inputs.length === 0) return null;
-    const op = beginWrite(`Filing ${modsCount(inputs.length)} into the library`, false, {
-      silent: auto,
-    });
-    if (!op) return null;
-    onStart?.();
+    const out = await fileLoose(inputs, techNames, keepActive, { auto, onStart });
+    if (!out) return null;
     /** What went wrong: the thrown error (keeps its code), or the report's problems. */
-    let problem: unknown = null;
-    try {
-      const rep = await applyOrganize(inputs);
-      if (rep.errors.length) {
-        problem = rep.errors.slice(0, 3).join("; ");
-      } else if (keepActive) {
-        const next = new Set([...activeSet, ...techNames]);
-        activeSet = next;
-        await applyActive([...next]); // reports its own problems
-      }
-    } catch (e) {
-      problem = e;
-    } finally {
-      op.end();
-    }
-    await runScan(false);
+    const problem: unknown =
+      out.thrown ?? (out.errors.length ? out.errors.slice(0, 3).join("; ") : null);
     if (problem !== null) {
       // Try again files whichever of these mods are still loose, as they are now.
       const wanted = new Set(techNames);
@@ -1294,33 +1339,77 @@
 
   // Auto-filer (opt-in): file new mods and keep them active — no prompt, they chose it.
   async function autoFile() {
+    // Never behind the setup flow: it moves nothing until the user clicks Organize there.
+    if (firstRun === "onboarding") return;
     const { inputs, techNames } = looseInputs();
     await applyLoose(inputs, techNames, true, true);
   }
 
-  // ── Manual "Organize N" button → dry-run preview → confirm ───────────────────
-  // A read-only preview of exactly what will move, shown before any file is touched.
-  // Dismissible for good ("Don't preview next time"), so power users aren't nagged.
+  /**
+   * File the planned mods with progress, for the Organize dialog and the setup flow. Report
+   * problems come back as failures (shown in place, and logged to the activity list); a thrown
+   * error (the game is running, the library is busy) is reported as usual and every planned mod
+   * still loose counts as not moved.
+   * @returns refused, or the mods that couldn't be filed
+   */
+  async function fileWithProgress(
+    plan: PlannedMove[],
+    onProgress: (done: number, total: number) => void,
+  ): Promise<OrganizeOutcome> {
+    const wanted = new Set(plan.map((p) => p.techName));
+    const inputs = looseInputs().inputs.filter((i) => wanted.has(i.techName));
+    const out = await fileLoose(
+      inputs,
+      inputs.map((i) => i.techName),
+      true,
+      { onProgress },
+    );
+    if (!out) return { refused: true };
+    const failures = filingFailures(out.errors, plan);
+    if (out.thrown !== null) {
+      // Shown in place (the dialog or the setup flow), and kept in the activity list.
+      const why = inlineError(out.thrown, "Filing mods into the library");
+      if (out.changed === 0) return { refused: true, message: why };
+      const listed = new Set(failures.map((f) => f.techName));
+      const loose = new Set(looseInputs().techNames);
+      for (const p of plan)
+        if (loose.has(p.techName) && !listed.has(p.techName))
+          failures.push({ techName: p.techName, fileName: p.fileName, message: why });
+    } else if (failures.length) {
+      reportError(out.errors.join("\n"), "Filing mods into the library", { quiet: true });
+    }
+    return { failures, filed: out.changed };
+  }
+
+  // ── Organize dialog: the status strip's Review (and Settings → Library) ─────────
+  // A read-only dry run of exactly what will move, shown before any file is touched. Its
+  // "File new mods automatically from now on" turns on auto-file; it replaced the old "Don't
+  // preview next time", whose localStorage key is cleared here.
   let organizePreview = $state<{
     inputs: ModInput[];
     techNames: string[];
     plan: PlannedMove[];
     loading: boolean;
     applying: boolean;
+    progress?: { done: number; total: number } | null;
+    failures?: FilingFailure[];
+    /** Mods filed by the last try (with `failures`). */
+    filed?: number;
+    /** Why the last try filed nothing (shown in the dialog). */
+    problem?: string;
     /** Filing loose mods already in the library archive (#166), not organizing mods/. */
     adopt?: { path: string | null; note: string | null };
   } | null>(null);
 
-  const PREVIEW_SKIP_KEY = "silo.organizePreviewSkip";
+  try {
+    localStorage.removeItem("silo.organizePreviewSkip");
+  } catch {
+    /* storage off: nothing to clear */
+  }
 
   async function organizeNew() {
     const { inputs, techNames } = looseInputs();
     if (inputs.length === 0) return;
-    // Honor a remembered "don't preview" choice.
-    if (localStorage.getItem(PREVIEW_SKIP_KEY) === "true") {
-      await applyLoose(inputs, techNames, true);
-      return;
-    }
     organizePreview = { inputs, techNames, plan: [], loading: true, applying: false };
     try {
       const plan = await planOrganize(inputs);
@@ -1331,7 +1420,7 @@
     }
   }
 
-  async function confirmOrganize(skipNext: boolean) {
+  async function confirmOrganize(autoFileNext: boolean) {
     if (!organizePreview) return;
     if (organizePreview.adopt) {
       const fileNames = organizePreview.inputs.map((m) => m.fileName);
@@ -1352,11 +1441,138 @@
       if (problem !== null) reportError(problem, "Filing mods from the archive folder");
       return;
     }
-    if (skipNext) localStorage.setItem(PREVIEW_SKIP_KEY, "true");
-    const { inputs, techNames } = organizePreview;
-    organizePreview = { ...organizePreview, applying: true };
-    await applyLoose(inputs, techNames, true);
+    const { plan } = organizePreview;
+    organizePreview = { ...organizePreview, applying: true, progress: { done: 0, total: plan.length } };
+    const out = await fileWithProgress(plan, (done, total) => {
+      if (organizePreview) organizePreview = { ...organizePreview, progress: { done, total } };
+    });
+    if (out.refused) {
+      if (organizePreview)
+        organizePreview = { ...organizePreview, applying: false, progress: null, problem: out.message ?? "" };
+      return;
+    }
+    if (autoFileNext !== autoFileNew) setAutoFile(autoFileNext);
+    if (out.failures.length) {
+      if (organizePreview)
+        organizePreview = {
+          ...organizePreview,
+          applying: false,
+          progress: null,
+          failures: out.failures,
+          filed: out.filed,
+        };
+      return;
+    }
     organizePreview = null;
+    success(`Filed ${modsCount(out.filed)} into your library. All active mods stay active.`);
+  }
+
+  // ── First run (#250): the setup flow for a new library, "What's new" for an upgrade ─────
+  /** Which first-run screen is up (decided once at startup from the database). */
+  let firstRun = $state<"onboarding" | "whatsNew" | null>(null);
+  let whatsNewOpen = $state(false);
+
+  async function decideFirstRun() {
+    try {
+      firstRun = firstRunScreen(await firstRunState());
+    } catch (e) {
+      // Can't tell: show neither (the setup flow must not appear over a library it can't read).
+      reportError(e, "Reading Silo's first-run settings", { quiet: true });
+      return;
+    }
+    if (firstRun === "whatsNew") whatsNewOpen = true;
+  }
+
+  function storeFlag(name: FirstRunFlag) {
+    setFirstRunFlag(name).catch((e) => reportError(e, "Saving a setting", { quiet: true }));
+  }
+
+  /** Leaving the setup flow: it doesn't come back, and "What's new" is moot for a new library. */
+  function finishOnboarding(_how: FinishHow) {
+    firstRun = null;
+    storeFlag("onboarding_done");
+    storeFlag("whats_new_seen");
+    go("library");
+  }
+
+  function closeWhatsNew() {
+    if (firstRun !== "whatsNew") return;
+    firstRun = null;
+    storeFlag("whats_new_seen");
+    // An existing library: the setup flow never comes up later (e.g. after Undo organizing).
+    storeFlag("onboarding_done");
+  }
+
+  /** The setup flow's "On another drive…": pick a folder and use it as the (empty) archive. */
+  async function chooseArchiveFirstRun(): Promise<ArchiveChoice> {
+    const why = await switchBlockReason();
+    if (why) return { problem: why };
+    const path = await pickFolderFor("archive");
+    if (!path) return null;
+    try {
+      const pf = await archiveMovePreflight(path);
+      if (pf.problems.length && !pf.canRepoint) return { problem: problemLines(pf.problems) };
+      // Mods already there need the adopt step Settings offers; setup only uses an empty folder.
+      if (pf.looseMods > 0)
+        return {
+          problem: `That folder already holds ${modsCount(pf.looseMods)}. Choose an empty folder, or set it up later in Settings → Library.`,
+        };
+      const op = beginWrite("Pointing Silo at the archive");
+      if (!op) return { problem: blocked("library-write").reason || "Silo is busy. Try again in a moment." };
+      try {
+        await archiveRepoint(path);
+      } finally {
+        op.end();
+      }
+      await archiveMove.refresh();
+      modsStatus = await modsRootStatus().catch(() => modsStatus);
+      await runScan(false);
+      return { path };
+    } catch (e) {
+      return { problem: inlineError(e, "Pointing Silo at the archive") };
+    }
+  }
+
+  /** The setup flow's "Inside your mods folder" after choosing another drive. */
+  async function useDefaultArchiveFirstRun(): Promise<string | null> {
+    const op = beginWrite("Pointing Silo at the archive");
+    if (!op) return blocked("library-write").reason || "Silo is busy. Try again in a moment.";
+    try {
+      await archiveRepoint(null);
+    } catch (e) {
+      return inlineError(e, "Pointing Silo at the archive");
+    } finally {
+      op.end();
+    }
+    await archiveMove.refresh();
+    await runScan(false);
+    return null;
+  }
+
+  /** The setup flow's dry run, kept for filing (so failures can name their files). */
+  let firstRunPlan: PlannedMove[] = [];
+  async function planFirstRun(): Promise<PlannedMove[]> {
+    firstRunPlan = await planOrganize(looseInputs().inputs);
+    return firstRunPlan;
+  }
+
+  async function organizeFirstRun(
+    techNames: string[],
+    autoFileNext: boolean,
+    onProgress: (done: number, total: number) => void,
+  ): Promise<OrganizeOutcome> {
+    const wanted = new Set(techNames);
+    const out = await fileWithProgress(
+      firstRunPlan.filter((p) => wanted.has(p.techName)),
+      onProgress,
+    );
+    if (!out.refused) {
+      if (autoFileNext) setAutoFile(true);
+      // Organized: the setup flow is done even if Silo closes before "Go to my library".
+      storeFlag("onboarding_done");
+      storeFlag("whats_new_seen");
+    }
+    return out;
   }
 
   async function rebuildLibrary() {
@@ -2839,6 +3055,8 @@
       // unavailable), deep links, bisect recovery and the focus listener don't wait on it.
       const archiveReady = archiveMove.load();
       if (roots.length) await archiveReady;
+      // Before the first scan: while the setup flow is up, the auto-filer stays off.
+      await decideFirstRun();
       try {
         // e.g. the library database was restored from a backup: worth reading, so it stays up
         // until dismissed.
@@ -3712,6 +3930,8 @@
         onopen={(url) => openExternal(url).catch((e) => reportError(e, "Opening the link"))}
         oncopydiagnostics={copyDiagnostics}
         onshowshortcuts={() => (shortcutsOpen = true)}
+        onshowwhatsnew={() => (whatsNewOpen = true)}
+        {appVer}
       />
     {/snippet}
   </ViewOutlet>
@@ -3760,14 +3980,58 @@
   {/if}
 
   {#if organizePreview}
-    <ViewBoundary name="the Organize preview" overlay onClose={() => (organizePreview = null)}>
+    <ViewBoundary name="the Organize dialog" overlay onClose={() => (organizePreview = null)}>
       <OrganizePreview
         plan={organizePreview.plan}
         loading={organizePreview.loading}
         applying={organizePreview.applying}
+        progress={organizePreview.progress ?? null}
+        failures={organizePreview.failures ?? []}
+        filed={organizePreview.filed ?? null}
+        problem={organizePreview.problem ?? ""}
+        blockedReason={organizeOffReason}
+        {cloudSynced}
+        activeCount={activeSet.size}
+        folderMods={mods.filter((m) => !m.organized && m.kind !== "zip").length}
+        autoFile={autoFileNew}
         adopt={organizePreview.adopt ?? null}
         onConfirm={confirmOrganize}
         onCancel={() => (organizePreview = null)}
+        onCopyDetails={(t) => void copyDetailsText(t)}
+      />
+    </ViewBoundary>
+  {/if}
+
+  {#if firstRun === "onboarding"}
+    <ViewBoundary name="Setup" overlay onClose={() => (firstRun = null)}>
+      <Onboarding
+        {modsStatus}
+        gameFound={!!gameInfo}
+        {cloudSynced}
+        {scanning}
+        scanned={libraryScanned}
+        {scanFailed}
+        onRescan={() => runScan(false)}
+        {progress}
+        autoFileOn={autoFileNew}
+        modCount={mods.length}
+        activeCount={activeSet.size}
+        folderMods={mods.filter((m) => !m.organized && m.kind !== "zip").length}
+        archive={archiveMove.archive}
+        sep={pathSep}
+        busy={fgLock.reason}
+        organizeBlocked={organizeOffReason}
+        onChooseModsFolder={changeModsFolder}
+        onCreateModsFolder={makeModsFolder}
+        onUseGameFolder={useGameFolder}
+        onRetry={retryModsFolder}
+        onPointGameHere={pointGameHere}
+        onChooseArchive={chooseArchiveFirstRun}
+        onUseDefaultArchive={useDefaultArchiveFirstRun}
+        onPlan={planFirstRun}
+        onOrganize={organizeFirstRun}
+        onCopyDetails={(t) => void copyDetailsText(t)}
+        onfinish={finishOnboarding}
       />
     </ViewBoundary>
   {/if}
@@ -3799,6 +4063,7 @@
   <DialogHost />
 </ViewBoundary>
 <ShortcutsDialog bind:open={shortcutsOpen} />
+<WhatsNew bind:open={whatsNewOpen} onclose={closeWhatsNew} onshowshortcuts={() => (shortcutsOpen = true)} />
 <ToastRegion />
 
 <style>
