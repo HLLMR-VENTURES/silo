@@ -1,133 +1,140 @@
 <script lang="ts">
+  // One Browse card, rendered inside a VirtualGrid item (which holds the focus and the keys, so
+  // the button here is tabindex -1; Enter on the card opens the drawer, which has every action).
+  // Cover, title, author, rating and downloads, the sources spelled out with their own versions
+  // ("GitHub 1.0.6.0"), at most three badges, and one primary button whose words follow the
+  // install state (installState): Install, Installing… 42%, Show in library, See update, or
+  // Open on ModHub for index-only sources. Mods you already have are never dimmed.
   import Icon from "../ui/Icon.svelte";
-  import type { BrowseMod, ModSourceOption } from "../types";
-  import { label, shortLabel, gatedReason, fmtCount, fmtMB, loadCatalogImage } from "../browse";
+  import Button from "../ui/Button.svelte";
+  import { tooltip } from "../ui/tooltip";
+  import BadgeRow from "./library/BadgeRow.svelte";
+  import type { BrowseMod } from "../types";
+  import type { BadgeSpec } from "./library/rowBadges";
+  import {
+    fmtCount,
+    gatedReason,
+    installLabel,
+    label,
+    loadCatalogImage,
+    sourceChip,
+    type InstallState,
+  } from "../browse";
 
-  let {
-    m,
-    here,
-    installing,
-    progressEntry,
-    onUseSource,
-    onOpenDetail,
-    onFindInLibrary,
-  }: {
+  interface Props {
     m: BrowseMod;
-    here: boolean;
-    installing: boolean;
-    progressEntry: { done: number; total: number | null } | undefined;
-    onUseSource: (s: ModSourceOption) => void;
+    state: InstallState;
+    badges: BadgeSpec[];
+    /** Another install is running: Install waits for it. */
+    busy?: boolean;
+    /** The primary button (Install / Show in library / See update / Open on ModHub). */
+    onPrimary: () => void;
     onOpenDetail: () => void;
-    onFindInLibrary?: () => void;
-  } = $props();
+  }
 
-  const pct = $derived.by(() => {
-    const p = progressEntry;
-    if (!p || !p.total) return null;
-    return Math.min(100, Math.round((p.done / p.total) * 100));
+  let { m, state: st, badges, busy = false, onPrimary, onOpenDetail }: Props = $props();
+
+  const disabled = $derived(st.kind === "installing" || st.kind === "none" || (st.kind === "install" && busy));
+  const hint = $derived.by(() => {
+    switch (st.kind) {
+      case "install":
+        return busy ? "Wait for the current install to finish." : `Install from ${label(st.source.source)}`;
+      case "open":
+        return gatedReason(st.source.source);
+      case "installed":
+        return "Open this mod in your library";
+      case "update":
+        return "A newer version is out. See it in Updates.";
+      default:
+        return "";
+    }
   });
+  const icon = $derived(
+    st.kind === "install" ? "download" : st.kind === "open" ? "external" : st.kind === "update" ? "update" : st.kind === "installed" ? "library" : undefined,
+  );
 
-  // Thumbnails load through the Rust proxy (data: URL) since the CDN needs a referer.
+  // Thumbnails: SiloAPI-cached URLs load directly; GitHub ones come through the Rust proxy.
   let thumb = $state("");
   $effect(() => {
     const url = m.imageUrl;
     thumb = "";
-    if (url) loadCatalogImage(url).then((u) => { if (m.imageUrl === url) thumb = u; });
+    if (!url) return;
+    let live = true;
+    void loadCatalogImage(url).then((u) => {
+      if (live) thumb = u;
+    });
+    return () => {
+      live = false;
+    };
   });
+
+  function onclick(e: MouseEvent) {
+    // The primary button stops here; anywhere else on the card opens the drawer.
+    if ((e.target as HTMLElement | null)?.closest("button")) return;
+    onOpenDetail();
+  }
 </script>
 
-<!-- Whole card opens the drawer (like the Library tiles); the source buttons stop propagation. -->
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="card" class:owned={here} onclick={onOpenDetail} title="Open details">
+<div class="card" {onclick}>
   <div class="thumb">
     {#if thumb}
       <img src={thumb} alt="" loading="lazy" />
     {:else}
-      <div class="thumb-fallback">{(m.title || "?").slice(0, 1)}</div>
+      <div class="thumb-fallback" aria-hidden="true">{(m.title || "?").slice(0, 1)}</div>
     {/if}
-    {#if here}<span class="owned-badge">In library</span>{/if}
   </div>
-  <div class="card-body">
-    <div class="card-title" title={m.title}>{m.title}</div>
-    <div class="card-meta">
-      {#if m.author}<span class="author">{m.author}</span>{/if}
-      {#if m.latestVersion}<span class="ver">v{m.latestVersion.replace(/^v/i, "")}</span>{/if}
-    </div>
-    {#if m.rating != null || m.downloads != null}
-      <div class="stats">
-        {#if m.rating != null}
-          <span class="stat" title="Rating">
-            <Icon name="favorite" size={12} filled label="rating" /> {m.rating.toFixed(1)}{#if m.ratingCount}<span class="stat-sub"
-                >&nbsp;({fmtCount(m.ratingCount)})</span
-              >{/if}
-          </span>
-        {/if}
-        {#if m.downloads != null}
-          <span class="stat" title="Downloads"><Icon name="download" size={12} label="downloads" /> {fmtCount(m.downloads)}</span>
-        {/if}
-      </div>
-    {/if}
-    {#if m.category}<div class="chip">{m.category}</div>{/if}
-    {#if installing}
-      {@const p = progressEntry}
-      <div class="dl">
-        <div class="dl-bar">
-          <div
-            class="dl-fill"
-            class:indet={pct === null}
-            style={pct !== null ? `width:${pct}%` : ""}
-          ></div>
-        </div>
-        <span class="dl-text tnum">
-          {#if p && p.total}
-            {fmtMB(p.done)} / {fmtMB(p.total)} MB
-          {:else if p}
-            {fmtMB(p.done)} MB…
-          {:else}
-            Starting…
-          {/if}
+  <div class="body">
+    <div class="title" title={m.title}>{m.title}</div>
+    <div class="author">{m.author ?? "Unknown author"}</div>
+    <div class="stats tnum">
+      {#if m.rating != null}
+        <span class="stat" use:tooltip={"Rating"}>
+          <Icon name="favorite" size={12} filled label="Rating" />
+          {m.rating.toFixed(1)}{#if m.ratingCount}<span class="sub">&nbsp;({fmtCount(m.ratingCount)})</span>{/if}
         </span>
-      </div>
-    {/if}
-    <!-- One button per source this mod actually lives on, each with that
-         source's own version — they drift, and that's worth seeing. -->
-    <div class="srcbar">
-      {#if here && onFindInLibrary}
-        <!-- Already installed: the primary action is jumping to it in the Library. -->
-        <button
-          class="srcbtn find-lib"
-          title="Open this mod in your Library"
-          onclick={(e) => {
-            e.stopPropagation();
-            onFindInLibrary?.();
-          }}
-        >
-          <span class="srcbtn-name"><Icon name="search" size={12} /> Find in Library</span>
-          <span class="srcbtn-icon"><Icon name="external" size={12} /></span>
-        </button>
+      {/if}
+      {#if m.downloads != null}
+        <span class="stat" use:tooltip={"Downloads"}>
+          <Icon name="download" size={12} label="Downloads" />
+          {fmtCount(m.downloads)}
+        </span>
+      {/if}
+    </div>
+    <div class="chips">
+      {#each m.sources as s (s.source + s.sourceUrl)}
+        <span class="chip tnum">{sourceChip(s)}</span>
       {:else}
-        {#each m.sources as s (s.source)}
-          <button
-            class="srcbtn"
-            class:can-install={s.installable}
-            disabled={here || installing}
-            title={here
-              ? "Already in your library"
-              : s.installable
-                ? `Install from ${label(s.source)}`
-                : gatedReason(s.source)}
-            onclick={(e) => {
-              e.stopPropagation();
-              onUseSource(s);
-            }}
-          >
-            <span class="srcbtn-name">{shortLabel(s.source)}</span>
-            {#if s.version}<span class="srcbtn-ver tnum">{s.version}</span>{/if}
-            <span class="srcbtn-icon"><Icon name={s.installable ? "download" : "external"} size={12} /></span>
-          </button>
-        {:else}
-          <span class="srcbar-none">No sources</span>
-        {/each}
+        <span class="chip none">No sources listed</span>
+      {/each}
+    </div>
+    <div class="badges"><BadgeRow {badges} /></div>
+    <div class="primary" use:tooltip={hint}>
+      {#if st.kind === "installing"}
+        <div
+          class="progress"
+          role="progressbar"
+          aria-label="Installing {m.title}"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={st.pct ?? undefined}
+        >
+          <div class="fill" class:indet={st.pct === null} style:width={st.pct === null ? undefined : `${st.pct}%`}></div>
+          <span class="progress-text tnum">{installLabel(st)}</span>
+        </div>
+      {:else}
+        <Button
+          size="sm"
+          variant={st.kind === "install" ? "primary" : "secondary"}
+          {icon}
+          {disabled}
+          tabindex={-1}
+          aria-label="{installLabel(st)}: {m.title}"
+          onclick={onPrimary}
+          class="primary-btn"
+        >
+          {installLabel(st)}
+        </Button>
       {/if}
     </div>
   </div>
@@ -135,27 +142,25 @@
 
 <style>
   .card {
-    background: var(--surface-raised);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
+    height: 100%;
+    box-sizing: border-box;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
     box-shadow: var(--shadow-1);
     cursor: pointer;
-    transition: box-shadow 0.15s, transform 0.15s;
+    transition: box-shadow 0.15s;
   }
   .card:hover {
     box-shadow: var(--shadow-2);
-    transform: translateY(-2px);
-  }
-  .card.owned {
-    opacity: 0.82;
   }
   .thumb {
-    position: relative;
-    aspect-ratio: 16 / 9;
-    background: var(--bg);
+    flex: none;
+    height: 124px;
+    background: var(--sunken);
     overflow: hidden;
   }
   .thumb img {
@@ -174,168 +179,126 @@
     color: var(--green-300);
     background: linear-gradient(135deg, var(--green-700), var(--green-900));
   }
-  .owned-badge {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    background: var(--primary);
-    color: var(--on-primary);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 2px 8px;
-    border-radius: 999px;
-  }
-  .card-body {
-    padding: 10px 12px 12px;
+  .body {
+    flex: 1 1 auto;
+    min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    flex: 1;
+    gap: var(--sp-1);
+    padding: var(--sp-2) var(--sp-3) var(--sp-3);
   }
-  .card-title {
+  .title {
+    flex: none;
     font-weight: 600;
     color: var(--text);
     line-height: 1.25;
+    height: 2.5em;
     display: -webkit-box;
     -webkit-line-clamp: 2;
     line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
-  .card-meta {
-    display: flex;
-    gap: 8px;
-    align-items: center;
+  .author {
     font-size: var(--fs-sm);
-    color: var(--text-muted);
-  }
-  .card-meta .ver {
-    margin-left: auto;
-    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .stats {
     display: flex;
-    gap: 10px;
+    gap: var(--sp-3);
     align-items: center;
+    min-height: 1.25rem;
     font-size: var(--fs-sm);
-    color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
+    color: var(--muted);
   }
   .stat {
     display: inline-flex;
     align-items: center;
+    gap: 3px;
     white-space: nowrap;
   }
-  .stat-sub {
-    color: var(--text-faint, var(--text-muted));
+  .sub {
+    color: var(--faint, var(--muted));
   }
-  .chip {
-    align-self: flex-start;
-    font-size: var(--fs-xs);
-    color: var(--earth-text);
-    background: color-mix(in srgb, var(--earth) 16%, transparent);
-    padding: 2px 8px;
-    border-radius: 999px;
-  }
-  .dl {
+  .chips {
     display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 2px;
-  }
-  .dl-bar {
-    flex: 1;
-    height: 6px;
-    background: var(--bg);
-    border-radius: 999px;
+    gap: var(--sp-1);
+    min-height: 1.25rem;
     overflow: hidden;
   }
-  .dl-fill {
+  .chip {
+    flex: none;
+    font-size: var(--fs-xs);
+    line-height: 1.25rem;
+    padding: 0 var(--sp-2);
+    border-radius: var(--r-pill);
+    border: 1px solid var(--border);
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .chip.none {
+    color: var(--muted);
+    border-style: dashed;
+  }
+  /* Up to two lines, so three badges and their "+n" always fit a narrow card. */
+  .badges {
+    display: flex;
+    max-height: calc(2.5rem + var(--sp-1));
+    overflow: hidden;
+  }
+  .badges :global(.badge-row) {
+    flex-wrap: wrap;
+    row-gap: var(--sp-1);
+  }
+  .primary {
+    margin-top: auto;
+    display: flex;
+  }
+  .primary :global(.primary-btn) {
+    flex: 1 1 auto;
+  }
+  .progress {
+    position: relative;
+    flex: 1 1 auto;
+    height: 28px;
+    border-radius: var(--r-sm);
+    background: var(--sunken);
+    overflow: hidden;
+  }
+  .fill {
     height: 100%;
-    background: var(--primary);
-    border-radius: 999px;
+    background: color-mix(in srgb, var(--primary) 35%, transparent);
     transition: width 0.2s ease;
   }
-  .dl-fill.indet {
+  .fill.indet {
     width: 35%;
     animation: indet 1.1s ease-in-out infinite;
   }
+  .progress-text {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    color: var(--text);
+  }
   @keyframes indet {
-    0% {
+    from {
       margin-left: -35%;
     }
-    100% {
+    to {
       margin-left: 100%;
     }
   }
-  .dl-text {
-    font-size: var(--fs-xs);
-    color: var(--text-muted);
-    white-space: nowrap;
-  }
-  /* One button per source, each showing that source's own version. */
-  .srcbar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: auto;
-    padding-top: 8px;
-  }
-  .srcbar-none {
-    font-size: var(--fs-xs);
-    color: var(--text-muted);
-  }
-  .srcbtn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 5px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--surface);
-    color: var(--text-muted);
-    font: inherit;
-    font-size: var(--fs-xs);
-    cursor: pointer;
-    transition: background 0.15s, border-color 0.15s, color 0.15s;
-  }
-  .srcbtn:hover:not(:disabled) {
-    background: var(--bg);
-    color: var(--text);
-  }
-  /* Directly installable reads as the primary action; the rest are link-outs. */
-  .srcbtn.can-install {
-    border-color: var(--primary);
-    color: var(--primary-text);
-    font-weight: 600;
-  }
-  .srcbtn.can-install:hover:not(:disabled) {
-    background: var(--primary);
-    color: var(--on-primary);
-  }
-  .srcbtn.find-lib {
-    flex: 1 1 auto;
-    justify-content: center;
-    border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
-    color: var(--primary-text);
-    font-weight: 600;
-  }
-  .srcbtn.find-lib:hover {
-    background: color-mix(in srgb, var(--primary) 12%, transparent);
-    border-color: var(--primary);
-  }
-  .srcbtn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  .srcbtn-name {
-    font-weight: 600;
-  }
-  .srcbtn-ver {
-    opacity: 0.85;
-  }
-  .srcbtn-icon {
-    opacity: 0.7;
-    font-size: var(--fs-xs);
+  @media (prefers-reduced-motion: reduce) {
+    .fill.indet {
+      animation: none;
+      width: 100%;
+      opacity: 0.5;
+    }
   }
 </style>

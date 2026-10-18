@@ -14,6 +14,13 @@
 </ViewBoundary>
 
 <style>
+  /* Browse fills the view (AppShell `fill`): ModBrowser's card grid scrolls itself. */
+  .browse {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
   /* While Browse's own detail drawer is open (it publishes its width as --drawer-w), the centred
      content shifts left of it instead of hiding under it. */
   .browse:has(:global(aside.drawer)) {

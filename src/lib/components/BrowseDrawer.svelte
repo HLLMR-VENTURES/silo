@@ -4,36 +4,61 @@
   import { resizable } from "../resize";
   import GithubCard from "./GithubCard.svelte";
   import ModHubCard from "./ModHubCard.svelte";
-  import { label, gatedReason, fmtCount, parseRepo, canExpand, loadCatalogImage } from "../browse";
+  import {
+    label,
+    gatedReason,
+    fmtCount,
+    parseRepo,
+    canExpand,
+    loadCatalogImage,
+    browseBadges,
+    progressPct,
+    type InstallProgressEntry,
+  } from "../browse";
   import { tooltip } from "../ui/tooltip";
+  import Skeleton from "../ui/Skeleton.svelte";
+  import BadgeRow from "./library/BadgeRow.svelte";
 
   let {
     detail,
     detailLoading,
     installingId,
+    progress,
+    busy = false,
     gh,
     installed,
+    updates,
     onClose,
     onUseSource,
     onOpenDesc,
     onNeedAuth,
     onFindInLibrary,
+    onShowUpdates,
   }: {
     detail: CatalogModDetail | null;
     detailLoading: boolean;
     installingId: string | null;
+    /** Download progress for this mod's install, while it runs. */
+    progress?: InstallProgressEntry;
+    /** Some install is running: Install waits for it. */
+    busy?: boolean;
     gh: { connected: boolean; canWrite: boolean };
     installed: Set<string>;
+    /** Tech names with a known newer version. */
+    updates?: ReadonlySet<string>;
     onClose: () => void;
     onUseSource: (d: CatalogModDetail, s: ModSourceOption) => void;
     onOpenDesc: (d: CatalogModDetail) => void;
     onNeedAuth?: () => void;
     onFindInLibrary?: (techName: string) => void;
+    onShowUpdates?: () => void;
   } = $props();
 
   function hasLocally(d: CatalogModDetail): boolean {
     return d.techName != null && installed.has(d.techName);
   }
+  const pct = $derived(progressPct(progress));
+  const badges = $derived(detail ? browseBadges(detail, { installed, updates }) : []);
 
   // The drawer is non-modal (clicks fall through to the grid), so Escape is the click-away close.
   $effect(() => {
@@ -58,7 +83,13 @@
 <div class="drawer-backdrop" onclick={onClose}></div>
 <aside class="drawer" use:resizable>
   {#if detailLoading}
-    <div class="empty">Loading…</div>
+    <div class="loading" aria-busy="true" aria-label="Loading the mod's details">
+      <Skeleton width="70%" height="1.4em" />
+      <Skeleton width="45%" />
+      <Skeleton variant="block" height="160px" />
+      <Skeleton width="90%" />
+      <Skeleton width="80%" />
+    </div>
   {:else if detail}
     {@const d = detail}
     <div class="drawer-head">
@@ -71,6 +102,7 @@
           </div>
         {/if}
         {#if d.techName}<div class="dh-tech tnum">{d.techName}</div>{/if}
+        {#if badges.length}<div class="dh-badges"><BadgeRow {badges} max={4} /></div>{/if}
       </div>
       <button class="drawer-x" use:tooltip={"Close"} aria-label="Close" onclick={onClose}><Icon name="close" /></button>
     </div>
@@ -123,15 +155,20 @@
                 <button
                   class="src-action"
                   class:can-install={s.installable}
-                  disabled={hasLocally(d) || installingId === d.id}
+                  disabled={s.installable && (hasLocally(d) || busy)}
+                  use:tooltip={s.installable && busy && installingId !== d.id
+                    ? "Wait for the current install to finish."
+                    : ""}
                   onclick={() => onUseSource(d, s)}
                 >
-                  {#if hasLocally(d)}
-                    In library
+                  {#if s.installable && installingId === d.id}
+                    Installing…{#if pct !== null}&nbsp;<span class="tnum">{pct}%</span>{/if}
+                  {:else if s.installable && hasLocally(d)}
+                    Installed <Icon name="check" size={13} />
                   {:else if s.installable}
-                    {#if installingId === d.id}Installing…{:else}Install <Icon name="download" size={13} />{/if}
+                    Install <Icon name="download" size={13} />
                   {:else}
-                    Open page <Icon name="external" size={13} />
+                    Open on {label(s.source)} <Icon name="external" size={13} />
                   {/if}
                 </button>
               </div>
@@ -182,9 +219,14 @@
       {#if hasLocally(d)}
         <div class="drawer-owned">
           <span>Already in your library</span>
+          {#if d.techName && updates?.has(d.techName) && onShowUpdates}
+            <button class="find-lib-btn" onclick={() => onShowUpdates?.()}>
+              <Icon name="update" size={13} /> See update
+            </button>
+          {/if}
           {#if d.techName && onFindInLibrary}
             <button class="find-lib-btn" onclick={() => onFindInLibrary?.(d.techName!)}>
-              <Icon name="search" size={13} /> Find in Library <Icon name="external" size={13} />
+              <Icon name="library" size={13} /> Show in library
             </button>
           {/if}
         </div>
@@ -194,10 +236,11 @@
 </aside>
 
 <style>
-  .empty {
-    color: var(--text-muted);
-    text-align: center;
-    padding: 60px 0;
+  .loading {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+    padding: var(--sp-5);
   }
   /* ── Detail drawer ── */
   .drawer-backdrop {
@@ -252,6 +295,10 @@
     color: var(--text-muted);
     opacity: 0.75;
     margin-top: 2px;
+  }
+  .dh-badges {
+    display: flex;
+    margin-top: var(--sp-2);
   }
   .drawer-x {
     border: none;

@@ -42,6 +42,10 @@ pub struct BrowseMod {
     // exists to compare against; the client still does the byte-level match itself.
     #[serde(default)]
     pub verified: Option<bool>,
+    /// The author's claim through SiloAPI's author program (A7). None when unclaimed or on an
+    /// API that predates claims; Browse shows "Verified author" only when it's present.
+    #[serde(default)]
+    pub verified_author: Option<VerifiedAuthor>,
     #[serde(default)]
     pub archive_sha256: Option<String>,
     #[serde(default)]
@@ -73,6 +77,17 @@ pub struct BrowseMod {
     pub year_from: Option<i64>,
     #[serde(default)]
     pub year_to: Option<i64>,
+}
+
+/// Who claimed a catalog mod (`verifiedAuthor: {login, avatarUrl, profileUrl}`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifiedAuthor {
+    pub login: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub profile_url: Option<String>,
 }
 
 /// One semantic facet tag on a mod (see SiloAPI docs/TAGGING.md). `confidence` lets the client
@@ -645,6 +660,27 @@ mod tests {
             m.as_str(),
             "https://h.example/mods/a%2Fb%3Fx/manifest?version=1.0%20beta%26y%3D1"
         );
+    }
+
+    #[test]
+    fn verified_author_passes_through_when_claimed() {
+        let base = r#"{"id":"m1","title":"Lizard","sources":[]}"#;
+        let m: BrowseMod = serde_json::from_str(base).unwrap();
+        assert!(m.verified_author.is_none(), "an API without claims still parses");
+
+        let claimed = r#"{"id":"m1","title":"Lizard","sources":[],
+            "verifiedAuthor":{"login":"octocat","avatarUrl":null,"profileUrl":"https://x/authors/octocat/"}}"#;
+        let m: BrowseMod = serde_json::from_str(claimed).unwrap();
+        let a = m.verified_author.as_ref().unwrap();
+        assert_eq!(a.login, "octocat");
+        assert_eq!(a.avatar_url, None);
+        // Re-serialized for the webview in camelCase, as Browse reads it.
+        let out = serde_json::to_value(&m).unwrap();
+        assert_eq!(out["verifiedAuthor"]["login"], "octocat");
+
+        let unclaimed = r#"{"id":"m1","title":"Lizard","sources":[],"verifiedAuthor":null}"#;
+        let m: BrowseMod = serde_json::from_str(unclaimed).unwrap();
+        assert!(m.verified_author.is_none());
     }
 
     #[test]

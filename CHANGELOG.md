@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   you open Updates, and it's in Settings → General. It only checks; nothing installs until you
   press Update. Checking sends the names of your installed mods to Silo's catalog. (#244)
 
+- **Browse badges.** Catalog mods whose build Silo's catalog hashed show **Verified build**
+  (green shield). Mods an author has claimed will show **Verified author** (sky-blue badge) once
+  Silo's author program goes live; the two never look alike. (#246)
+
 - **Library filters you can see.** Show All, Active or Parked mods; Favorites and Needs attention
   (mods that can't load, conflict, were modified, are flagged or have an update) are one click;
   the rest (Hidden, Flagged, In conflict, Has settings, Needs update, Maps, Script mods, uniqueType
@@ -79,6 +83,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Download from ModHub, appears only after a check, and drops as you update. A failed install
   stays in its row with the reason instead of a pop-up. The header button is now **Check now**.
   (#244)
+
+- **Browse cards, rebuilt.** The catalog grid only draws the cards on screen, so paging deep
+  into the catalog stays smooth; it's one Tab stop (arrows move, Enter opens a mod, Esc returns
+  to its card). Sources are spelled out with their own versions ("GitHub 1.0.6.0", "ModHub
+  1.0.5.0"). Each card has one button that follows the mod: **Install**, "Installing… 42%",
+  **Show in library**, **See update**, or **Open on ModHub** for ModHub-only mods. Mods you
+  already have are no longer faded; they say **In your library**. A finished install says so in a
+  toast with **Show in library**. (#246)
+- **Browse states.** Skeleton cards while the catalog loads; "Silo can't reach its catalog right
+  now. Your library still works." with **Try again** when it can't be reached; "No mods match
+  “x”." with **Clear search** when a search finds nothing. Install and loading errors use Silo's
+  usual messages instead of raw text. (#246)
 
 - **Parking a loose mod explains itself.** The first time you park a mod Silo hasn't filed yet, it
   says it moves the mod into your library folder (it stays in your library) and asks, with
@@ -219,6 +235,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (nanoid, postcss and source-map-js updated). Nothing in the shipped app changes. (#234)
 
 ### Fixed
+
+- **Browse no longer leaks a listener.** Leaving Browse before its install-progress listener
+  was ready left it registered, one more per visit. (#246)
 
 - **Tooltips no longer linger after their button disappears.** Pointing at a loadout's Delete
   button and then deleting it could leave "Delete loadout" floating on screen. Icon buttons now

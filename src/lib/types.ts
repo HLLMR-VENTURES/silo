@@ -271,6 +271,13 @@ export interface ModSourceOption {
   stars?: number | null;
 }
 
+/** Who claimed a catalog mod (SiloAPI's `verifiedAuthor`). */
+export interface VerifiedAuthor {
+  login: string;
+  avatarUrl?: string | null;
+  profileUrl?: string | null;
+}
+
 export interface BrowseMod {
   id: string;
   techName: string | null;
@@ -285,6 +292,12 @@ export interface BrowseMod {
   imageUrl: string | null;
   latestVersion: string | null;
   trustScore: number | null;
+  /** Silo's catalog hashed the published build from its source (SiloAPI provenance), so an
+   *  installed copy can be checked byte for byte. Null/absent when it hasn't. */
+  verified?: boolean | null;
+  /** The author claimed this mod through SiloAPI's author program (A7). Null/absent when
+   *  unclaimed, or on a catalog that predates claims. */
+  verifiedAuthor?: VerifiedAuthor | null;
   updatedAt: string | null;
   // Aggregated popularity (see SiloAPI docs/ENRICHMENT.md). `downloads` is a
   // cross-source sum, `rating` (0–5) from the rating-bearing source, `popularity` the
