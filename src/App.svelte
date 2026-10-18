@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { DialogHost, ToastRegion } from "./lib/ui";
   import {
     modsRootStatus,
     setModsRoot,
@@ -2599,6 +2600,9 @@
     />
   {/if}
 </div>
+
+<DialogHost />
+<ToastRegion />
 
 <style>
   .app {
