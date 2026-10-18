@@ -11,7 +11,7 @@ describe("SearchField", () => {
     expect(screen.getByRole("search")).toBeInTheDocument();
     const input = screen.getByRole("searchbox", { name: "Search the catalog" });
     expect(input).toHaveAttribute("placeholder", "Search the catalog");
-    expect(input).toHaveAttribute("aria-keyshortcuts", "Control+K");
+    expect(input).toHaveAttribute("aria-keyshortcuts", "Control+K /");
     expect(container.querySelectorAll("kbd")).toHaveLength(2);
   });
 

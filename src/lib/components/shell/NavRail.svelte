@@ -4,11 +4,13 @@
   // Arrow Up/Down (Home/End) move focus between destinations (one tab stop, roving tabindex);
   // Enter/Space activate. Collapsed, items show icons only: the label lives in aria-label and a
   // tooltip. The current item has aria-current="page" and a gold fill bar (fill, never text).
+  // aria-keyshortcuts names the app-wide keys (Alt+1…Alt+5, Ctrl+,) wired in lib/state/shortcuts.
   import Badge from "../../ui/Badge.svelte";
   import Icon from "../../ui/Icon.svelte";
   import SiloMark from "../../ui/SiloMark.svelte";
   import { tooltip } from "../../ui/tooltip";
   import type { ViewId } from "../../state/nav.svelte";
+  import { viewKeyshortcut } from "../../state/shortcuts";
   import { hasBadge, NAV_ITEMS, navItemName, type NavItem } from "./navItems";
 
   interface Props {
@@ -79,6 +81,7 @@
       class="item"
       aria-current={entry.id === current ? "page" : undefined}
       aria-label={name}
+      aria-keyshortcuts={viewKeyshortcut(entry.id)}
       tabindex={entry.id === tabStop ? 0 : -1}
       use:tooltip={collapsed ? entry.label : null}
       onfocus={() => (focusId = entry.id)}

@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
+  import { get } from "svelte/store";
   import {
     DialogHost,
     ToastRegion,
@@ -181,6 +182,10 @@
   import ViewBoundary from "./lib/components/ViewBoundary.svelte";
   import AppShell from "./lib/components/shell/AppShell.svelte";
   import AppHeader from "./lib/components/shell/AppHeader.svelte";
+  import ShortcutsDialog from "./lib/components/shell/ShortcutsDialog.svelte";
+  import { cycleRegion, regionOf } from "./lib/components/shell/regions";
+  import { installShortcuts, type ShortcutAction } from "./lib/state/shortcuts";
+  import { modalOpen } from "./lib/ui/overlayStack";
   import StatusChip from "./lib/components/shell/StatusChip.svelte";
   import PlayButton, { type PlayMenuItem } from "./lib/components/shell/PlayButton.svelte";
   import type { StatusStripItem } from "./lib/components/shell/StatusStrip.svelte";
@@ -200,7 +205,7 @@
     stripItemSpecs,
     stripLeft,
   } from "./lib/views/libraryStatus";
-  import { go, nav, searchPlaceholderFor, searchTargetFor } from "./lib/state/nav.svelte";
+  import { back, go, nav, searchPlaceholderFor, searchTargetFor } from "./lib/state/nav.svelte";
   import type { MenuItem } from "./lib/ui/overlayTypes";
   import Icon from "./lib/ui/Icon.svelte";
   import { fmtSize } from "./lib/format";
@@ -2720,6 +2725,8 @@
       label: scanning ? "Scanning…" : "Rescan",
       icon: "rescan",
       disabled: scanning || !!fgLock.reason,
+      shortcut: "F5",
+      keyshortcuts: "F5",
     },
     { id: "rebuild", label: "Re-read every mod", disabled: !!fgLock.reason || scanning },
   ]);
@@ -2727,6 +2734,66 @@
     if (id === "rescan") runScan();
     else if (id === "rebuild") rebuildLibrary();
   }
+
+  // ── Keyboard shortcuts (lib/state/shortcuts): one window listener, each key runs the handler
+  // its button would. F5 / Ctrl+R take the Library ⋯ Rescan path with the same guard as the menu
+  // item (off while scanning or during a foreground change), and never reload the window.
+  let appHeader = $state<AppHeader | null>(null);
+  let shortcutsOpen = $state(false);
+
+  function runShortcut(a: ShortcutAction) {
+    switch (a.kind) {
+      case "focusSearch":
+        appHeader?.focusSearch();
+        break;
+      case "rescan": {
+        const item = libraryMenuItems.find((i) => i.id === "rescan");
+        if (item && !item.disabled) libraryMenuSelect("rescan");
+        break;
+      }
+      case "settings":
+        go("settings");
+        break;
+      case "view":
+        go(a.view);
+        break;
+      case "back":
+        back();
+        break;
+      case "region":
+        cycleRegion(document, a.dir, document.activeElement);
+        break;
+      case "help":
+        shortcutsOpen = true;
+        break;
+    }
+  }
+
+  $effect(() => installShortcuts(window, runShortcut, () => get(modalOpen)));
+
+  // The mod drawer hands focus back when it closes (✕, Esc, Open in Browse…): to what had it in
+  // the list when the drawer opened, else to the main area, so focus never drops to <body>. Left
+  // alone when focus is still somewhere real (a rail click that left the Library).
+  let drawerWasOpen = false;
+  let drawerOpener: HTMLElement | null = null;
+  $effect(() => {
+    const open = !!detailMod && nav.view === "library";
+    untrack(() => {
+      if (open && !drawerWasOpen) {
+        const a = document.activeElement;
+        drawerOpener = a instanceof HTMLElement && regionOf(a) === "main" ? a : null;
+      } else if (!open && drawerWasOpen) {
+        const opener = drawerOpener;
+        drawerOpener = null;
+        void tick().then(() => {
+          const a = document.activeElement;
+          if (a && a !== document.body && a.isConnected) return;
+          (opener?.isConnected ? opener : document.getElementById("main"))?.focus();
+        });
+      }
+      drawerWasOpen = open;
+    });
+  });
 </script>
 
 {#snippet modDrawer()}
@@ -2792,6 +2859,7 @@
 >
   {#snippet header()}
     <AppHeader
+      bind:this={appHeader}
       bind:search={getHeaderSearch, setHeaderSearch}
       searchPlaceholder={searchPlaceholderFor(nav.view)}
       onsearchsubmit={submitHeaderSearch}
@@ -3187,6 +3255,7 @@
       <HelpView
         onopen={(url) => openExternal(url).catch((e) => reportError(e, "Opening the link"))}
         oncopydiagnostics={copyDiagnostics}
+        onshowshortcuts={() => (shortcutsOpen = true)}
       />
     {/snippet}
   </ViewOutlet>
@@ -3251,6 +3320,7 @@
 <ViewBoundary name="the dialog" overlay>
   <DialogHost />
 </ViewBoundary>
+<ShortcutsDialog bind:open={shortcutsOpen} />
 <ToastRegion />
 
 <style>

@@ -1,7 +1,7 @@
 <script lang="ts">
   // Header search: <SearchField bind:value placeholder="Search your mods" onsubmit={run} bind:this={field} />
   // then field.focus(). Esc clears the text; Esc on an empty field leaves it (blur). Enter submits.
-  // The Ctrl K hint is display-only; the global shortcut is wired by the app.
+  // The Ctrl K hint is display-only; the global shortcuts (Ctrl+K, /) are wired by the app.
   import Icon from "../../ui/Icon.svelte";
   import Kbd from "../../ui/Kbd.svelte";
 
@@ -60,7 +60,7 @@
     class="input"
     {placeholder}
     aria-label={label}
-    aria-keyshortcuts={shortcut ? "Control+K" : undefined}
+    aria-keyshortcuts={shortcut ? "Control+K /" : undefined}
     autocomplete="off"
     spellcheck="false"
     {onkeydown}

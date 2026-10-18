@@ -5,20 +5,25 @@
 </script>
 
 <script lang="ts">
-  // Help (a placeholder until the full page lands): where to ask, and how to report a problem.
-  //   <HelpView onopen={(url) => openExternal(url)} oncopydiagnostics={copyDiagnostics} />
+  // Help (a placeholder until the full page lands): where to ask, how to report a problem, and the
+  // keyboard shortcuts.
+  //   <HelpView onopen={(url) => openExternal(url)} oncopydiagnostics={copyDiagnostics}
+  //     onshowshortcuts={() => (shortcutsOpen = true)} />
   import ViewBoundary from "../components/ViewBoundary.svelte";
   import ViewHeader from "../components/shell/ViewHeader.svelte";
   import Button from "../ui/Button.svelte";
+  import Kbd from "../ui/Kbd.svelte";
 
   interface Props {
     /** Open a link in the browser. */
     onopen: (url: string) => void;
     /** Copy Silo's diagnostics for a bug report. */
     oncopydiagnostics: () => void;
+    /** Open the Keyboard shortcuts dialog (the same one ? opens). */
+    onshowshortcuts?: () => void;
   }
 
-  let { onopen, oncopydiagnostics }: Props = $props();
+  let { onopen, oncopydiagnostics, onshowshortcuts }: Props = $props();
 </script>
 
 <ViewBoundary name="Help" bodyText="Your mods weren't changed.">
@@ -46,6 +51,19 @@
         <Button icon="external" onclick={() => onopen(NEW_ISSUE_URL)}>Report a problem</Button>
       </div>
     </section>
+    {#if onshowshortcuts}
+      <section>
+        <h3>Keyboard shortcuts</h3>
+        <p>
+          <Kbd>Ctrl</Kbd>+<Kbd>K</Kbd> searches, <Kbd>F5</Kbd> rescans your library,
+          <Kbd>Alt</Kbd>+<Kbd>1</Kbd>…<Kbd>5</Kbd> switch pages and <Kbd>F6</Kbd> moves between the
+          sidebar, header and page. Press <Kbd>?</Kbd> anywhere for the full list.
+        </p>
+        <div class="row">
+          <Button onclick={onshowshortcuts}>Keyboard shortcuts</Button>
+        </div>
+      </section>
+    {/if}
   </div>
 </ViewBoundary>
 

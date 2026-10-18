@@ -2,6 +2,8 @@
 // AppShell sets them on the rail, header, notices, main and drawer.
 //   nextRegion("header", 1, presentRegions(shellEl)) // -> "notices" (or "main" with no notices)
 
+import { focusableIn } from "../../ui/overlayStack";
+
 export const REGIONS = ["rail", "header", "notices", "main", "drawer"] as const;
 export type Region = (typeof REGIONS)[number];
 
@@ -42,4 +44,43 @@ export function regionOf(node: Node | null): Region | null {
   const el = node instanceof Element ? node : node?.parentElement;
   const hit = el?.closest<HTMLElement>("[data-region]")?.dataset.region;
   return (REGIONS as readonly string[]).includes(hit ?? "") ? (hit as Region) : null;
+}
+
+/** A region worth landing on: it has something to read or operate (an empty notices strip has not). */
+function hasContent(el: HTMLElement): boolean {
+  return (el.textContent ?? "").trim() !== "" || focusableIn(el).length > 0;
+}
+
+/**
+ * Move focus into a region: its first element in the tab order, else the region itself (made
+ * focusable with tabindex -1 if it isn't already).
+ * @param el the region element
+ */
+export function focusRegion(el: HTMLElement): void {
+  const first = focusableIn(el).find((n) => n.tabIndex >= 0);
+  if (first) {
+    first.focus();
+    return;
+  }
+  if (!el.hasAttribute("tabindex")) el.setAttribute("tabindex", "-1");
+  el.focus();
+}
+
+/**
+ * F6 / Shift+F6: focus the next (or previous) region under `root` that has content.
+ * @param root the shell's container (usually `document`)
+ * @param dir 1 forward, -1 backward
+ * @param active the element that has focus now
+ * @return the region focused, or null when there is none
+ */
+export function cycleRegion(root: ParentNode, dir: 1 | -1, active: Element | null): Region | null {
+  const els = new Map<Region, HTMLElement>();
+  root.querySelectorAll<HTMLElement>("[data-region]").forEach((el) => {
+    const r = el.dataset.region as Region;
+    if ((REGIONS as readonly string[]).includes(r) && !els.has(r) && hasContent(el)) els.set(r, el);
+  });
+  const next = nextRegion(regionOf(active), dir, [...els.keys()]);
+  if (!next) return null;
+  focusRegion(els.get(next)!);
+  return next;
 }

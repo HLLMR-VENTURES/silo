@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Keyboard shortcuts.** Ctrl+K or / jumps to search, F5 rescans your library, Alt+1 to Alt+5
+  open Library, Browse, Mod sets, Diagnose and Updates, Ctrl+, opens Settings and Alt+← goes back.
+  F6 and Shift+F6 move between the sidebar, header, notices, page and mod details. Press ? (or
+  Help → Keyboard shortcuts) for the list. Letters and numbers you type in a field are never
+  taken as shortcuts. (#230)
+
 - **Help page.** Help in the sidebar links to GitHub Discussions and the Discord, and Report a
   problem copies Silo's diagnostics and opens a new issue. (#230)
 
@@ -30,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running. (#226)
 
 ### Changed
+
+- **Ctrl+R and F5 rescan instead of reloading the window.** Reloading dropped whatever Silo was in
+  the middle of; now these keys rescan your library (and do nothing while a dialog is open). (#230)
 
 - **A new layout.** A sidebar takes you to Library, Browse, Mod sets, Diagnose and Updates, with
   Tools, Settings and Help below. The header holds the search (it searches your mods, or the

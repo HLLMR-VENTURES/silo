@@ -42,6 +42,15 @@ describe("NavRail", () => {
     expect(onnavigate).toHaveBeenCalledWith("browse");
   });
 
+  it("names the keyboard shortcut of each destination that has one", () => {
+    setup();
+    const keys = (name: string) => screen.getByRole("button", { name }).getAttribute("aria-keyshortcuts");
+    expect(keys("Library")).toBe("Alt+1");
+    expect(keys("Updates")).toBe("Alt+5");
+    expect(keys("Settings")).toBe("Control+,");
+    expect(keys("Tools")).toBeNull();
+  });
+
   it("has one tab stop on the current item; arrows move focus and wrap; Enter activates", async () => {
     const { user, onnavigate } = setup({ current: "browse" });
     const browse = screen.getByRole("button", { name: "Browse" });

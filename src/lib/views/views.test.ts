@@ -179,5 +179,15 @@ describe("HelpView", () => {
     expect(onopen.mock.calls.map((c) => c[0])).toEqual([DISCUSSIONS_URL, DISCORD_URL, NEW_ISSUE_URL]);
     await user.click(screen.getByRole("button", { name: /Copy diagnostics/ }));
     expect(oncopydiagnostics).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "Keyboard shortcuts" })).not.toBeInTheDocument();
+  });
+
+  it("opens the keyboard shortcuts list", async () => {
+    const user = userEvent.setup();
+    const onshowshortcuts = vi.fn();
+    render(HelpView, { onopen: vi.fn(), oncopydiagnostics: vi.fn(), onshowshortcuts });
+    expect(screen.getByRole("heading", { name: "Keyboard shortcuts" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Keyboard shortcuts" }));
+    expect(onshowshortcuts).toHaveBeenCalledOnce();
   });
 });

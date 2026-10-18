@@ -256,7 +256,7 @@ One notice area under the header replaces the stacked banners; one-off results a
 - [ ] `[app]` **Results are toasts, not timed bars.** With every mod current, press **Needs update** → an "All mods are up to date" toast (no strip that disappears on its own). Settings → **Optimize links** → the status line under the header shows "Optimizing links… n/N" while it runs, then a toast with the result.
 - [ ] `[app]` **A view's crash stays in that view.** In normal use no "This part of Silo hit a problem." panel ever appears. (Dev build only: make a panel throw while rendering → only that panel shows the fallback, as a card centred in the window with **Reload this view**, **Close** and **Copy details**; the rest of Silo keeps working. If the dialog host itself fails, confirmations fall back to the system dialog.)
 
-## 19. Navigation (#230)  _(auto-verified: view outlet routing, tabbed views follow nav, status chip / strip / Play menu copy, toolbar facets)_
+## 19. Navigation (#230)  _(auto-verified: view outlet routing, keyboard shortcuts, tabbed views follow nav, status chip / strip / Play menu copy, toolbar facets)_
 
 Sidebar: Library · Browse · Mod sets · Diagnose · Updates, then Tools · Settings · Help. Header: search, status chip, activity bell, Play.
 
@@ -275,6 +275,14 @@ Sidebar: Library · Browse · Mod sets · Diagnose · Updates, then Tools · Set
 - [ ] `[app]` **Play guards still apply.** During a foreground change (Optimize links) and while a library move is copying, Play is off and pointing at it says why; with a critical conflict, Play asks "Launch with N critical conflicts?" first. The chevron opens the launch menu (active set line, Open the game folder, savegames missing mods → Mod sets → Savegames, Manage mod sets) even while Play is off.
 - [ ] `[app]` **Status chip.** "All good" with nothing to report; critical conflicts or mods that can't load show "N problems" (red); warning conflicts or foreign files show "N to review"; clicking it opens Diagnose.
 - [ ] `[app]` **Header search follows the view.** In the Library it filters the list; in Browse it searches the catalog; elsewhere Enter takes the text to the Library.
+- [ ] `[app]` **Keyboard shortcuts** _(auto-verified: keymap resolution, typing / IME / dialog gates, F6 cycling and ? in a jsdom shell)_:
+  - **Ctrl+K** focuses the header search from anywhere, even while typing in another field; **/** does too when you're not typing (and isn't typed into the box).
+  - **F5**, **Ctrl+R** and **Ctrl+Shift+R** rescan the library (the progress bar runs) and **never reload the window**, including mid-scan, during a library move and with a dialog open (behind a dialog they do nothing at all). While a foreground change runs they don't rescan, same as Library **⋯** → Rescan.
+  - **Alt+1 … Alt+5** open Library, Browse, Mod sets, Diagnose, Updates; **Ctrl+,** opens Settings; **Alt+←** goes back to the previous page. Typing digits or letters in a field never switches pages.
+  - **F6** cycles focus rail → header (search) → notices (when any are showing) → main → drawer (when open) → rail; **Shift+F6** goes the other way.
+  - **Esc** closes the mod drawer and focus goes back to the list (not lost to the window); with a dialog or a **⋯** menu open, Esc closes only that.
+  - **?** opens the Keyboard shortcuts dialog (Help → **Keyboard shortcuts** opens the same one); typing **?** in the search box stays text. With the dialog open, no other shortcut fires.
+  - A screen reader announces the shortcut on the search box (Control+K /), the sidebar items (Alt+1…5, Settings Control+,) and Library **⋯** → Rescan (F5).
 
 ## Sign-off
 - [ ] All `[app]` items pass.
