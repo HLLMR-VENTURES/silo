@@ -277,15 +277,24 @@ describe("UpdatesView", () => {
     const oncheck = vi.fn();
     const { rerender } = render(UpdatesView, {
       checking: false,
+      checkedAt: null,
       checkDisabled: false,
       oncheck,
       children: stub("Update rows"),
     });
     expect(screen.getByText("Update rows")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Check for updates/ }));
+    expect(screen.getByText(/Not checked yet/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Check now/ }));
     expect(oncheck).toHaveBeenCalledOnce();
-    await rerender({ checking: false, checkDisabled: true, oncheck, children: stub("Update rows") });
-    await user.click(screen.getByRole("button", { name: /Check for updates/ }));
+    await rerender({
+      checking: false,
+      checkedAt: Date.now(),
+      checkDisabled: true,
+      oncheck,
+      children: stub("Update rows"),
+    });
+    expect(screen.getByText(/Last checked just now/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Check now/ }));
     expect(oncheck).toHaveBeenCalledOnce();
   });
 });

@@ -1,0 +1,374 @@
+// @vitest-environment jsdom
+// The Updates view's logic: section grouping, the rail badge, ModHub dropped builds, the check,
+// Update all (refused / partial / stopped / success) and its summary, and the opt-in auto-check
+// (offered once, off by default, persisted).
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ForeignFile } from "../api";
+import type { CheckYourselfRow } from "../sources";
+import type { UpdateOutcome, UpdateRow } from "../types";
+import {
+  availableRows,
+  droppedBuildFor,
+  groupUpdates,
+  lastCheckedText,
+  newDroppedBuilds,
+  droppedKey,
+  sourceLabel,
+  updatesBadge,
+  versionChange,
+} from "./sections";
+import { runUpdateCheck, updateAll, updateAllSummary, type WriteToken } from "./run";
+import {
+  answerAutoCheckOffer,
+  AUTO_CHECK_KEY,
+  AUTO_CHECK_OFFERED_KEY,
+  autoCheck,
+  autoCheckEnabled,
+  autoCheckOffer,
+  reloadAutoCheck,
+  setAutoCheck,
+  takeAutoCheckOffer,
+} from "./autoCheck.svelte";
+
+const mod = (techName: string, version = "1.0.0.0", title = techName) => ({
+  techName,
+  title,
+  version,
+  path: `C:/mods/${techName}.zip`,
+});
+
+const row = (techName: string, extra: Partial<UpdateRow> = {}): UpdateRow => ({
+  techName,
+  title: techName,
+  path: `C:/mods/${techName}.zip`,
+  current: "1.0.0.0",
+  latest: "1.1.0.0",
+  ...extra,
+});
+
+describe("groupUpdates", () => {
+  const mods = [
+    mod("A_Ready"),
+    mod("B_Hub"),
+    mod("C_Current"),
+    mod("D_Failed"),
+    mod("E_Page"),
+    mod("F_Unknown", "1.0.0.0", "Zed"),
+    mod("G_Unknown", "1.0.0.0", "alpha"),
+    mod("H_Done", "1.1.0.0"),
+  ];
+  const rows = [
+    row("A_Ready", { hasUpdate: true, assetUrl: "https://x/a.zip", source: "github" }),
+    row("B_Hub", { hasUpdate: true, assetUrl: null, pageUrl: "https://www.farming-simulator.com/mod.php?mod_id=1" }),
+    row("C_Current", { hasUpdate: false, latest: "1.0.0.0" }),
+    row("D_Failed", { error: "GitHub is limiting requests for a while." }),
+    // Updated since the check: the library now has the offered version.
+    row("H_Done", { hasUpdate: true, assetUrl: "https://x/h.zip" }),
+    // A row for a mod no longer in the library is dropped.
+    row("Z_Gone", { hasUpdate: true, assetUrl: "https://x/z.zip" }),
+  ];
+  const yourself: CheckYourselfRow[] = [
+    { techName: "E_Page", title: "E_Page", url: "https://example.com/e", host: "example.com", lastChecked: null },
+  ];
+
+  it("sorts rows into their sections", () => {
+    const s = groupUpdates({ mods, rows, checkYourself: yourself, catalogReached: true });
+    expect(s.ready.map((r) => r.techName)).toEqual(["A_Ready"]);
+    expect(s.modhub.map((r) => r.techName)).toEqual(["B_Hub"]);
+    expect(s.checkYourself.map((r) => r.techName)).toEqual(["E_Page"]);
+    expect(s.failed.map((r) => r.techName)).toEqual(["D_Failed"]);
+    expect(s.upToDate.map((r) => r.techName)).toEqual(["C_Current", "H_Done"]);
+    expect(s.upToDate[1]).toMatchObject({ hasUpdate: false, current: "1.1.0.0" });
+    // Not tracked: neither the catalog, a repo nor a saved page answered; by title.
+    expect(s.notTracked).toEqual([
+      { techName: "G_Unknown", title: "alpha" },
+      { techName: "F_Unknown", title: "Zed" },
+    ]);
+  });
+
+  it("calls nothing 'not tracked' when the catalog didn't answer", () => {
+    const s = groupUpdates({ mods, rows, checkYourself: yourself, catalogReached: false });
+    expect(s.notTracked).toEqual([]);
+  });
+
+  it("the badge counts Ready + ModHub, and only after a check", () => {
+    const s = groupUpdates({ mods, rows, checkYourself: yourself, catalogReached: true });
+    expect(availableRows(s).map((r) => r.techName)).toEqual(["A_Ready", "B_Hub"]);
+    expect(updatesBadge(s, true)).toBe(2);
+    expect(updatesBadge(s, false)).toBeUndefined();
+    const none = groupUpdates({ mods, rows: [], checkYourself: [], catalogReached: true });
+    expect(updatesBadge(none, true)).toBeUndefined();
+  });
+
+  it("treats 'v1.1.0.0' as the same version as '1.1.0.0'", () => {
+    const s = groupUpdates({
+      mods: [mod("X", "v1.1.0.0")],
+      rows: [row("X", { hasUpdate: true, assetUrl: "https://x/x.zip" })],
+      checkYourself: [],
+      catalogReached: true,
+    });
+    expect(s.ready).toEqual([]);
+    expect(s.upToDate).toHaveLength(1);
+  });
+});
+
+describe("row words", () => {
+  it("shows versions without a doubled v, and names the source", () => {
+    expect(versionChange({ current: "v8.0.0.4", latest: "8.0.1.0" })).toBe("8.0.0.4 → 8.0.1.0");
+    expect(versionChange({ latest: "2.0" })).toBe("2.0");
+    expect(sourceLabel({ source: "github" })).toBe("GitHub");
+    expect(sourceLabel({ pageUrl: "https://www.farming-simulator.com/mod.php?mod_id=9" })).toBe("ModHub");
+    expect(sourceLabel({})).toBeNull();
+  });
+
+  it("says when the last check ran", () => {
+    const now = Date.parse("2026-10-18T12:00:00Z");
+    expect(lastCheckedText(now - 10_000, now)).toBe("just now");
+    expect(lastCheckedText(now - 2 * 60_000, now)).toBe("2 minutes ago");
+    expect(lastCheckedText(now - 3 * 3_600_000, now)).toBe("3 hours ago");
+  });
+});
+
+describe("ModHub dropped builds", () => {
+  const hub = row("FS25_Lizard", { hasUpdate: true, assetUrl: null, title: "Lizard R-Series" });
+  const file = (flat: string | null, managed: string | null = "1.0.0.0"): ForeignFile => ({
+    techName: "FS25_Lizard",
+    fileName: "FS25_Lizard.zip",
+    kind: "zip",
+    flatVersion: flat,
+    managedVersion: managed,
+  });
+
+  it("finds the zip the user saved, once per build", () => {
+    expect(droppedBuildFor(hub, [file("1.0.2.0")])?.flatVersion).toBe("1.0.2.0");
+    const seen = new Set<string>();
+    const first = newDroppedBuilds([hub], [file("1.0.2.0")], seen);
+    expect(first).toHaveLength(1);
+    seen.add(droppedKey(first[0].file));
+    expect(newDroppedBuilds([hub], [file("1.0.2.0")], seen)).toEqual([]);
+    // A later build is new again.
+    expect(newDroppedBuilds([hub], [file("1.0.3.0")], seen)).toHaveLength(1);
+  });
+
+  it("ignores the same build as Silo's copy, and other mods", () => {
+    expect(droppedBuildFor(hub, [file("1.0.0.0")])).toBeNull();
+    expect(droppedBuildFor(hub, [file(null)])).toBeNull();
+    expect(droppedBuildFor(hub, [{ ...file("2.0"), techName: "Other" }])).toBeNull();
+  });
+});
+
+describe("runUpdateCheck", () => {
+  const explain = (e: unknown) => ({ message: `why: ${String(e)}`, detail: `detail: ${String(e)}` });
+
+  it("merges the catalog with linked repos (the repo wins) and reports progress", async () => {
+    const progress: [number, number][] = [];
+    const res = await runUpdateCheck(
+      [mod("A"), mod("B"), mod("C")],
+      { B: { owner: "o", repo: "b" }, C: { owner: "o", repo: "c" }, Gone: { owner: "o", repo: "g" } },
+      {
+        catalog: async () => [
+          { techName: "A", latest: "2.0", hasUpdate: true, downloadUrl: null, source: null, pageUrl: "https://hub/a" },
+          { techName: "B", latest: "1.5", hasUpdate: true, downloadUrl: null, source: null },
+        ],
+        checkRepo: async (_o, repo) => {
+          if (repo === "c") throw "rate limited";
+          return {
+            hasUpdate: true,
+            current: "1.0.0.0",
+            release: { tag: "1.6", assetUrl: "https://gh/b.zip" } as never,
+          };
+        },
+        explain,
+        onProgress: (d, t) => progress.push([d, t]),
+      },
+    );
+    expect(res.catalogError).toBeNull();
+    const by = Object.fromEntries(res.rows.map((r) => [r.techName, r]));
+    expect(by.A).toMatchObject({ hasUpdate: true, pageUrl: "https://hub/a", assetUrl: null });
+    expect(by.B).toMatchObject({ latest: "1.6", assetUrl: "https://gh/b.zip", source: "github" });
+    expect(by.C).toMatchObject({ error: "why: rate limited", errorDetail: "detail: rate limited" });
+    expect(by.C.hasUpdate).toBeUndefined();
+    expect(progress).toEqual([
+      [0, 2],
+      [1, 2],
+      [2, 2],
+    ]);
+  });
+
+  it("keeps going with linked repos when the catalog is unreachable", async () => {
+    const res = await runUpdateCheck([mod("A")], { A: { owner: "o", repo: "a" } }, {
+      catalog: async () => {
+        throw "offline";
+      },
+      checkRepo: async () => ({ hasUpdate: false, current: "1.0.0.0", release: { tag: "1.0.0.0", assetUrl: null } as never }),
+      explain,
+    });
+    expect(res.catalogError?.message).toBe("why: offline");
+    expect(res.rows).toEqual([expect.objectContaining({ techName: "A", hasUpdate: false })]);
+  });
+});
+
+describe("updateAll", () => {
+  const ok: UpdateOutcome = { backup: "C:/mods/backups/x.zip", problems: [] };
+  function token() {
+    const t = { labels: [] as string[], progress: [] as [number, number][], ended: 0 };
+    const tok: WriteToken = {
+      setLabel: (l) => t.labels.push(l),
+      progress: (d, n) => t.progress.push([d, n]),
+      end: () => t.ended++,
+    };
+    return { t, tok };
+  }
+  const rows = [row("AutoDrive"), row("Courseplay"), row("Lizard")];
+  const why = (e: unknown) => `stopped: ${String(e)}`;
+
+  it("is refused when another library write runs, and installs nothing", async () => {
+    const install = vi.fn();
+    const res = await updateAll(rows, { begin: () => null, install, stops: () => false });
+    expect(res.refused).toBe(true);
+    expect(install).not.toHaveBeenCalled();
+    expect(updateAllSummary(res, why)).toBeNull();
+  });
+
+  it("updates each mod in turn under one write, with progress, then one summary", async () => {
+    const { t, tok } = token();
+    const begin = vi.fn(() => tok);
+    const done: string[] = [];
+    const res = await updateAll(rows, {
+      begin,
+      install: async () => ok,
+      stops: () => false,
+      onRowDone: (r) => done.push(r.techName),
+    });
+    expect(begin).toHaveBeenCalledOnce();
+    expect(begin).toHaveBeenCalledWith("Updating 3 mods");
+    expect(t.labels).toEqual([
+      "Updating 1 of 3: AutoDrive",
+      "Updating 2 of 3: Courseplay",
+      "Updating 3 of 3: Lizard",
+    ]);
+    expect(t.progress.at(-1)).toEqual([3, 3]);
+    expect(t.ended).toBe(1);
+    expect(done).toEqual(["AutoDrive", "Courseplay", "Lizard"]);
+    expect(updateAllSummary(res, why)).toEqual({
+      tone: "success",
+      message: "Updated 3 mods. The previous versions are in backups.",
+    });
+  });
+
+  it("a failed mod doesn't stop the rest: '2 updated, 1 failed'", async () => {
+    const { t, tok } = token();
+    const failed: string[] = [];
+    const res = await updateAll(rows, {
+      begin: () => tok,
+      install: async (r) => {
+        if (r.techName === "Courseplay") throw "download failed";
+        return ok;
+      },
+      stops: () => false,
+      onRowFailed: (r) => failed.push(r.techName),
+    });
+    expect(res.updated.map((u) => u.row.techName)).toEqual(["AutoDrive", "Lizard"]);
+    expect(failed).toEqual(["Courseplay"]);
+    expect(t.ended).toBe(1);
+    expect(updateAllSummary(res, why)).toEqual({
+      tone: "warn",
+      message: "2 updated, 1 failed.",
+      body: "Each failed mod shows why in its row.",
+    });
+  });
+
+  it("stops at a failure that would fail the rest (the game is running)", async () => {
+    const { t, tok } = token();
+    const install = vi.fn(async () => {
+      throw "GAME_RUNNING";
+    });
+    const res = await updateAll(rows, { begin: () => tok, install, stops: (e) => e === "GAME_RUNNING" });
+    expect(install).toHaveBeenCalledOnce();
+    expect(res.notTried.map((r) => r.techName)).toEqual(["Courseplay", "Lizard"]);
+    expect(t.ended).toBe(1);
+    expect(updateAllSummary(res, why)).toEqual({
+      tone: "danger",
+      message: "0 updated, 1 failed. 2 not tried.",
+      body: "stopped: GAME_RUNNING",
+    });
+  });
+
+  it("ends the write even when a callback throws", async () => {
+    const { t, tok } = token();
+    await expect(
+      updateAll([row("A")], {
+        begin: () => tok,
+        install: async () => ok,
+        stops: () => false,
+        onRowStart: () => {
+          throw new Error("boom");
+        },
+      }),
+    ).rejects.toThrow("boom");
+    expect(t.ended).toBe(1);
+  });
+
+  it("one mod's summary names it and the version", () => {
+    const res = { refused: false, updated: [{ row: row("Courseplay", { latest: "8.0.1.0" }), outcome: ok }], failed: [], notTried: [], stoppedBy: null };
+    expect(updateAllSummary(res, why)?.message).toBe(
+      "Updated Courseplay to 8.0.1.0. The previous version is in backups.",
+    );
+  });
+});
+
+describe("automatic update checks (opt-in)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    reloadAutoCheck();
+  });
+
+  it("is off by default", () => {
+    expect(autoCheckEnabled()).toBe(false);
+  });
+
+  it("is offered once: the first visit takes the offer, later visits don't", () => {
+    expect(takeAutoCheckOffer()).toBe(true);
+    expect(localStorage.getItem(AUTO_CHECK_OFFERED_KEY)).toBe("1");
+    expect(takeAutoCheckOffer()).toBe(false);
+    // Unanswered, it's still off.
+    expect(autoCheckEnabled()).toBe(false);
+  });
+
+  it("isn't offered when the setting was already chosen in Settings", () => {
+    setAutoCheck(false);
+    expect(takeAutoCheckOffer()).toBe(false);
+  });
+
+  it("answering persists the choice and closes the card", () => {
+    autoCheckOffer.open = true;
+    answerAutoCheckOffer(true);
+    expect(autoCheckOffer.open).toBe(false);
+    expect(autoCheck.on).toBe(true);
+    expect(localStorage.getItem(AUTO_CHECK_KEY)).toBe("on");
+    // A restart reads it back.
+    reloadAutoCheck();
+    expect(autoCheckEnabled()).toBe(true);
+    setAutoCheck(false);
+    reloadAutoCheck();
+    expect(autoCheckEnabled()).toBe(false);
+  });
+
+  it("works without storage (private mode)", () => {
+    const get = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("denied");
+    });
+    const set = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("denied");
+    });
+    try {
+      reloadAutoCheck();
+      expect(autoCheckEnabled()).toBe(false);
+      setAutoCheck(true);
+      expect(autoCheckEnabled()).toBe(true);
+    } finally {
+      get.mockRestore();
+      set.mockRestore();
+    }
+  });
+});

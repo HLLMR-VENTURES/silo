@@ -190,6 +190,10 @@ pub struct LookupResult {
     pub latest_version: Option<String>,
     #[serde(default)]
     pub download: Option<Download>,
+    /// The mod's page (ModHub first) for when nothing is directly installable. Absent on
+    /// older servers.
+    #[serde(default)]
+    pub page_url: Option<String>,
     /// Semantic tags (silo-api#9) — same shape as `/mods/:id`. Empty on older servers.
     #[serde(default)]
     pub tags: Vec<Tag>,

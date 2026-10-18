@@ -3,19 +3,31 @@
   // (foreground holders only: a background op such as the archive move leaves panels usable).
   import type { UpdateRow } from "../../types";
   import { blockedForeground } from "../../state/ops.svelte";
+  import { NO_SECTIONS } from "../../updates/sections";
   import UpdatesPanel from "../panels/UpdatesPanel.svelte";
 
   let { row, onInstall }: { row: UpdateRow; onInstall: (r: UpdateRow) => void } = $props();
   const writeLock = $derived(blockedForeground("library-write"));
+  const noop = () => {};
 </script>
 
 <UpdatesPanel
-  updateResults={[row]}
-  availableUpdates={[row]}
-  updateChecking={false}
+  sections={{ ...NO_SECTIONS, ready: [row] }}
+  checked={true}
+  checking={false}
+  catalogError={null}
+  rowStates={{}}
+  updatingAll={false}
   lockReason={writeLock.reason}
-  checkYourself={[]}
+  checkDisabledReason=""
+  foreign={[]}
+  onCheck={noop}
   {onInstall}
-  onOpenSource={() => {}}
-  onMarkChecked={() => {}}
+  onUpdateAll={noop}
+  onOpenPage={noop}
+  onUseDropped={noop}
+  onOpenSource={noop}
+  onMarkChecked={noop}
+  onRecheck={noop}
+  onCopyDetails={noop}
 />

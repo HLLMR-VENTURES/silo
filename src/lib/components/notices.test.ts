@@ -90,21 +90,24 @@ describe("the library-write lock on a control", () => {
     assetUrl: "https://example.com/x.zip",
   };
 
-  it("turns Install off with the running write's reason, and back on when it ends", async () => {
+  it("turns Update off with the running write's reason, and back on when it ends", async () => {
     render(LockHarness, { row, onInstall: () => {} });
-    const install = screen.getByRole("button", { name: "Install" });
+    const install = screen.getByRole("button", { name: "Update Big Tractor" });
+    const all = screen.getByRole("button", { name: /Update all 1/ });
     expect(install).toBeEnabled();
+    expect(all).toBeEnabled();
     let op!: ReturnType<typeof start>;
     await act(() => {
       op = start("Filing 3 mods into the library", { exclusive: "library-write" });
     });
     expect(install).toBeDisabled();
-    expect(install).toHaveAttribute("title", "Silo is filing 3 mods into the library.");
+    expect(all).toBeDisabled();
+    expect(screen.getByText("Silo is filing 3 mods into the library.")).toBeInTheDocument();
     // A second write is refused while the first holds the class.
     expect(tryStart("Installing Big Tractor", { exclusive: "library-write" })).toBeNull();
     await act(() => op.end());
     expect(install).toBeEnabled();
-    expect(install).not.toHaveAttribute("title");
+    expect(screen.queryByText("Silo is filing 3 mods into the library.")).toBeNull();
   });
 
   it("a background op (the archive move) leaves the panel usable", async () => {
@@ -112,7 +115,7 @@ describe("the library-write lock on a control", () => {
     await act(() => {
       start("Moving your library", { exclusive: "library-write", background: true });
     });
-    expect(screen.getByRole("button", { name: "Install" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Update Big Tractor" })).toBeEnabled();
     // ...but a write still can't start beside it.
     expect(tryStart("Installing Big Tractor", { exclusive: "library-write" })).toBeNull();
   });
@@ -122,7 +125,7 @@ describe("the library-write lock on a control", () => {
     await act(() => {
       start("Checking the folder");
     });
-    expect(screen.getByRole("button", { name: "Install" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Update Big Tractor" })).toBeEnabled();
   });
 });
 

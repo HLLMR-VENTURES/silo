@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Updates, in sections.** Updates now lists **Ready to install**, **Download from ModHub**,
+  **Check these yourself**, **Couldn't check** (with the reason, Try again and Copy details), and
+  collapsed **Up to date** and **Not tracked** lists, with when you last checked. **Update all**
+  updates every mod Silo can install in place, one at a time with progress, and ends with one
+  summary ("3 updated, 1 failed"); it stops early if Farming Simulator 25 is running. Each update
+  keeps the previous version in backups. (#244)
+
+- **ModHub updates: open, then use.** **Open on ModHub** opens the mod's page; save the new zip
+  into your mods folder and Silo offers **Use this version** for it. (#244)
+
+- **Check for mod updates when Silo starts.** Off by default. Silo offers it once, the first time
+  you open Updates, and it's in Settings → General. It only checks; nothing installs until you
+  press Update. Checking sends the names of your installed mods to Silo's catalog. (#244)
+
 - **Library filters you can see.** Show All, Active or Parked mods; Favorites and Needs attention
   (mods that can't load, conflict, were modified, are flagged or have an update) are one click;
   the rest (Hidden, Flagged, In conflict, Has settings, Needs update, Maps, Script mods, uniqueType
@@ -60,6 +74,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running. (#226)
 
 ### Changed
+
+- **Updates' badge counts what you can act on.** The rail badge counts Ready to install plus
+  Download from ModHub, appears only after a check, and drops as you update. A failed install
+  stays in its row with the reason instead of a pop-up. The header button is now **Check now**.
+  (#244)
 
 - **Parking a loose mod explains itself.** The first time you park a mod Silo hasn't filed yet, it
   says it moves the mod into your library folder (it stays in your library) and asks, with

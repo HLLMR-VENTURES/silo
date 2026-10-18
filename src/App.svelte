@@ -50,6 +50,7 @@
     getModSources,
     markSourceChecked,
     openExternal,
+    revealInFolder,
     checkModUpdate,
     catalogCheckUpdates,
     downloadUpdate,
@@ -116,6 +117,22 @@
     SourceRow,
   } from "./lib/types";
   import { checkYourselfList, type CheckYourselfRow } from "./lib/sources";
+  import {
+    availableRows,
+    droppedKey,
+    groupUpdates,
+    newDroppedBuilds,
+    updatesBadge,
+  } from "./lib/updates/sections";
+  import {
+    recheckRow,
+    runUpdateCheck,
+    updateAll,
+    updateAllSummary,
+    type ExplainedError,
+  } from "./lib/updates/run";
+  import { autoCheckEnabled } from "./lib/updates/autoCheck.svelte";
+  import type { RowInstallState } from "./lib/components/panels/UpdatesPanel.svelte";
   import { copyOrSave } from "./lib/clipboard";
   import { parseUiScale, type UiScale } from "./lib/uiScale";
   import {
@@ -128,7 +145,7 @@
     type OpToken,
   } from "./lib/state/ops.svelte";
   import { rescanGate } from "./lib/state/rescanGate";
-  import { describeError, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
+  import { describeError, formatDetail, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
   import {
     info,
     inlineError,
@@ -1586,11 +1603,30 @@
 
   let updateChecking = $state(false);
   let updateResults = $state<UpdateRow[]>([]);
+  /** When the last check finished (epoch ms); null = never checked this session (no rail badge). */
+  let updateCheckedAt = $state<number | null>(null);
+  /** The last check's catalog request failed (Updates shows it with Try again). */
+  let updateCatalogError = $state<ExplainedError | null>(null);
+  /** Linked GitHub repos checked so far, while a check runs. */
+  let updateProgress = $state<{ done: number; total: number } | null>(null);
+  /** Per-mod install state in Updates (running, or the failure with Try again). */
+  let updateRowStates = $state<Record<string, RowInstallState>>({});
+  let updatingAll = $state(false);
   // Mods with a saved page that this check couldn't answer: the user checks those by hand.
   const checkYourself = $derived(
     updateChecking ? [] : checkYourselfList(mods, sourceMap, updateResults),
   );
   const linkedCount = $derived(Object.keys(repoMap).length);
+  // The Updates view's sections. A mod updated since the check (by Silo, or a ModHub zip the user
+  // used) drops out of the "newer version" sections, so the badge and filters stay accurate.
+  const updateSections = $derived(
+    groupUpdates({
+      mods,
+      rows: updateResults,
+      checkYourself,
+      catalogReached: updateCheckedAt != null && !updateCatalogError,
+    }),
+  );
 
   // "Needs update" is on-demand: the first time it's switched on it runs a quiet update check,
   // then filters to whatever came back (or reports that everything's current). No launch-time work.
@@ -1607,92 +1643,165 @@
     }
   }
 
+  /** A failure as Updates shows it in a row: logged, worded, and the "Copy details" text. */
+  function explainUpdateError(e: unknown, op: string): ExplainedError {
+    return { message: inlineError(e, op), detail: formatDetail(describeError(e, op).detail) };
+  }
+
+  const updateCheckDeps = {
+    catalog: catalogCheckUpdates,
+    checkRepo: checkModUpdate,
+    explain: explainUpdateError,
+  };
+
   async function checkAllUpdates(quiet = false) {
     if (!quiet) go("updates");
+    if (updateChecking) return;
     updateChecking = true;
     updateResults = [];
-    const byTech = new Map(mods.map((m) => [m.techName, m]));
-    const rows = new Map<string, UpdateRow>();
-
-    // 1. One catalog request covers the whole library (GitHub + ModHub mods alike).
+    updateRowStates = {};
+    updateProgress = null;
     try {
-      const catalog = await catalogCheckUpdates(
-        mods.map((m) => ({ techName: m.techName, version: m.version ?? undefined })),
-      );
-      for (const c of catalog) {
-        const m = byTech.get(c.techName);
-        if (!m) continue;
-        rows.set(c.techName, {
-          techName: c.techName,
-          title: m.title ?? c.techName,
-          path: m.path,
-          current: m.version ?? undefined,
-          latest: c.latest ?? undefined,
-          hasUpdate: c.hasUpdate,
-          assetUrl: c.downloadUrl,
-          source: c.source ?? undefined,
-        });
-      }
-      updateResults = [...rows.values()];
-    } catch {
-      // Catalog unreachable (e.g. endpoint not yet deployed) — fall back to GitHub only.
+      const res = await runUpdateCheck(mods, repoMap, {
+        ...updateCheckDeps,
+        onRows: (rows) => (updateResults = rows),
+        onProgress: (done, total) => (updateProgress = { done, total }),
+      });
+      updateResults = res.rows;
+      updateCatalogError = res.catalogError;
+      updateCheckedAt = Date.now();
+    } finally {
+      updateChecking = false;
+      updateProgress = null;
     }
+  }
 
-    // 2. Linked GitHub repos are authoritative for the user's chosen source — check
-    //    them directly and let them override the catalog row for that mod.
-    for (const [techName, r] of Object.entries(repoMap)) {
-      const m = byTech.get(techName);
-      if (!m) continue;
-      const row: UpdateRow =
-        rows.get(techName) ?? { techName, title: m.title ?? techName, path: m.path };
-      try {
-        const info = await checkModUpdate(r.owner, r.repo, m.version ?? "0");
-        row.current = info.current;
-        row.latest = info.release.tag;
-        row.hasUpdate = info.hasUpdate;
-        row.assetUrl = info.release.assetUrl;
-        row.source = "github";
-        row.error = undefined;
-      } catch (e) {
-        if (!rows.has(techName)) row.error = inlineError(e, "Checking for an update");
-      }
-      rows.set(techName, row);
-      updateResults = [...rows.values()];
-    }
+  /** "Couldn't check" → Try again: that mod's linked repo only. */
+  async function recheckUpdate(row: UpdateRow) {
+    const m = mods.find((x) => x.techName === row.techName);
+    const r = repoMap[row.techName];
+    if (!m || !r) return;
+    const next = await recheckRow(row, m, r, updateCheckDeps);
+    updateResults = updateResults.map((x) => (x.techName === row.techName ? next : x));
+  }
 
-    updateChecking = false;
+  async function copyDetailsText(text: string) {
+    const out = await copyOrSave(text, "silo-update-details.txt", copyText, saveTextFile).catch(
+      () => "cancelled" as const,
+    );
+    if (out === "copied") success("Copied the details.");
+    else if (out === "saved") success("Saved the details.");
+  }
+
+  function setRowState(techName: string, st: RowInstallState | null) {
+    const next = { ...updateRowStates };
+    if (st) next[techName] = st;
+    else delete next[techName];
+    updateRowStates = next;
+  }
+
+  /** The row now shows the version it installed. */
+  function markInstalled(row: UpdateRow) {
+    updateResults = updateResults.map((r) =>
+      r.techName === row.techName ? { ...r, hasUpdate: false, current: r.latest } : r,
+    );
+  }
+
+  /** A failed install turns its row into the error, with Try again and Copy details there. */
+  function markInstallFailed(row: UpdateRow, e: unknown) {
+    const why = explainUpdateError(e, `Updating ${row.title}`);
+    setRowState(row.techName, {
+      phase: "error",
+      message: why.message || "Silo couldn't update this mod.",
+      detail: why.detail,
+    });
   }
 
   async function installFromRow(row: UpdateRow) {
     if (!row.assetUrl) return;
-    const op = beginWrite(`Installing ${row.title}`);
+    const op = beginWrite(`Updating ${row.title}`);
     if (!op) return;
-    /** What went wrong: the thrown error (keeps its code), or the install's problems. */
-    let warning: unknown = null;
-    let failed = false;
+    setRowState(row.techName, { phase: "installing" });
+    let problems: string[] = [];
     try {
       const out = await downloadUpdate(row.path, row.assetUrl);
-      if (out.backup) {
-        success(`Updated ${row.title}. The previous version is kept in ${out.backup}.`, {
+      setRowState(row.techName, null);
+      markInstalled(row);
+      problems = out.problems;
+      const backup = out.backup;
+      success(
+        `Updated ${row.title}${row.latest ? ` to ${row.latest}` : ""}. The previous version is in backups.`,
+        {
           duration: 10_000,
-        });
-      }
-      if (out.problems.length) warning = out.problems.join(" ");
-      updateResults = updateResults.map((r) =>
-        r.techName === row.techName ? { ...r, hasUpdate: false, current: r.latest } : r,
+          action: backup ? { label: "Show", run: () => void revealInFolder(backup) } : undefined,
+        },
       );
     } catch (e) {
-      warning = e;
-      failed = true;
+      markInstallFailed(row, e);
     } finally {
       op.end();
     }
     await runScan(false);
-    if (warning !== null)
-      reportError(warning, `Installing ${row.title}`, failed ? { retry: () => installFromRow(row) } : {});
+    // After the new version is in place (the update itself stands).
+    if (problems.length) reportError(problems.join(" "), `Updating ${row.title}`);
   }
 
-  const availableUpdates = $derived(updateResults.filter((r) => r.hasUpdate));
+  /** Failures that would fail every remaining mod, so Update all stops there. */
+  const UPDATE_ALL_STOPS = new Set([
+    "GAME_RUNNING",
+    "LIBRARY_BUSY",
+    "MOVE_UNFINISHED",
+    "ARCHIVE_UNAVAILABLE",
+    "DISK_FULL",
+    "NET_OFFLINE",
+  ]);
+
+  // Update all: one mod at a time under one library write, with "Updating 2 of 4: AutoDrive" in the
+  // header, then one summary toast. No confirm: each update keeps the previous version in backups.
+  async function updateAllReady() {
+    const rows = updateSections.ready.filter((r) => r.assetUrl);
+    if (rows.length === 0 || updatingAll) return;
+    updatingAll = true;
+    try {
+      const res = await updateAll(rows, {
+        begin: (label) => beginWrite(label, true),
+        install: (row) => downloadUpdate(row.path, row.assetUrl!),
+        stops: (e) => UPDATE_ALL_STOPS.has(describeError(e).code),
+        onRowStart: (row) => setRowState(row.techName, { phase: "installing" }),
+        onRowDone: (row) => {
+          setRowState(row.techName, null);
+          markInstalled(row);
+        },
+        onRowFailed: markInstallFailed,
+      });
+      if (res.refused) return;
+      await runScan(false);
+      const sum = updateAllSummary(res, (e) => describeError(e).title);
+      if (sum) toast({ message: sum.message, body: sum.body, tone: sum.tone, duration: 10_000 });
+    } finally {
+      updatingAll = false;
+    }
+  }
+
+  // ModHub's open-then-use loop: the zip the user saved from the page lands in the mods folder as
+  // a different build at the mod's name; the focus rescan finds it and Silo offers to use it.
+  const announcedDrops = new Set<string>();
+  $effect(() => {
+    const arrivals = newDroppedBuilds(updateSections.modhub, foreignFiles, announcedDrops);
+    for (const { row, file } of arrivals) {
+      announcedDrops.add(droppedKey(file));
+      toast({
+        message: `Found a newer ${row.title} (${file.flatVersion}).`,
+        duration: 15_000,
+        action: {
+          label: "Use this version",
+          run: () => void resolveForeign(file.fileName, "adopt"),
+        },
+      });
+    }
+  });
+
+  const availableUpdates = $derived(availableRows(updateSections));
   const updatesSet = $derived(new Set(availableUpdates.map((r) => r.techName)));
 
   async function toggleCuration(
@@ -2709,7 +2818,17 @@
       } catch {
         /* non-critical */
       }
-      if (roots.length) runScan();
+      const firstScan = roots.length ? runScan() : null;
+      // Checking for mod updates at startup is opt-in (Settings > General, offered once in
+      // Updates): it sends mod names to the catalog. It waits for the first scan, then a moment
+      // more so the window settles first. It only checks; nothing is installed.
+      if (firstScan && autoCheckEnabled()) {
+        void firstScan.then(() =>
+          setTimeout(() => {
+            if (mods.length && !updateChecking) void checkAllUpdates(true);
+          }, 3000),
+        );
+      }
       // Detect a cloud-synced mods folder (OneDrive / Google Drive / Proton Drive): those reject
       // hardlinks, so Silo projects the active set as copies. Warn once so the extra disk use and
       // slower bulk changes aren't a mystery — and so "Optimize links" can explain itself.
@@ -3128,7 +3247,7 @@
 {/snippet}
 
 <AppShell
-  badges={{ updates: availableUpdates.length, diagnose: bisecting ? BISECT_BADGE : undefined }}
+  badges={{ updates: updatesBadge(updateSections, updateCheckedAt != null), diagnose: bisecting ? BISECT_BADGE : undefined }}
   fill={nav.view === "library"}
   wide={nav.view === "library" || nav.view === "browse"}
   drawer={detailMod && nav.view === "library" ? modDrawer : undefined}
@@ -3438,19 +3557,31 @@
     {#snippet updates()}
       <UpdatesView
         checking={updateChecking}
+        checkedAt={updateCheckedAt}
+        progress={updateProgress}
         checkDisabled={!!fgLock.reason || updateChecking || mods.length === 0}
         checkDisabledReason={fgLock.reason || (mods.length === 0 ? "No mods to check yet." : "")}
         oncheck={() => checkAllUpdates()}
       >
         <UpdatesPanel
-          {updateResults}
-          {availableUpdates}
-          {updateChecking}
+          sections={updateSections}
+          checked={updateCheckedAt != null}
+          checking={updateChecking}
+          catalogError={updateCatalogError}
+          rowStates={updateRowStates}
+          {updatingAll}
           lockReason={fgLock.reason}
-          {checkYourself}
+          checkDisabledReason={fgLock.reason || (mods.length === 0 ? "No mods to check yet." : "")}
+          foreign={foreignFiles}
+          onCheck={() => checkAllUpdates()}
           onInstall={installFromRow}
-          onOpenSource={(s) => openExternal(s.url)}
+          onUpdateAll={updateAllReady}
+          onOpenPage={(r) => r.pageUrl && openExternal(r.pageUrl)}
+          onUseDropped={(f) => void resolveForeign(f.fileName, "adopt")}
+          onOpenSource={(c) => openExternal(c.url)}
           onMarkChecked={markChecked}
+          onRecheck={recheckUpdate}
+          onCopyDetails={(t) => void copyDetailsText(t)}
         />
       </UpdatesView>
     {/snippet}

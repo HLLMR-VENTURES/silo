@@ -103,7 +103,7 @@ shipping; macOS and Linux are experimental platforms, verified by testers as the
 - [ ] `[net]` Details opens the drawer: cover image, facts, full source list with per-source versions + open-page links.
 
 ## 7. Updates
-- [ ] `[net]` Updates (sidebar) → **Check for updates** checks the whole library via the catalog; rows show current→latest with source badge; Install works.
+- [ ] `[net]` Updates (sidebar) → **Check now** checks the whole library via the catalog; rows show current → latest with a source chip; **Update** works (see §22).
 - [ ] `[net]` Detail-drawer GitHub link: paste owner/repo (or accept the auto-suggestion), Check, Install — backs up `.bak`.
 
 ## 8. Crash & log triage  _(auto-verified: log parser on real 713-mod log)_
@@ -162,7 +162,7 @@ start below it).
 **Sidebar and header (always visible; see §19 for the full map):**
 - [ ] `[app]` Every sidebar item opens its view; leaving the Library **closes an open detail drawer**.
 - [ ] `[app]` **Mod sets** → My sets (loadouts), Share (collections), Multiplayer (MP sync), Savegames tabs each render.
-- [ ] `[net]` **Updates** opens the Updates page; **Check for updates** in its header runs the check.
+- [ ] `[net]` **Updates** opens the Updates page; **Check now** in its header runs the check.
 - [ ] `[app]` Library → **⋯** → **Rescan** runs a scan (progress bar → counts refresh).
 - [ ] `[app]` **Settings** opens as a page with tabs like Tools: General, Mods folder, Library, Accounts, Diagnostics, Maintenance, About. The tab you left on is the one it reopens on (until a restart, when it starts on General).
 - [ ] `[game]` **Play** is present (don't have to run it here); its chevron opens the launch menu.
@@ -268,7 +268,7 @@ Sidebar: Library · Browse · Mod sets · Diagnose · Updates, then Tools · Set
 - [ ] `[app]` **Everything is still reachable** (old place → new place):
   - Library / Browse tabs → sidebar **Library** / **Browse**.
   - Savegames, Loadouts, Collections, Multiplayer buttons → **Mod sets** → Savegames / My sets / Share / Multiplayer. A `silo://collection?url=…` link opens **Mod sets → Share** pre-filled.
-  - ⟳ Updates → sidebar **Updates** (badge = updates found) → **Check for updates**; the strip's **N updates → See updates**.
+  - ⟳ Updates → sidebar **Updates** (badge = updates found) → **Check now**; the strip's **N updates → See updates**.
   - Organize N → the strip's **N new mods aren't filed → Review** (and Settings → Library → Organize).
   - Rescan → Library **⋯** → Rescan; Settings' Rebuild → Library **⋯** → Re-read every mod (also Settings → Maintenance → **Re-read every mod**).
   - Launch → **Play** (header); Settings (gear) → sidebar **Settings**; activity bell → header.
@@ -320,6 +320,21 @@ Sidebar: Library · Browse · Mod sets · Diagnose · Updates, then Tools · Set
 - [ ] `[app]` **Focus isn't lost.** Focus a row, then change a filter so that mod disappears → focus is on the row now in its place (the last row if it was the last). Select mods, press **Clear** in the selection bar → focus is back on your row. Remove the last filter chip with its ✕ → focus is on **Filters**. In the selection bar, ←/→ move between its buttons and Tab leaves it. Focus a row, switch to **Card view** → the same mod is the tab stop and in view (and back again). A screen reader names a row "<mod name>, active" or "…, parked".
 - [ ] `[app]` **List density.** Settings → General → **List density: Comfortable / Compact** changes the Library list's row height at once; restart → kept (`silo.library.density`).
 - [ ] `[app]` **Fast with a big library.** On the 700+ mod library, scrolling the list and holding ↓ stay smooth; icons fill in as rows appear.
+
+## 22. Updates (#244)  _(auto-verified: section grouping and order, rows updated since the check leaving the sections, rail badge only after a check, Not tracked only when the catalog answered, the check's catalog + linked-repo merge and progress, Couldn't check reasons, Update all refused / partial / stopped / success and its summary, ModHub dropped-build detection once per build, the auto-check offer shown once and its persisted setting)_
+
+- [ ] `[app]` **Never checked.** Fresh profile (or clear `silo.updates.*` from localStorage) → Updates shows "Check your mods for updates" with **Check now** and the line "Checking sends the names of your installed mods to Silo's catalog. Versions are compared on your computer." The header says "Mod updates · Not checked yet". The rail's Updates item has no badge. Opening Updates doesn't check by itself.
+- [ ] `[app]` **Offered once.** The first visit shows "Check for mod updates when Silo starts?" with **Check on start** and **Only when I ask**. Leave without answering, come back → it isn't shown again. Settings → General → Updates → **Check for mod updates when Silo starts** is off.
+- [ ] `[net]` **Check on start.** Turn the setting on (or answer **Check on start**), restart Silo → a few seconds after the library loads, the rail badge appears with the number of newer versions, without opening Updates and without installing anything. Turn it off, restart → no check runs (no catalog call) until you press **Check now**.
+- [ ] `[net]` **Check now.** Press it → a progress line ("Asking Silo's catalog…", then "Checked 3 of 12 linked GitHub mods" if you've linked repos) and the header says "Checking…", then "Last checked just now" (it ticks to "1 minute ago" while open).
+- [ ] `[net]` **Sections, in order, empty ones hidden.** **Ready to install (n)** (GitHub releases, each "8.0.0.4 → 8.0.1.0" with a GitHub chip and **Update**), **Download from ModHub (n)** with its help text and **Open on ModHub**, **Check these yourself (n)** (saved source pages: **Open page**, **I checked it**), **Couldn't check (n)** (the reason, **Try again**, **Copy details**), then **Up to date (n)** and **Not tracked (n)**, both collapsed; Not tracked explains that saving a page in a mod's details moves it to Check these yourself.
+- [ ] `[net]` **Rail badge.** After a check the Updates badge = Ready to install + Download from ModHub (no badge when that's 0). It drops by one as each mod is updated.
+- [ ] `[net]` **Update one.** Press **Update** on a row → it says "Installing…", then a toast "Updated <mod> to <version>. The previous version is in backups." with **Show** (opens the backup in the file manager); the row moves to Up to date. With FS25 running → the row shows "Close Farming Simulator 25 first, then try again." with **Try again** and **Copy details**; close the game and Try again works.
+- [ ] `[net]` **Update all.** With two or more in Ready to install, press **Update all N** → no dialog; the header line reads "Updating 1 of N: <mod>", "Updating 2 of N: …"; each row says "Installing…" in turn; at the end one toast "Updated N mods. The previous versions are in backups." While it runs, Update / Update all / other library changes are off and say why under the heading. With one release asset broken (or the network pulled mid-way) → the rest still update and the toast says "3 updated, 1 failed."; the failed row keeps its reason. With FS25 running → it stops after the first ("0 updated, 1 failed. N not tried.", "Close Farming Simulator 25 first, then try again.").
+- [ ] `[app]` **Busy library.** Start a library move (or Reclaim disk space) and press **Update all** → refused with "Silo is … Try again when it's done."; nothing is downloaded.
+- [ ] `[net]` **ModHub: open, then use.** For a ModHub row press **Open on ModHub** → the mod's page opens in your browser. Download the new zip and save it over the mod's file in your mods folder, then switch back to Silo → a toast "Found a newer <mod> (<version>)." with **Use this version**, and the row shows "Found <version> in your mods folder." with **Use this version**. Press it → Silo keeps the new build (the old one goes to backups) and the row moves to Up to date. The toast appears once per saved build.
+- [ ] `[net]` **Catalog offline.** Disconnect the network and press **Check now** → "Silo can't reach its catalog right now. Your library still works." with **Try again** and **Copy details**; Not tracked doesn't appear (Silo can't tell). Reconnect, Try again → the sections fill.
+- [ ] `[app]` **Silo's own update** is still the "Silo x.y.z is ready" notice (Restart to update), separate from mod updates.
 
 ## Sign-off
 - [ ] All `[app]` items pass.
