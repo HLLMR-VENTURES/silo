@@ -143,6 +143,7 @@
   import LibraryToolbar from "./lib/components/panels/LibraryToolbar.svelte";
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
   import ArchiveMoveBanner from "./lib/components/ArchiveMoveBanner.svelte";
+  import BlockedFolderBanner from "./lib/components/BlockedFolderBanner.svelte";
   import { fmtSize } from "./lib/format";
   import {
     rootsFor,
@@ -2319,23 +2320,12 @@
       <button class="cn-act" onclick={useGameFolder}>Use the game's folder</button>
     </div>
   {:else if modsStatus?.layoutProblem}
-    <div class="cloud-notice">
-      <span class="cn-ico">⚠</span>
-      <div class="cn-text">
-        <b>Silo won't change files in this mods folder:</b>
-        <span class="tnum">{modsStatus.path}</span>. {modsStatus.layoutProblem}
-        {#if modsStatus.layoutConflict}
-          (<span class="tnum">{modsStatus.layoutConflict}</span>)
-        {/if}
-      </div>
-      {#if modsStatus.layoutProblemCause === "readError"}
-        <button class="cn-act" onclick={retryModsFolder}>Retry</button>
-      {/if}
-      {#if modsStatus.mismatch && modsStatus.canWriteGameSetting}
-        <button class="cn-act" onclick={pointGameHere}>Point FS25 here</button>
-      {/if}
-      <button class="cn-act" onclick={changeModsFolder}>Choose another</button>
-    </div>
+    <BlockedFolderBanner
+      status={modsStatus}
+      onRetry={retryModsFolder}
+      onPointGameHere={pointGameHere}
+      onChooseAnother={changeModsFolder}
+    />
   {:else if modsStatus?.modsFolderMissing}
     <div class="cloud-notice">
       <span class="cn-ico">ⓘ</span>
