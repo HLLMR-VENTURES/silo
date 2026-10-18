@@ -137,7 +137,7 @@
           <tr class:active={isActive} class:auto={set.kind === "auto"}>
             <th scope="row" class="name">
               <span class="title">{set.name}</span>
-              {#if isActive}<Badge tone="success">Active</Badge>{/if}
+              {#if isActive}<Badge tone="success" icon="ok">Active</Badge>{/if}
               {#if set.kind === "auto"}
                 <span class="meta">Automatic{set.createdAt ? ` · ${shortDate(set.createdAt)}` : ""}</span>
               {/if}

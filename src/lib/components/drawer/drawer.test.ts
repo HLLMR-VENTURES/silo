@@ -197,7 +197,7 @@ describe("drawer actions", () => {
     const p = props(entry(4), { hasSettings: true });
     render(ModDetail, p);
     await settle();
-    const sw = screen.getByRole("switch", { name: "Active" });
+    const sw = screen.getByRole("switch", { name: /^Active: / });
     expect(sw).toHaveAttribute("aria-checked", "true");
     await user.click(sw);
     expect(p.onToggleActive).toHaveBeenCalledTimes(1);

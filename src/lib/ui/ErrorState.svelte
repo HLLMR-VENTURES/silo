@@ -60,6 +60,7 @@
         <Button variant="secondary" icon={copied ? "check" : "copy"} onclick={copyDetails}>
           {copied ? "Copied" : "Copy details"}
         </Button>
+        <span class="sr-only" role="status">{copied ? "Details copied" : ""}</span>
       {/if}
     </div>
   {/if}

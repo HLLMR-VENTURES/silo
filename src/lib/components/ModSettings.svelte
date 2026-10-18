@@ -1,5 +1,10 @@
 <script lang="ts">
+  // A mod's settings files as forms (or raw XML), in a modal Dialog: Esc or Close leaves without
+  // saving; focus is trapped while it's open and goes back after.
+  import Button from "../ui/Button.svelte";
+  import Dialog from "../ui/Dialog.svelte";
   import Icon from "../ui/Icon.svelte";
+  import Switch from "../ui/Switch.svelte";
   import { inlineError } from "../state/notify.svelte";
   import {
     getModSettings,
@@ -7,7 +12,6 @@
     saveModSettingsRaw,
   } from "../api";
   import type { SettingsFile, SettingsEdit } from "../types";
-  import { tooltip } from "../ui/tooltip";
 
   interface Props {
     modName: string;
@@ -23,6 +27,8 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let savedPath = $state<string | null>(null);
+  let open = $state(true);
+  const uid = $props.id();
 
   async function load() {
     loading = true;
@@ -74,143 +80,92 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="backdrop" onclick={onClose}></div>
-<div class="ms-panel">
-  <div class="ms-head">
-    <div>
-      <div class="ms-title">{title}</div>
-      <div class="ms-sub">Mod settings</div>
-    </div>
-    <button class="ms-x" onclick={onClose} use:tooltip={"Close"} aria-label="Close"><Icon name="close" /></button>
-  </div>
-
+<Dialog bind:open {title} description="Mod settings" size="md" onclose={() => onClose()}>
   {#if loading}
-    <div class="ms-empty">Loading…</div>
+    <p class="ms-empty" role="status">Loading…</p>
   {:else if error}
-    <div class="ms-error">{error}</div>
+    <p class="ms-error" role="alert">{error}</p>
   {:else if files.length === 0}
-    <div class="ms-empty">No settings files found for this mod yet.</div>
+    <p class="ms-empty">No settings files found for this mod yet.</p>
   {/if}
 
   {#each files as file (file.path)}
-    <div class="ms-file">
+    <section class="ms-file" aria-label={file.name}>
       <div class="ms-file-head">
         <span class="ms-file-name tnum">{file.name}</span>
         <div class="ms-file-actions">
-          {#if savedPath === file.path}<span class="ms-saved">saved <Icon name="check" size={13} /></span>{/if}
-          <button
-            class="ms-link"
+          <span class="ms-saved" role="status">{#if savedPath === file.path}Saved <Icon name="check" size={13} />{/if}</span>
+          <Button
+            variant="link"
+            size="sm"
+            aria-pressed={rawMode[file.path] ? "true" : "false"}
             onclick={() => (rawMode[file.path] = !rawMode[file.path])}
           >
-            {rawMode[file.path] ? "form" : "raw XML"}
-          </button>
+            Raw XML
+          </Button>
         </div>
       </div>
 
       {#if rawMode[file.path]}
-        <textarea class="ms-raw" bind:value={rawText[file.path]} spellcheck="false"
+        <textarea
+          class="ms-raw"
+          aria-label="Raw XML of {file.name}"
+          bind:value={rawText[file.path]}
+          spellcheck="false"
         ></textarea>
-        <button class="ms-save" onclick={() => saveRaw(file)}>Save raw XML</button>
+        <Button variant="primary" class="ms-save" onclick={() => saveRaw(file)}>Save raw XML</Button>
       {:else if file.fields.length === 0}
-        <div class="ms-empty small">
-          Silo couldn't model this file as a form. Use “raw XML” to edit it directly.
-        </div>
+        <p class="ms-empty small">
+          Silo couldn't model this file as a form. Use Raw XML to edit it directly.
+        </p>
       {:else}
         {#each file.fields as fld (fld.id)}
+          {@const fid = `${uid}-f${fld.id}`}
           <div class="ms-field">
-            <label class="ms-flabel" for={"f" + fld.id}>{fld.label}</label>
+            <label class="ms-flabel" for={fid} id="{fid}-label">{fld.label}</label>
             {#if fld.kind === "bool"}
-              <button
-                class="switch"
-                class:on={values[fld.id] === "true"}
-                role="switch"
-                aria-checked={values[fld.id] === "true"}
-                aria-label={fld.label}
-                onclick={() =>
-                  (values[fld.id] = values[fld.id] === "true" ? "false" : "true")}
-              >
-                <span class="knob"></span>
-              </button>
+              <Switch
+                id={fid}
+                aria-labelledby="{fid}-label"
+                checked={values[fld.id] === "true"}
+                onchange={(on) => (values[fld.id] = on ? "true" : "false")}
+              />
             {:else if fld.kind === "int" || fld.kind === "float"}
               <input
-                id={"f" + fld.id}
+                id={fid}
                 class="ms-input tnum"
                 type="number"
                 step={fld.kind === "float" ? "any" : "1"}
                 bind:value={values[fld.id]}
               />
             {:else}
-              <input
-                id={"f" + fld.id}
-                class="ms-input"
-                type="text"
-                bind:value={values[fld.id]}
-              />
+              <input id={fid} class="ms-input" type="text" bind:value={values[fld.id]} />
             {/if}
           </div>
         {/each}
-        <button class="ms-save" onclick={() => saveForm(file)} disabled={!dirty(file)}>
+        <Button variant="primary" class="ms-save" onclick={() => saveForm(file)} disabled={!dirty(file)}>
           Save changes
-        </button>
+        </Button>
       {/if}
-    </div>
+    </section>
   {/each}
 
-  <div class="ms-foot">Silo keeps the original and the three versions before your latest edit as <code>.bak</code> files.</div>
-</div>
+  <p class="ms-foot">Silo keeps the original and the three versions before your latest edit as <code>.bak</code> files.</p>
+  {#snippet footer()}
+    <Button onclick={() => (open = false)}>Close</Button>
+  {/snippet}
+</Dialog>
 
 <style>
-  .ms-panel {
-    position: fixed;
-    z-index: 50;
-    top: 8vh;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 560px;
-    max-width: calc(100vw - 40px);
-    max-height: 84vh;
-    overflow-y: auto;
-    background: var(--surface-raised);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow-2);
-    padding: 16px;
-    scrollbar-width: thin;
-  }
-  .ms-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 8px;
-  }
-  .ms-title {
-    font-family: var(--font-display);
-    font-size: var(--fs-lg);
-    font-weight: 600;
-  }
-  .ms-sub {
-    font-size: var(--fs-xs);
-    color: var(--text-muted);
-  }
-  .ms-x {
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    width: 30px;
-    height: 30px;
-    border-radius: var(--radius-sm);
-    display: inline-grid;
-    place-items: center;
-  }
-  .ms-x:hover {
-    background: color-mix(in srgb, var(--primary) 12%, transparent);
-    color: var(--text);
-  }
   .ms-file {
     border-top: 1px solid var(--border);
     padding-top: 12px;
     margin-top: 12px;
+  }
+  .ms-file:first-child {
+    border-top: none;
+    margin-top: 0;
+    padding-top: 0;
   }
   .ms-file-head {
     display: flex;
@@ -220,7 +175,7 @@
   }
   .ms-file-name {
     font-size: var(--fs-xs);
-    color: var(--text-muted);
+    color: var(--muted);
   }
   .ms-file-actions {
     display: flex;
@@ -230,13 +185,6 @@
   .ms-saved {
     font-size: var(--fs-xs);
     color: var(--primary-text);
-    font-weight: 600;
-  }
-  .ms-link {
-    border: none;
-    background: transparent;
-    color: var(--info);
-    font-size: var(--fs-xs);
     font-weight: 600;
   }
   .ms-field {
@@ -254,69 +202,33 @@
   }
   .ms-input {
     flex: 0 0 200px;
-    padding: 7px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--bg);
+    min-height: 32px;
+    padding: 6px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-sm);
+    background: var(--sunken);
     color: var(--text);
     font-family: inherit;
     font-size: var(--fs-sm);
-  }
-  .switch {
-    flex: 0 0 auto;
-    width: 40px;
-    height: 23px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    position: relative;
-  }
-  .switch .knob {
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 17px;
-    height: 17px;
-    border-radius: 50%;
-    background: var(--text-muted);
-    transition: transform 0.15s ease, background 0.15s ease;
-  }
-  .switch.on {
-    background: color-mix(in srgb, var(--primary) 30%, transparent);
-    border-color: var(--primary);
-  }
-  .switch.on .knob {
-    transform: translateX(17px);
-    background: var(--primary);
   }
   .ms-raw {
     width: 100%;
     min-height: 220px;
     resize: vertical;
-    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     padding: 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-sm);
+    background: var(--sunken);
     color: var(--text);
   }
-  .ms-save {
+  .ms-file :global(.ms-save) {
     margin-top: 10px;
-    border: 1px solid var(--primary);
-    background: var(--primary);
-    color: var(--on-primary);
-    padding: 8px 16px;
-    border-radius: var(--radius-sm);
-    font-weight: 600;
-    font-size: var(--fs-sm);
-  }
-  .ms-save:disabled {
-    opacity: 0.5;
-    cursor: default;
   }
   .ms-empty {
-    color: var(--text-muted);
+    margin: 0;
+    color: var(--muted);
     padding: 16px 0;
     font-size: var(--fs-sm);
   }
@@ -325,15 +237,16 @@
     font-size: var(--fs-xs);
   }
   .ms-error {
+    margin: 0;
     color: var(--danger);
     padding: 8px 0;
     font-size: var(--fs-sm);
   }
   .ms-foot {
-    margin-top: 16px;
+    margin: 16px 0 0;
     padding-top: 10px;
     border-top: 1px solid var(--border);
     font-size: var(--fs-xs);
-    color: var(--text-muted);
+    color: var(--muted);
   }
 </style>

@@ -337,7 +337,7 @@
   </div>
 
   {#if error}
-    <p class="err" role="alert">{error}</p>
+    <p class="err" role="status">{error}</p>
     {#if changed}<Button size="sm" onclick={previewAgain}>Preview again</Button>{/if}
   {/if}
 
@@ -364,9 +364,9 @@
                 <span class="mn">{label(m.techName)}</span>
                 <span class="rt">{m.version ?? ""}</span>
                 {#if libraryTechs.has(m.techName)}
-                  <Button size="sm" onclick={() => onTurnOn(m.techName)}>Turn on</Button>
+                  <Button size="sm" aria-label="Turn on: {label(m.techName)}" onclick={() => onTurnOn(m.techName)}>Turn on</Button>
                 {:else}
-                  <Button size="sm" variant="ghost" onclick={() => onFindInBrowse(m.techName)}>Find in Browse</Button>
+                  <Button size="sm" variant="ghost" aria-label="Find in Browse: {label(m.techName)}" onclick={() => onFindInBrowse(m.techName)}>Find in Browse</Button>
                 {/if}
               </div>
             {/each}
@@ -377,7 +377,7 @@
               <div class="mod">
                 <span class="mn">{label(m.techName)}</span>
                 <span class="rt">{m.got && m.expected && m.got !== m.expected ? `yours ${m.got}, server ${m.expected}` : "a different file"}</span>
-                <Button size="sm" variant="ghost" onclick={() => onFindInBrowse(m.techName)}>Find in Browse</Button>
+                <Button size="sm" variant="ghost" aria-label="Find in Browse: {label(m.techName)}" onclick={() => onFindInBrowse(m.techName)}>Find in Browse</Button>
               </div>
             {/each}
           {/if}
@@ -387,7 +387,7 @@
               <div class="mod">
                 <span class="mn">{label(t)}</span>
                 <span class="rt"></span>
-                <Button size="sm" onclick={() => onPark(t)}>Park</Button>
+                <Button size="sm" aria-label="Park: {label(t)}" onclick={() => onPark(t)}>Park</Button>
               </div>
             {/each}
           {/if}
@@ -414,7 +414,7 @@
                 {:else}{m.version || ""}{m.source ? ` · ${m.source === "modhub" ? "ModHub" : m.source === "github" ? "GitHub" : m.source}` : ""}{/if}
               </span>
               {#if kind === "missing"}
-                <Button size="sm" variant="ghost" onclick={() => onFindInBrowse(m.techName)}>Find in Browse</Button>
+                <Button size="sm" variant="ghost" aria-label="Find in Browse: {label(m.techName)}" onclick={() => onFindInBrowse(m.techName)}>Find in Browse</Button>
               {/if}
             </div>
           {/each}

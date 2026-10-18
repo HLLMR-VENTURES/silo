@@ -11,7 +11,8 @@
     checked?: boolean;
     /** Visible text beside the switch (also its accessible name). */
     label?: string;
-    /** Accessible name when there is no visible label. */
+    /** Accessible name when there is no visible label, or a fuller one that starts with it
+     *  ("Active: Courseplay" beside a visible "Active"). */
     ariaLabel?: string;
     disabled?: boolean;
     onchange?: (checked: boolean) => void;
@@ -46,7 +47,7 @@
   type="button"
   role="switch"
   aria-checked={checked}
-  aria-label={label ? undefined : ariaLabel}
+  aria-label={ariaLabel}
   class="switch {className}"
   {disabled}
   onclick={toggle}

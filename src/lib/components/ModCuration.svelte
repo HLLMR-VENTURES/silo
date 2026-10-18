@@ -136,6 +136,7 @@
     color: var(--info);
     font-size: var(--fs-xs);
     font-weight: 600;
+    min-height: 24px;
     padding: 4px 4px 4px 10px;
   }
   .d-tag-x {
@@ -143,11 +144,9 @@
     background: transparent;
     color: var(--info);
     font-size: var(--fs-xs);
+    min-width: 24px;
+    min-height: 24px;
     padding: 4px 8px 4px 4px;
-    opacity: 0.7;
-  }
-  .d-tag-x:hover {
-    opacity: 1;
   }
   .d-tag-input {
     border: 1px dashed var(--border);

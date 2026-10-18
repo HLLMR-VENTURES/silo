@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Accessibility and performance checks in CI.** Every UI building block, the main pages and
+  Silo's dialogs are checked with axe on each build; a contrast check fails the build if a
+  colour change drops any text, control edge or focus ring below WCAG AA in either theme; a
+  2,500-mod test keeps Library search and sorting fast. (#258)
+
 - **First run.** A new library opens a short setup: Silo shows the mods folder it found (and
   sorts out a missing, unavailable or different folder right there), explains active and parked
   mods and where parked mods live, then shows exactly what organizing would do before anything
@@ -116,6 +121,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running. (#226)
 
 ### Changed
+
+- **Keyboard and screen readers.** The settings editors (game.xml, savegame settings, a mod's
+  settings) and Browse's full description are proper dialogs now: focus moves in, stays in, Esc
+  closes and focus goes back; every field is announced by its label. **Change category…** is a
+  real menu with arrow keys and type-ahead. A rescan is announced once when it starts and once
+  when it ends. (#258)
+
+- **Colours.** Input borders, info text and warning text are a touch darker so they meet
+  contrast on every surface, including for colour-blind users (protanopia and deuteranopia
+  checked). (#258)
 
 - **The Organize dialog.** Review (in the Library's status strip) and Settings → Library →
   Organize open a standard dialog: a summary first, the files grouped by category behind **See
@@ -300,6 +315,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (nanoid, postcss and source-map-js updated). Nothing in the shipped app changes. (#234)
 
 ### Fixed
+- **Faster sorting.** Sorting the Library by version, and grouping a large Updates check, no
+  longer slow down on big libraries (version sort on 2,500 mods went from about 60 ms to 3 ms).
+  (#258)
+
 - A link that isn't a Silo set link now just says so, without "Something went wrong" in front. (#256)
 - Checking for updates works again on libraries with more than 500 mods; Silo now asks its catalog in batches. When the catalog refuses a check, Silo says so instead of claiming it's offline, and keeps the last good "Last checked" time. (#252)
 

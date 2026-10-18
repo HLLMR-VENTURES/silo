@@ -28,7 +28,7 @@
 </script>
 
 <div class="actions">
-  <Switch checked={active} controlled label="Active" onchange={onToggleActive} />
+  <Switch checked={active} controlled label="Active" ariaLabel="Active: {title}" onchange={onToggleActive} />
   <span class="state">{active ? "The game loads it" : "Parked, kept in your library"}</span>
   <span class="spacer"></span>
   {#if hasSettings}

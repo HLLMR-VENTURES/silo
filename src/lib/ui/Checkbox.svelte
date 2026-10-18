@@ -26,7 +26,7 @@
   }: Props = $props();
 </script>
 
-<label class="checkbox {className}" class:disabled>
+<label class="checkbox {className}" class:disabled class:bare={!children && !label}>
   <input {...rest} type="checkbox" bind:checked bind:indeterminate {disabled} />
   {#if children}
     <span class="label">{@render children()}</span>
@@ -43,6 +43,11 @@
     min-height: 1.75rem;
     color: var(--text);
     cursor: pointer;
+  }
+  /* A label-less checkbox (a row's select box) still gets a 24 px target (WCAG 2.5.8). */
+  .bare {
+    min-width: 1.5rem;
+    justify-content: center;
   }
   input {
     width: 1rem;

@@ -1,6 +1,7 @@
 <script lang="ts">
   // Details: the facts from the mod's files, as label / value pairs. Mod ID (the techName) has a
   // copy button; dependencies say whether each is in the library.
+  import Icon from "../../ui/Icon.svelte";
   import IconButton from "../../ui/IconButton.svelte";
   import { toast } from "../../ui/toasts.svelte";
   import { copyText } from "../../api";
@@ -78,9 +79,9 @@
         <li>
           <code class="mono">{dep}</code>
           {#if libraryTechNames.has(dep)}
-            <span class="ok">In your library</span>
+            <span class="ok"><Icon name="ok" size={12} /> In your library</span>
           {:else}
-            <span class="missing">Missing</span>
+            <span class="missing"><Icon name="problem" size={12} /> Missing</span>
           {/if}
         </li>
       {/each}

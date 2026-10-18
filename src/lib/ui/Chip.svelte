@@ -59,8 +59,9 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 1.25rem;
-    height: 1.25rem;
+    /* 24 px target (WCAG 2.5.8). */
+    width: 1.5rem;
+    height: 1.5rem;
     padding: 0;
     border: 0;
     border-radius: var(--r-pill);

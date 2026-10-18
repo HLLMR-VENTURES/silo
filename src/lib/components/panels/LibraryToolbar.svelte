@@ -146,6 +146,7 @@
       icon="menu"
       aria-haspopup="dialog"
       aria-expanded={filtersOpen}
+      aria-controls={filtersOpen ? "library-filters" : undefined}
       onclick={toggleFilters}
     >
       Filters{inPopover ? ` (${inPopover})` : ""}
@@ -185,6 +186,7 @@
   anchor={trigger}
   placement="bottom-start"
   role="dialog"
+  id="library-filters"
   aria-label="Filters"
 >
   <div class="panel">
@@ -302,8 +304,8 @@
     border: none;
     background: transparent;
     color: var(--text-muted);
-    width: 26px;
-    height: 22px;
+    width: 28px;
+    height: 24px;
     border-radius: 5px;
     display: inline-grid;
     place-items: center;

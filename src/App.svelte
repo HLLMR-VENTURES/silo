@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { get } from "svelte/store";
   import {
     DialogHost,
@@ -165,6 +165,8 @@
   import ModListRow, { ROW_HEIGHTS, type Density } from "./lib/components/library/ModListRow.svelte";
   import ModCard, { CARD_HEIGHT } from "./lib/components/library/ModCard.svelte";
   import { rowBadges } from "./lib/components/library/rowBadges";
+  import { searchMods, sortMods, type SortKey } from "./lib/components/library/libraryList";
+  import { markStart, measureFrom, timed } from "./lib/perf";
   import type { MenuTarget, SelectIntent } from "./lib/components/library/roving";
   import {
     loadLibraryDensity,
@@ -221,7 +223,6 @@
   import DiagnosticsSettings from "./lib/components/settings/DiagnosticsSettings.svelte";
   import MaintenanceSettings from "./lib/components/settings/MaintenanceSettings.svelte";
   import AboutSettings from "./lib/components/settings/AboutSettings.svelte";
-  import CategoryMenu from "./lib/components/panels/CategoryMenu.svelte";
   import LibraryToolbar from "./lib/components/panels/LibraryToolbar.svelte";
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
   import Onboarding from "./lib/firstRun/Onboarding.svelte";
@@ -329,7 +330,10 @@
   // search are libCat/libSub and `query`.
   let libFilters = $state<LibraryFilters>({ ...NO_FILTERS, status: loadLibraryState().status });
   $effect(() => saveLibraryState({ status: libFilters.status }));
-  let editing = $state<{ techName: string; x: number; y: number } | null>(null);
+  // "Change category…": a menu at the row's ⋯ button (or where the row menu opened), so Esc and a
+  // choice hand focus back to that row.
+  let editing = $state<{ techName: string; x: number; y: number; anchor: HTMLElement | null } | null>(null);
+  let editingOpen = $state(false);
   let activeSet = $state<Set<string>>(new Set());
   // Library writes hold the "library-write" op class, one at a time: a second is refused with the
   // reason. `writeLock` counts every holder (the archive move too) and turns off the controls
@@ -1378,7 +1382,8 @@
 
   function openEditor(techName: string, ev: MouseEvent) {
     ev.stopPropagation();
-    editing = { techName, x: ev.clientX, y: ev.clientY };
+    editing = { techName, x: ev.clientX, y: ev.clientY, anchor: null };
+    editingOpen = true;
   }
 
   // ── Library row menu: the ⋯ button, right-click and Shift+F10 open the same items ──
@@ -1450,7 +1455,8 @@
           const r = at.anchor?.getBoundingClientRect();
           const x = at.point?.x ?? r?.left ?? 0;
           const y = at.point?.y ?? r?.bottom ?? 0;
-          editing = { techName: mod.techName, x, y };
+          editing = { techName: mod.techName, x, y, anchor: at.anchor?.isConnected ? at.anchor : null };
+          editingOpen = true;
           return;
         }
         case "settings":
@@ -1465,6 +1471,23 @@
     return { items, run };
   }
   const rowMenuSpec = $derived(rowMenu ? rowMenuFor(rowMenu.mod, rowMenu.at) : null);
+  // Forget the category menu once it has closed (Esc, outside click, or a choice).
+  $effect(() => {
+    if (!editingOpen) untrack(() => (editing = null));
+  });
+  const CATEGORY_RESET = "silo:reset-category"; // not a category name
+  /** The category menu's items: every category (the current one checked), then Reset to auto. */
+  function categoryMenuItems(techName: string): MenuItem[] {
+    const now = effectiveMods.find((m) => m.techName === techName)?.category;
+    return [
+      ...CATEGORIES.map((c) => ({ id: c, label: c, icon: c === now ? ("check" as const) : undefined })),
+      { id: CATEGORY_RESET, label: "Reset to auto", icon: "undo" as const, separatorBefore: true },
+    ];
+  }
+  function modTitle(techName: string): string {
+    const m = mods.find((x) => x.techName === techName);
+    return m?.title ?? techName;
+  }
 
   async function setCategory(
     techName: string,
@@ -1865,24 +1888,18 @@
     libFilters = { ...NO_FILTERS };
     if (alsoSearch) query = "";
   }
-  const filtered = $derived.by(() => {
-    let list = effectiveMods;
-    if (libCat) {
-      list = list.filter(
-        (m) => m.category === libCat && (!libSub || m.subcategory === libSub),
-      );
-    }
-    list = filterMods(list, libFilters, filterCtx);
-    if (q !== "") {
-      list = list.filter(
-        (m) =>
-          (m.title ?? "").toLowerCase().includes(q) ||
-          m.techName.toLowerCase().includes(q) ||
-          (m.author ?? "").toLowerCase().includes(q),
-      );
-    }
-    return list;
-  });
+  const filtered = $derived.by(() =>
+    timed("silo:library-filter", () => {
+      let list: readonly ModEntry[] = effectiveMods;
+      if (libCat) {
+        list = list.filter(
+          (m) => m.category === libCat && (!libSub || m.subcategory === libSub),
+        );
+      }
+      list = filterMods(list, libFilters, filterCtx);
+      return searchMods(list, q);
+    }),
+  );
   /** How many mods "Needs attention" would show (hidden ones aside), for its chip. */
   const attentionCount = $derived(
     effectiveMods.reduce((n, m) => {
@@ -1898,7 +1915,6 @@
     }, 0),
   );
 
-  type SortKey = "name" | "category" | "size" | "added" | "version" | "rating";
   let sortBy = $state<SortKey>("added");
   let sortDir = $state<"asc" | "desc">("desc");
   // Library view: the list (default, for every library size) or cards; remembered per machine.
@@ -1964,38 +1980,8 @@
   }
 
   const visible = $derived.by(() => {
-    const arr = [...filtered];
-    const mul = sortDir === "desc" ? -1 : 1;
-    const name = (m: ModEntry) => (m.title ?? m.techName).toLowerCase();
-    arr.sort((a, b) => {
-      let r = 0;
-      switch (sortBy) {
-        case "name":
-          r = name(a).localeCompare(name(b));
-          break;
-        case "size":
-          r = a.size - b.size;
-          break;
-        case "added":
-          r = a.mtimeMs - b.mtimeMs;
-          break;
-        case "version":
-          r = (a.version ?? "").localeCompare(b.version ?? "", undefined, { numeric: true });
-          break;
-        case "rating":
-          // My own star rating (0 = unrated sorts last on desc, which is the default use).
-          r = cur(a.techName).rating - cur(b.techName).rating;
-          break;
-        case "category":
-          r =
-            a.category.localeCompare(b.category) ||
-            (a.subcategory ?? "").localeCompare(b.subcategory ?? "") ||
-            name(a).localeCompare(name(b));
-          break;
-      }
-      return r * mul || name(a).localeCompare(name(b));
-    });
-    return arr;
+    const list = filtered; // read first, so a keystroke's filtering isn't counted as sorting
+    return timed("silo:library-sort", () => sortMods(list, sortBy, sortDir, (t) => cur(t).rating));
   });
 
   const visibleKeys = $derived(visible.map(modKey));
@@ -2223,6 +2209,50 @@
   const pct = $derived(
     progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0,
   );
+
+  // A scan, from outside runScan: one screen-reader line when a scan the user asked for starts
+  // and one when it ends (not every tick, and not the quiet rescans after every write), and the
+  // §5.5 timing from its start to the Library painted with the result (DevTools → Performance →
+  // Timings, "silo:scan-to-render").
+  let scanSaid = $state("");
+  /** Set by the rescans the user starts (F5, Rescan, Try again, the first scan); read once. */
+  let announceNextScan = false;
+  let scanAnnounced = false;
+  let scanTimed = false;
+  let scanSeq = 0;
+  /** runScan, announced to screen readers. */
+  function rescanAnnounced(auto = true) {
+    announceNextScan = true;
+    return runScan(auto);
+  }
+  $effect(() => {
+    if (scanning) {
+      scanTimed = true;
+      scanSeq++;
+      markStart("silo:scan-to-render");
+      scanAnnounced = announceNextScan;
+      announceNextScan = false;
+      if (scanAnnounced) scanSaid = "Scanning your mods…";
+    } else if (scanTimed) {
+      scanTimed = false;
+      if (scanAnnounced) {
+        const n = untrack(() => mods.length);
+        scanSaid = untrack(() => scanFailed)
+          ? "The scan didn't finish."
+          : `Scan finished: ${n.toLocaleString()} mod${n === 1 ? "" : "s"}.`;
+      }
+      // After the DOM update, then after the frame that paints it; skipped if a newer scan has
+      // started meanwhile (its start mark isn't this scan's).
+      const seq = scanSeq;
+      void tick().then(() =>
+        requestAnimationFrame(() =>
+          setTimeout(() => {
+            if (seq === scanSeq && !untrack(() => scanning)) measureFrom("silo:scan-to-render");
+          }, 0),
+        ),
+      );
+    }
+  });
 
   /** Why switching folders isn't safe right now, or null. */
   function switchBlockReason(): Promise<string | null> {
@@ -2727,7 +2757,7 @@
           level: "warning",
           title: d.title,
           body: d.body,
-          actions: [{ label: "Try again", run: () => runScan(false), primary: true }],
+          actions: [{ label: "Try again", run: () => rescanAnnounced(false), primary: true }],
           dismissible: true,
         });
     } finally {
@@ -2819,7 +2849,7 @@
       } catch {
         /* non-critical */
       }
-      if (roots.length) runScan();
+      if (roots.length) rescanAnnounced();
       // Checking for mod updates at startup is opt-in (Settings > General, offered once in
       // Updates): it sends mod names to the catalog. It runs after the first scan (see
       // startupCheckPending) and only checks; nothing is installed.
@@ -3116,7 +3146,7 @@
     { id: "rebuild", label: "Re-read every mod", disabled: !!fgLock.reason || scanning },
   ]);
   function libraryMenuSelect(id: string) {
-    if (id === "rescan") runScan();
+    if (id === "rescan") rescanAnnounced();
     else if (id === "rebuild") rebuildLibrary();
   }
 
@@ -3235,7 +3265,7 @@
   fill={nav.view === "library" || nav.view === "browse"}
   wide={nav.view === "library" || nav.view === "browse"}
   drawer={detailMod && nav.view === "library" ? modDrawer : undefined}
-  drawerLabel="Mod details"
+  drawerLabel={detailMod ? `Mod details: ${detailMod.title ?? detailMod.techName}` : "Mod details"}
 >
   {#snippet header()}
     <AppHeader
@@ -3270,9 +3300,16 @@
 
   {#snippet notices()}
     {#if scanning}
-      <div class="progress">
+      <div
+        class="progress"
+        role="progressbar"
+        aria-label="Scanning mods"
+        aria-valuemin={0}
+        aria-valuemax={progress.total || undefined}
+        aria-valuenow={progress.total ? progress.done : undefined}
+      >
         <div class="bar" style="width: {pct}%"></div>
-        <span class="progress-text tnum">{progress.done} / {progress.total}</span>
+        <span class="progress-text tnum" aria-hidden="true">{progress.done} / {progress.total}</span>
       </div>
     {/if}
     {#if statusOp}
@@ -3362,7 +3399,7 @@
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div class="list-body" bind:this={listBodyEl} onkeydown={onListKeydown}>
             {#if mods.length === 0 && !scanning}
-              <EmptyState icon="library" title="No mods in this folder yet.">
+              <EmptyState icon="library" title="No mods in this folder yet." level={3}>
                 {#snippet actions()}
                   <Button variant="primary" icon="browse" onclick={() => go("browse")}>Browse mods</Button>
                   <Button icon="folder" onclick={openModsFolder}>Open mods folder</Button>
@@ -3370,7 +3407,7 @@
                 {/snippet}
               </EmptyState>
             {:else if filtered.length === 0 && !scanning}
-              <EmptyState icon="search" title="No mods match these filters.">
+              <EmptyState icon="search" title="No mods match these filters." level={3}>
                 {#snippet actions()}
                   <Button onclick={() => clearLibFilters(true)}>Clear filters</Button>
                 {/snippet}
@@ -3793,7 +3830,7 @@
         {scanning}
         scanned={libraryScanned}
         {scanFailed}
-        onRescan={() => runScan(false)}
+        onRescan={() => rescanAnnounced(false)}
         {progress}
         autoFileOn={autoFileNew}
         modCount={mods.length}
@@ -3819,13 +3856,16 @@
   {/if}
 
   {#if editing}
-    <CategoryMenu
-      categories={CATEGORIES}
-      x={editing.x}
-      y={editing.y}
-      onSelect={(c) => setCategory(editing!.techName, c)}
-      onReset={() => resetCategory(editing!.techName)}
-      onClose={() => (editing = null)}
+    {@const ed = editing}
+    <Menu
+      bind:open={editingOpen}
+      anchor={ed.anchor}
+      point={ed.anchor ? null : { x: ed.x, y: ed.y }}
+      placement="bottom-end"
+      items={categoryMenuItems(ed.techName)}
+      label="Category for {modTitle(ed.techName)}"
+      onselect={(id) =>
+        id === CATEGORY_RESET ? resetCategory(ed.techName) : setCategory(ed.techName, id)}
     />
   {/if}
 
@@ -3847,6 +3887,8 @@
 <ShortcutsDialog bind:open={shortcutsOpen} />
 <WhatsNew bind:open={whatsNewOpen} onclose={closeWhatsNew} onshowshortcuts={() => (shortcutsOpen = true)} />
 <ToastRegion />
+<!-- Scan start / finish for screen readers; outside the shell so F6 doesn't treat it as a notice. -->
+<p class="sr-only" role="status">{scanSaid}</p>
 
 <style>
   .busy {

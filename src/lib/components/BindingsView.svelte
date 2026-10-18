@@ -64,7 +64,7 @@
 <div class="bv">
   <div class="bv-head">
     <div>
-      <h2>Control bindings</h2>
+      <h3>Control bindings</h3>
       {#if report}
         <p class="sub">
           {report.totalActions.toLocaleString()} actions · {report.totalBindings.toLocaleString()} bindings
@@ -88,6 +88,7 @@
     <input
       class="search"
       type="search"
+      aria-label="Search actions or keys"
       placeholder="Search actions or keys…"
       bind:value={query}
     />
@@ -147,7 +148,7 @@
     gap: 12px;
     margin-bottom: 12px;
   }
-  .bv-head h2 {
+  .bv-head h3 {
     margin: 0;
     font-family: var(--font-display);
     font-size: 1.35rem;

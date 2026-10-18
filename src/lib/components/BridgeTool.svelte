@@ -102,7 +102,7 @@
 <div class="br">
   <div class="br-head">
     <div>
-      <h2>Filltype compatibility bridge</h2>
+      <h3>Filltype compatibility bridge</h3>
       <p class="sub">
         Got a map filltype nothing can haul, store, or sell? Silo builds a small companion
         mod that adds it to the categories your equipment accepts, with no edits to other mods.
@@ -138,8 +138,8 @@
     {/if}
   </div>
 
-  <div class="field">
-    <span class="lbl">Add to</span>
+  <div class="field" role="group" aria-labelledby="bridge-add-to">
+    <span class="lbl" id="bridge-add-to">Add to</span>
     {#each CATEGORY_GROUPS as g (g.label)}
       <div class="grp">
         <div class="grp-label">{g.label}</div>
@@ -184,7 +184,7 @@
     gap: 12px;
     margin-bottom: 8px;
   }
-  .br-head h2 {
+  .br-head h3 {
     margin: 0;
     font-family: var(--font-display);
     font-size: 1.35rem;
@@ -198,7 +198,12 @@
     max-width: 56ch;
   }
   .x {
+    display: inline-grid;
+    place-items: center;
+    min-width: 28px;
+    min-height: 28px;
     border: none;
+    border-radius: var(--r-sm);
     background: transparent;
     color: var(--text-muted);
     cursor: pointer;

@@ -157,11 +157,11 @@ describe("Open a shared set", () => {
     await fireEvent.click(screen.getByRole("button", { name: "Check my mods" }));
     expect(await screen.findByText(/Your mods don't match yet/)).toBeInTheDocument();
     expect(mpVerifyPath).toHaveBeenCalledWith("/home/me/server.silomp", expect.any(Array));
-    await fireEvent.click(screen.getByRole("button", { name: "Turn on" }));
+    await fireEvent.click(screen.getByRole("button", { name: /^Turn on: / }));
     expect(p.onTurnOn).toHaveBeenCalledWith("Dev");
-    await fireEvent.click(screen.getByRole("button", { name: "Find in Browse" }));
+    await fireEvent.click(screen.getByRole("button", { name: /^Find in Browse: / }));
     expect(p.onFindInBrowse).toHaveBeenCalledWith("Q");
-    await fireEvent.click(screen.getByRole("button", { name: "Park" }));
+    await fireEvent.click(screen.getByRole("button", { name: /^Park: / }));
     expect(p.onPark).toHaveBeenCalledWith("B");
     expect(screen.getByRole("button", { name: "Check again" })).toBeInTheDocument();
   });
@@ -398,7 +398,7 @@ describe("Savegames", () => {
     expect(screen.getByText("Last played Aug 2, 2026")).toBeInTheDocument();
     expect(screen.getByText(/1 of 2 mods in your library\. 1 missing/)).toBeInTheDocument();
     await fireEvent.click(screen.getByRole("button", { name: "Show missing mods" }));
-    await fireEvent.click(screen.getByRole("button", { name: "Find in Browse" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Find in Browse: Quarry" }));
     expect(onFindInBrowse).toHaveBeenCalledWith("Q", "Quarry");
     await fireEvent.click(screen.getByRole("button", { name: "Use this save's mods" }));
     expect(onUse).toHaveBeenCalledWith(s);
