@@ -63,7 +63,7 @@
 
 <div class="prov">
   <div class="prov-head">
-    <span class="prov-title">Integrity</span>
+    <h3 class="prov-title">Integrity</h3>
     {#if canVerify && phase === "idle"}
       <button class="prov-btn" onclick={run}>Verify integrity</button>
     {:else if phase === "running"}
@@ -136,8 +136,7 @@
 <style>
   .prov {
     border-top: 1px solid var(--border);
-    padding-top: 12px;
-    margin-top: 4px;
+    padding: 12px 0;
   }
   .prov-head {
     display: flex;
@@ -147,6 +146,8 @@
     margin-bottom: 6px;
   }
   .prov-title {
+    margin: 0;
+    font-weight: 700;
     font-size: var(--fs-xs);
     text-transform: uppercase;
     letter-spacing: 0.05em;

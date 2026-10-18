@@ -90,11 +90,12 @@
 </script>
 
 <div class="d-section">
-  <div class="d-label">Where it came from</div>
+  <h4 class="d-label">Where you got it</h4>
   {#if showInput}
     <div class="src-link">
       <input
         class="src-input"
+        aria-label="The page you downloaded this mod from"
         placeholder="Paste the page you downloaded this mod from"
         bind:value={draft}
         onkeydown={(e) => e.key === "Enter" && draft.trim() && save()}
@@ -110,7 +111,7 @@
       <button class="src-host" title={source.url} onclick={() => openExternal(source.url)}>
         {sourceHost(source.url)}
       </button>
-      <button class="src-open" onclick={() => openExternal(source.url)}>Open page <Icon name="external" size={12} /></button>
+      <button class="src-open" onclick={() => openExternal(source.url)}>Open page <Icon name="external" size={12} /><span class="vh"> (opens in your browser)</span></button>
       <button class="src-btn" onclick={startChange}>Change</button>
       <button class="src-btn" onclick={remove}>Remove</button>
     </div>
@@ -127,16 +128,13 @@
 
 <style>
   .d-section {
-    padding: 12px 0;
-    border-top: 1px solid var(--border);
+    padding: 6px 0;
   }
   .d-label {
+    margin: 0 0 6px;
     font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
-    font-weight: 700;
-    margin-bottom: 8px;
+    font-weight: 600;
+    color: var(--text);
   }
   .src-link {
     display: flex;
@@ -224,5 +222,13 @@
     margin-top: 8px;
     color: var(--danger);
     font-size: var(--fs-xs);
+  }
+  .vh {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 </style>
