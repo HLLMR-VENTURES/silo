@@ -20,7 +20,7 @@
     hasMods,
     updateChecking,
     scanning,
-    busy,
+    lockReason,
     launchBlocked,
     organizeBlocked,
     hasGame,
@@ -55,7 +55,8 @@
     hasMods: boolean;
     updateChecking: boolean;
     scanning: boolean;
-    busy: string | null;
+    /** Why library-changing controls are off (a library write is running), or "". */
+    lockReason: string;
     /** An archive move is copying right now — launching would race it. */
     launchBlocked: boolean;
     /** An archive move is unfinished (running or paused) — writes are refused. */
@@ -119,8 +120,8 @@
       <button
         class="btn"
         onclick={onOrganize}
-        disabled={!!busy || scanning || organizeBlocked}
-        title={organizeBlocked ? "Finish or cancel the archive move first" : undefined}
+        disabled={!!lockReason || scanning || organizeBlocked}
+        title={lockReason || (organizeBlocked ? "Finish or cancel the archive move first" : undefined)}
       >
         Organize {unorganizedCount}
       </button>
@@ -128,14 +129,19 @@
     {#if hasMods}
       <button
         class="btn"
-        title="Check the SiloAPI catalog (and any linked GitHub repos) for updates"
+        title={lockReason || "Check the SiloAPI catalog (and any linked GitHub repos) for updates"}
         onclick={onCheckUpdates}
-        disabled={!!busy || updateChecking}
+        disabled={!!lockReason || updateChecking}
       >
         {#if updateChecking}Checking…{:else}<Icon name="update" size={14} /> Updates{/if}
       </button>
     {/if}
-    <button class="btn" onclick={onRescan} disabled={scanning || !!busy}>
+    <button
+      class="btn"
+      onclick={onRescan}
+      disabled={scanning || !!lockReason}
+      title={lockReason || undefined}
+    >
       {scanning ? "Scanning…" : "Rescan"}
     </button>
     {#if hasGame}
@@ -143,9 +149,9 @@
         class="btn primary launch-btn"
         title={launchBlocked
           ? "An archive move is running — pause it to play"
-          : "Launch Farming Simulator 25 with the current active set"}
+          : lockReason || "Launch Farming Simulator 25 with the current active set"}
         onclick={onLaunch}
-        disabled={!!busy || launchBlocked}
+        disabled={!!lockReason || launchBlocked}
       >
         <Icon name="play" size={14} /> Launch{activeCount ? ` (${activeCount})` : ""}
       </button>
@@ -153,10 +159,10 @@
     <button
       class="btn icon-btn"
       class:on={settingsOpen}
-      title="Settings"
+      title={lockReason || "Settings"}
       aria-label="Settings"
       onclick={onToggleSettings}
-      disabled={!!busy}
+      disabled={!!lockReason}
     >
       <Icon name="settings" size={18} />
     </button>
@@ -165,7 +171,13 @@
   <!-- Second row: the panel toggles, grouped intentionally rather than wrapping ad hoc. -->
   <nav class="topbar-nav" aria-label="Panels">
     {#if hasSavegames}
-      <button class="btn" class:on={savesOpen} onclick={onToggleSaves} disabled={!!busy}>
+      <button
+        class="btn"
+        class:on={savesOpen}
+        onclick={onToggleSaves}
+        disabled={!!lockReason}
+        title={lockReason || undefined}
+      >
         Savegames
       </button>
     {/if}
@@ -174,7 +186,8 @@
       class="btn loadout-btn"
       class:on={loadoutsOpen}
       onclick={onToggleLoadouts}
-      disabled={!!busy}
+      disabled={!!lockReason}
+      title={lockReason || undefined}
     >
       {#if activeLoadoutName !== null}
         <Icon name="dot" size={12} /> {activeLoadoutName}
@@ -186,9 +199,9 @@
     <button
       class="btn"
       class:on={collectionsOpen}
-      title="Collections: share a curated set of mods as a link, or open one someone sent you"
+      title={lockReason || "Collections: share a curated set of mods as a link, or open one someone sent you"}
       onclick={onToggleCollections}
-      disabled={!!busy}
+      disabled={!!lockReason}
     >
       Collections
     </button>
@@ -196,9 +209,9 @@
     <button
       class="btn"
       class:on={mpOpen}
-      title="Multiplayer: share or verify your mod set so friends can join"
+      title={lockReason || "Multiplayer: share or verify your mod set so friends can join"}
       onclick={onToggleMp}
-      disabled={!!busy}
+      disabled={!!lockReason}
     >
       Multiplayer
     </button>

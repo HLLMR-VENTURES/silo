@@ -24,13 +24,14 @@
     onClose: () => void;
   } = $props();
 
-  let busy = $state<string | null>(null);
+  /** The file whose Adopt / Restore is running (its buttons are off meanwhile). */
+  let pendingFile = $state<string | null>(null);
   async function resolve(fileName: string, action: "adopt" | "restore") {
-    busy = fileName;
+    pendingFile = fileName;
     try {
       await onResolveForeign(fileName, action);
     } finally {
-      busy = null;
+      pendingFile = null;
     }
   }
 </script>
@@ -98,7 +99,7 @@
         <div class="hz-actions">
           <button
             class="hz-btn"
-            disabled={busy === f.fileName}
+            disabled={pendingFile === f.fileName}
             title="Adopt the file in your mods folder as the mod's managed version"
             onclick={() => resolve(f.fileName, "adopt")}
           >
@@ -106,7 +107,7 @@
           </button>
           <button
             class="hz-btn"
-            disabled={busy === f.fileName}
+            disabled={pendingFile === f.fileName}
             title="Restore Silo's managed copy over the file in your mods folder"
             onclick={() => resolve(f.fileName, "restore")}
           >

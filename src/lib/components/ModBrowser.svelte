@@ -28,6 +28,7 @@
   import BrowseDrawer from "./BrowseDrawer.svelte";
   import { browseCacheKey, getBrowseView, setBrowseView } from "../browseCache";
   import FilterBar from "./FilterBar.svelte";
+  import { blocked, tryStart } from "../state/ops.svelte";
 
   interface Props {
     /** Tech names already in the local library, to flag "in library". */
@@ -296,21 +297,30 @@
   }
 
   async function install(m: { id: string }, source?: string) {
+    // It adds a mod to the mods folder: a library write, one at a time.
+    const op = tryStart("Installing a mod", { exclusive: "library-write" });
+    if (!op) {
+      error = `${blocked("library-write").reason} Try again when it's done.`;
+      return;
+    }
     installing = m.id;
     error = null;
     installedNote = null;
     progress = { ...progress, [m.id]: { done: 0, total: null } };
+    let filename: string | null = null;
     try {
-      const filename = await installRemoteMod(m.id, source);
+      filename = await installRemoteMod(m.id, source);
       installedNote = `Installed ${filename}`;
-      onInstalled(filename);
     } catch (e) {
       error = String(e);
     } finally {
       installing = null;
       const { [m.id]: _drop, ...rest } = progress;
       progress = rest;
+      op.end();
     }
+    // After the op ends: the rescan it triggers skips while a library write is running.
+    if (filename !== null) onInstalled(filename);
   }
 
   onMount(async () => {

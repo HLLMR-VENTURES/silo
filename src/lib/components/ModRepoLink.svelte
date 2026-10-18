@@ -3,6 +3,7 @@
   import type { ModEntry, UpdateInfo } from "../types";
   import { setModRepo, guessRepo, checkModUpdate, downloadUpdate, openExternal } from "../api";
   import { ask } from "../ui";
+  import { blocked, tryStart } from "../state/ops.svelte";
 
   let {
     mod,
@@ -75,10 +76,17 @@
       }))
     )
       return;
+    // It replaces a mod in the library: a library write, one at a time.
+    const op = tryStart("Installing an update", { exclusive: "library-write" });
+    if (!op) {
+      ghError = `${blocked("library-write").reason} Try again when it's done.`;
+      return;
+    }
     installing = true;
     ghError = null;
     installNote = null;
     const path = mod.path;
+    let installed = false;
     try {
       const out = await downloadUpdate(path, update.release.assetUrl);
       installNote = {
@@ -86,11 +94,15 @@
         backup: out.backup ? `The previous version is kept in ${out.backup}.` : null,
         warning: out.problems.length ? out.problems.join(" ") : null,
       };
-      onInstalled();
+      installed = true;
     } catch (e) {
       ghError = String(e);
+    } finally {
+      op.end();
     }
     installing = false;
+    // After the op ends: the rescan it triggers skips while a library write is running.
+    if (installed) onInstalled();
   }
 
   // What the last install said. Kept across the rescan `onInstalled` triggers (which hands this

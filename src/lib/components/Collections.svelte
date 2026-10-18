@@ -18,6 +18,7 @@
     copyText,
   } from "../api";
   import { ask } from "../ui";
+  import { blocked, tryStart } from "../state/ops.svelte";
   import type { CollectionSummary } from "../api";
   import type {
     MpModRef,
@@ -267,13 +268,23 @@
     // Only apply what was previewed: apply refuses if the collection changed since.
     if (!plan) return;
     const fingerprint = plan.fingerprint;
+    // It downloads mods into the library: a library write, one at a time.
+    const op = tryStart("Adding a collection's mods", { exclusive: "library-write", progress: true });
+    if (!op) {
+      importErr = `${blocked("library-write").reason} Try again when it's done.`;
+      return;
+    }
     applyBusy = true;
     importErr = null;
     applyProgress = null;
-    unlisten = await onCollectionProgress((p) => (applyProgress = p));
+    let applied = false;
     try {
+      unlisten = await onCollectionProgress((p) => {
+        applyProgress = p;
+        op.progress(p.done, p.total, p.current);
+      });
       applyReport = await collectionApply(importUrl.trim(), installed, fingerprint);
-      onImported?.();
+      applied = true;
     } catch (e) {
       importErr = String(e);
     } finally {
@@ -281,7 +292,10 @@
       applyProgress = null;
       unlisten?.();
       unlisten = undefined;
+      op.end();
     }
+    // After the op ends: the rescan it triggers skips while a library write is running.
+    if (applied) onImported?.();
   }
 
   onDestroy(() => unlisten?.());

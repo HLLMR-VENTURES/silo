@@ -7,7 +7,7 @@
     updateResults,
     availableUpdates,
     updateChecking,
-    busy,
+    lockReason,
     checkYourself,
     onInstall,
     onOpenSource,
@@ -17,7 +17,8 @@
     updateResults: UpdateRow[];
     availableUpdates: UpdateRow[];
     updateChecking: boolean;
-    busy: string | null;
+    /** Why Install is off (a library write is running), or "". */
+    lockReason: string;
     /** Mods with a saved source page that the automatic check couldn't answer. */
     checkYourself: CheckYourselfRow[];
     onInstall: (row: UpdateRow) => void;
@@ -53,7 +54,12 @@
           <div class="hz-detail">{r.current} → <b class="up-new">{r.latest}</b></div>
         </div>
         {#if r.assetUrl}
-          <button class="sg-make" onclick={() => onInstall(r)} disabled={!!busy}>Install</button>
+          <button
+            class="sg-make"
+            onclick={() => onInstall(r)}
+            disabled={!!lockReason}
+            title={lockReason || undefined}>Install</button
+          >
         {/if}
       </div>
     </div>

@@ -29,7 +29,7 @@
     organizedCount,
     unorganizedCount,
     cloudSynced,
-    busy,
+    lockReason,
     scanning,
     onSetTheme,
     onSetUiScale,
@@ -62,7 +62,8 @@
     organizedCount: number;
     unorganizedCount: number;
     cloudSynced: boolean;
-    busy: string | null;
+    /** Why library-changing controls are off (a library write is running), or "". */
+    lockReason: string;
     scanning: boolean;
     onSetTheme: (t: "system" | "light" | "dark") => void;
     onSetUiScale: (s: UiScale) => void;
@@ -88,10 +89,14 @@
     onArchiveDefault: () => void;
   } = $props();
 
-  // Folder- and library-changing controls are off while busy, scanning, or mid-move.
-  const locked = $derived(!!busy || scanning || moveUnfinished);
-  /** Why a `locked` control is off, when it's the move. */
-  const lockTitle = $derived(moveUnfinished ? "Finish or cancel the archive move first" : undefined);
+  // Folder- and library-changing controls are off during a library write, a scan, or mid-move.
+  const locked = $derived(!!lockReason || scanning || moveUnfinished);
+  /** Why a `locked` control is off. */
+  const lockTitle = $derived(
+    moveUnfinished
+      ? "Finish or cancel the archive move first"
+      : lockReason || (scanning ? "Wait for the scan to finish." : undefined),
+  );
 
   const others = $derived((modsStatus?.known ?? []).filter((k) => !k.current));
 
@@ -321,7 +326,7 @@
       <button class="set-btn" onclick={onOrganize} disabled={locked} title={lockTitle}>
         Organize {unorganizedCount > 0 ? unorganizedCount : "library"}
       </button>
-      <button class="set-btn" onclick={onRebuild} disabled={!!busy || scanning}>
+      <button class="set-btn" onclick={onRebuild} disabled={!!lockReason || scanning} title={lockReason || undefined}>
         <Icon name="rescan" size={13} /> Rebuild categories
       </button>
     </div>

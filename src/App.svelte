@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import {
     DialogHost,
     ToastRegion,
@@ -115,6 +115,15 @@
   import { appendInfo } from "./lib/info";
   import { copyOrSave } from "./lib/clipboard";
   import { parseUiScale, type UiScale } from "./lib/uiScale";
+  import {
+    blocked,
+    current as currentOp,
+    running,
+    start,
+    tryStart,
+    type OpToken,
+  } from "./lib/state/ops.svelte";
+  import { info, success } from "./lib/state/notify.svelte";
 
   const CATEGORIES = [
     "Maps",
@@ -181,6 +190,8 @@
   // Epoch-ms of the last scan attempt — throttles the auto-rescan-on-focus so alt-tabbing
   // doesn't re-scan on every focus.
   let lastScanAt = 0;
+  /** The running scan's op (progress events report into it). */
+  let scanOp: OpToken | null = null;
   let progress = $state({ done: 0, total: 0 });
   let result = $state<ScanResult | null>(null);
   let query = $state("");
@@ -206,7 +217,26 @@
   let statFilter = $state<"" | "maps" | "scripts" | "unique" | "active">("");
   let editing = $state<{ techName: string; x: number; y: number } | null>(null);
   let activeSet = $state<Set<string>>(new Set());
-  let busy = $state<string | null>(null);
+  // Library writes hold the "library-write" op class, one at a time: a second is refused with the
+  // reason, and the controls that start one are off (titled with that reason) while it's held.
+  const writeLock = $derived(blocked("library-write"));
+  /** Ops whose progress shows elsewhere (the scan bar, the move notice), not in the status line. */
+  const quietOps = new Set<number>();
+  /** The op the status line under the top bar names: the newest library write, else the newest op. */
+  const statusOp = $derived.by(() => {
+    const shown = running.filter((o) => !quietOps.has(o.id));
+    return shown.findLast((o) => o.exclusive) ?? shown.at(-1) ?? null;
+  });
+  /**
+   * Start a library write, or say why it can't start now.
+   * @param label what Silo is doing, fits "Silo is …" ("Filing 3 mods into the library")
+   * @return the op's token (end it before rescanning), or null when another write holds the class
+   */
+  function beginWrite(label: string, progress = false): OpToken | null {
+    const op = tryStart(label, { exclusive: "library-write", progress });
+    if (!op) info(`${blocked("library-write").reason} Try again when it's done.`);
+    return op;
+  }
   // Mods folder is on a cloud-sync filesystem that can't do hardlinks → Silo uses copies.
   let cloudSynced = $state(false);
   let cloudNoticeOpen = $state(false);
@@ -343,7 +373,7 @@
       /* the check failed; the state below still guards */
     }
     return !!(
-      busy ||
+      writeLock.blocked ||
       archiveMove.running ||
       archiveMove.unfinished ||
       bisecting ||
@@ -611,13 +641,16 @@
   }
 
   async function backupSave(s: Savegame) {
-    busy = `Backing up “${s.name}”…`;
+    // Held as a write like before (it copies files): nothing else changes them meanwhile.
+    const op = beginWrite(`Backing up ${s.name}`);
+    if (!op) return;
     try {
       await backupSavegame(s.folder);
     } catch (e) {
       errorMsg = String(e);
+    } finally {
+      op.end();
     }
-    busy = null;
   }
 
   async function loadoutFromSave(s: Savegame) {
@@ -680,9 +713,11 @@
   }
 
   /** Set the active set through the loadout apply path (optimistic set, then project it).
-   *  @return true when it applied without errors (failures go to the error banner) */
-  async function setActiveSetTo(techNames: string[], label: string): Promise<boolean> {
-    busy = label;
+   *  @return true when it applied without errors (failures are reported), null when another
+   *  library write was running so nothing changed */
+  async function setActiveSetTo(techNames: string[], label: string): Promise<boolean | null> {
+    const op = beginWrite(label);
+    if (!op) return null;
     activeSet = new Set(techNames);
     let clean = false;
     try {
@@ -690,8 +725,9 @@
       clean = rep.errors.length === 0;
     } catch (e) {
       errorMsg = String(e);
+    } finally {
+      op.end();
     }
-    busy = null;
     return clean;
   }
 
@@ -715,7 +751,8 @@
     switchUndo?.dismiss();
     switchUndo = null;
     const previous = [...activeSet];
-    const clean = await setActiveSetTo(techNames, `Applying loadout “${name}”…`);
+    const clean = await setActiveSetTo(techNames, `Switching to ${name}`);
+    if (clean === null) return; // refused: another write is running, nothing changed
     const switched = [...techNames];
     switchUndo = toast({
       message: clean ? `Switched to ${name}.` : `Switch to ${name} finished with problems.`,
@@ -728,7 +765,7 @@
             toast({ message: why, tone: "warn" });
             return;
           }
-          await setActiveSetTo(previous, "Switching back…");
+          await setActiveSetTo(previous, "Switching back");
         },
       },
     });
@@ -938,6 +975,18 @@
     if (rep.errors.length) throw rep.errors.slice(0, 3).join("; ");
   }
 
+  /** One bisection round (or its final restore) as a library write. Refused, it rejects with
+   *  the reason, so the flow stops and keeps its snapshot. */
+  async function bisectRound(techNames: string[]) {
+    const op = tryStart("Applying the next test set", { exclusive: "library-write" });
+    if (!op) throw blocked("library-write").reason;
+    try {
+      await bisectApply(techNames);
+    } finally {
+      op.end();
+    }
+  }
+
   // When a bisection ends, a snapshot still on disk means the restore didn't finish (or
   // the panel was closed mid-run): offer the restore banner now rather than next launch.
   // After a clean finish, rescan so the library shows the restored set.
@@ -976,6 +1025,8 @@
       );
       return;
     }
+    const op = beginWrite(turningOff ? "Parking a mod" : "Activating a mod");
+    if (!op) return;
     const next = new Set(activeSet);
     if (next.has(techName)) next.delete(techName);
     else next.add(techName);
@@ -984,6 +1035,8 @@
       await applyActive([...next]);
     } catch (e) {
       errorMsg = String(e);
+    } finally {
+      op.end();
     }
   }
 
@@ -991,14 +1044,16 @@
   // build the user dropped in to update). Adopt = promote it to the managed copy; restore = put
   // Silo's copy back. Shared by the health panel and the mod drawer's "you dropped an update" banner.
   async function resolveForeign(fileName: string, action: "adopt" | "restore") {
-    busy = action === "adopt" ? "Adopting the dropped build…" : "Restoring Silo's copy…";
+    const op = beginWrite(action === "adopt" ? "Adopting the dropped build" : "Restoring Silo's copy");
+    if (!op) return;
     try {
       if (action === "adopt") await adoptForeignFile(fileName);
       else await restoreForeignFile(fileName);
     } catch (e) {
       errorMsg = String(e);
+    } finally {
+      op.end();
     }
-    busy = null;
     await runScan(false);
     foreignFiles = await detectForeignFiles(roots[0]).catch(() => []);
   }
@@ -1022,7 +1077,8 @@
   // loaded state is preserved (used by both the auto-filer and the manual button).
   async function applyLoose(inputs: ModInput[], techNames: string[], keepActive: boolean) {
     if (inputs.length === 0) return;
-    busy = `Filing ${inputs.length} mod${inputs.length > 1 ? "s" : ""} into the library…`;
+    const op = beginWrite(`Filing ${modsCount(inputs.length)} into the library`);
+    if (!op) return;
     let problem: string | null = null;
     try {
       const rep = await applyOrganize(inputs);
@@ -1036,8 +1092,9 @@
       }
     } catch (e) {
       problem = String(e);
+    } finally {
+      op.end();
     }
-    busy = null;
     await runScan(false);
     // runScan clears errorMsg: show what filing said after the scan's own problems.
     if (problem) errorMsg = appendInfo(errorMsg, [problem]);
@@ -1086,6 +1143,8 @@
     if (!organizePreview) return;
     if (organizePreview.adopt) {
       const fileNames = organizePreview.inputs.map((m) => m.fileName);
+      const op = beginWrite(`Filing ${modsCount(fileNames.length)} into the library`);
+      if (!op) return;
       organizePreview = { ...organizePreview, applying: true };
       let problem: string | null = null;
       try {
@@ -1093,6 +1152,8 @@
         if (rep.errors.length) problem = rep.errors.slice(0, 3).join("; ");
       } catch (e) {
         problem = String(e);
+      } finally {
+        op.end();
       }
       organizePreview = null;
       await runScan(false);
@@ -1107,15 +1168,19 @@
   }
 
   async function rebuildLibrary() {
-    busy = "Rebuilding library (re-scanning every mod)…";
+    const op = beginWrite("Clearing the scan cache");
+    if (!op) return;
     errorMsg = null;
     try {
       await clearScanCache();
-      await runScan(false);
     } catch (e) {
       errorMsg = String(e);
+      return;
+    } finally {
+      op.end();
     }
-    busy = null;
+    // The scan names itself in the status line: it re-reads every mod, so it takes a while.
+    await runScan(false, "Rebuilding your library (re-scanning every mod)");
   }
 
   async function restoreVanilla() {
@@ -1127,15 +1192,17 @@
       }))
     )
       return;
-    busy = "Restoring vanilla layout…";
+    const op = beginWrite("Restoring a flat mods folder");
+    if (!op) return;
     try {
       const rep = await flatten();
       if (rep.errors.length) errorMsg = rep.errors.slice(0, 3).join("; ");
       if (rep.notices?.length) infoMsg = rep.notices.join(" ");
     } catch (e) {
       errorMsg = String(e);
+    } finally {
+      op.end();
     }
-    busy = null;
     await runScan();
   }
 
@@ -1345,8 +1412,7 @@
     if (availableUpdates.length > 0) {
       needsUpdateOnly = true;
     } else {
-      busy = "All mods are up to date";
-      setTimeout(() => (busy = null), 1600);
+      success("All mods are up to date");
     }
   }
 
@@ -1408,7 +1474,8 @@
 
   async function installFromRow(row: UpdateRow) {
     if (!row.assetUrl) return;
-    busy = `Installing ${row.title}…`;
+    const op = beginWrite(`Installing ${row.title}`);
+    if (!op) return;
     let warning: string | null = null;
     try {
       const out = await downloadUpdate(row.path, row.assetUrl);
@@ -1421,8 +1488,9 @@
       );
     } catch (e) {
       warning = String(e);
+    } finally {
+      op.end();
     }
-    busy = null;
     await runScan(false);
     // After the rescan, which clears the error banner.
     if (warning) errorMsg = warning;
@@ -1621,21 +1689,23 @@
       )
         return;
     }
+    const op = beginWrite(active ? "Activating mods" : "Deactivating mods");
+    if (!op) return;
     const next = new Set(activeSet);
     for (const m of filtered) {
       if (active) next.add(m.techName);
       else next.delete(m.techName);
     }
     activeSet = next;
-    busy = active ? "Activating…" : "Deactivating…";
     let problem: string | null = null;
     try {
       const rep = await applyActive([...next]);
       if (rep.errors.length) problem = rep.errors.slice(0, 3).join("; ");
     } catch (e) {
       problem = String(e);
+    } finally {
+      op.end();
     }
-    busy = null;
     // Reconcile the optimistic set against what's actually on disk — a partial/failed projection
     // (e.g. a file Silo couldn't prove was its own) leaves the two out of sync otherwise.
     await runScan(false);
@@ -1646,20 +1716,23 @@
   // activate/deactivate O(1) instead of a full-library content hash. Progress-reported so a
   // large one-time pass shows a bar instead of looking frozen.
   async function optimizeLinks() {
+    const op = beginWrite("Optimizing links", true);
+    if (!op) return;
     settingsOpen = false;
     let unlisten: (() => void) | null = null;
     let done = "";
+    /** `done` explains why nothing changed (an info toast), not a result (a success toast). */
+    let explained = false;
     let problem: string | null = null;
     try {
-      unlisten = await onRelinkProgress((d, total) => {
-        busy = `Optimizing links… ${d}/${total}`;
-      });
-      busy = "Optimizing links…";
+      unlisten = await onRelinkProgress((d, total) => op.progress(d, total));
       const rep = await relinkProjections();
       if (rep.crossDriveCopies) {
+        explained = true;
         done =
           "Your library archive is on another drive and Windows can't link across drives without Developer Mode — active mods stay as copies.";
       } else if (rep.hardlinksUnsupported) {
+        explained = true;
         cloudSynced = true;
         done = "Mods folder is cloud-synced — hardlinks aren't available, so there's nothing to optimize";
       } else {
@@ -1676,16 +1749,14 @@
       problem = String(e);
     } finally {
       unlisten?.();
+      op.end();
     }
     await runScan(false); // reconcile + refresh sizes; also clears errorMsg
     if (problem) errorMsg = problem;
-    if (done) {
-      busy = done;
-      // Long enough to read: the cross-drive explanation is a full sentence.
-      setTimeout(() => (busy = null), Math.max(2600, done.length * 50));
-    } else {
-      busy = null;
-    }
+    // Long enough to read: the cross-drive explanation is a full sentence.
+    const duration = Math.max(6000, done.length * 50);
+    if (done && explained) info(done, { duration });
+    else if (done) success(done, { duration });
   }
 
   const stats = $derived.by(() => {
@@ -1712,7 +1783,7 @@
       {
         moveUnfinished: archiveMove.unfinished,
         scanning,
-        busy,
+        busy: writeLock.blocked ? (currentOp()?.label ?? null) : null,
         blocked: !!modsStatus?.layoutProblem,
       },
       async () => !!(await bisectSnapshotGet().catch(() => null)),
@@ -1846,6 +1917,29 @@
     },
   });
 
+  // A running move holds the library-write class, so other writes wait and say why. It ends as
+  // soon as the move stops running (finished or paused), before the move's settle rescans.
+  // The move's own notice shows its progress, so the status line leaves it out.
+  let moveOp: OpToken | null = null;
+  $effect(() => {
+    const isRunning = archiveMove.running;
+    untrack(() => {
+      if (isRunning && !moveOp) {
+        moveOp = start("Moving your library", { exclusive: "library-write", progress: true });
+        quietOps.add(moveOp.id);
+      } else if (!isRunning && moveOp) {
+        moveOp.end();
+        quietOps.delete(moveOp.id);
+        moveOp = null;
+      }
+    });
+  });
+  $effect(() => {
+    const p = archiveMove.progress;
+    if (p && p.total > 0) untrack(() => moveOp?.progress(p.done, p.total));
+  });
+  $effect(() => () => moveOp?.end());
+
   // The startup read gave up: try once more whenever Settings opens.
   $effect(() => {
     if (settingsOpen && archiveMove.loadFailed) void archiveMove.refresh();
@@ -1891,11 +1985,12 @@
     );
     if (!ok) return;
     try {
-      busy = "Pointing Silo at the archive…";
+      const op = beginWrite("Pointing Silo at the archive");
+      if (!op) return;
       try {
         await archiveRepoint(path);
       } finally {
-        busy = null;
+        op.end();
       }
       settingsOpen = false;
       await archiveMove.refresh();
@@ -1919,12 +2014,12 @@
       return;
     }
     try {
-      busy = "Checking the folder…";
+      const check = start("Checking the folder"); // a read: it changes nothing
       let pf: ArchivePreflight;
       try {
         pf = await archiveMovePreflight(path);
       } finally {
-        busy = null;
+        check.end();
       }
       if (pf.problems.length) {
         // Nothing to move and the folder clears every path check: offer to use it as the
@@ -2021,8 +2116,18 @@
     localStorage.setItem("silo.overrideNoticeShown", "1");
   }
 
-  async function runScan(auto = true) {
-    if (scanning) return;
+  /**
+   * Rescan the library. Skipped (not queued) while a library write runs: every write rescans
+   * once it's done. A scan doesn't hold the write class itself, so the controls don't flicker
+   * off on every focus rescan; the ones that must wait for a scan check `scanning`.
+   * @param auto allow auto-filing afterwards
+   * @param label names the scan in the status line (a plain rescan only shows the progress bar)
+   */
+  async function runScan(auto = true, label?: string) {
+    if (scanning || writeLock.blocked) return;
+    const op = start(label ?? "Rescanning your library");
+    if (!label) quietOps.add(op.id);
+    scanOp = op;
     scanning = true;
     errorMsg = null;
     progress = { done: 0, total: 0 };
@@ -2053,6 +2158,9 @@
     } finally {
       scanning = false;
       lastScanAt = Date.now();
+      op.end();
+      quietOps.delete(op.id);
+      scanOp = null;
     }
     // Auto-file any mods still loose in the flat root (e.g. freshly downloaded),
     // keeping them active so filing is transparent to the game.
@@ -2080,7 +2188,10 @@
     };
     window.addEventListener("contextmenu", onCtx);
     (async () => {
-      unlisten = await onScanProgress((p) => (progress = p));
+      unlisten = await onScanProgress((p) => {
+        progress = p;
+        scanOp?.progress(p.done, p.total);
+      });
       moveUnlisten = await archiveMove.listen();
       try {
         const rows = await getCuration();
@@ -2161,14 +2272,14 @@
       }
       // Auto-refresh on window focus: a mod downloaded in a browser lands while Silo is in the
       // background, so pick it up when the user returns instead of waiting for a manual rescan.
-      // Throttled (skip if busy/scanning or scanned <4s ago) so alt-tabbing doesn't thrash; the
+      // Throttled (skip during a library write or scan, or scanned <4s ago) so alt-tabbing doesn't thrash; the
       // scan cache (path+mtime+size) makes an unchanged rescan cheap anyway.
       try {
         focusUnlisten = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
           if (
             focused &&
             !scanning &&
-            !busy &&
+            !writeLock.blocked &&
             !archiveMove.running &&
             !bisecting &&
             roots.length &&
@@ -2213,18 +2324,22 @@
 
   async function restoreBisect() {
     if (!bisectRecovery) return;
-    busy = "Restoring your mod set…";
+    const op = beginWrite("Restoring your mod set");
+    if (!op) return;
+    let restored = false;
     try {
       // Clears even if the report lists errors (applyActive shows them): this banner is the
       // escape hatch, and keeping the snapshot would block every new bisection for good.
       await applyActive(bisectRecovery);
       await bisectSnapshotClear();
       bisectRecovery = null;
-      await runScan(false);
+      restored = true;
     } catch (e) {
       errorMsg = String(e);
+    } finally {
+      op.end();
     }
-    busy = null;
+    if (restored) await runScan(false);
   }
 
   /** Forget an interrupted bisection without restoring it (asked first: it can't be undone). */
@@ -2269,7 +2384,7 @@
     hasMods={mods.length > 0}
     {updateChecking}
     {scanning}
-    {busy}
+    lockReason={writeLock.reason}
     launchBlocked={archiveMove.running}
     organizeBlocked={archiveMove.unfinished}
     hasGame={!!gameInfo}
@@ -2293,11 +2408,11 @@
         A guided diagnosis was interrupted — your active mods may be partially applied.
       </span>
       <div class="recover-actions">
-        <button class="btn primary" onclick={restoreBisect} disabled={!!busy}>
+        <button class="btn primary" onclick={restoreBisect} disabled={writeLock.blocked} title={writeLock.reason || undefined}>
           Restore my mod set
         </button>
-        <button class="btn" onclick={discardBisect} disabled={!!busy}>Discard</button>
-        <button class="btn" onclick={() => (bisectRecovery = null)} disabled={!!busy}>
+        <button class="btn" onclick={discardBisect} disabled={writeLock.blocked} title={writeLock.reason || undefined}>Discard</button>
+        <button class="btn" onclick={() => (bisectRecovery = null)} disabled={writeLock.blocked} title={writeLock.reason || undefined}>
           Later
         </button>
       </div>
@@ -2322,7 +2437,7 @@
   {#if savesOpen}
     <SavegamesPanel
       rows={saveRows}
-      {busy}
+      lockReason={writeLock.reason}
       onConfigure={openSaveConfig}
       onBackup={backupSave}
       onLoadout={loadoutFromSave}
@@ -2351,7 +2466,7 @@
       {organizedCount}
       {unorganizedCount}
       {cloudSynced}
-      {busy}
+      lockReason={writeLock.reason}
       {scanning}
       onSetTheme={setTheme}
       onSetUiScale={setUiScale}
@@ -2463,7 +2578,7 @@
       {updateResults}
       {availableUpdates}
       {updateChecking}
-      {busy}
+      lockReason={writeLock.reason}
       {checkYourself}
       onInstall={installFromRow}
       onOpenSource={(s) => openExternal(s.url)}
@@ -2500,7 +2615,7 @@
         onClose={() => (logOpen = false)}
         activeMods={[...activeSet]}
         activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
-        onApply={bisectApply}
+        onApply={bisectRound}
         onBisecting={(v) => void bisectingChanged(v)}
         recoveryPending={bisectRecovery !== null}
       />
@@ -2569,8 +2684,11 @@
     />
   {/if}
 
-  {#if busy}
-    <div class="busy">{busy}</div>
+  {#if statusOp}
+    <div class="busy" role="status">
+      {statusOp.label}…{#if statusOp.progress && statusOp.progress.total > 0}
+        <span class="tnum">{statusOp.progress.done}/{statusOp.progress.total}</span>{/if}
+    </div>
   {/if}
 
   {#if errorMsg}
@@ -2747,7 +2865,8 @@
         shownCount={filtered.length}
         allActive={allFilteredActive}
         activeInFilter={filteredActiveCount}
-        disabled={!!busy || filtered.length === 0}
+        disabled={writeLock.blocked || filtered.length === 0}
+        disabledReason={writeLock.reason}
         bind:libView
         onSelectAll={setActiveForFiltered}
         onClearTag={() => (selectedTag = null)}

@@ -9,14 +9,15 @@
 
   let {
     rows,
-    busy,
+    lockReason,
     onConfigure,
     onBackup,
     onLoadout,
     onClose,
   }: {
     rows: { s: Savegame; st: SaveStat }[];
-    busy: string | null;
+    /** Why Back up is off (a library write is running), or "". */
+    lockReason: string;
     onConfigure: (s: Savegame) => void;
     onBackup: (s: Savegame) => void;
     onLoadout: (s: Savegame) => void;
@@ -48,9 +49,9 @@
       </button>
       <button
         class="sg-make"
-        title="Back up this savegame (a safe copy — original untouched)"
+        title={lockReason || "Back up this savegame (a safe copy — original untouched)"}
         onclick={() => onBackup(s)}
-        disabled={!!busy}
+        disabled={!!lockReason}
       >
         Back up
       </button>

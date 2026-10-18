@@ -3,6 +3,7 @@
   // into the categories your equipment accepts — the "nothing can haul my sugar beets" fix.
   import Icon from "../ui/Icon.svelte";
   import { generateBridge } from "../api";
+  import { blocked, tryStart } from "../state/ops.svelte";
 
   interface Props {
     onGenerated: (filename: string) => void; // parent rescans
@@ -46,7 +47,8 @@
   let fillTypesRaw = $state("");
   let selected = $state<Set<string>>(new Set(DEFAULT_CATS));
   let name = $state("FS25_SiloFilltypeBridge");
-  let busy = $state(false);
+  /** Generating right now (the button is off meanwhile). */
+  let generating = $state(false);
   let error = $state<string | null>(null);
   let done = $state<string | null>(null);
 
@@ -56,7 +58,7 @@
       .map((s) => s.trim().toUpperCase())
       .filter(Boolean),
   );
-  const canGenerate = $derived(fillTypeList.length > 0 && selected.size > 0 && !busy);
+  const canGenerate = $derived(fillTypeList.length > 0 && selected.size > 0 && !generating);
 
   function toggle(id: string) {
     const next = new Set(selected);
@@ -65,23 +67,32 @@
   }
 
   async function generate() {
-    busy = true;
+    // It writes a mod into the mods folder: a library write, one at a time.
+    const op = tryStart("Generating a bridge mod", { exclusive: "library-write" });
+    if (!op) {
+      error = `${blocked("library-write").reason} Try again when it's done.`;
+      return;
+    }
+    generating = true;
     error = null;
     done = null;
+    let filename: string | null = null;
     try {
-      const filename = await generateBridge({
+      filename = await generateBridge({
         techName: name.trim(),
         title: "Silo Filltype Bridge",
         fillTypes: fillTypeList,
         categories: [...selected],
       });
       done = filename;
-      onGenerated(filename);
     } catch (e) {
       error = String(e);
     } finally {
-      busy = false;
+      generating = false;
+      op.end();
     }
+    // After the op ends: the rescan it triggers skips while a library write is running.
+    if (filename !== null) onGenerated(filename);
   }
 </script>
 
@@ -153,7 +164,7 @@
   <div class="actions">
     <button class="btn" onclick={onClose}>Close</button>
     <button class="btn primary" disabled={!canGenerate} onclick={generate}>
-      {busy ? "Generating…" : "Generate bridge mod"}
+      {generating ? "Generating…" : "Generate bridge mod"}
     </button>
   </div>
 </div>
