@@ -76,7 +76,7 @@
 
   {#if autoCheckOffer.open}
     <section class="offer" aria-labelledby="auto-check-offer">
-      <h2 id="auto-check-offer">Check for mod updates when Silo starts?</h2>
+      <h3 id="auto-check-offer">Check for mod updates when Silo starts?</h3>
       <p>You can change this in Settings.</p>
       <div class="offer-acts">
         <Button variant="primary" onclick={() => answerAutoCheckOffer(true)}>Check on start</Button>
@@ -113,7 +113,7 @@
     border-radius: var(--radius);
     background: var(--surface-raised);
   }
-  .offer h2 {
+  .offer h3 {
     margin: 0;
     font-family: var(--font-display);
     font-size: var(--fs-md);

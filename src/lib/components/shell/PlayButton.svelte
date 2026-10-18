@@ -134,6 +134,7 @@
       class="part main"
       aria-disabled={inert ? "true" : undefined}
       aria-busy={loading ? "true" : undefined}
+      aria-label={loading ? "Play: launching the game" : undefined}
       aria-describedby={showReason ? reasonId : undefined}
       onclick={play}
     >

@@ -3375,7 +3375,7 @@
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div class="list-body" bind:this={listBodyEl} onkeydown={onListKeydown}>
             {#if mods.length === 0 && !scanning}
-              <EmptyState icon="library" title="No mods in this folder yet.">
+              <EmptyState icon="library" title="No mods in this folder yet." level={3}>
                 {#snippet actions()}
                   <Button variant="primary" icon="browse" onclick={() => go("browse")}>Browse mods</Button>
                   <Button icon="folder" onclick={openModsFolder}>Open mods folder</Button>
@@ -3383,7 +3383,7 @@
                 {/snippet}
               </EmptyState>
             {:else if filtered.length === 0 && !scanning}
-              <EmptyState icon="search" title="No mods match these filters.">
+              <EmptyState icon="search" title="No mods match these filters." level={3}>
                 {#snippet actions()}
                   <Button onclick={() => clearLibFilters(true)}>Clear filters</Button>
                 {/snippet}

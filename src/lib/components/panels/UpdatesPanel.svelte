@@ -95,16 +95,16 @@
 </script>
 
 {#snippet sectionHead(id: string, title: string, count: number)}
-  <h2 class="sec-title" {id}>{title} <span class="count tnum">({n(count)})</span></h2>
+  <h3 class="sec-title" {id}>{title} <span class="count tnum">({n(count)})</span></h3>
 {/snippet}
 
 {#snippet foldHead(id: string, title: string, count: number, open: boolean, toggle: () => void)}
-  <h2 class="sec-title">
+  <h3 class="sec-title">
     <button type="button" class="fold-btn" aria-expanded={open} aria-controls={`${id}-body`} onclick={toggle}>
       <Icon name={open ? "chevronDown" : "chevronRight"} size={16} />
       {title} <span class="count tnum">({n(count)})</span>
     </button>
-  </h2>
+  </h3>
 {/snippet}
 
 {#snippet copyButton(detail: string, name: string)}
@@ -115,7 +115,7 @@
 
 <div class="updates">
   {#if !checked && !checking}
-    <EmptyState icon="update" title="Check your mods for updates" body={UPDATE_PRIVACY_LINE}>
+    <EmptyState icon="update" title="Check your mods for updates" body={UPDATE_PRIVACY_LINE} level={3}>
       {#snippet actions()}
         <span use:tooltip={checkDisabledReason || null}>
           <Button variant="primary" icon="update" disabled={!!checkDisabledReason} onclick={onCheck}>
@@ -127,8 +127,8 @@
   {:else}
     {#if catalogError && !checking}
       <ErrorState
+        level={3}
         icon="cloud"
-        level={2}
         title={catalogError.offline
           ? "Silo can't reach its catalog right now. Your library still works."
           : "Silo's catalog couldn't answer this check. Your library still works."}
@@ -177,7 +177,7 @@
                 </div>
                 <div class="detail tnum">{versionChange(r)}</div>
                 {#if st?.phase === "error"}
-                  <p class="row-error" role="alert"><Icon name="problem" size={14} /> {st.message}</p>
+                  <p class="row-error" role="status"><Icon name="problem" size={14} /> {st.message}</p>
                 {/if}
               </div>
               <div class="acts">

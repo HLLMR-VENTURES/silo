@@ -137,12 +137,12 @@
       <button class="gha-btn primary" onclick={() => connect()}>Connect GitHub</button>
     </div>
     {#if !status.builtin}
-      <button class="gha-link" onclick={() => (showAdvanced = !showAdvanced)}>
+      <button class="gha-link" aria-expanded={showAdvanced} onclick={() => (showAdvanced = !showAdvanced)}>
         {showAdvanced ? "Hide" : "Change OAuth App…"}
       </button>
       {#if showAdvanced}
         <div class="gha-row">
-          <input class="gha-input" placeholder="OAuth App Client ID" bind:value={clientIdInput} />
+          <input class="gha-input" aria-label="OAuth App Client ID" placeholder="OAuth App Client ID" bind:value={clientIdInput} />
           <button class="gha-btn" onclick={saveClientId}>Save</button>
         </div>
       {/if}
@@ -157,14 +157,14 @@
         </button>
       </div>
       <div class="gha-row">
-        <input class="gha-input" placeholder="OAuth App Client ID (Iv1.…)" bind:value={clientIdInput} />
+        <input class="gha-input" aria-label="OAuth App Client ID" placeholder="OAuth App Client ID (Iv1.…)" bind:value={clientIdInput} />
         <button class="gha-btn" onclick={saveClientId}>Save</button>
       </div>
     </div>
   {/if}
 
   {#if !status.user && !flow}
-    <button class="gha-link" onclick={() => (showPat = !showPat)}>
+    <button class="gha-link" aria-expanded={showPat} onclick={() => (showPat = !showPat)}>
       {showPat ? "Hide token option" : "Use a Personal Access Token instead…"}
     </button>
     {#if showPat}
@@ -182,6 +182,7 @@
         <input
           class="gha-input"
           type="password"
+          aria-label="Personal access token"
           placeholder="github_pat_… or ghp_…"
           bind:value={patInput}
         />

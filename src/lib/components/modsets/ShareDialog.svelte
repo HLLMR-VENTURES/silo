@@ -211,7 +211,7 @@
       </p>
     {/if}
     {#if note}<p class="ok">{note}</p>{/if}
-    {#if error}<p class="err" role="alert">{error}</p>{/if}
+    {#if error}<p class="err" role="status">{error}</p>{/if}
   </div>
 
   {#snippet footer()}

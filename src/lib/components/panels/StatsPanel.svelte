@@ -28,7 +28,7 @@
 
 <div class="conflicts-panel">
   <div class="lp-head">
-    <span>Library statistics</span>
+    <h3 class="lp-title">Library statistics</h3>
     <span class="lp-sub tnum">{fmtSize(libStats.totalSize)}</span>
   </div>
 
@@ -82,6 +82,10 @@
     padding: 6px 8px 10px;
     font-family: var(--font-display);
     font-weight: 600;
+  }
+  .lp-title {
+    margin: 0;
+    font: inherit;
   }
   .lp-sub {
     font-size: var(--fs-xs);

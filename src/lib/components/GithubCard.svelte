@@ -122,6 +122,7 @@
         <button
           class="act"
           class:on={stats.youStarred}
+          aria-pressed={!!stats.youStarred}
           disabled={pending === "star"}
           onclick={toggleStar}
         >
@@ -131,6 +132,7 @@
         <button
           class="act"
           class:on={stats.youWatching}
+          aria-pressed={!!stats.youWatching}
           disabled={pending === "watch"}
           onclick={toggleWatch}
         >
@@ -243,10 +245,11 @@
     cursor: default;
   }
   .mini {
-    border: 1px solid var(--border);
+    border: 1px solid var(--border-strong);
     background: var(--bg);
     color: var(--text);
     border-radius: var(--radius-sm);
+    min-height: 24px;
     padding: 2px 8px;
     font-size: var(--fs-xs);
   }

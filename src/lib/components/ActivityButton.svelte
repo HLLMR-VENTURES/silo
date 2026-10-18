@@ -43,7 +43,8 @@
     onclick={toggle}
   />
   {#if unseen > 0}
-    <span class="dot dot-error" aria-hidden="true"></span>
+    <!-- Not by colour alone: new errors show their count, a running task a hollow ring. -->
+    <span class="dot dot-error tnum" aria-hidden="true">{unseen > 9 ? "9+" : unseen}</span>
   {:else if busy > 0}
     <span class="dot dot-busy" aria-hidden="true"></span>
   {/if}
@@ -69,9 +70,22 @@
     pointer-events: none;
   }
   .dot-busy {
-    background: var(--info);
+    background: var(--surface);
+    border: 2px solid var(--info);
   }
   .dot-error {
+    top: 0;
+    right: 0;
+    display: grid;
+    place-items: center;
+    width: auto;
+    min-width: 1rem;
+    height: 1rem;
+    padding: 0 0.2rem;
     background: var(--danger);
+    color: var(--on-danger);
+    font-size: 0.625rem;
+    font-weight: 700;
+    line-height: 1;
   }
 </style>

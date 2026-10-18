@@ -89,6 +89,7 @@
               <Button size="sm" variant="ghost" onclick={() => copy(entry)}>
                 {copiedId === entry.id ? "Copied" : "Copy details"}
               </Button>
+              <span class="sr-only" role="status">{copiedId === entry.id ? "Details copied" : ""}</span>
             {/if}
           </li>
         {/each}

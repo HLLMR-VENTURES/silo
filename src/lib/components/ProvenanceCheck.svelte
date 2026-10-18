@@ -160,6 +160,7 @@
     font: inherit;
     font-size: var(--fs-xs);
     font-weight: 600;
+    min-height: 24px;
     padding: 4px 11px;
     border-radius: var(--radius-sm);
     cursor: pointer;

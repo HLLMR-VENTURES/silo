@@ -131,7 +131,7 @@
     {#if loading && links.length === 0}
       <p class="muted">Loading your shared links…</p>
     {:else if error}
-      <p class="err" role="alert">{error}</p>
+      <p class="err" role="status">{error}</p>
     {:else if links.length === 0}
       <p class="muted">Nothing shared yet. Use Share on a set to create a link.</p>
     {/if}
@@ -141,9 +141,14 @@
           <span class="name">{c.name}</span>
           <span class="muted">{sharedOn(c)} · {count(c.modCount)}</span>
         </div>
-        <Button size="sm" icon="copy" onclick={() => copy(c)}>Copy link</Button>
-        <Button size="sm" disabled={busyRef === c.reference || zips === 0} onclick={() => update(c)}>Update link</Button>
-        <Button size="sm" variant="ghost" disabled={busyRef === c.reference} onclick={() => stop(c)}
+        <Button size="sm" icon="copy" aria-label="Copy link: {c.name}" onclick={() => copy(c)}>Copy link</Button>
+        <Button size="sm" aria-label="Update link: {c.name}" disabled={busyRef === c.reference || zips === 0} onclick={() => update(c)}>Update link</Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-label="{c.canDelete ? 'Stop sharing' : 'Stop sharing on GitHub'}: {c.name}"
+          disabled={busyRef === c.reference}
+          onclick={() => stop(c)}
           >{c.canDelete ? "Stop sharing" : "Stop sharing on GitHub"}</Button
         >
       </div>

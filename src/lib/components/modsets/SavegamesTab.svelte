@@ -50,6 +50,7 @@
         </p>
         {#if libraryRead}
           <p class="mods" class:warn={st.missing.length > 0}>
+            {#if st.missing.length > 0}<Icon name="problem" size={14} />{/if}
             {saveModsLine(st)}{#if st.missing.length > 0}. {formatCount(st.missing.length)} missing{/if}
           </p>
         {:else}
@@ -84,7 +85,7 @@
             {#each st.missing as m (m.modName)}
               <li>
                 <span class="mn">{m.title ?? m.modName}</span>
-                <Button size="sm" variant="ghost" onclick={() => onFindInBrowse(m.modName, m.title)}>Find in Browse</Button>
+                <Button size="sm" variant="ghost" aria-label="Find in Browse: {m.title ?? m.modName}" onclick={() => onFindInBrowse(m.modName, m.title)}>Find in Browse</Button>
               </li>
             {/each}
           </ul>

@@ -54,6 +54,7 @@
     {#if foreign}
       <div class="banner info" role="group" aria-label="A different build">
         <p class="msg">
+          <Icon name="info" size={14} />
           <b>{foreignIsNewer ? "A newer build is in your mods folder" : "A different build is in your mods folder"}</b>:
           {v(foreign.flatVersion)}. Silo keeps {foreign.managedVersion ? versionLabel(foreign.managedVersion) : "its own copy"}. This is how ModHub updates
           arrive: you download the zip into the folder.

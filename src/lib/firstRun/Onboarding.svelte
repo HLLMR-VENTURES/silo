@@ -251,7 +251,7 @@
     {#each STEPS as label, i (label)}
       <li class:current={step === i + 1} class:done={step > i + 1} aria-current={step === i + 1 ? "step" : undefined}>
         <span class="dot" aria-hidden="true">{#if step > i + 1}<Icon name="check" size={14} />{:else}{i + 1}{/if}</span>
-        <span class="label">{label}</span>
+        <span class="label">{label}</span>{#if step > i + 1}<span class="sr-only"> (done)</span>{/if}
       </li>
     {/each}
   </ol>
