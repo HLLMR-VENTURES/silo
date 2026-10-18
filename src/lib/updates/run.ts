@@ -26,6 +26,8 @@ export interface LinkedRepo {
 export interface ExplainedError {
   message: string;
   detail: string;
+  /** No network or a timeout: the catalog may be fine, Silo just couldn't reach it. */
+  offline?: boolean;
 }
 
 export interface CheckDeps {

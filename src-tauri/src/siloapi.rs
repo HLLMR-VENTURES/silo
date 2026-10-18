@@ -297,8 +297,25 @@ pub fn browse(
     }
 }
 
-/// Batch version lookup by tech name. One request covers the whole library.
+/// SiloAPI's `POST /mods/lookup` accepts at most this many tech names per request.
+pub const LOOKUP_BATCH: usize = 500;
+
+/// Batch version lookup by tech name. Libraries bigger than [`LOOKUP_BATCH`] go out in several
+/// requests (the API refuses larger bodies with 400); the answers are concatenated in order.
 pub fn lookup(base: &str, tech_names: &[String]) -> Result<Vec<LookupResult>, String> {
+    let mut out = Vec::new();
+    for batch in lookup_batches(tech_names) {
+        out.extend(lookup_one(base, batch)?);
+    }
+    Ok(out)
+}
+
+/// Split the names into request-sized batches (none when there are no names).
+fn lookup_batches(tech_names: &[String]) -> std::slice::Chunks<'_, String> {
+    tech_names.chunks(LOOKUP_BATCH)
+}
+
+fn lookup_one(base: &str, tech_names: &[String]) -> Result<Vec<LookupResult>, String> {
     let resp = crate::net::api()
         .post(&format!("{}/mods/lookup", base.trim_end_matches('/')))
         .set("Content-Type", "application/json")
@@ -766,5 +783,25 @@ mod tests {
         assert_eq!(as_u64(&serde_json::json!("215")), 215);
         assert_eq!(as_u64(&serde_json::json!(199)), 199);
         assert_eq!(as_u64(&serde_json::json!(null)), 0);
+    }
+}
+
+#[cfg(test)]
+mod lookup_batch_tests {
+    use super::*;
+
+    fn names(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("FS25_mod{i}")).collect()
+    }
+
+    #[test]
+    fn lookups_are_split_into_api_sized_batches() {
+        assert_eq!(lookup_batches(&names(0)).count(), 0);
+        assert_eq!(lookup_batches(&names(1)).count(), 1);
+        assert_eq!(lookup_batches(&names(LOOKUP_BATCH)).count(), 1);
+        let big = names(739);
+        let sizes: Vec<usize> = lookup_batches(&big).map(|b| b.len()).collect();
+        assert_eq!(sizes, vec![500, 239]);
+        assert!(lookup_batches(&big).all(|b| b.len() <= LOOKUP_BATCH));
     }
 }

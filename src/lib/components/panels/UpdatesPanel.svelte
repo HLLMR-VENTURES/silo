@@ -129,10 +129,14 @@
       <ErrorState
         icon="cloud"
         level={2}
-        title="Silo can't reach its catalog right now. Your library still works."
+        title={catalogError.offline
+          ? "Silo can't reach its catalog right now. Your library still works."
+          : "Silo's catalog couldn't answer this check. Your library still works."}
         body={hasLinkedRepos
           ? "Linked GitHub mods were still checked. Try again in a moment."
-          : "Try again in a moment."}
+          : catalogError.offline
+            ? "Try again in a moment."
+            : "Try again in a moment. If it keeps happening, copy the details into a bug report."}
         details={catalogError.detail}
       >
         {#snippet actions()}

@@ -168,12 +168,21 @@ describe("UpdatesPanel", () => {
   });
 
   it("a catalog that didn't answer says so, with Try again", async () => {
-    const h = setup({}, { catalogError: { message: "Silo can't reach the internet right now.", detail: "Code: NET_OFFLINE" } });
+    const h = setup({}, { catalogError: { message: "Silo can't reach the internet right now.", detail: "Code: NET_OFFLINE", offline: true } });
     expect(screen.getByText(/Silo can't reach its catalog right now/)).toBeInTheDocument();
     // Nothing linked: it doesn't claim GitHub mods were checked.
     expect(screen.queryByText(/Linked GitHub mods/)).toBeNull();
     await h.user.click(screen.getByRole("button", { name: "Try again" }));
     expect(h.onCheck).toHaveBeenCalledOnce();
+  });
+});
+
+describe("UpdatesPanel catalog refusal", () => {
+  it("a catalog that answered with an error doesn't claim Silo is offline", () => {
+    setup({}, { catalogError: { message: "Something went wrong.", detail: "SiloAPI lookup returned 400", offline: false } });
+    expect(screen.getByText(/Silo's catalog couldn't answer this check/)).toBeInTheDocument();
+    expect(screen.queryByText(/can't reach its catalog/)).toBeNull();
+    expect(screen.getByText(/copy the details into a bug report/)).toBeInTheDocument();
   });
 });
 
