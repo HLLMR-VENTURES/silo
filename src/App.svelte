@@ -61,22 +61,16 @@
     hardlinkSupport,
     type ForeignFile,
     confirmDialog,
-    archiveStatus,
     archiveMovePreflight,
     archiveMoveStart,
-    archiveMoveResume,
-    archiveMovePause,
-    archiveMoveCancel,
     archiveUseDefault,
     archiveRepoint,
     archiveAdoptPreview,
     archiveAdoptApply,
-    onMoveProgress,
-    type ArchiveStatus,
     type ArchivePreflight,
-    type MoveProgress,
   } from "./lib/api";
-  import { errorCode } from "./lib/errors";
+  import { ArchiveMove } from "./lib/archiveMove.svelte";
+  import { capList, modsCount, problemLines, unDot } from "./lib/archiveMoveLogic";
   import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { checkUpdate, installUpdate, type AvailableUpdate } from "./lib/updater";
@@ -148,6 +142,8 @@
   import StatBar from "./lib/components/panels/StatBar.svelte";
   import LibraryToolbar from "./lib/components/panels/LibraryToolbar.svelte";
   import OrganizePreview from "./lib/components/OrganizePreview.svelte";
+  import ArchiveMoveBanner from "./lib/components/ArchiveMoveBanner.svelte";
+  import BlockedFolderBanner from "./lib/components/BlockedFolderBanner.svelte";
   import { fmtSize } from "./lib/format";
   import {
     rootsFor,
@@ -168,6 +164,8 @@
   let result = $state<ScanResult | null>(null);
   let query = $state("");
   let errorMsg = $state<string | null>(null);
+  /** A neutral, dismissible notice (not an error). */
+  let infoMsg = $state<string | null>(null);
   // Library category filter, driven by the shared FilterBar's parent/child dropdowns
   // ("" = all). Replaces the old category rail + `selected`.
   let libCat = $state("");
@@ -309,7 +307,14 @@
     } catch {
       /* the check failed; the state below still guards */
     }
-    return !!(busy || moveRunning || moveUnfinished || bisecting || bisectRecovery || writing);
+    return !!(
+      busy ||
+      archiveMove.running ||
+      archiveMove.unfinished ||
+      bisecting ||
+      bisectRecovery ||
+      writing
+    );
   }
 
   async function applyUpdate() {
@@ -800,20 +805,24 @@
   async function applyLoose(inputs: ModInput[], techNames: string[], keepActive: boolean) {
     if (inputs.length === 0) return;
     busy = `Filing ${inputs.length} mod${inputs.length > 1 ? "s" : ""} into the library…`;
+    let problem: string | null = null;
     try {
       const rep = await applyOrganize(inputs);
       if (rep.errors.length) {
-        errorMsg = rep.errors.slice(0, 3).join("; ");
+        problem = rep.errors.slice(0, 3).join("; ");
       } else if (keepActive) {
         const next = new Set([...activeSet, ...techNames]);
         activeSet = next;
-        await applyActive([...next]);
+        const act = await applyActive([...next]);
+        if (act.errors.length) problem = act.errors.slice(0, 3).join("; ");
       }
     } catch (e) {
-      errorMsg = String(e);
+      problem = String(e);
     }
     busy = null;
     await runScan(false);
+    // runScan clears errorMsg: show what filing said after the scan's own problems.
+    if (problem) errorMsg = appendInfo(errorMsg, [problem]);
   }
 
   // Auto-filer (opt-in): file new mods and keep them active — no prompt, they chose it.
@@ -1470,7 +1479,12 @@
   /** Why switching folders isn't safe right now, or null. */
   function switchBlockReason(): Promise<string | null> {
     return switchGate(
-      { moveUnfinished, scanning, busy, blocked: !!modsStatus?.layoutProblem },
+      {
+        moveUnfinished: archiveMove.unfinished,
+        scanning,
+        busy,
+        blocked: !!modsStatus?.layoutProblem,
+      },
       async () => !!(await bisectSnapshotGet().catch(() => null)),
     );
   }
@@ -1479,7 +1493,7 @@
   async function applyModsStatus(st: ModsRootStatus) {
     const prev = roots[0] ?? null;
     modsStatus = st;
-    await refreshArchive(); // the archive belongs to the mods folder
+    await archiveMove.refresh(); // the archive belongs to the mods folder
     roots = rootsFor(st);
     if ((roots[0] ?? null) === prev) return;
     result = null;
@@ -1579,234 +1593,30 @@
   }
 
   // ── Library archive location (#166) ──────────────────────────────────────────
-  // A move can run for hours: its invoke stays pending the whole time, so the UI is driven by
-  // `archive_status` (polled while running) and `archive-move-progress` events, not the return.
-  let archive = $state<ArchiveStatus | null>(null);
-  /** The startup read gave up — Settings says so and retries once when opened. */
-  let archiveLoadFailed = $state(false);
-  let moveProgress = $state<MoveProgress | null>(null);
-  /** Move invokes (start / resume / cancel / use default) this window is still waiting on. */
-  let movesInFlight = $state(0);
-  /** Pause was clicked; the move pauses at the next mod boundary. */
-  let pauseRequested = $state(false);
-  /** Cancel was confirmed; shows "moving back" before the backend reports the turn-around. */
-  let cancelInFlight = $state(false);
-  /** A neutral, dismissible notice (not an error). */
-  let infoMsg = $state<string | null>(null);
-  /** A move is copying right now — Pause applies, Launch is blocked. */
-  const moveRunning = $derived(!!archive?.running || movesInFlight > 0);
-  /** A move is running or paused — library writes are refused until it finishes. */
-  const moveUnfinished = $derived(moveRunning || !!archive?.moving);
-  const moveCancelling = $derived(
-    archive?.moving?.direction === "back" ||
-      cancelInFlight ||
-      (moveRunning && !!moveProgress?.cancelling),
-  );
-  // Lost-cancel detection: Cancel was clicked on a running move, but it may finish first.
-  let cancelRequested = false;
-  /** Where the move started when Cancel was clicked (the archive path during a move). */
-  let cancelHome: string | null = null;
-  let cancelHomeDefault = false;
-  /** The cancel invoke's own error, held until we know whether the cancel was lost. */
-  let cancelProblem: string | null = null;
-  let sawTurnAround = false;
-  let lastProgressCancelling = false;
-  let settlingMove = false;
-  /** A settle was asked for while one ran: the running one loops once more with this. */
-  let resettle: { problem: string | null } | null = null;
-  /** Orders archive_status responses so a stale one can't overwrite newer state. */
-  let archiveSeq = 0;
-
-  const isStillLoading = (e: unknown) => errorCode(e) === "STILL_LOADING";
-  const joinProblems = (...ps: (string | null | undefined)[]) =>
-    ps.filter(Boolean).join(" ") || null;
-  /** Drop a trailing period (and spaces) so joined messages don't end up with "..". */
-  const unDot = (s: string) => s.replace(/[.\s]+$/, "");
-  /** End a message with exactly one period. */
-  const sentence = (s: string) => unDot(s) + ".";
-  /** "1 mod" / "N mods". */
-  const modsCount = (n: number) => (n === 1 ? "1 mod" : `${n} mods`);
-  /** Several problems as separate sentences, one per line. */
-  const problemLines = (ps: string[]) => ps.map(sentence).join("\n");
-  /** "a, b, c +N more" */
-  const capList = (xs: string[], n = 3, sep = ", ") =>
-    xs.slice(0, n).join(sep) + (xs.length > n ? ` +${xs.length - n} more` : "");
-
-  /** Re-read the archive status; keeps the last one on error ("still loading" is expected
-   *  until the layout resolves at startup). False when it failed or a newer read superseded it. */
-  async function refreshArchive(): Promise<boolean> {
-    const seq = ++archiveSeq;
-    try {
-      const st = await archiveStatus();
-      if (seq !== archiveSeq) return false;
-      archive = st;
-      archiveLoadFailed = false;
-      if (st.moving?.direction === "back") sawTurnAround = true;
-      if (st.moving && !st.running) pauseRequested = false;
-      return true;
-    } catch (e) {
-      if (!isStillLoading(e)) console.warn("[Silo] archive_status:", e);
-      return false;
-    }
-  }
-
-  /** Startup: retry while the backend is still resolving the layout. */
-  async function loadArchive() {
-    for (let i = 0; i < 60; i++) {
-      const seq = ++archiveSeq;
-      try {
-        const st = await archiveStatus();
-        if (seq === archiveSeq) archive = st;
-        archiveLoadFailed = false;
-        return;
-      } catch (e) {
-        if (!isStillLoading(e)) {
-          console.warn("[Silo] archive_status at startup:", e);
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 500));
-      }
-    }
-    if (!archive) {
-      console.warn("[Silo] gave up reading the library archive status");
-      archiveLoadFailed = true;
-    }
-  }
+  // The move's state, poll and drive/settle cycle live in archiveMove.svelte.ts; App supplies
+  // the side effects that reach beyond the move.
+  const archiveMove = new ArchiveMove({
+    setError: (msg) => (errorMsg = msg),
+    refreshModsStatus: async () => {
+      modsStatus = await modsRootStatus().catch(() => modsStatus);
+    },
+    runScan: () => runScan(),
+    // One adopt offer at a time (a second settle pass mustn't replace an open preview).
+    offerAdopt: async () => {
+      if (!organizePreview) await offerAdopt();
+    },
+  });
 
   // The startup read gave up: try once more whenever Settings opens.
   $effect(() => {
-    if (settingsOpen && archiveLoadFailed) void refreshArchive();
+    if (settingsOpen && archiveMove.loadFailed) void archiveMove.refresh();
   });
-
-  // While a move runs, poll so Pause → paused and the turn-around show even if an event is missed.
-  $effect(() => {
-    if (!moveRunning) return;
-    const t = setInterval(() => void pollArchive(), 2000);
-    return () => clearInterval(t);
-  });
-
-  async function pollArchive() {
-    const wasRunning = !!archive?.running;
-    if (!(await refreshArchive())) return;
-    // A move this window isn't waiting on (e.g. after a webview reload) stopped: settle it here.
-    if (wasRunning && !archive?.running && movesInFlight === 0) await settleMove(null);
-  }
-
-  /** After a move stops (finished, paused, or back home): refresh everything that depends on
-   *  where the library lives, explain a lost cancel, and offer to file in loose mods. A settle
-   *  asked for while one runs is folded into it (one more pass), never dropped. */
-  async function settleMove(problem: string | null) {
-    if (settlingMove) {
-      if (problem) errorMsg = problem;
-      resettle = { problem: joinProblems(resettle?.problem, problem) };
-      return;
-    }
-    settlingMove = true;
-    try {
-      // Messages accumulate across passes: each pass's runScan clears errorMsg, so every pass
-      // re-shows everything said so far.
-      let said: { problem: string | null; lost: string | null } = { problem, lost: null };
-      for (;;) {
-        said = await settleOnce(said.problem, said.lost);
-        if (!resettle) break;
-        said = { problem: joinProblems(said.problem, resettle.problem), lost: said.lost };
-        resettle = null;
-      }
-    } finally {
-      settlingMove = false;
-    }
-  }
-
-  /** One settle pass. Returns the messages it showed, for the next pass to carry. */
-  async function settleOnce(
-    problem: string | null,
-    lost: string | null,
-  ): Promise<{ problem: string | null; lost: string | null }> {
-    moveProgress = null;
-    pauseRequested = false;
-    cancelInFlight = false;
-    await refreshArchive();
-    modsStatus = await modsRootStatus().catch(() => modsStatus);
-    if (cancelRequested && !archive?.moving && !archive?.running) {
-      const landedElsewhere = !cancelHome || archive?.path !== cancelHome;
-      if (!lastProgressCancelling && !sawTurnAround && landedElsewhere) {
-        // Lost: the cancel's own "nothing to cancel" error is noise — drop it.
-        lost = lostCancelMessage();
-      } else {
-        problem = joinProblems(problem, cancelProblem);
-      }
-      cancelRequested = false;
-      cancelHome = null;
-      cancelProblem = null;
-      sawTurnAround = false;
-    }
-    await runScan();
-    // runScan clears errorMsg — show what the move said afterwards.
-    if (problem || lost) errorMsg = joinProblems(problem, lost);
-    // One adopt offer at a time (a second pass mustn't replace an open preview).
-    if (!archive?.moving && !archive?.running && !problem && !organizePreview) await offerAdopt();
-    return { problem, lost };
-  }
-
-  function lostCancelMessage(): string {
-    return (
-      `The move finished before it could be cancelled — your library is now in ${archive?.path ?? "its new folder"}. ` +
-      (cancelHomeDefault
-        ? "Use 'Use default' in Settings to move it back."
-        : "Use Change… in Settings to move it again.")
-    );
-  }
-
-  /** Run a move-ish invoke (pending until the move finishes or pauses), then settle. */
-  async function driveMove(call: () => Promise<unknown>, isCancel = false) {
-    movesInFlight++;
-    let problem: string | null = null;
-    try {
-      await call();
-    } catch (e) {
-      // A cancel of a running move can race its finish; hold that error until the settle
-      // knows whether the cancel was lost.
-      if (isCancel && cancelRequested) cancelProblem = String(e);
-      else problem = String(e);
-      // A rejected cancel didn't turn anything around.
-      if (isCancel) cancelInFlight = false;
-    } finally {
-      movesInFlight--;
-    }
-    if (movesInFlight > 0) {
-      if (problem) errorMsg = problem;
-      return;
-    }
-    const fresh = await refreshArchive();
-    if (fresh && archive?.running) {
-      // Not this window's move to settle (e.g. after a webview reload) — pollArchive will.
-      if (problem) errorMsg = problem;
-      return;
-    }
-    await settleMove(problem);
-  }
-
-  /** Fresh move: forget the previous one's progress and cancel bookkeeping. */
-  function startTracking() {
-    moveProgress = null;
-    lastProgressCancelling = false;
-    pauseRequested = false;
-    cancelInFlight = false;
-    cancelRequested = false;
-    cancelHome = null;
-    cancelProblem = null;
-    sawTurnAround = false;
-  }
-
-  /** A custom archive whose folder is missing (drive unplugged): nothing can be moved out of
-   *  it, so Change… / Use default re-point Silo instead. */
-  const archiveMissing = $derived(!!archive?.path && !archive.available && !archive.isDefault);
 
   /** Point Silo at another archive folder (`path`, or null = the default) without moving
    *  anything, then rescan so the library reconciles against it. `why`: the current archive is
    *  missing, or it holds no mods and a move to `path` was refused (`refusal`: the first reason). */
   async function repointArchive(path: string | null, why: "missing" | "empty", refusal = "") {
-    const old = archive?.path ?? "its old folder";
+    const old = archiveMove.archive?.path ?? "its old folder";
     const msg =
       why === "empty"
         ? `Silo can't move your library to ${path}${refusal ? ` (${unDot(refusal)})` : ""}. ` +
@@ -1829,7 +1639,7 @@
         busy = null;
       }
       settingsOpen = false;
-      await refreshArchive();
+      await archiveMove.refresh();
       modsStatus = await modsRootStatus().catch(() => modsStatus);
       await runScan();
     } catch (e) {
@@ -1845,7 +1655,7 @@
     }
     const path = await pickFolderFor("archive");
     if (!path) return;
-    if (archiveMissing) {
+    if (archiveMove.missing) {
       await repointArchive(path, "missing");
       return;
     }
@@ -1877,8 +1687,8 @@
       msg += "\n\nClose Farming Simulator 25 first. You can pause the move to play and resume later.";
       if (!(await confirmDialog(msg, { okLabel: "Move library", cancelLabel: "Cancel" }))) return;
       settingsOpen = false;
-      startTracking();
-      await driveMove(() => archiveMoveStart(path));
+      archiveMove.startTracking();
+      await archiveMove.drive(() => archiveMoveStart(path));
     } catch (e) {
       errorMsg = String(e);
     }
@@ -1890,7 +1700,7 @@
       errorMsg = why;
       return;
     }
-    if (archiveMissing) {
+    if (archiveMove.missing) {
       await repointArchive(null, "missing");
       return;
     }
@@ -1902,58 +1712,8 @@
     )
       return;
     settingsOpen = false;
-    startTracking();
-    await driveMove(() => archiveUseDefault());
-  }
-
-  async function pauseMove() {
-    pauseRequested = true;
-    try {
-      await archiveMovePause();
-    } catch (e) {
-      pauseRequested = false;
-      errorMsg = String(e);
-    }
-    void refreshArchive();
-  }
-
-  async function resumeMove() {
-    startTracking();
-    await driveMove(() => archiveMoveResume());
-  }
-
-  async function cancelMove() {
-    // Captured before the dialog: the move may finish while it's open.
-    const home = archive?.path ?? null;
-    const homeDefault = !!archive?.isDefault;
-    if (
-      !(await confirmDialog("Cancel the move? Mods already moved go back to where they were.", {
-        okLabel: "Cancel move",
-        cancelLabel: "Keep going",
-      }))
-    )
-      return;
-    if (!moveUnfinished) {
-      // It finished while the dialog was open — nothing left to cancel.
-      if (archive?.path && archive.path !== home) {
-        cancelHomeDefault = homeDefault;
-        errorMsg = lostCancelMessage();
-      }
-      return;
-    }
-    // Only a running move can finish before it sees the cancel; a paused one is run home here.
-    if (moveRunning) {
-      cancelRequested = true;
-      cancelHome = home;
-      cancelHomeDefault = homeDefault;
-    }
-    cancelInFlight = true;
-    // The backend's cancel replaces a pending pause — don't leave "Pausing…" up for the trip home.
-    pauseRequested = false;
-    // A running move is asked to turn around (resolves at once; the original invoke settles
-    // when it lands); a paused one stays pending until it's back home.
-    await driveMove(() => archiveMoveCancel(), true);
-    void refreshArchive();
+    archiveMove.startTracking();
+    await archiveMove.drive(() => archiveUseDefault());
   }
 
   /** After a move, if the archive folder holds loose mods, offer to file them in. */
@@ -1974,7 +1734,7 @@
       plan: pv.plan,
       loading: false,
       applying: false,
-      adopt: { path: archive?.path ?? null, note: dupNote },
+      adopt: { path: archiveMove.archive?.path ?? null, note: dupNote },
     };
   }
 
@@ -2018,7 +1778,7 @@
     // Auto-file any mods still loose in the flat root (e.g. freshly downloaded),
     // keeping them active so filing is transparent to the game.
     // Never auto-file mid-move: library writes are refused until the move finishes.
-    if (auto && autoFileNew && !moveUnfinished) {
+    if (auto && autoFileNew && !archiveMove.unfinished) {
       if (mods.some(isFileable)) {
         await autoFile();
       }
@@ -2042,10 +1802,7 @@
     window.addEventListener("contextmenu", onCtx);
     (async () => {
       unlisten = await onScanProgress((p) => (progress = p));
-      moveUnlisten = await onMoveProgress((p) => {
-        moveProgress = p;
-        lastProgressCancelling = p.cancelling;
-      });
+      moveUnlisten = await archiveMove.listen();
       try {
         const rows = await getCuration();
         curationMap = Object.fromEntries(rows.map((r) => [r.techName, r]));
@@ -2079,8 +1836,11 @@
         errorMsg = String(e);
       }
       // Where the library archive lives, and any unfinished move (paused before a restart).
-      // Awaited so the first scan's auto-file guard sees a move left paused before a restart.
-      await loadArchive();
+      // Awaited when there is a folder to scan, so the first scan's auto-file guard sees a move
+      // left paused before a restart. With nothing to scan (the mods-folder status failed or is
+      // unavailable), deep links, bisect recovery and the focus listener don't wait on it.
+      const archiveReady = archiveMove.load();
+      if (roots.length) await archiveReady;
       try {
         const notes = await takeStartupNotices();
         if (notes.length) infoMsg = appendInfo(infoMsg, notes);
@@ -2130,7 +1890,7 @@
             focused &&
             !scanning &&
             !busy &&
-            !moveRunning &&
+            !archiveMove.running &&
             !bisecting &&
             roots.length &&
             Date.now() - lastScanAt > 4000
@@ -2228,8 +1988,8 @@
     {updateChecking}
     {scanning}
     {busy}
-    launchBlocked={moveRunning}
-    organizeBlocked={moveUnfinished}
+    launchBlocked={archiveMove.running}
+    organizeBlocked={archiveMove.unfinished}
     hasGame={!!gameInfo}
     activeCount={activeSet.size}
     {settingsOpen}
@@ -2330,9 +2090,9 @@
       onChangeModsFolder={changeModsFolder}
       onUseGameFolder={useGameFolder}
       onSwitchModsFolder={switchModsFolder}
-      {archive}
-      {moveUnfinished}
-      {archiveLoadFailed}
+      archive={archiveMove.archive}
+      moveUnfinished={archiveMove.unfinished}
+      archiveLoadFailed={archiveMove.loadFailed}
       onChangeArchive={changeArchive}
       onArchiveDefault={archiveDefault}
     />
@@ -2567,23 +2327,12 @@
       <button class="cn-act" onclick={useGameFolder}>Use the game's folder</button>
     </div>
   {:else if modsStatus?.layoutProblem}
-    <div class="cloud-notice">
-      <span class="cn-ico">⚠</span>
-      <div class="cn-text">
-        <b>Silo won't change files in this mods folder:</b>
-        <span class="tnum">{modsStatus.path}</span>. {modsStatus.layoutProblem}
-        {#if modsStatus.layoutConflict}
-          (<span class="tnum">{modsStatus.layoutConflict}</span>)
-        {/if}
-      </div>
-      {#if modsStatus.layoutProblemCause === "readError"}
-        <button class="cn-act" onclick={retryModsFolder}>Retry</button>
-      {/if}
-      {#if modsStatus.mismatch && modsStatus.canWriteGameSetting}
-        <button class="cn-act" onclick={pointGameHere}>Point FS25 here</button>
-      {/if}
-      <button class="cn-act" onclick={changeModsFolder}>Choose another</button>
-    </div>
+    <BlockedFolderBanner
+      status={modsStatus}
+      onRetry={retryModsFolder}
+      onPointGameHere={pointGameHere}
+      onChooseAnother={changeModsFolder}
+    />
   {:else if modsStatus?.modsFolderMissing}
     <div class="cloud-notice">
       <span class="cn-ico">ⓘ</span>
@@ -2606,66 +2355,22 @@
     </div>
   {/if}
 
-  {#if moveUnfinished}
-    <div class="cloud-notice">
-      <span class="cn-ico">⇄</span>
-      <div class="cn-text">
-        {#if moveRunning}
-          <b>{moveCancelling ? "Moving your library back" : "Moving your library"}</b>
-          {#if archive?.moving}
-            to <span class="tnum">{moveCancelling ? archive.moving.from : archive.moving.to}</span>
-          {/if}
-          —
-          {#if moveProgress && moveProgress.total > 0}
-            <span class="tnum">
-              {moveProgress.done}/{moveProgress.total} mods · {fmtSize(moveProgress.bytesDone)} of
-              {fmtSize(moveProgress.bytesTotal)}</span
-            >.
-          {:else}
-            starting.
-          {/if}
-          Launch is blocked until it pauses or finishes.
-        {:else if archive?.moving?.errors.length}
-          <b>{modsCount(archive.moving.errors.length)} couldn't be moved:</b>
-          {sentence(capList(archive.moving.errors.map(unDot), 3, "; "))}
-          {archive.moving.pauseReason ? `${sentence(archive.moving.pauseReason)} ` : ""}The move is
-          paused — Retry tries them again{moveCancelling ? "." : ", or Cancel moves everything back."}
-        {:else if archive?.moving}
-          <b>{moveCancelling ? "Moving your library back is paused." : "Archive move paused."}</b>
-          {archive.moving.pauseReason ? `${sentence(archive.moving.pauseReason)} ` : ""}You can play —
-          resume when you're done.
-        {/if}
-      </div>
-      {#if moveRunning}
-        <button class="cn-act" onclick={pauseMove} disabled={pauseRequested}>
-          {pauseRequested ? "Pausing…" : "Pause"}
-        </button>
-      {:else if archive?.moving}
-        <button class="cn-act" onclick={resumeMove}>
-          {archive.moving.errors.length ? "Retry" : "Resume"}
-        </button>
-      {/if}
-      {#if !moveCancelling}
-        <button class="cn-act" onclick={cancelMove}>Cancel move</button>
-      {/if}
-    </div>
-  {:else if archive?.path && !archive.available}
-    <div class="cloud-notice">
-      <span class="cn-ico">⚠</span>
-      <div class="cn-text">
-        <b>Your library archive isn't available:</b> <span class="tnum">{archive.path}</span>. Parked
-        mods are hidden until it's back; active mods linked from it won't load in-game.
-      </div>
-      <button
-        class="cn-act"
-        onclick={async () => {
-          await refreshArchive();
-          await runScan();
-        }}>Retry</button
-      >
-      <button class="cn-act" onclick={changeArchive}>Choose another</button>
-    </div>
-  {/if}
+  <ArchiveMoveBanner
+    archive={archiveMove.archive}
+    moveProgress={archiveMove.progress}
+    moveRunning={archiveMove.running}
+    moveUnfinished={archiveMove.unfinished}
+    moveCancelling={archiveMove.cancelling}
+    pauseRequested={archiveMove.pauseRequested}
+    onPause={() => archiveMove.pause()}
+    onResume={() => archiveMove.resume()}
+    onCancel={() => archiveMove.cancel()}
+    onRetry={async () => {
+      await archiveMove.refresh();
+      await runScan();
+    }}
+    onChooseAnother={changeArchive}
+  />
 
   {#if overrideNoticeOpen && modsStatus?.path && !modsStatus.layoutProblem}
     <div class="cloud-notice">
@@ -2937,53 +2642,6 @@
     font-size: 13px;
     /* Several problems arrive one per line. */
     white-space: pre-line;
-  }
-  .cloud-notice {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    padding: 11px 16px 11px 20px;
-    background: color-mix(in srgb, var(--info) 12%, var(--surface));
-    border-bottom: 1px solid color-mix(in srgb, var(--info) 30%, var(--border));
-    font-size: 12.5px;
-    line-height: 1.5;
-    color: var(--text);
-  }
-  .cn-ico {
-    font-size: 16px;
-    line-height: 1.4;
-    color: var(--info);
-    flex: 0 0 auto;
-  }
-  .cn-text {
-    flex: 1 1 auto;
-  }
-  .cn-act {
-    flex: 0 0 auto;
-    border: 1px solid color-mix(in srgb, var(--info) 40%, transparent);
-    background: transparent;
-    color: var(--text);
-    font-size: 12px;
-    cursor: pointer;
-    padding: 3px 8px;
-    border-radius: var(--radius-sm);
-  }
-  .cn-act:hover {
-    background: color-mix(in srgb, var(--info) 15%, transparent);
-  }
-  .cn-x {
-    flex: 0 0 auto;
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: 13px;
-    cursor: pointer;
-    padding: 2px 6px;
-    border-radius: var(--radius-sm);
-  }
-  .cn-x:hover {
-    background: color-mix(in srgb, var(--info) 15%, transparent);
-    color: var(--text);
   }
   /* Log-triage panel owns its own padding (LogTriage.svelte), so no inner padding here. */
   .recover-banner {
