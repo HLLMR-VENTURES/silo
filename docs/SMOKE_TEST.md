@@ -420,7 +420,7 @@ Keyboard only (unplug or ignore the mouse). Views switch with **Alt+1…Alt+5** 
 
 **NVDA (about 30 minutes, NVDA + Silo, browse mode off unless noted).**
 
-- [ ] `[app]` **Landmarks** (Insert+F7 → Landmarks): Main (the sidebar, a navigation), banner (the header), main, and "Mod details" (the drawer, when open). The header's search is announced as "Search your mods, edit" with its shortcut.
+- [ ] `[app]` **Landmarks** (Insert+F7 → Landmarks): Main (the sidebar, a navigation), banner (the header), main, and "Mod details: Courseplay" (the drawer, named after its mod, when open). The header's search is announced as "Search your mods, edit" with its shortcut.
 - [ ] `[app]` **Sidebar.** Arrowing through the pages reads each name; the current one says "current page"; Updates with a count reads it ("Updates, 4").
 - [ ] `[app]` **Headings** (H in browse mode): each view has one level-2 heading with its name; dialogs read their title when they open.
 - [ ] `[app]` **Library row.** Focusing a row reads "Courseplay, active" (or "parked"); its switch reads "Active: Courseplay, switch, on"; badges are read as words ("Modified", "Update"), not as colours; "+2 more" reads what the two are.

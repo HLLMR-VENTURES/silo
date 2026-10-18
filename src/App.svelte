@@ -3241,7 +3241,7 @@
   fill={nav.view === "library" || nav.view === "browse"}
   wide={nav.view === "library" || nav.view === "browse"}
   drawer={detailMod && nav.view === "library" ? modDrawer : undefined}
-  drawerLabel="Mod details"
+  drawerLabel={detailMod ? `Mod details: ${detailMod.title ?? detailMod.techName}` : "Mod details"}
 >
   {#snippet header()}
     <AppHeader

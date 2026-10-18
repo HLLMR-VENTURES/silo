@@ -302,8 +302,8 @@
     border: none;
     background: transparent;
     color: var(--text-muted);
-    width: 26px;
-    height: 22px;
+    width: 28px;
+    height: 24px;
     border-radius: 5px;
     display: inline-grid;
     place-items: center;

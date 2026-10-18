@@ -41,6 +41,9 @@
     align-items: center;
     gap: var(--sp-2);
     min-height: 1.75rem;
+    /* A label-less checkbox (a row's select box) still gets a 24 px target (WCAG 2.5.8). */
+    min-width: 1.5rem;
+    justify-content: center;
     color: var(--text);
     cursor: pointer;
   }
