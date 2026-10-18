@@ -189,6 +189,11 @@
   import ViewOutlet from "./lib/views/ViewOutlet.svelte";
   import LibraryView from "./lib/views/LibraryView.svelte";
   import BrowseView from "./lib/views/BrowseView.svelte";
+  import ModSetsView from "./lib/views/ModSetsView.svelte";
+  import DiagnoseView from "./lib/views/DiagnoseView.svelte";
+  import UpdatesView from "./lib/views/UpdatesView.svelte";
+  import ToolsView from "./lib/views/ToolsView.svelte";
+  import Button from "./lib/ui/Button.svelte";
   import {
     activeSetLine,
     libraryStatusCounts,
@@ -379,21 +384,17 @@
   const unorganizedCount = $derived(mods.filter(isFileable).length);
 
   let loadouts = $state<Loadout[]>([]);
-  let loadoutsOpen = $state(false);
   let savegames = $state<Savegame[]>([]);
-  let savesOpen = $state(false);
   let conflicts = $state<Conflict[]>([]);
-  let conflictsOpen = $state(false);
   let conflictTimer: ReturnType<typeof setTimeout> | undefined;
   let settingsOpen = $state(false);
-  let healthOpen = $state(false);
-  let statsOpen = $state(false);
-  let logOpen = $state(false);
-  let bindingsOpen = $state(false);
-  let mpOpen = $state(false);
-  let collectionsOpen = $state(false);
-  // Set when a silo://collection?url=… deep link arrives — opens Collections, pre-filled.
+  // Set when a silo://collection?url=… deep link arrives — opens Mod sets → Share (Collections),
+  // pre-filled. Leaving that tab forgets it, as closing the Collections panel did.
   let collImportUrl = $state<string | null>(null);
+  $effect(() => {
+    const onShare = nav.view === "modSets" && nav.tab.modSets === "share";
+    if (!onShare) untrack(() => (collImportUrl = null));
+  });
 
   function handleDeepLinks(urls: string[] | null | undefined) {
     if (!urls) return;
@@ -401,12 +402,11 @@
       const target = parseCollectionDeepLink(raw);
       if (target) {
         collImportUrl = target;
-        collectionsOpen = true;
+        go("modSets", "share");
         break;
       }
     }
   }
-  let bridgeOpen = $state(false);
   // Active set as manifest refs for MP sync (techName, path, kind, version).
   const activeModRefs = $derived(
     mods
@@ -510,7 +510,6 @@
 
   function openSaveConfig(s: Savegame) {
     if (!userDir) return;
-    savesOpen = false;
     configEditor = {
       title: `Configure — ${s.name}`,
       path: `${userDir}/${s.folder}/careerSavegame.xml`,
@@ -752,7 +751,6 @@
     try {
       const id = await saveLoadout(null, s.name, target);
       await loadLoadouts();
-      savesOpen = false;
       // Apply exactly the mods the confirmation showed (already confirmed above). The new
       // loadout is found by its id, never by name: another loadout may share the save's name.
       const name = loadouts.find((l) => l.id === id)?.name ?? s.name;
@@ -896,7 +894,6 @@
     // With no scan yet every mod would look missing, so only count missing once mods are known.
     const diff = activeSetDiff([...activeSet], l.mods, libraryScanned ? libraryTechNames : undefined);
     if (diff.on.length + diff.off.length === 0) {
-      loadoutsOpen = false;
       toast({ message: `Already using ${l.name}` });
       return;
     }
@@ -911,7 +908,6 @@
       }))
     )
       return;
-    loadoutsOpen = false;
     await switchTo(l.name, l.mods);
   }
 
@@ -1015,7 +1011,7 @@
       const id = await importLoadoutFile();
       if (id !== null) {
         await loadLoadouts();
-        loadoutsOpen = true;
+        go("modSets", "sets");
       }
     } catch (e) {
       reportError(e, "Importing a loadout");
@@ -1496,7 +1492,6 @@
     }
   }
 
-  let updatesOpen = $state(false);
   let updateChecking = $state(false);
   let updateResults = $state<UpdateRow[]>([]);
   // Mods with a saved page that this check couldn't answer: the user checks those by hand.
@@ -1521,7 +1516,7 @@
   }
 
   async function checkAllUpdates(quiet = false) {
-    if (!quiet) updatesOpen = true;
+    if (!quiet) go("updates");
     updateChecking = true;
     updateResults = [];
     const byTech = new Map(mods.map((m) => [m.techName, m]));
@@ -2814,13 +2809,13 @@
       {updatePct}
       onApplyUpdate={applyUpdate}
       hasSavegames={savegames.length > 0}
-      {savesOpen}
-      {loadoutsOpen}
+      savesOpen={nav.view === "modSets" && nav.tab.modSets === "savegames"}
+      loadoutsOpen={nav.view === "modSets" && (nav.tab.modSets ?? "sets") === "sets"}
       activeLoadoutName={activeLoadoutId !== null
         ? loadouts.find((l) => l.id === activeLoadoutId)?.name ?? null
         : null}
-      {mpOpen}
-      {collectionsOpen}
+      mpOpen={nav.view === "modSets" && nav.tab.modSets === "multiplayer"}
+      collectionsOpen={nav.view === "modSets" && nav.tab.modSets === "share"}
       showOrganize={unorganizedCount > 0 && !autoFileNew}
       {unorganizedCount}
       hasMods={mods.length > 0}
@@ -2833,10 +2828,10 @@
       activeCount={activeSet.size}
       {settingsOpen}
       onSwitchView={(v) => go(v)}
-      onToggleSaves={() => (savesOpen = !savesOpen)}
-      onToggleLoadouts={() => (loadoutsOpen = !loadoutsOpen)}
-      onToggleMp={() => (mpOpen = !mpOpen)}
-      onToggleCollections={() => (collectionsOpen = !collectionsOpen)}
+      onToggleSaves={() => go("modSets", "savegames")}
+      onToggleLoadouts={() => go("modSets", "sets")}
+      onToggleMp={() => go("modSets", "multiplayer")}
+      onToggleCollections={() => go("modSets", "share")}
       onOrganize={organizeNew}
       onCheckUpdates={checkAllUpdates}
       onRescan={() => runScan()}
@@ -3016,12 +3011,12 @@
               {healthCount}
               tookMs={result ? result.tookMs : null}
               bind:statFilter
-              onOpenStats={() => (statsOpen = !statsOpen)}
-              onOpenConflicts={() => (conflictsOpen = !conflictsOpen)}
-              onOpenHealth={() => (healthOpen = !healthOpen)}
-              onOpenLog={() => (logOpen = true)}
-              onOpenBindings={() => (bindingsOpen = true)}
-              onOpenBridge={() => (bridgeOpen = true)}
+              onOpenStats={() => go("tools", "stats")}
+              onOpenConflicts={() => go("diagnose", "conflicts")}
+              onOpenHealth={() => go("diagnose", "problems")}
+              onOpenLog={() => go("diagnose", "lastRun")}
+              onOpenBindings={() => go("tools", "controls")}
+              onOpenBridge={() => go("tools", "bridge")}
             />
           </div>
         {/snippet}
@@ -3040,49 +3035,146 @@
         />
       </BrowseView>
     {/snippet}
+    {#snippet modSets()}
+      <ModSetsView>
+        {#snippet setsTab()}
+          <ViewBoundary name="Loadouts">
+            <LoadoutsPanel
+              {loadouts}
+              activeCount={activeSet.size}
+              {activeLoadoutId}
+              onApply={applyLoadout}
+              onOverwrite={overwriteLoadout}
+              onExport={exportLoadout}
+              onRemove={removeLoadout}
+              onSaveCurrent={saveCurrentLoadout}
+              onImport={importLoadout}
+            />
+          </ViewBoundary>
+        {/snippet}
+        {#snippet shareTab()}
+          <ViewBoundary name="Collections">
+            <div class="page-card">
+              <Collections
+                active={activeModRefs}
+                library={mods}
+                initialImportUrl={collImportUrl}
+                onImported={() => runScan(false)}
+              />
+            </div>
+          </ViewBoundary>
+        {/snippet}
+        {#snippet multiplayerTab()}
+          <ViewBoundary name="Multiplayer">
+            <div class="page-card">
+              <MpSync active={activeModRefs} />
+            </div>
+          </ViewBoundary>
+        {/snippet}
+        {#snippet savegamesTab()}
+          <ViewBoundary name="Savegames">
+            <SavegamesPanel
+              rows={saveRows}
+              lockReason={fgLock.reason}
+              onConfigure={openSaveConfig}
+              onBackup={backupSave}
+              onLoadout={loadoutFromSave}
+            />
+          </ViewBoundary>
+        {/snippet}
+      </ModSetsView>
+    {/snippet}
+    {#snippet diagnose()}
+      <DiagnoseView
+        conflictsBadge={conflicts.filter((c) => c.severity !== "info").length}
+        problemsBadge={healthCount}
+      >
+        {#snippet lastRunTab()}
+          <div class="page-card">
+            <LogTriage
+              activeMods={[...activeSet]}
+              activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
+              onApply={bisectRound}
+              onBisecting={(v) => void bisectingChanged(v)}
+              recoveryPending={bisectRecovery !== null}
+            />
+          </div>
+        {/snippet}
+        {#snippet conflictsTab()}
+          <ViewBoundary name="Conflicts" bodyText="Your mods weren't changed.">
+            <ConflictsPanel
+              {conflicts}
+              {criticalCount}
+              activeCount={activeSet.size}
+            />
+          </ViewBoundary>
+        {/snippet}
+        {#snippet problemsTab()}
+          <ViewBoundary name="Library health">
+            <HealthPanel {health} {healthCount} onResolveForeign={resolveForeign} />
+          </ViewBoundary>
+        {/snippet}
+      </DiagnoseView>
+    {/snippet}
+    {#snippet updates()}
+      <UpdatesView
+        checking={updateChecking}
+        checkDisabled={!!fgLock.reason || updateChecking || mods.length === 0}
+        checkDisabledReason={fgLock.reason || (mods.length === 0 ? "No mods to check yet." : "")}
+        oncheck={() => checkAllUpdates()}
+      >
+        <UpdatesPanel
+          {updateResults}
+          {availableUpdates}
+          {updateChecking}
+          lockReason={fgLock.reason}
+          {checkYourself}
+          onInstall={installFromRow}
+          onOpenSource={(s) => openExternal(s.url)}
+          onMarkChecked={markChecked}
+        />
+      </UpdatesView>
+    {/snippet}
+    {#snippet tools()}
+      <ToolsView>
+        {#snippet statsTab()}
+          <ViewBoundary name="Library stats" bodyText="Your mods weren't changed.">
+            <StatsPanel
+              modCount={mods.length}
+              {organizedCount}
+              activeCount={activeSet.size}
+              mapsCount={stats.maps}
+              {libStats}
+            />
+          </ViewBoundary>
+        {/snippet}
+        {#snippet controlsTab()}
+          <ViewBoundary name="Bindings" bodyText="Your mods weren't changed.">
+            <div class="page-card"><BindingsView /></div>
+          </ViewBoundary>
+        {/snippet}
+        {#snippet bridgeTab()}
+          <ViewBoundary name="the filltype bridge">
+            <div class="page-card"><BridgeTool onGenerated={() => runScan(true)} /></div>
+          </ViewBoundary>
+        {/snippet}
+        {#snippet graphicsTab()}
+          <div class="tool-note">
+            <p>
+              Tune Farming Simulator 25's graphics settings (presets: Performance / Balanced /
+              Quality) without launching the game. Changes take effect the next time you launch it.
+            </p>
+            {#if userDir}
+              <Button icon="modSettings" onclick={openGameGraphics}>Edit game.xml</Button>
+            {:else}
+              <p class="muted">Silo couldn't find your Farming Simulator 25 user folder.</p>
+            {/if}
+          </div>
+        {/snippet}
+      </ToolsView>
+    {/snippet}
   </ViewOutlet>
 </AppShell>
-
-  {#if loadoutsOpen}
-    <ViewBoundary name="Loadouts" overlay onClose={() => (loadoutsOpen = false)}>
-      <LoadoutsPanel
-        {loadouts}
-        activeCount={activeSet.size}
-        {activeLoadoutId}
-        onApply={applyLoadout}
-        onOverwrite={overwriteLoadout}
-        onExport={exportLoadout}
-        onRemove={removeLoadout}
-        onSaveCurrent={saveCurrentLoadout}
-        onImport={importLoadout}
-        onClose={() => (loadoutsOpen = false)}
-      />
-    </ViewBoundary>
-  {/if}
-
-  {#if savesOpen}
-    <ViewBoundary name="Savegames" overlay onClose={() => (savesOpen = false)}>
-      <SavegamesPanel
-        rows={saveRows}
-        lockReason={fgLock.reason}
-        onConfigure={openSaveConfig}
-        onBackup={backupSave}
-        onLoadout={loadoutFromSave}
-        onClose={() => (savesOpen = false)}
-      />
-    </ViewBoundary>
-  {/if}
-
-  {#if conflictsOpen}
-    <ViewBoundary name="Conflicts" overlay onClose={() => (conflictsOpen = false)} bodyText="Your mods weren't changed.">
-      <ConflictsPanel
-        {conflicts}
-        {criticalCount}
-        activeCount={activeSet.size}
-        onClose={() => (conflictsOpen = false)}
-      />
-    </ViewBoundary>
-  {/if}
 
   {#if settingsOpen}
     <ViewBoundary name="Settings" overlay onClose={() => (settingsOpen = false)}>
@@ -3152,127 +3244,6 @@
     </ViewBoundary>
   {/if}
 
-  {#if updatesOpen}
-    <ViewBoundary name="Updates" overlay onClose={() => (updatesOpen = false)}>
-      <UpdatesPanel
-        {updateResults}
-        {availableUpdates}
-        {updateChecking}
-        lockReason={fgLock.reason}
-        {checkYourself}
-        onInstall={installFromRow}
-        onOpenSource={(s) => openExternal(s.url)}
-        onMarkChecked={markChecked}
-        onClose={() => (updatesOpen = false)}
-      />
-    </ViewBoundary>
-  {/if}
-
-  {#if statsOpen}
-    <ViewBoundary name="Library stats" overlay onClose={() => (statsOpen = false)} bodyText="Your mods weren't changed.">
-      <StatsPanel
-        modCount={mods.length}
-        {organizedCount}
-        activeCount={activeSet.size}
-        mapsCount={stats.maps}
-        {libStats}
-        onClose={() => (statsOpen = false)}
-      />
-    </ViewBoundary>
-  {/if}
-
-  {#if healthOpen}
-    <ViewBoundary name="Library health" overlay onClose={() => (healthOpen = false)}>
-      <HealthPanel
-        {health}
-        {healthCount}
-        onResolveForeign={resolveForeign}
-        onClose={() => (healthOpen = false)}
-      />
-    </ViewBoundary>
-  {/if}
-
-  {#if logOpen}
-    <ViewBoundary
-      name="Diagnose"
-      overlay
-      onClose={() => (logOpen = false)}
-      bodyText="Your mods are as they were before this view failed. If a diagnosis was running, Silo keeps your place."
-    >
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <div class="backdrop" onclick={() => (logOpen = false)}></div>
-      <div class="log-panel">
-        <LogTriage
-          onClose={() => (logOpen = false)}
-          activeMods={[...activeSet]}
-          activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
-          onApply={bisectRound}
-          onBisecting={(v) => void bisectingChanged(v)}
-          recoveryPending={bisectRecovery !== null}
-        />
-      </div>
-    </ViewBoundary>
-  {/if}
-
-  {#if bindingsOpen}
-    <ViewBoundary name="Bindings" overlay onClose={() => (bindingsOpen = false)} bodyText="Your mods weren't changed.">
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <div class="backdrop" onclick={() => (bindingsOpen = false)}></div>
-      <div class="log-panel">
-        <BindingsView onClose={() => (bindingsOpen = false)} />
-      </div>
-    </ViewBoundary>
-  {/if}
-
-  {#if mpOpen}
-    <ViewBoundary name="Multiplayer" overlay onClose={() => (mpOpen = false)}>
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <div class="backdrop" onclick={() => (mpOpen = false)}></div>
-      <div class="log-panel">
-        <MpSync active={activeModRefs} onClose={() => (mpOpen = false)} />
-      </div>
-    </ViewBoundary>
-  {/if}
-
-  {#if collectionsOpen}
-    <ViewBoundary
-      name="Collections"
-      overlay
-      onClose={() => {
-        collectionsOpen = false;
-        collImportUrl = null;
-      }}
-    >
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <div class="backdrop" onclick={() => (collectionsOpen = false)}></div>
-      <div class="log-panel">
-        <Collections
-          active={activeModRefs}
-          library={mods}
-          initialImportUrl={collImportUrl}
-          onImported={() => runScan(false)}
-          onClose={() => {
-            collectionsOpen = false;
-            collImportUrl = null;
-          }}
-        />
-      </div>
-    </ViewBoundary>
-  {/if}
-
-  {#if bridgeOpen}
-    <ViewBoundary name="the filltype bridge" overlay onClose={() => (bridgeOpen = false)}>
-      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <div class="backdrop" onclick={() => (bridgeOpen = false)}></div>
-      <div class="log-panel">
-        <BridgeTool
-          onGenerated={() => runScan(true)}
-          onClose={() => (bridgeOpen = false)}
-        />
-      </div>
-    </ViewBoundary>
-  {/if}
-
   {#if organizePreview}
     <ViewBoundary name="the Organize preview" overlay onClose={() => (organizePreview = null)}>
       <OrganizePreview
@@ -3336,22 +3307,23 @@
     font-size: var(--fs-xs);
     color: var(--text-muted);
   }
-  /* Log-triage panel owns its own padding (LogTriage.svelte), so no inner padding here. */
-  .log-panel {
-    position: fixed;
-    z-index: 50;
-    top: 90px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 620px;
-    max-width: calc(100vw - 40px);
-    max-height: 80vh;
-    overflow-y: auto;
+  /* A tool or panel that was a floating card (log triage, bindings, MP sync, collections, the
+     bridge) shown as a page section. Each owns its inner padding. */
+  .page-card {
+    max-width: 56rem;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: var(--shadow-2);
-    scrollbar-width: thin;
+  }
+  .tool-note {
+    max-width: 48rem;
+  }
+  .tool-note p {
+    margin: 0 0 var(--sp-3);
+    max-width: 65ch;
+  }
+  .tool-note .muted {
+    color: var(--muted);
   }
   /* ── Library view (LibraryView lays out the column; a floating footer stat bar over the list) ── */
   .lib-toggles {
@@ -3428,11 +3400,6 @@
   .list-body {
     height: 100%;
     min-height: 0;
-  }
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 40;
   }
   .empty {
     display: grid;

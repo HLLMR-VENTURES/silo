@@ -1,7 +1,7 @@
 <script lang="ts">
   // Diagnose: Last run (crash & log triage, with guided bisection), Conflicts, Problems (library
   // health). Snippets App renders; the tab lives in nav.tab.diagnose.
-  //   <DiagnoseView conflictsBadge={2} problemsBadge={1}>{#snippet lastRun()}...{/snippet}...</DiagnoseView>
+  //   <DiagnoseView conflictsBadge={2} problemsBadge={1}>{#snippet lastRunTab()}...{/snippet}...</DiagnoseView>
   // Leaving the Last run tab (or the view) closes the log triage, as closing its panel did: a
   // running diagnosis keeps its snapshot and Silo offers to restore it.
   import type { Snippet } from "svelte";
@@ -13,23 +13,28 @@
   type Tab = "lastRun" | "conflicts" | "problems";
 
   interface Props {
-    lastRun: Snippet;
-    conflicts: Snippet;
-    problems: Snippet;
+    lastRunTab: Snippet;
+    conflictsTab: Snippet;
+    problemsTab: Snippet;
     /** Conflicts that aren't info-level; 0 hides the badge. */
     conflictsBadge?: number;
     /** Library health issues; 0 hides the badge. */
     problemsBadge?: number;
   }
 
-  let { lastRun, conflicts, problems, conflictsBadge = 0, problemsBadge = 0 }: Props = $props();
+  let { lastRunTab, conflictsTab, problemsTab, conflictsBadge = 0, problemsBadge = 0 }: Props =
+    $props();
 
   const tabs: TabItem<Tab>[] = $derived([
     { id: "lastRun", label: "Last run" },
     { id: "conflicts", label: "Conflicts", badge: conflictsBadge > 0 ? conflictsBadge : undefined },
     { id: "problems", label: "Problems", badge: problemsBadge > 0 ? problemsBadge : undefined },
   ]);
-  const panels: Record<Tab, Snippet> = $derived({ lastRun, conflicts, problems });
+  const panels: Record<Tab, Snippet> = $derived({
+    lastRun: lastRunTab,
+    conflicts: conflictsTab,
+    problems: problemsTab,
+  });
 </script>
 
 <ViewBoundary

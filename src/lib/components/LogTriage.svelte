@@ -10,7 +10,8 @@
   import BisectFlow from "./BisectFlow.svelte";
 
   interface Props {
-    onClose: () => void;
+    /** Shows a close button (the page has none). */
+    onClose?: () => void;
     /** Current active tech names, and which of them are maps (kept on during bisection). */
     activeMods: string[];
     activeMaps: string[];
@@ -95,7 +96,9 @@
           {#if loading}Reading…{:else}<Icon name="rescan" size={14} /> Re-read log{/if}
         </button>
       {/if}
-      <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+      {#if onClose}
+        <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+      {/if}
     </div>
   </div>
 

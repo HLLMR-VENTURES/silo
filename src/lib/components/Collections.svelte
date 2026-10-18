@@ -43,7 +43,8 @@
     initialImportUrl?: string | null;
     /** Called after a successful import so the parent can rescan the library. */
     onImported?: () => void;
-    onClose: () => void;
+    /** Shows a close button (the page has none). */
+    onClose?: () => void;
   }
   let { active, library, initialImportUrl = null, onImported, onClose }: Props = $props();
   const installed = $derived(library.map((m) => ({ techName: m.techName, version: m.version })));
@@ -320,7 +321,9 @@
         is shared; no mod files are uploaded.
       </p>
     </div>
-    <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+    {#if onClose}
+      <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+    {/if}
   </div>
 
   <div class="share">

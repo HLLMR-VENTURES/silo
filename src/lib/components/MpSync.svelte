@@ -11,7 +11,8 @@
   interface Props {
     /** The active set as (techName, path, kind, version) refs. */
     active: MpModRef[];
-    onClose: () => void;
+    /** Shows a close button (the page has none). */
+    onClose?: () => void;
   }
   let { active, onClose }: Props = $props();
 
@@ -73,7 +74,9 @@
         that's the #1 "can't join" cause. Match sets here instead of guessing.
       </p>
     </div>
-    <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+    {#if onClose}
+      <button class="x" title="Close" aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+    {/if}
   </div>
 
   {#if working}<div class="busy">{working}…</div>{/if}

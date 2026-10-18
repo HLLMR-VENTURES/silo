@@ -1,7 +1,7 @@
 <script lang="ts">
   // Mod sets: My sets (loadouts), Share (collections), Multiplayer (MP sync), Savegames. Each tab
   // is a snippet App renders with its own state and handlers:
-  //   <ModSetsView>{#snippet sets()}<LoadoutsPanel ... />{/snippet}...</ModSetsView>
+  //   <ModSetsView>{#snippet setsTab()}<LoadoutsPanel ... />{/snippet}...</ModSetsView>
   // The tab lives in nav.tab.modSets, so go("modSets", "share") lands on Share.
   import type { Snippet } from "svelte";
   import ViewBoundary from "../components/ViewBoundary.svelte";
@@ -10,13 +10,13 @@
   import type { TabItem } from "../ui/types";
 
   interface Props {
-    sets: Snippet;
-    share: Snippet;
-    multiplayer: Snippet;
-    savegames: Snippet;
+    setsTab: Snippet;
+    shareTab: Snippet;
+    multiplayerTab: Snippet;
+    savegamesTab: Snippet;
   }
 
-  let { sets, share, multiplayer, savegames }: Props = $props();
+  let { setsTab, shareTab, multiplayerTab, savegamesTab }: Props = $props();
 
   const TABS: TabItem<ModSetsTab>[] = [
     { id: "sets", label: "My sets" },
@@ -24,7 +24,12 @@
     { id: "multiplayer", label: "Multiplayer" },
     { id: "savegames", label: "Savegames" },
   ];
-  const panels: Record<ModSetsTab, Snippet> = $derived({ sets, share, multiplayer, savegames });
+  const panels: Record<ModSetsTab, Snippet> = $derived({
+    sets: setsTab,
+    share: shareTab,
+    multiplayer: multiplayerTab,
+    savegames: savegamesTab,
+  });
 </script>
 
 <ViewBoundary name="Mod sets">

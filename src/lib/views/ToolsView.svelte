@@ -1,7 +1,7 @@
 <script lang="ts">
   // Tools: Library stats, Controls map (input bindings), Fill type bridge, Graphics settings
   // (game.xml). Snippets App renders; the tab lives in nav.tab.tools.
-  //   <ToolsView>{#snippet stats()}<StatsPanel ... />{/snippet}...</ToolsView>
+  //   <ToolsView>{#snippet statsTab()}<StatsPanel ... />{/snippet}...</ToolsView>
   import type { Snippet } from "svelte";
   import ViewBoundary from "../components/ViewBoundary.svelte";
   import ViewHeader from "../components/shell/ViewHeader.svelte";
@@ -9,13 +9,13 @@
   import type { TabItem } from "../ui/types";
 
   interface Props {
-    stats: Snippet;
-    controls: Snippet;
-    bridge: Snippet;
-    graphics: Snippet;
+    statsTab: Snippet;
+    controlsTab: Snippet;
+    bridgeTab: Snippet;
+    graphicsTab: Snippet;
   }
 
-  let { stats, controls, bridge, graphics }: Props = $props();
+  let { statsTab, controlsTab, bridgeTab, graphicsTab }: Props = $props();
 
   const TABS: TabItem<ToolsTab>[] = [
     { id: "stats", label: "Library stats" },
@@ -23,7 +23,12 @@
     { id: "bridge", label: "Fill type bridge" },
     { id: "graphics", label: "Graphics settings" },
   ];
-  const panels: Record<ToolsTab, Snippet> = $derived({ stats, controls, bridge, graphics });
+  const panels: Record<ToolsTab, Snippet> = $derived({
+    stats: statsTab,
+    controls: controlsTab,
+    bridge: bridgeTab,
+    graphics: graphicsTab,
+  });
 </script>
 
 <ViewBoundary name="Tools">

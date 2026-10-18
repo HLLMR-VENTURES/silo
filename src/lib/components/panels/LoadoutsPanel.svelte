@@ -12,7 +12,6 @@
     onRemove,
     onSaveCurrent,
     onImport,
-    onClose,
   }: {
     loadouts: Loadout[];
     activeCount: number;
@@ -23,12 +22,9 @@
     onRemove: (l: Loadout) => void;
     onSaveCurrent: () => void;
     onImport: () => void;
-    onClose: () => void;
   } = $props();
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="backdrop" onclick={onClose}></div>
 <div class="loadouts-panel">
   <div class="lp-head">
     <span>Loadouts</span>
@@ -73,25 +69,13 @@
 </div>
 
 <style>
-  .backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 40;
-  }
+  /* A page section in its view (it was a popover under the old top bar). */
   .loadouts-panel {
-    position: fixed;
-    z-index: 50;
-    top: 66px;
-    right: 20px;
-    width: 320px;
-    max-height: 70vh;
-    overflow-y: auto;
+    max-width: 48rem;
     background: var(--surface-raised);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: var(--shadow-2);
     padding: 8px;
-    scrollbar-width: thin;
   }
   .lp-head {
     display: flex;
