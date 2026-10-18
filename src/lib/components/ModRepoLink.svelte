@@ -115,10 +115,11 @@
 </script>
 
 <div class="d-section">
-  <div class="d-label">GitHub updates</div>
+  <h4 class="d-label">GitHub repo</h4>
   <div class="gh-link">
     <input
       class="gh-input"
+      aria-label="GitHub repo, as owner/repo"
       placeholder="owner/repo"
       bind:value={repoInput}
       onkeydown={(e) => e.key === "Enter" && linkRepo()}
@@ -162,16 +163,13 @@
 
 <style>
   .d-section {
-    padding: 12px 0;
-    border-top: 1px solid var(--border);
+    padding: 6px 0;
   }
   .d-label {
+    margin: 0 0 6px;
     font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
-    font-weight: 700;
-    margin-bottom: 8px;
+    font-weight: 600;
+    color: var(--text);
   }
   .gh-link {
     display: flex;

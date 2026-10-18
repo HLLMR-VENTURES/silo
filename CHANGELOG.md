@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (green shield). Mods an author has claimed will show **Verified author** (sky-blue badge) once
   Silo's author program goes live; the two never look alike. (#246)
 
+- **Verdicts at the top of a mod's details.** The header shows Verified build or Modified (with
+  how many files differ), Update available, and Problem when the mod is in a critical conflict or
+  logged errors in a game that crashed. (#245)
+
 - **Library filters you can see.** Show All, Active or Parked mods; Favorites and Needs attention
   (mods that can't load, conflict, were modified, are flagged or have an update) are one click;
   the rest (Hidden, Flagged, In conflict, Has settings, Needs update, Maps, Script mods, uniqueType
@@ -95,6 +99,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now. Your library still works." with **Try again** when it can't be reached; "No mods match
   “x”." with **Clear search** when a search finds nothing. Install and loading errors use Silo's
   usual messages instead of raw text. (#246)
+
+- **Mod details, reordered.** The Active switch, Settings and a ⋯ menu (Favorite, Flag, Hide,
+  Change category, Show file, Find in Browse) replace the row of seven buttons. What needs
+  your attention comes next: a different build in your mods folder (Use this version or keep
+  Silo's), errors from your last game (See in Diagnose) and conflicts with active mods (See
+  conflicts). Then About, Details (with the Mod ID and a copy button, Exclusive slot and
+  dependencies), Integrity, Source and updates, My notes and Category. Opening a mod's details
+  moves focus to its name; Esc closes them and puts focus back on the mod's row. (#245)
 
 - **Parking a loose mod explains itself.** The first time you park a mod Silo hasn't filed yet, it
   says it moves the mod into your library folder (it stays in your library) and asks, with

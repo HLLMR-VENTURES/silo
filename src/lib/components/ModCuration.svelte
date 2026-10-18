@@ -20,6 +20,7 @@
     onFilterTag: (tag: string) => void;
   } = $props();
 
+  const uid = $props.id();
   let noteDraft = $state("");
   $effect(() => {
     noteDraft = curation.note ?? "";
@@ -57,25 +58,26 @@
 </script>
 
 <div class="d-section">
-  <div class="d-label">Rating</div>
-  <div class="d-stars">
+  <h4 class="d-label" id="{uid}-rating">Rating</h4>
+  <div class="d-stars" role="group" aria-labelledby="{uid}-rating">
     {#each [1, 2, 3, 4, 5] as s (s)}
-      <button class="star" class:on={curation.rating >= s} onclick={() => setRating(s)} aria-label={`${s} stars`}><Icon name="favorite" size={22} filled={curation.rating >= s} /></button>
+      <button class="star" class:on={curation.rating >= s} onclick={() => setRating(s)} aria-label={`${s} ${s === 1 ? "star" : "stars"}`} aria-pressed={curation.rating === s}><Icon name="favorite" size={22} filled={curation.rating >= s} /></button>
     {/each}
   </div>
 </div>
 
 <div class="d-section">
-  <div class="d-label">Tags</div>
+  <h4 class="d-label">Tags</h4>
   <div class="d-tags">
     {#each tags as t (t)}
       <span class="d-tag">
-        <button class="d-tag-name" onclick={() => onFilterTag(t)} title="Filter by this tag">{t}</button>
-        <button class="d-tag-x" onclick={() => removeTag(t)} use:tooltip={"Remove tag"} aria-label="Remove tag"><Icon name="close" size={12} /></button>
+        <button class="d-tag-name" onclick={() => onFilterTag(t)} use:tooltip={"Show mods with this tag"}>{t}</button>
+        <button class="d-tag-x" onclick={() => removeTag(t)} use:tooltip={"Remove tag"} aria-label="Remove tag: {t}"><Icon name="close" size={12} /></button>
       </span>
     {/each}
     <input
       class="d-tag-input"
+      aria-label="Add a tag"
       placeholder="add tag…"
       bind:value={newTag}
       onkeydown={(e) => e.key === "Enter" && addTag()}
@@ -85,22 +87,19 @@
 </div>
 
 <div class="d-section">
-  <div class="d-label">Notes</div>
-  <textarea class="d-note" bind:value={noteDraft} onblur={saveNote} placeholder="Personal notes about this mod…"></textarea>
+  <h4 class="d-label"><label for="{uid}-notes">Notes</label></h4>
+  <textarea id="{uid}-notes" class="d-note" bind:value={noteDraft} onblur={saveNote} placeholder="Personal notes about this mod…"></textarea>
 </div>
 
 <style>
   .d-section {
-    padding: 12px 0;
-    border-top: 1px solid var(--border);
+    padding: 6px 0;
   }
   .d-label {
+    margin: 0 0 6px;
     font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
-    font-weight: 700;
-    margin-bottom: 8px;
+    font-weight: 600;
+    color: var(--text);
   }
   .d-stars {
     display: flex;

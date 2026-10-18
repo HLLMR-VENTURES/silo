@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick, untrack } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { get } from "svelte/store";
   import {
     DialogHost,
@@ -211,6 +211,7 @@
   import FilterBar from "./lib/components/FilterBar.svelte";
   import ModSettings from "./lib/components/ModSettings.svelte";
   import ModDetail from "./lib/components/ModDetail.svelte";
+  import { returnFocusOnDrawerClose } from "./lib/components/drawer/drawerFocus.svelte";
   import ConfigEditor from "./lib/components/ConfigEditor.svelte";
   import ModBrowser from "./lib/components/ModBrowser.svelte";
   import LogTriage from "./lib/components/LogTriage.svelte";
@@ -3176,35 +3177,14 @@
     ),
   );
 
-  // The mod drawer hands focus back when it closes (✕, Esc, Open in Browse…): to the row of the
-  // mod it showed (by key, scrolled into view), else to what had focus in the main area when it
-  // opened, else to the main area, so focus never drops to <body>. Left alone when focus is still
-  // somewhere real (a rail click that left the Library).
-  let drawerWasOpen = false;
-  let drawerOpener: HTMLElement | null = null;
-  let drawerModKey: string | null = null;
-  $effect(() => {
-    const open = !!detailMod && nav.view === "library";
-    const key = detailMod ? modKey(detailMod) : null;
-    untrack(() => {
-      if (open) drawerModKey = key; // follows the shown mod (Find in Library can swap it)
-      if (open && !drawerWasOpen) {
-        const a = document.activeElement;
-        drawerOpener = a instanceof HTMLElement && regionOf(a) === "main" ? a : null;
-      } else if (!open && drawerWasOpen) {
-        const opener = drawerOpener;
-        const back = drawerModKey;
-        drawerOpener = null;
-        drawerModKey = null;
-        void tick().then(() => {
-          const a = document.activeElement;
-          if (a && a !== document.body && a.isConnected) return;
-          if (back && libList?.focusKey(back)) return;
-          (opener?.isConnected ? opener : document.getElementById("main"))?.focus();
-        });
-      }
-      drawerWasOpen = open;
-    });
+  // The mod drawer hands focus back when it closes: to the row of the mod it showed, else to what
+  // had focus in the main area when it opened, else to the main area (drawer/drawerFocus).
+  returnFocusOnDrawerClose({
+    open: () => !!detailMod && nav.view === "library",
+    key: () => (detailMod ? modKey(detailMod) : null), // follows the shown mod (Find in Library can swap it)
+    focusKey: (k) => libList?.focusKey(k) ?? false,
+    keepOpener: (el) => regionOf(el) === "main",
+    fallback: () => document.getElementById("main"),
   });
 </script>
 
@@ -3220,6 +3200,7 @@
         active={activeSet.has(dm.techName)}
         organized={dm.organized}
         hasSettings={settingsModsSet.has(dm.techName)}
+        hasUpdate={updatesSet.has(dm.techName)}
         foreign={fgn}
         onAdoptForeign={async () => {
           if (fgn && (await resolveForeign(fgn.fileName, "adopt"))) detailMod = null;

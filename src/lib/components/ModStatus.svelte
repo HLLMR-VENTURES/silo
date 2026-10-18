@@ -1,70 +1,41 @@
 <script lang="ts">
+  // What Silo's catalog says about this mod's version, inside the drawer's "Source and updates".
+  // The drawer does the (best-effort) lookup and passes the result: `checked` false while it
+  // runs, `catalog` null when the mod isn't in the catalog or the lookup failed.
   import Icon from "../ui/Icon.svelte";
-  import type { ModEntry, LogModHealth, CatalogUpdate } from "../types";
-  import { scanLog, catalogCheckUpdates, openExternal } from "../api";
+  import type { ModEntry, CatalogUpdate } from "../types";
+  import { openExternal } from "../api";
 
-  let { mod }: { mod: ModEntry } = $props();
-
-  // Per-mod status pulled in on open: how it fared in the last run's log, and what the
-  // catalog knows about it. Both best-effort — a missing log or offline catalog just
-  // hides the section rather than erroring.
-  let logHealth = $state<LogModHealth | null | "clean">(null); // null=unknown, "clean"=in log, no findings
-  let catalog = $state<CatalogUpdate | null>(null);
-  let catalogChecked = $state(false);
-
-  $effect(() => {
-    const tech = mod.techName; // re-run when the drawer switches mods
-    logHealth = null;
-    catalog = null;
-    catalogChecked = false;
-    scanLog()
-      .then((r) => {
-        const m = r.mods.find((x) => x.modName === tech);
-        logHealth = m ?? (r.mods.length >= 0 ? "clean" : null);
-      })
-      .catch(() => {});
-    catalogCheckUpdates([{ techName: tech, version: mod.version ?? undefined }])
-      .then((rows) => {
-        catalog = rows.find((x) => x.techName === tech) ?? null;
-        catalogChecked = true;
-      })
-      .catch(() => {});
-  });
+  let {
+    mod,
+    catalog,
+    checked,
+    pageUrl = null,
+  }: {
+    mod: ModEntry;
+    catalog: CatalogUpdate | null;
+    checked: boolean;
+    /** The catalog's page for the mod, offered when there's no download link. */
+    pageUrl?: string | null;
+  } = $props();
+  const link = $derived(catalog?.downloadUrl ?? pageUrl);
 </script>
 
-{#if logHealth}
-  <div class="d-section">
-    <div class="d-label">Last run</div>
-    {#if logHealth === "clean"}
-      <div class="d-log ok">No errors or warnings from this mod in the last game log.</div>
-    {:else if logHealth.errors > 0}
-      <div class="d-log bad">
-        {logHealth.errors} error{logHealth.errors === 1 ? "" : "s"} in the last run,
-        likely the reason something's broken.
-        <div class="d-log-sample">{logHealth.sample}</div>
-      </div>
-    {:else if logHealth.warnings - logHealth.benign > 0}
-      <div class="d-log warn">
-        {logHealth.warnings - logHealth.benign} warning{logHealth.warnings - logHealth.benign === 1 ? "" : "s"} last run.
-        <div class="d-log-sample">{logHealth.sample}</div>
-      </div>
-    {:else}
-      <div class="d-log ok">{logHealth.benign} cosmetic warning{logHealth.benign === 1 ? "" : "s"} only. Safe to ignore.</div>
-    {/if}
-  </div>
-{/if}
-
 <div class="d-section">
-  <div class="d-label">Catalog</div>
-  {#if !catalogChecked}
+  <h4 class="d-label">Silo's catalog</h4>
+  {#if !checked}
     <div class="d-log muted">Checking the catalog…</div>
   {:else if !catalog}
-    <div class="d-log muted">Not found in the SiloAPI catalog.</div>
+    <div class="d-log muted">Not in Silo's catalog.</div>
   {:else if catalog.hasUpdate}
     {@const c = catalog}
     <div class="d-log warn">
-      Update available: you have {mod.version ?? "?"}, catalog has <b>{c.latest}</b>{c.source ? ` (${c.source})` : ""}.
-      {#if c.downloadUrl}<button class="d-cat-link" onclick={() => openExternal(c.downloadUrl!)}>Get it <Icon name="external" size={12} /></button>{/if}
+      Update available: you have {mod.version ?? "an unknown version"}, the catalog has <b>{c.latest}</b>{c.source
+        ? ` (${c.source})`
+        : ""}.
+      {#if link}<button class="d-cat-link" onclick={() => openExternal(link)}
+          >{c.downloadUrl ? "Get it" : "View source"} <Icon name="external" size={12} /><span class="vh"> (opens in your browser)</span></button
+        >{/if}
     </div>
   {:else}
     <div class="d-log ok">Up to date with the catalog{catalog.latest ? ` (${catalog.latest})` : ""}.</div>
@@ -73,19 +44,16 @@
 
 <style>
   .d-section {
-    padding: 12px 0;
-    border-top: 1px solid var(--border);
+    padding: 6px 0;
   }
   .d-label {
+    margin: 0 0 4px;
     font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
-    font-weight: 700;
-    margin-bottom: 8px;
+    font-weight: 600;
+    color: var(--text);
   }
   .d-log {
-    font-size: 0.85rem;
+    font-size: var(--fs-xs);
     line-height: 1.5;
     color: var(--text);
   }
@@ -99,18 +67,6 @@
   .d-log.warn {
     color: var(--warn-text);
   }
-  .d-log.bad {
-    color: var(--danger);
-  }
-  .d-log-sample {
-    margin-top: 4px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: var(--fs-xs);
-    color: var(--text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
   .d-cat-link {
     border: none;
     background: transparent;
@@ -120,5 +76,13 @@
     padding: 0;
     margin-left: 4px;
     text-decoration: underline;
+  }
+  .vh {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 </style>
