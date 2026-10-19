@@ -6,6 +6,45 @@ gap between the RC protocol and visible proof it ran.
 
 ---
 
+## v1.0.0 — 2026-10-19
+
+### Artifact identity
+| Field | Value |
+|---|---|
+| Version | 1.0.0 (exe FileVersion + ProductVersion + Apps & features `DisplayVersion` agree; Settings › About "Silo 1.0.0") |
+| Source | Tag `v1.0.0` on `cc12c1b` (main CI green); release-workflow run 39267015886, all 6 jobs green (macOS arm64 + x64, Linux, Windows signed, SBOM, checksums) |
+| Installers | `Silo_1.0.0_x64-setup.exe` SHA-256 `9c2b4bcc7c2a54c544f49499dcea90f4cf7e075392780ea5053c09bcd6ffa3c0`; `Silo_1.0.0_x64_en-US.msi` SHA-256 `0fa3af1b3e13c35b95e5f9d50a6d2b96cd34f3726d2b5acf7c95724a30916334` (both match `SHA256SUMS.txt`) |
+| Authenticode | **Valid**, signer `CN=David Hellmer`, timestamped, on both installers |
+| Provenance | `gh attestation verify` passes for setup.exe and msi (workflow ref `refs/tags/v1.0.0`) |
+| Checksums | `SHA256SUMS.txt` lists all 18 other assets, **including `silo-sbom.cdx.json` and `latest.json`** (v0.11.0's list missed the SBOM; fixed by running `checksums` after `sbom`) |
+| Updater manifest | `latest.json` v1.0.0, 11 platform keys each with a signature + a `/download/v1.0.0/` URL; `releases/latest/download/latest.json` serves 1.0.0 after publish |
+| Install path | Silent per-user NSIS (`/S`) **over an existing 0.11.0** install at `%LOCALAPPDATA%\silo`; one "Silo" entry in Apps & features afterwards |
+| Environment | Windows 11 Pro 26200, standard user, no elevation; real library of **739 mods** (736 organized, 3 active including a dev folder mod), cloud-synced Documents |
+
+### Live tests
+- **Upgrade 0.11.0 → 1.0.0 is non-destructive: ✅ PASS.** A size+mtime listing of the whole `mods/` tree (761 entries) before installing vs. after installing, launching, and closing 1.0.0: **0-line diff**. `integrity_check: ok`, `user_version` 2.
+- **The release candidate on main, in the real app (dev build), overnight 2026-10-18/19: ✅ PASS after fixes.** A top-down click-through on the real library and on a throwaway demo profile (`SILO_PROFILE_DIR`, first run, organize, mod sets, bulk park + Undo, set switch, Find the problem mod, share `.silo`/`.silomp`, Undo organizing, settings editors). It found 4 blockers and ~30 smaller issues, all fixed before tagging (#268-#300; see Findings). Re-run on main after the fixes; records in the release-check reports.
+- **Find the problem mod with unfiled mods: ✅ PASS** (demo profile, 693 loose mods): files them first on consent (Cancel moves nothing), parks the right half on disk (348 of 693 active), the Library shows the round's real set, Stop asks first and restores all 693.
+- **Settings editors: ✅ PASS.** A number field (Max shadow lights 10 → 6) saves, with backups; Performance class shows the game's own `Medium`.
+- **#266 on real data: ✅ PASS.** "Realistic Soil & Fertilizer" shows in full after the one-time re-parse (0.11 showed "Realistic Soil").
+
+### Findings (all fixed before the tag)
+- **Find the problem mod never parked unfiled (loose) mods**, so a newly added mod (the likely culprit) could never be found (#291).
+- **Number fields in the settings editors couldn't be saved** (a JS number sent to a Rust `String`) (#278).
+- **An integrity verdict, a GitHub update check or a typed note could land on the next mod clicked** (#276, #297).
+- **XML text was cut at the first entity** (`Elm &amp; Ash` → "Elm") in modDesc, savegame, store and config reads (#266, #268).
+- Plus: a move fallback that could leave two copies of an in-use mod (#279), a pasted GitHub token that could reach the log (#281), unbounded shared sets (#277), the 500 MB install cap (#282), false type/specialization conflicts (#275), the release body's "Beta" and the SBOM missing from the checksums (#269), and many UI and copy fixes.
+
+### Not run live
+- The in-app update offer from 0.11.0 (it reads `/releases/latest`, live only after publish).
+- The 0.11 → 1.0 database migration on a v1 database: this machine's database was already migrated by the dev builds (with `db-snapshots/silo-before-v1.db` kept); the migration is covered by `db.rs` tests (`migrating_to_v2_keeps_every_set_as_a_user_set`, concurrent first opens).
+- macOS and Linux packages: built and signed by CI, not run here (#171).
+
+### Sign-off
+- Artifact identity, signing, provenance, upgrade integrity and the release's headline flows: **PASS**. Published as Latest 2026-10-19T14:31:10Z.
+
+---
+
 ## v0.8.0 — 2026-10-16
 
 ### Artifact identity
