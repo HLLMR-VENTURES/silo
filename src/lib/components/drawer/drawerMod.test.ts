@@ -34,8 +34,23 @@ describe("currentEntry (the drawer follows the library)", () => {
     expect(currentEntry(shown, now)?.path).toBe("/mods/b.zip");
   });
 
-  it("keeps the shown entry when the mod is gone", () => {
+  it("is null when the mod is gone (the drawer closes)", () => {
     const shown = entry("/mods/a.zip", "a");
-    expect(currentEntry(shown, [entry("/mods/z.zip", "z")])).toBe(shown);
+    expect(currentEntry(shown, [entry("/mods/z.zip", "z")])).toBeNull();
+  });
+
+  it("keeps the previous object when a rescan changed nothing about the mod", () => {
+    const shown = entry("/mods/a.zip", "a");
+    const prev = currentEntry(shown, [entry("/mods/a.zip", "a")]);
+    const again = currentEntry(shown, [entry("/mods/a.zip", "a")], prev);
+    expect(again).toBe(prev);
+  });
+
+  it("hands over the new object when the mod changed", () => {
+    const shown = entry("/mods/a.zip", "a");
+    const prev = currentEntry(shown, [entry("/mods/a.zip", "a", "Tractors")]);
+    const next = currentEntry(shown, [entry("/mods/a.zip", "a", "Trailers")], prev);
+    expect(next).not.toBe(prev);
+    expect(next?.category).toBe("Trailers");
   });
 });
