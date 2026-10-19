@@ -3924,6 +3924,7 @@
         checkDisabledReason={fgLock.reason ||
           updateCheckBlocked ||
           (mods.length === 0 ? "No mods to check yet." : "")}
+        catalogError={!!updateCatalogError}
         oncheck={() => checkAllUpdates()}
       >
         <UpdatesPanel
