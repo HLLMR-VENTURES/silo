@@ -76,7 +76,8 @@ export function markActivitySeen(): void {
   seenUpTo = nextId - 1;
 }
 
-/** Error entries logged since the panel was last opened. Reactive. */
+/** Error entries logged since the panel was last opened. Reactive. A notice is logged when it
+ *  goes away (its problem is over), so a blocking notice's entry isn't news for the bell. */
 export function unseenErrorCount(): number {
-  return activity.filter((a) => a.level === "error" && a.id > seenUpTo).length;
+  return activity.filter((a) => a.level === "error" && a.kind !== "notice" && a.id > seenUpTo).length;
 }

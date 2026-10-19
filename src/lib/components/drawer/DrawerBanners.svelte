@@ -7,7 +7,8 @@
   import type { ForeignFile } from "../../api";
   import type { Conflict, LogModHealth } from "../../types";
   import { plural, formatCount } from "../../plural";
-  import { conflictKindLabel, versionLabel } from "./drawerText";
+  import { conflictKindLabel } from "./drawerText";
+  import { displayVersion } from "../../format";
 
   interface Props {
     foreign: ForeignFile | null;
@@ -42,9 +43,9 @@
     onSeeConflicts,
   }: Props = $props();
 
-  const v = (s: string | null) => (s ? versionLabel(s) : "an unknown version");
+  const v = (s: string | null) => (s ? displayVersion(s) : "an unknown version");
   const keepLabel = $derived(
-    foreign?.managedVersion ? `Keep Silo's ${versionLabel(foreign.managedVersion)}` : "Keep Silo's copy",
+    foreign?.managedVersion ? `Keep Silo's ${displayVersion(foreign.managedVersion)}` : "Keep Silo's copy",
   );
   const others = (c: Conflict) => c.mods.filter((m) => !selfNames.includes(m)).join(", ");
 </script>
@@ -56,7 +57,7 @@
         <p class="msg">
           <Icon name="info" size={14} />
           <b>{foreignIsNewer ? "A newer build is in your mods folder" : "A different build is in your mods folder"}</b>:
-          {v(foreign.flatVersion)}. Silo keeps {foreign.managedVersion ? versionLabel(foreign.managedVersion) : "its own copy"}. This is how ModHub updates
+          {v(foreign.flatVersion)}. Silo keeps {foreign.managedVersion ? displayVersion(foreign.managedVersion) : "its own copy"}. This is how ModHub updates
           arrive: you download the zip into the folder.
         </p>
         <div class="row">

@@ -76,7 +76,7 @@
     </p>
   {/if}
   {#if modsStatus?.gameSettingProblem}
-    <p class="hint">Silo can't update FS25's setting: {modsStatus.gameSettingProblem}.</p>
+    <p class="hint">Silo can't change the game's mods folder setting. {modsStatus.gameSettingProblem}</p>
   {/if}
   {#if modsStatus?.path && modsStatus.source === "user"}
     <div class="btnrow">

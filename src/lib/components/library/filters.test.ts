@@ -2,9 +2,11 @@
 // toggles' and facets', unchanged), the chips and their removal, and what's remembered.
 import { describe, expect, it } from "vitest";
 import {
+  conflictedTechNames,
   filterChips,
   filterMods,
   needsAttention,
+  needsUpdateOutcome,
   NO_FILTERS,
   noFilters,
   popoverCount,
@@ -165,5 +167,39 @@ describe("remembered Library state and density", () => {
     const throwing = { getItem: () => { throw new Error("off"); }, setItem: () => { throw new Error("off"); } };
     expect(loadLibraryDensity(throwing)).toBe("comfortable");
     expect(() => saveLibraryDensity("compact", throwing)).not.toThrow();
+  });
+});
+
+describe("conflictedTechNames (badge, In conflict filter and its count agree)", () => {
+  it("collects tech names, not display titles, and skips info notes", () => {
+    const s = conflictedTechNames([
+      { severity: "warning", mods: ["Courseplay"], techNames: ["FS25_Courseplay"] },
+      { severity: "critical", mods: ["Big Tractor", "Other"], techNames: ["FS25_Big", "FS25_Other"] },
+      { severity: "info", mods: ["Map A", "Map B"], techNames: ["FS25_MapA", "FS25_MapB"] },
+    ]);
+    expect(s.has("FS25_Courseplay")).toBe(true);
+    expect(s.has("Courseplay")).toBe(false);
+    expect([...s].sort()).toEqual(["FS25_Big", "FS25_Courseplay", "FS25_Other"]);
+  });
+});
+
+describe("needsUpdateOutcome (switching Needs update on)", () => {
+  const base = { available: 0, checking: false, checked: true, catalogError: null, blocked: "" };
+  it("filters when updates are available", () => {
+    expect(needsUpdateOutcome({ ...base, available: 3 })).toEqual({ filter: true });
+  });
+  it("says up to date only after a clean check", () => {
+    expect(needsUpdateOutcome(base)).toEqual({ filter: false, say: "All mods are up to date", tone: "success" });
+  });
+  it("doesn't say up to date when the catalog couldn't be reached", () => {
+    const o = needsUpdateOutcome({ ...base, checked: false, catalogError: "Silo couldn't reach its catalog." });
+    expect(o).toEqual({ filter: false, say: "Silo couldn't reach its catalog.", tone: "warn" });
+  });
+  it("doesn't say up to date while a check is still running", () => {
+    expect(needsUpdateOutcome({ ...base, checked: false, checking: true })).toMatchObject({ filter: false, tone: "warn" });
+  });
+  it("doesn't say up to date when the check couldn't start", () => {
+    const o = needsUpdateOutcome({ ...base, checked: false, blocked: "Wait for the updates to finish." });
+    expect(o).toEqual({ filter: false, say: "Wait for the updates to finish.", tone: "warn" });
   });
 });

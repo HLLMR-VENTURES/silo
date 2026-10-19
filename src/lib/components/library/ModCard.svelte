@@ -13,7 +13,7 @@
   import Icon from "../../ui/Icon.svelte";
   import IconButton from "../../ui/IconButton.svelte";
   import Switch from "../../ui/Switch.svelte";
-  import { fmtSize } from "../../format";
+  import { displayVersion, modSizeLabel } from "../../format";
   import type { ModEntry } from "../../types";
   import BadgeRow from "./BadgeRow.svelte";
   import { cachedModIcon, loadModIcon } from "./modIcon";
@@ -56,7 +56,7 @@
   const title = $derived(mod.title ?? mod.techName);
   const initial = $derived(title.trim().charAt(0).toUpperCase() || "?");
   const meta = $derived(
-    [mod.version ? `v${mod.version.replace(/^v/i, "")}` : null, mod.category, fmtSize(mod.size)].filter(
+    [mod.version ? displayVersion(mod.version) : null, mod.category, modSizeLabel(mod)].filter(
       Boolean,
     ) as string[],
   );

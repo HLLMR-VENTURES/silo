@@ -96,13 +96,35 @@ pub fn to_json(c: &Collection) -> Result<String, String> {
     serde_json::to_string_pretty(c).map_err(|e| e.to_string())
 }
 
+/// The most mods a shared set may list. A set is untrusted input: every mod in it costs catalog
+/// lookups on preview and on apply, so a link to a huge file mustn't turn into hundreds of
+/// requests. Far above any real set (the largest libraries Silo is tuned for hold ~2,500 mods).
+pub const MAX_SET_MODS: usize = 5_000;
+
 /// Parse + validate an untrusted collection document. Rejects anything that isn't a
-/// Silo collection (wrong/missing schema or malformed JSON) with one user-facing message.
+/// Silo collection (wrong/missing schema or malformed JSON) with one user-facing message,
+/// and a set of more than [`MAX_SET_MODS`] mods.
 pub fn parse(json: &str) -> Result<Collection, String> {
+    parse_document(json).and_then(within_limit)
+}
+
+/// [`parse`] without the size limit, so `parse_set_file` can tell "too big" from "not a set".
+fn parse_document(json: &str) -> Result<Collection, String> {
     let c: Collection =
         serde_json::from_str(json).map_err(|_| "That isn't a valid Silo shared set".to_string())?;
     if !c.schema.starts_with(SCHEMA_PREFIX) {
         return Err("That isn't a valid Silo shared set".to_string());
+    }
+    Ok(c)
+}
+
+/// Refuse a set of more than [`MAX_SET_MODS`] mods.
+fn within_limit(c: Collection) -> Result<Collection, String> {
+    if c.mods.len() > MAX_SET_MODS {
+        return Err(format!(
+            "That shared set lists {} mods. Silo opens sets of up to 5,000 mods.",
+            c.mods.len()
+        ));
     }
     Ok(c)
 }
@@ -119,8 +141,8 @@ pub struct SetFile {
 /// collection with bare tech names, so it previews and installs through the same path).
 pub fn parse_set_file(json: &str) -> Result<Collection, String> {
     const NOT_A_SET: &str = "That file isn't a Silo mod set";
-    if let Ok(c) = parse(json) {
-        return Ok(c);
+    if let Ok(c) = parse_document(json) {
+        return within_limit(c);
     }
     let f: SetFile = serde_json::from_str(json).map_err(|_| NOT_A_SET.to_string())?;
     let name = f.name.trim();
@@ -143,7 +165,7 @@ pub fn parse_set_file(json: &str) -> Result<Collection, String> {
             catalog_id: None,
         })
         .collect();
-    Ok(Collection {
+    within_limit(Collection {
         schema: SCHEMA.to_string(),
         name: name.to_string(),
         description: None,
@@ -699,6 +721,50 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn a_shared_set_over_the_mod_limit_is_refused() {
+        let doc = |n: usize| {
+            let mods: Vec<String> = (0..n)
+                .map(|i| format!(r#"{{"techName":"FS25_M{i}"}}"#))
+                .collect();
+            format!(
+                r#"{{"schema":"silo.collection/1","name":"x","mods":[{}]}}"#,
+                mods.join(",")
+            )
+        };
+        let set_file = |names: Vec<String>| {
+            serde_json::to_string(&SetFile {
+                silo: 1,
+                name: "x".into(),
+                mods: names,
+            })
+            .unwrap()
+        };
+        let names = |n: usize| (0..n).map(|i| format!("FS25_M{i}")).collect::<Vec<_>>();
+
+        assert_eq!(parse(&doc(MAX_SET_MODS)).unwrap().mods.len(), MAX_SET_MODS);
+        let too_many = parse(&doc(MAX_SET_MODS + 1)).unwrap_err();
+        assert!(too_many.contains("5,000"), "{too_many}");
+        assert_eq!(
+            parse_set_file(&doc(MAX_SET_MODS + 1)).unwrap_err(),
+            too_many
+        );
+
+        assert!(parse_set_file(&set_file(names(MAX_SET_MODS))).is_ok());
+        assert_eq!(
+            parse_set_file(&set_file(names(MAX_SET_MODS + 1))).unwrap_err(),
+            too_many
+        );
+        // The limit counts distinct mods, after repeats and blanks are dropped.
+        let mut repeats = names(MAX_SET_MODS);
+        repeats.extend(names(10));
+        repeats.push(" ".into());
+        assert_eq!(
+            parse_set_file(&set_file(repeats)).unwrap().mods.len(),
+            MAX_SET_MODS
+        );
     }
 
     #[test]

@@ -225,6 +225,11 @@
     min-height: 0;
     margin-top: var(--sp-4);
     overflow: auto;
+    /* A few px of room inside the scroll box (taken back from the panel's padding, so nothing
+       moves): a control flush with the edge whose hit area overhangs it (Switch's negative
+       margin) or whose focus ring does no longer gives the body a horizontal scrollbar. */
+    margin-inline: calc(-1 * var(--sp-1));
+    padding-inline: var(--sp-1);
   }
   .body:empty {
     display: none;

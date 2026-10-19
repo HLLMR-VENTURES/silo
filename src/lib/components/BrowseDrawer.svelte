@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "../ui/Icon.svelte";
+  import { displayVersion } from "../format";
   import type { CatalogModDetail, ModSourceOption } from "../types";
   import { resizable } from "../resize";
   import GithubCard from "./GithubCard.svelte";
@@ -164,7 +165,7 @@
             <li>
               <div class="src-head">
                 <span class="src-name">{label(s.source)}</span>
-                {#if s.version}<span class="src-ver tnum">{s.version}</span>{/if}
+                {#if s.version}<span class="src-ver tnum">{displayVersion(s.version)}</span>{/if}
                 <button
                   class="src-action"
                   class:can-install={s.installable}
@@ -228,7 +229,7 @@
              and that Silo will still take it from there. -->
         <p class="drawer-hint">
           None of these sources allow apps to download for you. Grab the .zip from a
-          source above and drop it in your mods folder. Silo files it automatically
+          source above and drop it in your mods folder. Silo adds it to your library
           on the next scan.
         </p>
       {/if}

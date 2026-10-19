@@ -27,7 +27,7 @@ Windows (tested) · macOS and Linux (preview).**
   &nbsp;·&nbsp; <a href="#install">Build from source</a>
 </p>
 
-> **Status: public beta.** Windows installers are [code-signed](docs/VERIFY_DOWNLOAD.md) by
+> **Status: 1.0.** Windows installers are [code-signed](docs/VERIFY_DOWNLOAD.md) by
 > David Hellmer, Silo's developer. SmartScreen may still prompt on new releases while
 > reputation builds, but it shows the publisher instead of "unknown". macOS/Linux builds are
 > OS-unsigned, so macOS blocks the first launch until you click **Open Anyway** in System
@@ -44,7 +44,7 @@ Windows (tested) · macOS and Linux (preview).**
 FS25 reads one `mods/` folder, so everything in it is active at once. With hundreds of mods
 installed, finding the one that broke your game can take the whole evening. Silo adds a
 management layer on top: crash triage, conflict checks before launch, update tracking,
-and loadouts you can switch between playthroughs.
+and mod sets you can switch between playthroughs.
 
 ## What it does
 
@@ -61,10 +61,10 @@ and loadouts you can switch between playthroughs.
   build its source published: a clean match, or the exact files that changed. Provenance, not
   antivirus — it confirms what a mod is, not whether it means well. It covers mods from
   GitHub, and ModHub mods the catalog has already hashed.
-- **Guided bisection** — when the log can't name the culprit, automates "disable half,
-  relaunch" to isolate it, and safely restores your active set afterward. Maps stay on every
-  round.
-- **Loadouts** — curate profiles. Switching a mod on or off adds or removes its link in the
+- **Find the problem mod** — when the log can't name the culprit, a guided search parks half
+  your mods per test launch to isolate it, and safely restores your active set afterward. Maps
+  stay on every round.
+- **Mod sets** — save your active mods as a set and switch between sets. Switching a mod on or off adds or removes its link in the
   game's flat folder right away (hardlinks for zips, junctions/symlinks for folder mods, copies
   where links aren't allowed, such as cloud-synced folders). Launch just starts the game.
   Organize files your zips into a local archive and shows every move before it touches a
@@ -76,18 +76,19 @@ and loadouts you can switch between playthroughs.
 - **Library archive on any drive** — move your parked mods to a bigger drive
   while the mods folder stays where the game reads it. Every mod is verified before the
   original is removed; the move can be paused to play, or cancelled to put everything back.
-- **Collections** — share a mod-set as a link (secret gist or public repo); others preview it
-  against their library, then import it: Silo downloads the GitHub mods, checks them against
-  the pinned build and saves the set as a loadout.
+- **Shared sets** — share a mod set as a link (an unlisted gist on your GitHub), a `.silo` file,
+  or a Multiplayer check file. Others preview it against their library in *Mod sets → Open a
+  shared set*, then use it: Silo downloads the GitHub mods, checks them against the pinned
+  build and saves it as a mod set.
 - **Installs and updates** — GitHub releases install in one click, checked against the
   catalog's hash when it has one. Updates keep the previous version in `backups/` (newest
   three per mod) and finish or roll back if Silo stops mid-update. ModHub mods download from
   ModHub; Silo picks them up from your mods folder.
 - **Per-source actions** — star a repo on GitHub through *your own* account, or open the
   ModHub page to rate a mod. Your GitHub token stays on your machine.
-- **Multiplayer sync**, a **filltype-compatibility bridge generator**, **savegame &
-  graphics settings editing** (with `.bak` backups), a **mod-settings editor**, **savegame
-  backup**, and a full **control-binding map**.
+- **Multiplayer check** (does your active set match the server's?), a **fill type bridge**
+  generator, **savegame & graphics settings editing** (with `.bak` backups), a **mod-settings
+  editor**, **savegame backup**, and a full **controls map** (Tools).
 
 ## Install
 
@@ -98,7 +99,7 @@ builds are OS-unsigned, so Gatekeeper may warn on first launch. On Windows, the 
 installs per user with no admin rights (recommended); the `.msi` installs for all users and
 needs admin rights. Linux ships as `.AppImage`, `.deb` and `.rpm`.
 
-**Build from source:** needs [Rust](https://rustup.rs) + [Node 20+](https://nodejs.org)
+**Build from source:** needs [Rust](https://rustup.rs) + [Node 22](https://nodejs.org)
 and the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS.
 
 ```bash
@@ -129,7 +130,7 @@ npm run tauri:build   # produce an installer in src-tauri/target/release/bundle/
 
 Tauri v2 (Rust core, all heavy work off the UI thread) + Svelte 5 + TypeScript, SQLite
 cache (path + mtime + size), quick-xml parsing. See [`docs/`](docs/) —
-`ARCHITECTURE.md`, `MVP.md`, and per-feature notes.
+`ARCHITECTURE.md`, `DESIGN.md`, and per-feature notes.
 
 ## Community
 
@@ -138,17 +139,17 @@ help and release news, join the [Silo Discord](https://discord.gg/NpxcYdGHrW).
 
 ## Contributing
 
-Issues and PRs welcome. `npm run check` (svelte-check) and `cargo test` (in `src-tauri/`)
-must pass — CI runs both. Please keep heavy work off the UI thread and file writes
-reversible (see [`CLAUDE.md`](CLAUDE.md) for conventions).
+Issues and PRs welcome. `npm test`, `npm run build` (svelte-check + Vite) and, in
+`src-tauri/`, `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings` and
+`cargo test` must pass — CI runs them all. Please keep heavy work off the UI thread and file
+writes reversible (see [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CLAUDE.md`](CLAUDE.md)).
 
 ## Built with AI assistance
 
 Silo was built with heavy use of AI-assisted engineering (Claude Code). The
 architecture, the security and reliability decisions, the testing, and every release are
 human-owned and human-reviewed — including acting on rounds of external code critique
-(informal outside review, not a formal third-party security audit) before promoting the
-beta. The desktop source is fully open here so you don't have to take that on faith: read
+(informal outside review, not a formal third-party security audit) before each release. The desktop source is fully open here so you don't have to take that on faith: read
 it, audit it, build it yourself.
 
 ## License
