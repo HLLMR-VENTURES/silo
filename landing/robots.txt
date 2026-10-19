@@ -1,8 +1,0 @@
-# Silo — https://silo.hllmr.com
-# Everything here is public marketing content. Crawlers welcome, including AI /
-# answer-engine crawlers (GPTBot, ClaudeBot, PerplexityBot, Google-Extended, …) —
-# we want Silo to be discoverable and citable, so nothing is disallowed.
-User-agent: *
-Allow: /
-
-Sitemap: https://silo.hllmr.com/sitemap.xml
