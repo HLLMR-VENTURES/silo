@@ -383,7 +383,9 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       return;
     }
     const snapshotName = `Before ${s.name}`;
-    const sum = switchSummary(diff, deps.title, missing.length, deps.active().size ? snapshotName : null);
+    // The missing mods are said once, in `note` (they aren't saved into the set, so the summary's
+    // "stays off until you get it" would be wrong here).
+    const sum = switchSummary(diff, deps.title, 0, deps.active().size ? snapshotName : null);
     const note =
       missing.length > 0
         ? plural(missing.length, {

@@ -266,6 +266,9 @@ describe("useSave", () => {
     expect(opts.title).toBe("Use Riverbend's mods?");
     expect(opts.body).toContain("Silo saves 1 mod from this save as a set called Riverbend and switches to it.");
     expect(opts.body).toContain("1 mod the save used isn't in your library and is left out.");
+    // Said once (L14): not again as "stays off until you get it", since it isn't in the set.
+    expect(opts.body).not.toMatch(/until you get/);
+    expect(opts.facts?.map((f) => f.label)).not.toContain("Not in your library");
     expect(t.setActiveSetTo).toHaveBeenCalledWith(["C"], "Switching to Riverbend");
     expect(saveAutoSnapshot).toHaveBeenCalledWith("Before Riverbend", ["A", "B"]);
     expect(saveLoadout).toHaveBeenCalledWith(null, "Riverbend", ["C"]);

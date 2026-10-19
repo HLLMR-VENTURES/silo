@@ -155,7 +155,7 @@ describe("runBulkSwitch: parking loose mods", () => {
     expect(t.ask).toHaveBeenCalledTimes(1);
     const o = t.ask.mock.calls[0][0];
     expect(o.title).toBe("Park 29 mods?");
-    expect(o.body).toContain("2 of them aren't filed yet, so Silo moves those into your library archive (archive\\Tractors)");
+    expect(o.body).toContain("2 of them aren't filed yet, so Silo moves those into your library archive (its Tractors folder)");
     expect(o.facts).toEqual([
       { label: "Park", value: "29 mods" },
       { label: "Filed into your library first", value: "2 mods" },
@@ -217,7 +217,7 @@ describe("the bulk filing dialog", () => {
     expect(o.body).toContain("cloud-synced");
     expect(o.facts).toContainEqual({ label: "Library folder", value: "On another drive" });
     expect(bulkParkLooseConfirm(2, [mod("A", true, "Maps")], { sep: "/" }).body).toContain(
-      "1 of them isn't filed yet, so Silo moves it into your library archive (archive/Maps)",
+      "1 of them isn't filed yet, so Silo moves it into your library archive (its Maps folder)",
     );
   });
 

@@ -38,6 +38,7 @@
   import { formatCount, plural } from "../../plural";
   import { displayVersion } from "../../format";
   import { baseName, sharedFileKind } from "../../modsets/modSets";
+  import { conflictTitle } from "../../diagnose/conflictCopy";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import { onDestroy, untrack } from "svelte";
 
@@ -432,7 +433,7 @@
         <div class="heads-up">
           <h4>Heads-up</h4>
           {#each preflightConflicts as c, i (c.kind + c.mods.join() + i)}
-            <div class="mod"><span class="mn"><Icon name="problem" size={13} /> {c.name}</span><span class="rt">{c.mods.join(", ")}</span></div>
+            <div class="mod"><span class="mn"><Icon name="problem" size={13} /> {conflictTitle(c)}</span><span class="rt">{c.mods.join(", ")}</span></div>
           {/each}
           {#each preflightDeps as d (d.mod)}
             <div class="mod"><span class="mn">{d.mod}</span><span class="rt">needs {d.missing.join(", ")}, which {d.missing.length === 1 ? "isn't" : "aren't"} in the set or your library</span></div>
