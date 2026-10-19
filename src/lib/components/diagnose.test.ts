@@ -246,6 +246,13 @@ describe("Find the problem mod: mods Silo can't park yet", () => {
     expect(await screen.findByText(/this round/)).toHaveTextContent("Testing 1 mod this round (2 parked for now).");
   });
 
+  it("the intro says only maps stay on (required mods are tested too), with a real plural", () => {
+    render(BisectFlow, { pool: ["FS25_A", "FS25_B"], alwaysOn: [], onApply: vi.fn(() => Promise.resolve()), onBisecting: vi.fn(), onExit: vi.fn() });
+    const intro = screen.getByText(/mods to test/);
+    expect(intro).toHaveTextContent("about 1 launch. Maps stay on the whole time.");
+    expect(intro.textContent).not.toMatch(/required/);
+  });
+
   it("once they're filed, the run saves the set as it is then", async () => {
     const user = userEvent.setup();
     const onPrepare = vi.fn(() => Promise.resolve(true));

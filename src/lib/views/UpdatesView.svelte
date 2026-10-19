@@ -26,6 +26,8 @@
     checkDisabled: boolean;
     /** Why it can't, shown as the button's tooltip. */
     checkDisabledReason?: string;
+    /** The last check's catalog request failed (a failed first check still has no checkedAt). */
+    catalogError?: boolean;
     oncheck: () => void;
     children: Snippet;
   }
@@ -36,6 +38,7 @@
     progress = null,
     checkDisabled,
     checkDisabledReason = "",
+    catalogError = false,
     oncheck,
     children,
   }: Props = $props();
@@ -56,8 +59,9 @@
         : "Mod updates · Not checked yet",
   );
   // Before the first check the panel's empty state carries the privacy line and Check now, so the
-  // header doesn't repeat them.
-  const neverChecked = $derived(!checking && checkedAt == null);
+  // header doesn't repeat them. A failed first check shows the error card instead, so the header
+  // keeps them for the retry.
+  const neverChecked = $derived(!checking && checkedAt == null && !catalogError);
   const progressLabel = $derived(
     progress && progress.total > 0
       ? `Checked ${progress.done} of ${progress.total} ${progress.total === 1 ? "mod" : "mods"} on GitHub`
