@@ -355,6 +355,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - After switching mod sets, the status chip and Conflicts could show the previous set's result
   (for example "All good" while the new set had a conflict open). Silo now waits for the switch
   to finish and keeps only the newest check. (#260)
+- Installing from Browse or a shared set stopped at 500 MB, so a large map could be updated
+  but not installed. Every download now allows up to 4 GB.
+- Previewing a shared set while Silo's catalog couldn't be reached listed every mod as "not in
+  the catalog"; it now says it couldn't look them up and changes nothing.
+- The Multiplayer check reads each mod in small pieces instead of loading whole files, so a set
+  with several large maps no longer needs gigabytes of memory.
+- Silo's outbound-address check also refuses IPv4 addresses written as IPv6
+  (`::ffff:10.0.0.1`), `0.x.x.x`, and other spellings of localhost.
 - A link that isn't a Silo set link now just says so, without "Something went wrong" in front. (#256)
 - Checking for updates works again on libraries with more than 500 mods; Silo now asks its catalog in batches. When the catalog refuses a check, Silo says so instead of claiming it's offline, and keeps the last good "Last checked" time. (#252)
 
