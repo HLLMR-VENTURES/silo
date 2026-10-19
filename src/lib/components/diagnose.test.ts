@@ -37,6 +37,12 @@ vi.mock("../api", async (importOriginal) => ({
   userDirPath: vi.fn(() => Promise.resolve("C:/fs25")),
 }));
 
+const ui = vi.hoisted(() => ({ ask: vi.fn(() => Promise.resolve(true)) }));
+vi.mock("../ui", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../ui")>()),
+  ask: ui.ask,
+}));
+
 function conflict(over: Partial<Conflict>): Conflict {
   return {
     id: "x",
@@ -315,6 +321,19 @@ describe("Find the problem mod: a run survives a hiccup", () => {
     await user.click(await screen.findByRole("button", { name: "Try again" }));
     expect(await screen.findByText(/Round 2 of about/)).toBeInTheDocument();
     expect(bisectNarrow).toHaveBeenCalledOnce();
+  });
+
+  it("the ✕ asks first once a round was applied; No keeps the run", async () => {
+    const onApply = vi.fn(() => Promise.resolve());
+    const { user } = await start(onApply);
+    ui.ask.mockResolvedValueOnce(false);
+    await user.click(screen.getByRole("button", { name: "Stop and put my mods back" }));
+    expect(ui.ask).toHaveBeenCalledWith(expect.objectContaining({ title: "Stop finding the problem mod?", confirm: "Stop" }));
+    expect(onApply).toHaveBeenCalledTimes(1); // the round only: nothing was restored
+    expect(screen.getByRole("button", { name: "I've quit the game" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Stop and put my mods back" }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(2));
+    expect(onApply).toHaveBeenLastCalledWith(["FS25_A", "FS25_B"]);
   });
 
   it("when putting the mods back fails, Close and restore later stops the run and keeps the saved set", async () => {

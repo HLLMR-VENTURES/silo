@@ -5,6 +5,7 @@
   // auto-detected from the log). The player's real mod set is snapshotted first and
   // restored on finish/cancel — nothing here is destructive.
   import Icon from "../ui/Icon.svelte";
+  import { ask } from "../ui";
   import { inlineError } from "../state/notify.svelte";
   import { onDestroy } from "svelte";
   import {
@@ -271,6 +272,20 @@
     onExit();
   }
 
+  /** The ✕: after a round was applied, stopping loses the rounds played, so ask first. */
+  async function stop() {
+    if (working) return;
+    if (started && round > 0 && (phase === "await-launch" || phase === "verdict" || phase === "error")) {
+      const ok = await ask({
+        title: "Stop finding the problem mod?",
+        body: "Your mods go back to how they were. The rounds played so far are lost.",
+        confirm: "Stop",
+      });
+      if (!ok || destroyed) return;
+    }
+    await finish();
+  }
+
   function exitUnchanged() {
     if (working) return;
     onBisecting(false);
@@ -299,7 +314,7 @@
         <p class="stepper tnum">Round {round} of about {about}</p>
       {/if}
     </div>
-    <button class="x" use:tooltip={cancelLabel} aria-label={cancelLabel} onclick={() => finish()} disabled={!!working}><Icon name="close" /></button>
+    <button class="x" use:tooltip={cancelLabel} aria-label={cancelLabel} onclick={() => void stop()} disabled={!!working}><Icon name="close" /></button>
   </div>
 
   <div role="status" aria-live="polite">
