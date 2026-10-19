@@ -345,7 +345,7 @@
     <section class="result" aria-labelledby="mp-h">
       <h3 id="mp-h">Multiplayer check file</h3>
       <p class="muted">{baseName(source.path)}</p>
-      <p>Silo compares the file with your {count(active.size)} active mods: names, versions and each file's fingerprint.</p>
+      <p>Silo compares the file with the {count(active.size)} you have active: names, versions and each file's fingerprint.</p>
       <div class="actions">
         <Button variant="primary" loading={checking} disabled={checking || activeRefs.length === 0} onclick={check}
           >{mpReport ? "Check again" : "Check my mods"}</Button
@@ -376,7 +376,7 @@
             {#each [...r.versionMismatch, ...r.hashMismatch] as m, i (m.techName + i)}
               <div class="mod">
                 <span class="mn">{label(m.techName)}</span>
-                <span class="rt">{m.got && m.expected && m.got !== m.expected ? `yours ${m.got}, server ${m.expected}` : "a different file"}</span>
+                <span class="rt">{i < r.versionMismatch.length && m.got && m.expected && m.got !== m.expected ? `yours ${m.got}, server ${m.expected}` : "a different file"}</span>
                 <Button size="sm" variant="ghost" aria-label="Find in Browse: {label(m.techName)}" onclick={() => onFindInBrowse(m.techName)}>Find in Browse</Button>
               </div>
             {/each}

@@ -2226,17 +2226,23 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
     let default = loc.as_ref().map(|l| l.user_dir.join("mods"));
     let map = loc.as_ref().map(path_map).unwrap_or_default();
     let (ov, game_setting_problem) = match loc.as_ref() {
-        None => (None, Some("FS25 user folder not found".to_string())),
+        None => (
+            None,
+            Some("Silo can't find your Farming Simulator 25 user folder.".to_string()),
+        ),
         Some(l) => match std::fs::read_to_string(l.user_dir.join("gameSettings.xml")) {
             Err(_) => (
                 None,
-                Some("gameSettings.xml not found. Start FS25 once to create it.".to_string()),
+                Some(
+                    "Start Farming Simulator 25 once so it creates its settings, then try again."
+                        .to_string(),
+                ),
             ),
             Ok(xml) => match modsroot::read_override(&xml) {
                 Some(o) => (Some(o), None),
                 None => (
                     None,
-                    Some("gameSettings.xml has no modsDirectoryOverride setting".to_string()),
+                    Some("The game's settings don't have a mods folder entry yet.".to_string()),
                 ),
             },
         },
