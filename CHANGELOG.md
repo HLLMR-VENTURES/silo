@@ -356,6 +356,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Find the problem mod** showed "Round 1 of about NaN", and a finished run couldn't name the
   mod it found: Silo sent the step's fields in the wrong case. (#263)
 
+- Organizing, parking or flattening a mod the game (or an antivirus or sync client) had open
+  could leave two copies of it, or a half-deleted mod folder in the mods folder: when Silo
+  couldn't move it in one step it copied it and then failed to delete the original. Silo now
+  copies only when the mod is going to another drive, and takes its copy back out if the
+  original can't be removed. A failed game-settings write also no longer rewrites the original
+  file from its backup.
+
 - **Faster sorting.** Sorting the Library by version, and grouping a large Updates check, no
   longer slow down on big libraries (version sort on 2,500 mods went from about 60 ms to 3 ms).
   (#258)

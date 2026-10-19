@@ -945,11 +945,12 @@ fn remove_path(p: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Move a file/dir, preferring an instant same-volume rename. On any rename failure
-/// (typically a cross-volume move) fall back SAFELY: copy to a temporary sibling of the
-/// destination, rename that into place, and only then remove the source — so a failed or
-/// partial copy never leaves a half-written file at `to`, and `from` is never lost until
-/// the destination is complete.
+/// Move a file/dir, preferring an instant same-volume rename. Only when the rename fails
+/// because the two paths are on different drives does it fall back to a copy: copy to a
+/// temporary sibling of the destination, rename that into place, and only then remove the
+/// source — so a failed or partial copy never leaves a half-written file at `to`, and `from`
+/// is never lost until the destination is complete. Any other rename failure (the file is in
+/// use, access denied) is returned as is, with nothing copied.
 pub(crate) fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
     move_path_as(from, to, "move")
 }
@@ -960,14 +961,34 @@ pub(crate) fn move_path_as(from: &Path, to: &Path, action: &str) -> std::io::Res
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if std::fs::rename(from, to).is_ok() {
-        crate::fslog::moved(action, from, to);
-        return Ok(());
+    match std::fs::rename(from, to) {
+        Ok(()) => {}
+        // A rename that failed for another reason would fail the copy's final delete the same
+        // way, after the copy was placed: two copies, or a half-deleted folder mod.
+        Err(e) if !crosses_drives(&e) => return Err(e),
+        Err(_) => copy_then_remove(from, to)?,
     }
+    crate::fslog::moved(action, from, to);
+    Ok(())
+}
 
+/// The rename failed only because `from` and `to` are on different drives: Windows
+/// `ERROR_NOT_SAME_DEVICE` (17), Unix `EXDEV` (18). (`ErrorKind::CrossesDevices` needs Rust
+/// 1.85, above the MSRV.)
+fn crosses_drives(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(if cfg!(windows) { 17 } else { 18 })
+}
+
+/// The cross-drive half of [`move_path_as`]: copy `from` to `to` through a temporary sibling,
+/// then remove `from`. If `from` can't be removed, the copy at `to` (Silo's own, just made) is
+/// removed again, so a failure leaves exactly the original. A folder is first renamed aside on
+/// its own drive, so a delete that stops halfway never leaves a half-deleted mod under its
+/// real name.
+fn copy_then_remove(from: &Path, to: &Path) -> std::io::Result<()> {
     let tmp = tmp_sibling(to);
     let _ = remove_path(&tmp); // clear any stale temp from a prior aborted run
-    let copied = if from.is_dir() {
+    let is_dir = from.is_dir();
+    let copied = if is_dir {
         copy_dir_all(from, &tmp)
     } else {
         std::fs::copy(from, &tmp).map(|_| ())
@@ -980,13 +1001,32 @@ pub(crate) fn move_path_as(from: &Path, to: &Path, action: &str) -> std::io::Res
         let _ = remove_path(&tmp);
         return Err(e);
     }
-    if from.is_dir() {
-        std::fs::remove_dir_all(from)
-    } else {
-        std::fs::remove_file(from)
-    }?;
-    crate::fslog::moved(action, from, to);
+    let undo = |e: std::io::Error| {
+        let _ = remove_path(to);
+        e
+    };
+    if !is_dir {
+        return std::fs::remove_file(from).map_err(undo);
+    }
+    let aside = aside_sibling(from);
+    let _ = remove_path(&aside);
+    std::fs::rename(from, &aside).map_err(undo)?;
+    if let Err(e) = std::fs::remove_dir_all(&aside) {
+        // The mod is in place at `to` and gone from its old name; only the hidden leftover
+        // remains (scans skip it, and the next archive move clears it).
+        log::warn!("moved, but couldn't remove {}: {e}", aside.display());
+    }
     Ok(())
+}
+
+/// `.{name}.silo-move-old` beside `p`: where a folder waits to be deleted after a cross-drive
+/// copy (a Silo temp name, so scans skip it).
+fn aside_sibling(p: &Path) -> PathBuf {
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "x".into());
+    p.with_file_name(format!(".{name}.silo-move-old"))
 }
 
 /// Project `src` into the flat root at `link`. Files → hardlink (no privilege, same volume, no
@@ -1817,6 +1857,110 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rename refused for any reason but "different drive" moves nothing and copies nothing:
+    /// the old fallback copied, then failed the delete, leaving two copies.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_in_use_is_not_copied_when_its_rename_fails() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let base = std::env::temp_dir().join(format!("silo_move_inuse_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let from = base.join("FS25_A.zip");
+        std::fs::write(&from, b"PK").unwrap();
+        let to = base.join("archive/Misc/FS25_A.zip");
+        // Held open without delete sharing, like the game holding a mod zip.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1) // FILE_SHARE_READ
+            .open(&from)
+            .unwrap();
+        let r = move_path(&from, &to);
+        drop(held);
+        assert!(r.is_err());
+        assert!(from.exists());
+        assert!(!to.exists(), "nothing copied");
+        assert!(!tmp_sibling(&to).exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_rename_is_not_copied() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("silo_move_ro_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let ro = base.join("ro");
+        std::fs::create_dir_all(&ro).unwrap();
+        let from = ro.join("FS25_A.zip");
+        std::fs::write(&from, b"PK").unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let to = base.join("archive/Misc/FS25_A.zip");
+        let r = move_path(&from, &to);
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if r.is_ok() {
+            // Running as root: permissions don't apply, so there's nothing to test.
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        assert!(from.exists());
+        assert!(!to.exists(), "nothing copied");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn only_a_different_drive_counts_as_crossing_drives() {
+        let (cross, in_use) = if cfg!(windows) { (17, 32) } else { (18, 13) };
+        assert!(crosses_drives(&std::io::Error::from_raw_os_error(cross)));
+        assert!(!crosses_drives(&std::io::Error::from_raw_os_error(in_use)));
+        assert!(!crosses_drives(&std::io::Error::other("x")));
+    }
+
+    /// The cross-drive copy: a source that can't be removed takes the copy back out, so the
+    /// failure leaves exactly the original (file and folder).
+    #[cfg(windows)]
+    #[test]
+    fn a_cross_drive_copy_whose_source_cant_be_removed_is_undone() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let base = std::env::temp_dir().join(format!("silo_move_undo_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("FS25_Dir/data")).unwrap();
+        let file = base.join("FS25_A.zip");
+        std::fs::write(&file, b"PK").unwrap();
+        let inner = base.join("FS25_Dir/data/x.i3d");
+        std::fs::write(base.join("FS25_Dir/modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::write(&inner, b"x").unwrap();
+        let open = |p: &Path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1) // FILE_SHARE_READ: copyable, not deletable
+                .open(p)
+                .unwrap()
+        };
+
+        let to = base.join("other/FS25_A.zip");
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        let held = open(&file);
+        assert!(copy_then_remove(&file, &to).is_err());
+        drop(held);
+        assert!(file.exists() && !to.exists());
+
+        let dir = base.join("FS25_Dir");
+        let to = base.join("other/FS25_Dir");
+        let held = open(&inner);
+        assert!(copy_then_remove(&dir, &to).is_err());
+        drop(held);
+        assert!(inner.exists(), "the folder is whole");
+        assert!(dir.join("modDesc.xml").exists());
+        assert!(!to.exists() && !aside_sibling(&dir).exists());
+
+        // Nothing held: the folder moves and no leftover remains.
+        copy_then_remove(&dir, &to).unwrap();
+        assert!(to.join("data/x.i3d").exists() && !dir.exists());
+        assert!(!aside_sibling(&dir).exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn cleaning_an_empty_archive_removes_silos_own_note() {
