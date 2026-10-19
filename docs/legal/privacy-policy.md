@@ -17,14 +17,14 @@ The controller for the Services is **HLLMR Ventures LLC**, a Texas limited liabi
 This policy covers:
 
 - The **Silo desktop app** (Windows, macOS and Linux builds). Its source is MIT-licensed at github.com/HLLMR/silo.
-- The **Silo website** at silo.hllmr.com, including the landing page, /browse, /help, /trust and the shared-collection page /c/.
+- The **Silo website** at silo.hllmr.com, including the landing page, /browse, /help, /trust and the shared mod set page /c/.
 - The **Silo public read API** at silo-api.hllmr.com.
 
 It does not cover GitHub, ModHub or other services Silo links to or talks to. They have their own privacy policies, linked under "Third-party services" below.
 
 ## What the app keeps on your computer
 
-- **A local database** (`silo.db`) with your mod library index, loadouts, curation (favorites, ratings, tags, notes), source pages you saved, scan results and settings. It lives in the app's data folder on your device.
+- **A local database** (`silo.db`) with your mod library index, mod sets (including up to five automatic "Before …" sets), curation (favorites, ratings, tags, notes), source pages you saved, scan results and settings. It lives in the app's data folder on your device, with daily backup copies and a copy taken before an upgrade changes it (`db-snapshots/`).
 - **Your GitHub token**, if you connect GitHub. It goes into your operating system's credential store (Windows Credential Manager, macOS Keychain, Linux Secret Service). On a Linux system without a keyring, Silo stores it in its local database instead.
 
 We do not receive this data. If you uninstall the app and delete its data folder, it is gone; there is no copy on our side.
@@ -33,22 +33,22 @@ Silo also moves and links mod files inside your own game folder, and writes back
 
 ## Every connection Silo makes
 
-The app has no background telemetry. Apart from the update check at launch, it connects only when you do something that needs it. Most requests from the app carry Silo's version in their User-Agent header (for example `Silo/1.2.3`), and every server the app reaches sees your IP address.
+The app has no background telemetry. Apart from the update check at launch (and, if you turn on **Check for mod updates when Silo starts**, that check at each launch), it connects only when you do something that needs it. Most requests from the app carry Silo's version in their User-Agent header (for example `Silo/1.2.3`), and every server the app reaches sees your IP address.
 
 | What triggers it | Where it goes | What is sent |
 |---|---|---|
 | **App update check**: every time Silo starts | GitHub (`github.com/HLLMR/silo/releases/latest/download/latest.json`) | A plain request for that file. No library data. If you choose to install an update, the installer downloads from GitHub Releases. |
 | **Browse**: opening the Browse tab, searching, filtering, sorting or paging | Our catalog API (silo-api.hllmr.com) | Your search terms, filters, sort order and page. |
 | **A mod's details**: opening a mod's drawer in Library or Browse | Our catalog API | That mod's tech name (or its catalog id), to show its catalog record and whether a newer version exists. |
-| **Check for updates** (⟳ Updates, or the Needs update filter) | Our catalog API | The tech names of your installed mods. Versions are compared on your computer. |
+| **Check for updates** (Updates → Check now, the Needs update filter, or Check for mod updates when Silo starts, which is off by default) | Our catalog API | The tech names of your installed mods. Versions are compared on your computer. |
 | **Verify integrity** | Our catalog API | The mod's tech name and version, to fetch the published build's file list. Hashing and the comparison happen on your computer. No file hashes are sent. |
 | **Install from Browse** | Our catalog API, then GitHub | The catalog id and version, to find the download address and the published hash. The file itself downloads from the GitHub release. |
-| **Collections**: publishing, previewing or importing | Our catalog API | The tech names of the mods in the collection, to find where each one can be installed from. |
+| **Shared mod sets**: sharing, previewing or opening one | Our catalog API | The tech names of the mods in the set, to find where each one can be installed from. |
 | **Cover images** in Browse and the details drawer | Our catalog API's image cache; GitHub for GitHub-hosted images | The image address. Images on our API load directly in the app window; GitHub-hosted images are fetched by the app. |
-| **GitHub, without signing in**: checking a mod linked to a GitHub repository for updates, showing repository stats in a drawer, installing a GitHub mod, opening a shared collection link | GitHub API (api.github.com) and GitHub release downloads | The repository name or gist id. If you have connected GitHub, your token is sent with these API requests so you get the higher rate limit. It is never sent with mod downloads. |
-| **Connect GitHub** (sign-in) | GitHub (github.com/login/device, api.github.com/user) | GitHub's OAuth device flow. Silo asks for `read:user` (your username, for the higher rate limit). **Enable actions** adds `public_repo` (star, watch and public collections). **Enable collection sharing** adds `gist` (private collections). Silo never asks for access to private repositories. |
+| **GitHub, without signing in**: checking a mod linked to a GitHub repository for updates, showing repository stats in a drawer, installing a GitHub mod, opening a shared mod set link | GitHub API (api.github.com) and GitHub release downloads | The repository name or gist id. If you have connected GitHub, your token is sent with these API requests so you get the higher rate limit. It is never sent with mod downloads. |
+| **Connect GitHub** (sign-in) | GitHub (github.com/login/device, api.github.com/user) | GitHub's OAuth device flow. Silo asks for `read:user` (your username, for the higher rate limit). **Enable actions** adds `public_repo` (star and watch). **Enable sharing links** adds `gist` (share links). Silo never asks for access to private repositories. |
 | **Star / Watch** | GitHub API | The repository name and your token. The star or watch lands on your GitHub account. |
-| **Publishing a collection** | GitHub API | Creates a secret gist (private collection) or a public repository (public collection) in **your** GitHub account. It contains the collection name, your GitHub username, an optional description and the mod list (tech names, versions, sources and a hash of each mod's build). Silo also lists your gists and repositories to show *Your collections*. A secret gist is unlisted but anyone with its link can open it. |
+| **Sharing a mod set as a link** | GitHub API | Creates a secret gist in **your** GitHub account. It contains the set's name, your GitHub username, an optional description and the mod list (tech names, versions, sources and a hash of each mod's build). Silo also lists your gists and repositories (older Silo versions could share as a public repository) to show your shared links. A secret gist is unlisted but anyone with its link can open it. |
 | **Mod downloads and updates** | GitHub release assets | A plain download. No token. |
 | **Links you open** (Open page ↗, ModHub pages, source pages you saved) | Your web browser | Silo hands the address to your browser. It never visits those pages itself. |
 
@@ -59,7 +59,7 @@ Silo never uploads your saves, mod archives, notes, settings or personal files.
 - The website sets **no cookies** and runs **no analytics scripts**. The only thing it stores in your browser is your light/dark theme choice (in `localStorage`).
 - **/browse** loads catalog data from our API in your browser. Cover images load from our API's image cache, or for some mods directly from where the source hosts them (GitHub or ModHub).
 - **/trust** loads catalog counts and traffic totals from our servers and release statistics from the GitHub API, in your browser.
-- **/c/** (shared collections) reads the collection from the GitHub API in your browser.
+- **/c/** (shared mod sets) reads the shared set from the GitHub API in your browser.
 
 When your browser loads data from GitHub, GitHub sees your IP address under its own privacy policy.
 
@@ -78,7 +78,7 @@ If data-protection law such as the EU or UK GDPR applies to you:
 
 - **Server access logs and published counts:** our legitimate interest in running secure, reliable Services and understanding how much they're used. We keep the logs short-lived and publish only totals.
 - **Catalog requests from the app or website:** to provide the feature you asked for.
-- **GitHub sign-in features** (star, watch, publishing collections): these run between your computer and GitHub. We don't receive your token or your GitHub data. You start each one and can stop at any time by disconnecting GitHub in Silo or revoking the app in your GitHub settings.
+- **GitHub sign-in features** (star, watch, sharing mod sets as links): these run between your computer and GitHub. We don't receive your token or your GitHub data. You start each one and can stop at any time by disconnecting GitHub in Silo or revoking the app in your GitHub settings.
 
 ## What we don't do
 
@@ -91,7 +91,7 @@ If data-protection law such as the EU or UK GDPR applies to you:
 
 These services have their own privacy policies:
 
-- **GitHub** (app updates, sign-in, downloads, collections) — https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement
+- **GitHub** (app updates, sign-in, downloads, shared mod sets) — https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement
 - **GIANTS Software / ModHub** (pages you open in your browser, and some cover images on /browse) — https://www.giants-software.com/privacy.php
 
 We are not responsible for their practices.
