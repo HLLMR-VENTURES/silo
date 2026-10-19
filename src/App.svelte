@@ -1744,6 +1744,8 @@
   let updateCheckedAt = $state<number | null>(null);
   /** The last check's catalog request failed (Updates shows it with Try again). */
   let updateCatalogError = $state<ExplainedError | null>(null);
+  /** The mods the last check asked about (one added since isn't "not tracked"). */
+  let updateCheckedTechs = $state<ReadonlySet<string> | undefined>(undefined);
   /** Linked GitHub repos checked so far, while a check runs. */
   let updateProgress = $state<{ done: number; total: number } | null>(null);
   /** Per-mod install state in Updates (running, or the failure with Try again). */
@@ -1764,6 +1766,7 @@
       rows: updateResults,
       checkYourself,
       catalogReached: updateCheckedAt != null && !updateCatalogError,
+      checkedTechs: updateCheckedTechs,
     }),
   );
 
@@ -1809,6 +1812,7 @@
     if (updateChecking || updateCheckBlocked) return;
     updateChecking = true;
     updateProgress = null;
+    const asked = new Set(mods.map((m) => m.techName));
     try {
       const res = await runUpdateCheck(mods, repoMap, {
         ...updateCheckDeps,
@@ -1817,6 +1821,7 @@
       updateResults = res.rows;
       updateRowStates = {};
       updateCatalogError = res.catalogError;
+      updateCheckedTechs = asked;
       // A failed catalog request isn't a check: keep the last good time (or "Not checked yet").
       if (!res.catalogError) updateCheckedAt = Date.now();
     } finally {
@@ -2449,6 +2454,12 @@
     scanFailed = false;
     activeSet = new Set();
     foreignFiles = [];
+    // The last update check was of the other folder's files.
+    updateResults = [];
+    updateCheckedAt = null;
+    updateCatalogError = null;
+    updateCheckedTechs = undefined;
+    updateRowStates = {};
     if (roots.length) {
       await runScan();
       hardlinkSupport()

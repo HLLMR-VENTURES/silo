@@ -80,7 +80,15 @@ export function isNewerVersion(a: string, b: string): boolean {
  */
 export function installedSinceCheck(mod: LibraryModLike, row: UpdateRow): boolean {
   if (!mod.version || !row.latest) return false;
-  return normVersion(mod.version) === normVersion(row.latest);
+  if (normVersion(mod.version) === normVersion(row.latest)) return true;
+  // The same or a newer version ("v1.2.0" is 1.2.0.0; a 1.3 installed by hand over an offered
+  // 1.2): offering the row would re-download it, or put the older one back.
+  return isPlainVersion(mod.version) && isPlainVersion(row.latest) && !isNewerVersion(row.latest, mod.version);
+}
+
+/** Dot-separated numbers only (an optional leading "v"), so `isNewerVersion` can order it. */
+function isPlainVersion(v: string): boolean {
+  return /^\d+(\.\d+)*$/.test(normVersion(v));
 }
 
 // One shared collator: localeCompare with an options object builds a new one per call, which is
@@ -92,7 +100,7 @@ const byTitle = (a: { title: string }, b: { title: string }) => titleCollator.co
  * Sort one check's rows into the Updates view's sections.
  * @param opts `mods` the library now; `rows` the check's rows; `checkYourself` saved pages the
  *   check couldn't answer; `catalogReached` false when the catalog request failed (then no mod is
- *   called "not tracked", because Silo can't tell)
+ *   called "not tracked", because Silo can't tell); `checkedTechs` the mods the check asked about
  * @returns each section sorted by title; rows for mods no longer in the library are dropped
  */
 export function groupUpdates(opts: {
@@ -100,6 +108,8 @@ export function groupUpdates(opts: {
   rows: UpdateRow[];
   checkYourself: CheckYourselfRow[];
   catalogReached: boolean;
+  /** The mods the check asked about; one added since isn't called "not tracked". */
+  checkedTechs?: ReadonlySet<string>;
 }): UpdateSections {
   const byTech = new Map(opts.mods.map((m) => [m.techName, m]));
   const out: UpdateSections = {
@@ -132,7 +142,7 @@ export function groupUpdates(opts: {
   }
   if (opts.catalogReached) {
     for (const m of opts.mods) {
-      if (!answered.has(m.techName))
+      if (!answered.has(m.techName) && (!opts.checkedTechs || opts.checkedTechs.has(m.techName)))
         out.notTracked.push({ techName: m.techName, title: m.title || m.techName });
     }
   }
