@@ -106,11 +106,13 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'Silo ${{ github.ref_name }}'
           releaseBody: |
-            Beta release. Download the installer for your OS below.
+            Download the installer for your OS below. What's new is in the
+            [changelog](https://github.com/HLLMR/silo/blob/main/CHANGELOG.md).
 
             Windows installers are code-signed. macOS/Linux builds are open source and
             OS-unsigned — Gatekeeper may warn on first launch; you can inspect or build
-            from source at any time.
+            from source at any time. To check a download, see
+            [Verify your download](https://github.com/HLLMR/silo/blob/main/docs/VERIFY_DOWNLOAD.md).
           releaseDraft: true
           # Stable "Latest" channel: publish as a full (non-prerelease) release so the
           # in-app updater's /releases/latest/ endpoint resolves to it. Still created as a
@@ -139,9 +141,11 @@ jobs:
           "All Windows installers validly signed and timestamped."
 
   # Attach a SHA256SUMS.txt so users can verify their download. Runs after all platforms have
-  # uploaded to the (draft) release, hashes every asset, and adds the checksums file.
+  # uploaded to the (draft) release AND the SBOM is attached (so it's hashed and attested too;
+  # running beside `sbom` raced it and v0.11.0's checksums missed the SBOM), hashes every
+  # asset, and adds the checksums file.
   checksums:
-    needs: build
+    needs: [build, sbom]
     runs-on: ubuntu-latest
     permissions:
       contents: write
