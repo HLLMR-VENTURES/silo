@@ -50,6 +50,8 @@ button {
   font-family: inherit;
   font-size: inherit;
   cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 ::selection {

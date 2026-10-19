@@ -338,3 +338,19 @@ describe("ModListRow meta", () => {
     expect(screen.queryByText(/\b0 B\b/)).toBeNull();
   });
 });
+
+describe("Ctrl+A in the list (C14)", () => {
+  it("selects all shown, from a row or a control inside it, and keeps the page text unselected", async () => {
+    const user = userEvent.setup();
+    const onselectall = vi.fn();
+    const { container } = render(ListHarness, { items, onselectall });
+    itemEl(container, "k0")!.focus();
+    const ev = new KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true, cancelable: true });
+    itemEl(container, "k0")!.dispatchEvent(ev);
+    expect(onselectall).toHaveBeenCalledTimes(1);
+    expect(ev.defaultPrevented).toBe(true);
+    screen.getByRole("button", { name: "Inner Item 0" }).focus();
+    await user.keyboard("{Control>}a{/Control}");
+    expect(onselectall).toHaveBeenCalledTimes(2);
+  });
+});
