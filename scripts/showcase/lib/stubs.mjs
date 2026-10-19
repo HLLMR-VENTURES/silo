@@ -8,6 +8,10 @@ import { rng } from "./catalog.mjs";
 
 const DEMO_USER = "silo-demo";
 const OFF = "The demo profile is offline: this needs the internet.";
+// Made-up gist ids (32 hex characters, like GitHub's).
+const SHARED_GIST = "5f1c0de5a1b04c7e9d2f8a6b3c1e7d40";
+const NEW_GIST = "9a3e7c41d2b8f05e6a1c7d3b9e2f4a68";
+const sharePage = (id) => `https://silo.hllmr.com/c/?g=${id}`;
 
 /** "1.2.0.0" -> "1.3.0.0" (minor bump) or "1.2.1.0" (patch). */
 function bump(v, patch) {
@@ -140,10 +144,11 @@ export function buildStubs(lib) {
       },
       value: { status: "unverified", how: null, added: [], removed: [], changed: [], matchedVersion: null, note: "Silo's catalog hasn't hashed this build yet." },
     },
-    // Sharing: links are placeholders on the real share-page host (Silo always hands out its
-    // silo.hllmr.com/c/ page, never the gist itself).
-    collections_list: { value: [{ kind: "gist", reference: "5f1c0de5a1b0", name: "Marlow Flats Grain", modCount: lib.sets[1].mods.length, createdAt: "2026-10-12T18:20:00Z", pageUrl: "https://silo.hllmr.com/c/5f1c0de5a1b0", sourceUrl: "https://gist.github.com/silo-demo/5f1c0de5a1b0", canDelete: true }] },
-    collection_export: { value: { url: "https://silo.hllmr.com/c/9a3e7c41d2b8", count: lib.mods.filter((m) => m.active).length, omitted: [] } },
+    // Sharing: placeholder gists, shaped like the real thing. Silo always hands out its handoff
+    // page, `https://silo.hllmr.com/c/?g=<gist id>` (collection::gist_page_url), never the gist,
+    // and a gist id is 20 to 40 hex characters (github::valid_gist_id).
+    collections_list: { value: [{ kind: "gist", reference: SHARED_GIST, name: "Marlow Flats Grain", modCount: lib.sets[1].mods.length, createdAt: "2026-10-12T18:20:00Z", pageUrl: sharePage(SHARED_GIST), sourceUrl: `https://gist.github.com/${DEMO_USER}/${SHARED_GIST}`, canDelete: true }] },
+    collection_export: { value: { url: sharePage(NEW_GIST), count: lib.mods.filter((m) => m.active).length, omitted: [] } },
     collection_update: { error: OFF },
     collection_delete: { error: OFF },
     collection_import_preview: { error: OFF },

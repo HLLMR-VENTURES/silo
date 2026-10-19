@@ -79,8 +79,14 @@ describe("showcase stubs", () => {
     expect(text).not.toMatch(/gh[pousr]_[A-Za-z0-9]{20,}|github_pat_/);
     const browse = stubs.browse_mods.value as { mods: { imageUrl: string }[] };
     for (const m of browse.mods) expect(m.imageUrl).toMatch(/^data:image\/png;base64,/);
-    // Share links are Silo's own handoff page, as the real export returns.
-    expect((stubs.collection_export.value as { url: string }).url).toMatch(/^https:\/\/silo\.hllmr\.com\/c\//);
+    // Share links are Silo's handoff page with a real-shaped gist id (collection::gist_page_url,
+    // github::valid_gist_id), as the export returns.
+    const page = /^https:\/\/silo\.hllmr\.com\/c\/\?g=[0-9a-f]{20,40}$/;
+    expect((stubs.collection_export.value as { url: string }).url).toMatch(page);
+    for (const c of stubs.collections_list.value as { reference: string; pageUrl: string }[]) {
+      expect(c.pageUrl).toMatch(page);
+      expect(c.reference).toMatch(/^[0-9a-f]{20,40}$/);
+    }
   });
 
   it("fail every command that would download or sign in", () => {
