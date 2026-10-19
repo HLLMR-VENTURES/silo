@@ -174,6 +174,23 @@ describe("Open a shared set", () => {
     await fireEvent.click(await screen.findByRole("button", { name: "Check my mods" }));
     expect(await screen.findByText(/You match\. You're ready to join\./)).toBeInTheDocument();
   });
+
+  it("names versions that differ, and calls a same-version mismatch a different file (never its hash)", async () => {
+    vi.mocked(pickSharedSetFile).mockResolvedValue("server.silomp");
+    vi.mocked(mpVerifyPath).mockResolvedValue({
+      ok: false,
+      missing: [],
+      versionMismatch: [{ techName: "A", expected: "1.1.0.0", got: "1.0.0.0" }],
+      hashMismatch: [{ techName: "Dev", expected: "aaaa1111", got: "bbbb2222" }],
+      extra: [],
+    });
+    openTab();
+    await fireEvent.click(screen.getByRole("button", { name: "Choose a file…" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "Check my mods" }));
+    expect(await screen.findByText("yours 1.0.0.0, server 1.1.0.0")).toBeInTheDocument();
+    expect(screen.getByText("a different file")).toBeInTheDocument();
+    expect(screen.queryByText(/aaaa1111|bbbb2222/)).toBeNull();
+  });
 });
 
 describe("Open a shared set: races and repeats", () => {

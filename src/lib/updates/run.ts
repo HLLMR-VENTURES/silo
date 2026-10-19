@@ -70,6 +70,8 @@ async function checkLinked(
       latest: info.release.tag,
       hasUpdate: info.hasUpdate,
       assetUrl: info.release.assetUrl,
+      // No .zip on the release: its page is where the user gets it (not the catalog's ModHub page).
+      pageUrl: info.release.assetUrl ? row.pageUrl : (info.release.htmlUrl ?? row.pageUrl),
       source: "github",
       error: undefined,
       errorDetail: undefined,

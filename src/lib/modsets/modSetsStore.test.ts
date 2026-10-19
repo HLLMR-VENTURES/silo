@@ -56,6 +56,20 @@ beforeEach(() => {
 });
 
 describe("switchTo", () => {
+  it("Undo expects what the switch left, including a mod Silo couldn't park", async () => {
+    const t = setup(["A", "B", "F"], ["A", "B", "C", "D", "F"]);
+    // App's switch keeps an unzipped folder mod (F) on: set_active can't park it.
+    const live = t.active() as Set<string>;
+    t.setActiveSetTo.mockImplementation(async (mods: string[]) => {
+      live.clear();
+      for (const m of [...mods, "F"]) live.add(m);
+      return true;
+    });
+    await t.store.load();
+    await t.store.switchTo(forestry);
+    expect(t.undo.offer).toHaveBeenCalledWith(expect.objectContaining({ expected: ["C", "D", "Z", "F"] }));
+  });
+
   it("shows the diff, switches, saves a Before snapshot of the previous mods and offers Undo", async () => {
     const t = setup();
     await t.store.load();

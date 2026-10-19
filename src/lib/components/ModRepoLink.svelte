@@ -136,7 +136,7 @@
     />
     <button class="gh-btn" onclick={linkRepo}>{repo ? "Update link" : "Link"}</button>
   </div>
-  {#if suggested && !repo}<div class="gh-suggest">Suggested from the mod's page. Click Link to confirm.</div>{/if}
+  {#if suggested && !repo}<div class="gh-suggest">Found in the mod's own files. Select Link to confirm.</div>{/if}
   {#if repo}
     <div class="gh-actions">
       <button class="gh-btn" onclick={checkUpdate} disabled={checking}>

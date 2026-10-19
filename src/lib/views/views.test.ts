@@ -270,18 +270,32 @@ describe("LibraryView", () => {
 });
 
 describe("UpdatesView", () => {
-  it("the header button checks for updates, and is off when told", async () => {
-    const user = userEvent.setup();
-    const oncheck = vi.fn();
-    const { rerender } = render(UpdatesView, {
+  it("before the first check, leaves Check now and the privacy line to the empty state", () => {
+    render(UpdatesView, {
       checking: false,
       checkedAt: null,
       checkDisabled: false,
-      oncheck,
+      oncheck: vi.fn(),
       children: stub("Update rows"),
     });
     expect(screen.getByText("Update rows")).toBeInTheDocument();
     expect(screen.getByText(/Not checked yet/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Check now/ })).toBeNull();
+    expect(screen.queryByText(/Checking sends the names/)).toBeNull();
+  });
+
+  it("after a check, the header button checks again, and is off when told", async () => {
+    const user = userEvent.setup();
+    const oncheck = vi.fn();
+    const { rerender } = render(UpdatesView, {
+      checking: false,
+      checkedAt: Date.now(),
+      checkDisabled: false,
+      oncheck,
+      children: stub("Update rows"),
+    });
+    expect(screen.getByText(/Last checked just now/)).toBeInTheDocument();
+    expect(screen.getByText(/Checking sends the names/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Check now/ }));
     expect(oncheck).toHaveBeenCalledOnce();
     await rerender({
@@ -291,7 +305,6 @@ describe("UpdatesView", () => {
       oncheck,
       children: stub("Update rows"),
     });
-    expect(screen.getByText(/Last checked just now/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Check now/ }));
     expect(oncheck).toHaveBeenCalledOnce();
   });

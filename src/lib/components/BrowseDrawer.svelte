@@ -229,7 +229,7 @@
              and that Silo will still take it from there. -->
         <p class="drawer-hint">
           None of these sources allow apps to download for you. Grab the .zip from a
-          source above and drop it in your mods folder. Silo files it automatically
+          source above and drop it in your mods folder. Silo adds it to your library
           on the next scan.
         </p>
       {/if}
