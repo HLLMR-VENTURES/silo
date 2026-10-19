@@ -186,7 +186,7 @@
   }
 
   async function launch() {
-    working = "Launching FS25…";
+    working = "Launching Farming Simulator 25…";
     error = null;
     try {
       await launchGame();
@@ -207,7 +207,7 @@
       const st = await logStatus().catch(() => null);
       if (destroyed) return;
       if (st?.gameRunning) {
-        error = "Farming Simulator 25 is still running. Quit to the desktop, then press I've quit the game again.";
+        error = "Farming Simulator 25 is still running. Quit to the desktop, then press “I've quit the game” again.";
         return;
       }
       onProgress?.({ round, about, launching: false });
@@ -349,7 +349,7 @@
       Silo finds the problem mod by parking half of your active mods, having you play, and
       halving again. There are <b>{total}</b> mods to test, about <b
         >{Math.ceil(Math.log2(Math.max(total, 2)))}</b
-      > launches. Maps and required mods stay on the whole time. Silo saves your exact mods now and
+      > {Math.ceil(Math.log2(Math.max(total, 2))) === 1 ? "launch" : "launches"}. Maps stay on the whole time. Silo saves your exact mods now and
       puts them back when you finish.
     </p>
     {#if stayOn > 0}
@@ -406,7 +406,7 @@
     </div>
   {:else if phase === "inconclusive"}
     <div class="result">
-      <div class="result-title">No single mod is at fault.</div>
+      <div class="result-title">No single mod is at fault</div>
       <p class="body">
         The problem only shows up when certain mods are on together, or it isn't caused by a mod.
       </p>
