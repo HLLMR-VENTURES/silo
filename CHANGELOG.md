@@ -14,6 +14,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   colour change drops any text, control edge or focus ring below WCAG AA in either theme; a
   2,500-mod test keeps Library search and sorting fast. (#258)
 
+- **Crash notice.** When your last game ended unexpectedly, Silo says so as soon as you come
+  back: it checks when its window regains focus, and every 5 seconds while a game it launched is
+  running (it stops when the game exits). The notice names the most likely mod with **Park it**,
+  or, when the log names none, offers **Find the problem mod**. A crash is announced once, and
+  counts as one problem in the status chip until a clean run or Dismiss. (#260)
+
+- **Last run with actions.** Diagnose → Last run ranks the most likely causes by errors, with
+  the library title, the first log line (click to see it whole) and **Park**, **Show in library**
+  and **Copy details** on each mod, then what's worth a look, cosmetic-only mods tucked away, and
+  findings no mod is tied to with **Open log.txt**. (#260)
+
+- **Find the problem mod, finished.** The guided search now shows "Round 2 of about 8", the
+  header shows "Finding the problem mod · round 2" with **Open** while you move around Silo, and
+  Play says "Launch test round". When it names a mod, **Put my mods back and park it** restores
+  your set without that mod. (#260)
+
 - **First run.** A new library opens a short setup: Silo shows the mods folder it found (and
   sorts out a missing, unavailable or different folder right there), explains active and parked
   mods and where parked mods live, then shows exactly what organizing would do before anything
@@ -131,6 +147,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Colours.** Input borders, info text and warning text are a touch darker so they meet
   contrast on every surface, including for colour-blind users (protanopia and deuteranopia
   checked). (#258)
+
+- **Conflicts in plain words.** Diagnose → Conflicts leads with "0 problems · 12 to review ·
+  19 notes hidden", labels each conflict Problem, Review or Note, gives it a plain title ("Two
+  mods claim the same exclusive slot"), makes the mods links to their details, and adds **Park
+  one…**. Notes stay hidden until **Show notes**. (#260)
+
+- **More than one active map is a Note, not a critical conflict.** An in-game test showed
+  Farming Simulator 25 loads only the map your savegame uses and leaves the others unloaded, so
+  Silo no longer counts it as a problem or asks about it before Play. (#260)
+
+- **Problems tab.** Library health is now Diagnose → Problems, with an action on each row:
+  **Find it in Browse** for a missing required mod, **Show file** and **Park** for one that can't
+  be read, **Show file** for a name the game skips, and **Use this version** / **Keep Silo's**
+  for a different build in your mods folder. (#260)
 
 - **The Organize dialog.** Review (in the Library's status strip) and Settings → Library →
   Organize open a standard dialog: a summary first, the files grouped by category behind **See
@@ -319,6 +349,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer slow down on big libraries (version sort on 2,500 mods went from about 60 ms to 3 ms).
   (#258)
 
+- After switching mod sets, the status chip and Conflicts could show the previous set's result
+  (for example "All good" while the new set had a conflict open). Silo now waits for the switch
+  to finish and keeps only the newest check. (#260)
 - A link that isn't a Silo set link now just says so, without "Something went wrong" in front. (#256)
 - Checking for updates works again on libraries with more than 500 mods; Silo now asks its catalog in batches. When the catalog refuses a check, Silo says so instead of claiming it's offline, and keeps the last good "Last checked" time. (#252)
 

@@ -7,6 +7,7 @@
 //!   means one silently wins (critical)
 //! * `<extraSourceFiles>` global Lua with the same basename — they can overwrite
 //!   each other (warning)
+//! * more than one active map (info only: FS25 loads just the savegame's map)
 //!
 //! Signal refinement: a clash among mods by the **same author** is usually
 //! intentional (shared packs/utilities), and two mods shipping the **byte-identical
@@ -36,15 +37,49 @@ pub struct ConflictInput {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Conflict {
+    /// Stable identity (kind, name and the sorted tech names), for list keys.
+    pub id: String,
     pub severity: String, // "critical" | "warning" | "info"
     pub kind: String,     // "uniqueType" | "specialization" | "vehicleType" | "script" | …
     pub name: String,
     pub explanation: String,
     pub mods: Vec<String>, // display labels of the mods involved
+    /// The involved mods' tech names, in the same order as `mods`.
+    pub tech_names: Vec<String>,
+}
+
+/// `kind:name:techA,techB` with the tech names sorted, so the id doesn't depend on load order.
+fn conflict_id(kind: &str, name: &str, tech_names: &[String]) -> String {
+    let mut t = tech_names.to_vec();
+    t.sort();
+    format!("{kind}:{name}:{}", t.join(","))
+}
+
+/// The involved mods: display labels and tech names, deduplicated by label, in step.
+type Involved = (Vec<String>, Vec<String>);
+
+/// Build a conflict and its id.
+fn conflict(
+    severity: &str,
+    kind: &str,
+    name: &str,
+    explanation: String,
+    (mods, tech_names): Involved,
+) -> Conflict {
+    Conflict {
+        id: conflict_id(kind, name, &tech_names),
+        severity: severity.into(),
+        kind: kind.into(),
+        name: name.into(),
+        explanation,
+        mods,
+        tech_names,
+    }
 }
 
 struct Parsed {
     label: String,
+    tech_name: String,
     author: Option<String>,
     path: String,
     kind: String,
@@ -53,15 +88,15 @@ struct Parsed {
 
 fn kind_label(kind: &str) -> &str {
     match kind {
-        "specialization" => "specialization",
-        "placeableSpecialization" => "placeable specialization",
-        "handToolSpecialization" => "hand-tool specialization",
+        "specialization" => "feature",
+        "placeableSpecialization" => "building feature",
+        "handToolSpecialization" => "hand tool feature",
         "vehicleType" => "vehicle type",
-        "placeableType" => "placeable type",
-        "handToolType" => "hand-tool type",
-        "action" => "input action",
+        "placeableType" => "building type",
+        "handToolType" => "hand tool type",
+        "action" => "control action",
         "brand" => "brand",
-        "storeCategory" => "store category",
+        "storeCategory" => "shop category",
         other => other,
     }
 }
@@ -149,31 +184,36 @@ fn fill_type_names(xml: &[u8]) -> Vec<String> {
     out
 }
 
-fn labels(parsed: &[Parsed], idxs: &[usize]) -> Vec<String> {
+/// The involved mods, deduplicated by tech name (two different mods may share a title).
+fn labels(parsed: &[Parsed], idxs: &[usize]) -> Involved {
     let mut out: Vec<String> = Vec::new();
+    let mut techs: Vec<String> = Vec::new();
     for &i in idxs {
-        if !out.contains(&parsed[i].label) {
+        if !techs.contains(&parsed[i].tech_name) {
             out.push(parsed[i].label.clone());
+            techs.push(parsed[i].tech_name.clone());
         }
     }
-    out
+    (out, techs)
 }
 
-/// Flag when more than one map is active (a reliable instant-crash cause). Pure over
-/// the active maps' labels, so it's testable without fixture mods.
-fn map_conflict(map_labels: Vec<String>) -> Option<Conflict> {
-    if map_labels.len() < 2 {
+/// Note when more than one map is active. FS25 loads only the map the savegame uses and lists
+/// the others as "Available mod" in log.txt without loading them (in-game test 2026-10-18: four
+/// maps active, a base-map save loaded cleanly), so this is information, never a problem. Pure
+/// over the active maps, so it's testable without fixture mods.
+fn map_conflict(maps: Involved) -> Option<Conflict> {
+    let n = maps.0.len();
+    if n < 2 {
         return None;
     }
-    Some(Conflict {
-        severity: "critical".into(),
-        kind: "map".into(),
-        name: format!("{} maps enabled", map_labels.len()),
-        explanation:
-            "More than one map is active. FS loads a second map's scripts even when it isn't the one you're playing, which typically crashes on load. Keep exactly one map enabled."
-                .into(),
-        mods: map_labels,
-    })
+    Some(conflict(
+        "info",
+        "map",
+        &format!("{n} maps active"),
+        "Only the map your savegame uses loads. The others wait until you start a save on them."
+            .into(),
+        maps,
+    ))
 }
 
 /// Detect conflicts within the given active set.
@@ -185,6 +225,7 @@ pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
             let md = moddesc::parse(&xml);
             Some(Parsed {
                 label: i.title.clone().unwrap_or_else(|| i.tech_name.clone()),
+                tech_name: i.tech_name.clone(),
                 author: md.author.clone(),
                 path: i.path.clone(),
                 kind: i.kind.clone(),
@@ -218,45 +259,45 @@ pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
     let note_same_author = " These mods share an author, so this is likely intentional.";
 
     for (ut, idxs) in unique_types {
-        let labels = labels(&parsed, &idxs);
-        if labels.len() < 2 {
+        let involved = labels(&parsed, &idxs);
+        if involved.0.len() < 2 {
             continue;
         }
         let sa = same_author(&parsed, &idxs);
-        out.push(Conflict {
-            severity: if sa { "warning" } else { "critical" }.into(),
-            kind: "uniqueType".into(),
-            name: ut.clone(),
-            explanation: format!(
-                "These mods share the uniqueType \"{ut}\". FS loads only one mod of a given uniqueType, so the others will not take effect.{}",
+        out.push(conflict(
+            if sa { "warning" } else { "critical" },
+            "uniqueType",
+            &ut,
+            format!(
+                "These mods use the same exclusive slot (\"{ut}\"). The game loads only one mod per slot, so the others won't take effect.{}",
                 if sa { note_same_author } else { "" }
             ),
-            mods: labels,
-        });
+            involved,
+        ));
     }
 
     for ((kind, name), idxs) in registrations {
-        let labels = labels(&parsed, &idxs);
-        if labels.len() < 2 {
+        let involved = labels(&parsed, &idxs);
+        if involved.0.len() < 2 {
             continue;
         }
         let sa = same_author(&parsed, &idxs);
         let kl = kind_label(&kind).to_string();
-        out.push(Conflict {
-            severity: if sa { "warning" } else { "critical" }.into(),
-            kind,
-            name: name.clone(),
-            explanation: format!(
-                "Multiple mods register the {kl} \"{name}\". Only one registration wins at load. The others' behavior may break.{}",
+        out.push(conflict(
+            if sa { "warning" } else { "critical" },
+            &kind,
+            &name,
+            format!(
+                "These mods each add the {kl} \"{name}\". Only one of them takes effect when the game loads, so the others may not work as intended.{}",
                 if sa { note_same_author } else { "" }
             ),
-            mods: labels,
-        });
+            involved,
+        ));
     }
 
     for (base, idxs) in scripts {
-        let labels = labels(&parsed, &idxs);
-        if labels.len() < 2 {
+        let involved = labels(&parsed, &idxs);
+        if involved.0.len() < 2 {
             continue;
         }
         let identical = identical_script(&parsed, &idxs, &base);
@@ -264,33 +305,28 @@ pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
         let (severity, extra) = if identical {
             (
                 "info",
-                " The file is byte-identical in each, so it's a shared library, not a real clash.",
+                " The file is the same in each, so it's shared code, not a real clash.",
             )
         } else if sa {
             ("info", note_same_author)
         } else {
             ("warning", "")
         };
-        out.push(Conflict {
-            severity: severity.into(),
-            kind: "script".into(),
-            name: base.clone(),
-            explanation: format!(
-                "These mods each inject a global Lua script named \"{base}\" via extraSourceFiles. They may override one another depending on load order.{extra}"
+        out.push(conflict(
+            severity,
+            "script",
+            &base,
+            format!(
+                "These mods each load a script file named \"{base}\". Depending on which loads last, one may replace the other.{extra}"
             ),
-            mods: labels,
-        });
+            involved,
+        ));
     }
 
-    // Two active maps = instant crash on load: a second map's scripts still load even
-    // if unused. Canonical FS folklore ("never have more than one map enabled"); no
-    // manager surfaces it. Zero false positives — a mod either declares <maps> or not.
-    let map_labels: Vec<String> = parsed
-        .iter()
-        .filter(|p| p.md.is_map)
-        .map(|p| p.label.clone())
-        .collect();
-    if let Some(c) = map_conflict(map_labels) {
+    // More than one active map: a note (only the savegame's map loads), never a problem. A mod
+    // either declares <maps> or not, so there are no false positives.
+    let map_idxs: Vec<usize> = (0..parsed.len()).filter(|&i| parsed[i].md.is_map).collect();
+    if let Some(c) = map_conflict(labels(&parsed, &map_idxs)) {
         out.push(c);
     }
 
@@ -314,21 +350,21 @@ pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
         }
     }
     for (name, idxs) in fill_types {
-        let labels = labels(&parsed, &idxs);
-        if labels.len() < 2 {
+        let involved = labels(&parsed, &idxs);
+        if involved.0.len() < 2 {
             continue;
         }
         let sa = same_author(&parsed, &idxs);
-        out.push(Conflict {
-            severity: if sa { "info" } else { "warning" }.into(),
-            kind: "fillType".into(),
-            name: name.clone(),
-            explanation: format!(
-                "These mods each define the fillType \"{name}\". FS keeps only one definition. Whichever loads last silently overrides the others' settings (capacity, price, etc.), so one mod may misbehave.{}",
-                if sa { " Same author, so likely coordinated." } else { "" }
+        out.push(conflict(
+            if sa { "info" } else { "warning" },
+            "fillType",
+            &name,
+            format!(
+                "These mods each define the fill type \"{name}\". The game keeps only one definition: whichever loads last replaces the others' settings (capacity, price and so on), so one mod may misbehave.{}",
+                if sa { " They share an author, so this is likely coordinated." } else { "" }
             ),
-            mods: labels,
-        });
+            involved,
+        ));
     }
 
     // critical → warning → info, then by name.
@@ -349,19 +385,133 @@ pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn one_or_zero_maps_is_fine() {
-        assert!(map_conflict(vec![]).is_none());
-        assert!(map_conflict(vec!["FS25_LoneStar".into()]).is_none());
+    fn maps(list: &[(&str, &str)]) -> Involved {
+        (
+            list.iter().map(|(l, _)| l.to_string()).collect(),
+            list.iter().map(|(_, t)| t.to_string()).collect(),
+        )
     }
 
     #[test]
-    fn two_plus_maps_is_critical() {
-        let c = map_conflict(vec!["Lone Star Plains".into(), "Frankenmuth".into()]).unwrap();
-        assert_eq!(c.severity, "critical");
+    fn one_or_zero_maps_is_fine() {
+        assert!(map_conflict(maps(&[])).is_none());
+        assert!(map_conflict(maps(&[("Lone Star", "FS25_LoneStar")])).is_none());
+    }
+
+    #[test]
+    fn two_plus_maps_is_only_a_note() {
+        // FS25 loads only the savegame's map (in-game test 2026-10-18), so never critical.
+        let c = map_conflict(maps(&[
+            ("Lone Star Plains", "FS25_LoneStar"),
+            ("Frankenmuth", "FS25_Frankenmuth"),
+            ("Elmcreek", "FS25_Elmcreek"),
+            ("Hof Bergmann", "FS25_HofBergmann"),
+        ]))
+        .unwrap();
+        assert_eq!(c.severity, "info");
         assert_eq!(c.kind, "map");
-        assert_eq!(c.mods.len(), 2);
-        assert!(c.name.contains('2'));
+        assert_eq!(c.mods.len(), 4);
+        assert_eq!(c.tech_names[1], "FS25_Frankenmuth");
+        assert_eq!(c.name, "4 maps active");
+        assert!(c
+            .explanation
+            .contains("Only the map your savegame uses loads"));
+        assert_eq!(
+            c.id,
+            "map:4 maps active:FS25_Elmcreek,FS25_Frankenmuth,FS25_HofBergmann,FS25_LoneStar"
+        );
+    }
+
+    fn parsed(label: &str, tech: &str) -> Parsed {
+        Parsed {
+            label: label.into(),
+            tech_name: tech.into(),
+            author: None,
+            path: String::new(),
+            kind: "zip".into(),
+            md: moddesc::ModDesc::default(),
+        }
+    }
+
+    #[test]
+    fn involved_mods_dedupe_by_tech_name_not_title() {
+        // Two different mods with the same title are still two mods; one mod twice is one.
+        let p = vec![
+            parsed("Seeder", "FS25_SeederA"),
+            parsed("Seeder", "FS25_SeederB"),
+            parsed("Seeder", "FS25_SeederA"),
+        ];
+        let (mods, techs) = labels(&p, &[0, 1, 2]);
+        assert_eq!(techs, vec!["FS25_SeederA", "FS25_SeederB"]);
+        assert_eq!(mods, vec!["Seeder", "Seeder"]);
+    }
+
+    #[test]
+    fn explanations_are_plain_words() {
+        // Two unpacked mods by different authors that share a slot, a feature name and a
+        // script name. What users read must not use modDesc jargon.
+        let base = std::env::temp_dir().join(format!("silo_conflict_words_{}", std::process::id()));
+        let mut inputs = Vec::new();
+        for (i, author) in ["Ann", "Bob"].iter().enumerate() {
+            let dir = base.join(format!("FS25_Mod{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("modDesc.xml"),
+                format!(
+                    r#"<modDesc descVersion="92"><author>{author}</author><uniqueType>seedSlot</uniqueType>
+                    <specializations><specialization name="mulcher" className="M" filename="m{i}.lua"/></specializations>
+                    <extraSourceFiles><sourceFile filename="scripts/util.lua"/></extraSourceFiles></modDesc>"#
+                ),
+            )
+            .unwrap();
+            std::fs::create_dir_all(dir.join("scripts")).unwrap();
+            std::fs::write(dir.join("scripts/util.lua"), format!("-- {author}")).unwrap();
+            inputs.push(ConflictInput {
+                tech_name: format!("FS25_Mod{i}"),
+                title: None,
+                path: dir.to_string_lossy().into_owned(),
+                kind: "dir".into(),
+            });
+        }
+        let found = detect(&inputs);
+        let _ = std::fs::remove_dir_all(&base);
+        let kinds: Vec<&str> = found.iter().map(|c| c.kind.as_str()).collect();
+        assert!(kinds.contains(&"uniqueType"), "{kinds:?}");
+        assert!(kinds.contains(&"specialization"), "{kinds:?}");
+        assert!(kinds.contains(&"script"), "{kinds:?}");
+        for c in &found {
+            for jargon in [
+                "uniqueType",
+                "extraSourceFiles",
+                "fillType",
+                "specialization",
+                "FS ",
+            ] {
+                assert!(
+                    !c.explanation.contains(jargon),
+                    "{jargon} in {:?}",
+                    c.explanation
+                );
+            }
+            assert!(
+                !c.explanation.contains('—'),
+                "em dash in {:?}",
+                c.explanation
+            );
+            assert_eq!(c.tech_names, vec!["FS25_Mod0", "FS25_Mod1"]);
+        }
+    }
+
+    #[test]
+    fn conflict_id_ignores_mod_order() {
+        let a = conflict_id("script", "x.lua", &["B".into(), "A".into()]);
+        let b = conflict_id("script", "x.lua", &["A".into(), "B".into()]);
+        assert_eq!(a, b);
+        assert_eq!(a, "script:x.lua:A,B");
+        assert_ne!(
+            a,
+            conflict_id("fillType", "x.lua", &["A".into(), "B".into()])
+        );
     }
 
     #[test]

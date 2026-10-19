@@ -39,15 +39,18 @@ export type BisectFinishResult = { ok: true } | { ok: false; error: string };
  *  @param deps snapshot read, set apply, snapshot clear
  *  @param alwaysOn mods kept on every round (fallback when no snapshot)
  *  @param pool current suspects (fallback when no snapshot)
+ *  @param park a mod to leave out of the restored set (the culprit the run found), if any
  *  @returns ok, or the error message */
 export async function finishBisect(
   deps: BisectFinishDeps,
   alwaysOn: string[],
   pool: string[],
+  park?: string | null,
 ): Promise<BisectFinishResult> {
   try {
     const snapshot = await deps.get();
-    await deps.apply(bisectRestoreSet(snapshot, alwaysOn, pool));
+    const restore = bisectRestoreSet(snapshot, alwaysOn, pool);
+    await deps.apply(park ? restore.filter((m) => m !== park) : restore);
     await deps.clear();
     return { ok: true };
   } catch (e) {

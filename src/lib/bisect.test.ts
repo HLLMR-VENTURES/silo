@@ -79,4 +79,16 @@ describe("finishBisect", () => {
     expect(await finishBisect(f.deps, ["map"], ["a", "b"])).toEqual({ ok: true });
     expect(f.applied).toEqual([["map", "a", "b"]]);
   });
+  it("puts the mods back without the culprit when asked to park it", async () => {
+    // "Put my mods back and park X": the saved set minus the culprit, then the snapshot goes.
+    const f = fakeDeps({ snapshot: ["map", "a", "culprit", "c"] });
+    expect(await finishBisect(f.deps, ["map"], ["culprit"], "culprit")).toEqual({ ok: true });
+    expect(f.applied).toEqual([["map", "a", "c"]]);
+    expect(f.calls).toEqual(["get", "apply", "clear"]);
+  });
+  it("keeps the snapshot when parking the culprit fails to apply", async () => {
+    const f = fakeDeps({ snapshot: ["map", "a", "culprit"], applyFails: true });
+    expect((await finishBisect(f.deps, ["map"], ["culprit"], "culprit")).ok).toBe(false);
+    expect(f.stored()).toEqual(["map", "a", "culprit"]);
+  });
 });

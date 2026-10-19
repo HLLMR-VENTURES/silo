@@ -8,6 +8,8 @@
 import { formatCount, plural } from "../plural";
 
 export interface LibraryStatusInput {
+  /** 1 while the last game's crash is unresolved (until a clean run or Dismiss), else 0. */
+  crash?: number;
   /** Conflicts with severity "critical" (the game may crash). */
   criticalConflicts: number;
   /** Conflicts with severity "warning". Info-level conflicts never count. */
@@ -31,7 +33,7 @@ export interface LibraryStatusInput {
  */
 export function libraryStatusCounts(i: LibraryStatusInput): { problems: number; review: number } {
   return {
-    problems: i.criticalConflicts + i.missingDeps + i.corrupt + i.ignored,
+    problems: (i.crash ?? 0) + i.criticalConflicts + i.missingDeps + i.corrupt + i.ignored,
     review: i.warningConflicts + i.foreign + i.inactiveFindings,
   };
 }
@@ -62,6 +64,8 @@ export function stripLeft(s: {
 }
 
 export interface StripFacts {
+  /** The last game crashed and that's not resolved yet. */
+  crash?: boolean;
   criticalConflicts: number;
   /** Loose .zip mods Organize would file (0 when auto-file is on: it files them itself). */
   unfiled: number;
@@ -70,7 +74,7 @@ export interface StripFacts {
 }
 
 export interface StripItemSpec {
-  id: "critical" | "unfiled" | "updates";
+  id: "crash" | "critical" | "unfiled" | "updates";
   text: string;
   action: string;
 }
@@ -82,10 +86,11 @@ export interface StripItemSpec {
  */
 export function stripItemSpecs(f: StripFacts): StripItemSpec[] {
   const out: StripItemSpec[] = [];
+  if (f.crash) out.push({ id: "crash", text: "Your last game ended unexpectedly", action: "See details" });
   if (f.criticalConflicts > 0)
     out.push({
       id: "critical",
-      text: `${formatCount(f.criticalConflicts)} critical ${plural(f.criticalConflicts, { one: "conflict", other: "conflicts" })}`,
+      text: `${formatCount(f.criticalConflicts)} ${plural(f.criticalConflicts, { one: "conflict needs", other: "conflicts need" })} fixing`,
       action: "See why",
     });
   if (f.unfiled > 0)

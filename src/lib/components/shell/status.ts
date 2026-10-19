@@ -62,3 +62,12 @@ export function statusChipModel(
   }
   return { tone, text, label: `Library status: ${text}` };
 }
+
+/**
+ * The header's mini-status while Find the problem mod runs.
+ * @param round the current test round, or null before the first one is applied
+ * @return "Finding the problem mod · round 2", or "Finding the problem mod"
+ */
+export function bisectStatusText(round: number | null): string {
+  return round ? `Finding the problem mod · round ${round}` : "Finding the problem mod";
+}

@@ -33,9 +33,25 @@
     /** An interrupted run's snapshot is waiting in App's restore banner; don't start. */
     recoveryPending?: boolean;
     onExit: () => void;
+    /** Told each round ("Round 2 of about 8") for the header's mini-status; `launching` is true
+     *  while a test round waits to be played (until "I've quit the game"). */
+    onProgress?: (p: { round: number; about: number; launching: boolean }) => void;
+    /** Told after the mods were put back: `parked` is the culprit left parked, if any. */
+    onFinished?: (parked: string | null) => void;
+    /** A mod's title for display (tech name when unknown). */
+    titleOf?: (techName: string) => string;
   }
-  let { pool, alwaysOn, onApply, onBisecting, recoveryPending = false, onExit }: Props =
-    $props();
+  let {
+    pool,
+    alwaysOn,
+    onApply,
+    onBisecting,
+    recoveryPending = false,
+    onExit,
+    onProgress,
+    onFinished,
+    titleOf = (t: string) => t,
+  }: Props = $props();
 
   type Phase =
     | "intro"
@@ -121,6 +137,7 @@
       round += 1;
       crashHint = null;
       phase = "await-launch";
+      onProgress?.({ round, about: round - 1 + s.roundsLeft, launching: true });
     }
   }
 
@@ -138,6 +155,7 @@
 
   // User is back from the game. Peek the log to pre-answer "did it crash?".
   async function backFromGame() {
+    onProgress?.({ round, about, launching: false });
     working = "Reading the log…";
     try {
       const r = await scanLog();
@@ -169,19 +187,21 @@
   // snapshot saved at start, not the live props: a rescan mid-round would have turned
   // `pool` into the test half. The snapshot is cleared only after a clean restore, so if
   // this fails the restore banner can offer it again.
-  async function finish() {
+  // `park`: leave this mod (the culprit) out of the restored set.
+  async function finish(park: string | null = null) {
     if (working) return;
     if (!started) {
       // Nothing was saved or changed yet (or saving failed): just leave.
       exitUnchanged();
       return;
     }
-    working = "Restoring your mods…";
+    working = park ? `Putting your mods back without ${titleOf(park)}…` : "Putting your mods back…";
     error = null;
     const r = await finishBisect(
       { get: bisectSnapshotGet, apply: onApply, clear: bisectSnapshotClear },
       alwaysOn,
       pool,
+      park,
     );
     working = null;
     if (!r.ok) {
@@ -193,6 +213,7 @@
     started = false;
     // Called even if the panel closed mid-restore: App re-reads the (now cleared) snapshot.
     onBisecting(false);
+    onFinished?.(park);
     if (!destroyed) onExit();
   }
 
@@ -210,108 +231,96 @@
   });
 
   const roundsLeft = $derived(step?.kind === "split" ? step.roundsLeft : 0);
+  /** "Round 2 of about 8": rounds so far plus the most still needed. */
+  const about = $derived(round - 1 + roundsLeft);
+  const culpritTitle = $derived(culprit ? titleOf(culprit) : "");
+  const cancelLabel = $derived(started ? "Stop and put my mods back" : "Close");
 </script>
 
 <div class="bf">
   <div class="bf-head">
-    <h3>Guided bisection</h3>
-    <button class="x" use:tooltip={"Cancel & restore"} aria-label="Cancel & restore" onclick={finish} disabled={!!working}><Icon name="close" /></button>
+    <div>
+      <h3>Find the problem mod</h3>
+      {#if phase === "await-launch" || phase === "verdict"}
+        <p class="stepper tnum">Round {round} of about {about}</p>
+      {/if}
+    </div>
+    <button class="x" use:tooltip={cancelLabel} aria-label={cancelLabel} onclick={() => finish()} disabled={!!working}><Icon name="close" /></button>
   </div>
 
-  {#if working}
-    <div class="working">{working}</div>
-  {/if}
+  <div role="status" aria-live="polite">
+    {#if working}<div class="working">{working}</div>{/if}
+  </div>
   {#if error}
-    <div class="err">{error}</div>
+    <div class="err" role="alert">{error}</div>
   {/if}
 
   {#if phase === "intro"}
     <p class="body">
-      Silo will find the culprit by halving your active mods and having you relaunch a few
-      times. There are <b>{total}</b> mods to test, about <b
+      Silo finds the problem mod by parking half of your active mods, having you play, and
+      halving again. There are <b>{total}</b> mods to test, about <b
         >{Math.ceil(Math.log2(Math.max(total, 2)))}</b
-      > launches. Maps and required mods stay on the whole time, and your exact mod set is
-      saved now and restored when you finish.
+      > launches. Maps and required mods stay on the whole time. Silo saves your exact mods now and
+      puts them back when you finish.
     </p>
     {#if recoveryPending && !error}
       <div class="err">{BISECT_RESTORE_FIRST}</div>
     {/if}
     <div class="actions">
       <button class="btn ghost" onclick={exitUnchanged} disabled={!!working}>Not now</button>
-      <button
-        class="btn primary"
-        onclick={begin}
-        disabled={!!working || recoveryPending}
-        title={recoveryPending ? BISECT_RESTORE_FIRST : ""}>Start</button
-      >
+      <button class="btn primary" onclick={begin} disabled={!!working || recoveryPending}>Start</button>
     </div>
   {:else if phase === "await-launch"}
     {#if step?.kind === "split"}
       <p class="body">
-        <span class="round">Round {round}</span>
-        {roundsLeft} launch{roundsLeft === 1 ? "" : "es"} left at most. Testing
-        <b>{step.test.length}</b> mods this round ({step.rest.length} temporarily off).
+        Testing <b>{step.test.length}</b> mods this round ({step.rest.length} parked for now).
       </p>
       <ol class="steps">
-        <li>Launch FS25 and load the save that was breaking.</li>
-        <li>Try to reproduce the problem, then quit back to desktop.</li>
-        <li>Come back here and tell Silo what happened.</li>
+        <li>Launch the game and load the save that was crashing.</li>
+        <li>Try to make it crash, then quit to the desktop.</li>
+        <li>Come back and tell Silo what happened.</li>
       </ol>
     {/if}
     <div class="actions">
-      <button class="btn" onclick={launch} disabled={!!working}><Icon name="play" size={14} /> Launch FS25</button>
-      <button class="btn primary" onclick={backFromGame} disabled={!!working}>
-        I've quit the game →
-      </button>
+      <button class="btn" onclick={launch} disabled={!!working}><Icon name="play" size={14} /> Launch test round</button>
+      <button class="btn primary" onclick={backFromGame} disabled={!!working}>I've quit the game</button>
     </div>
   {:else if phase === "verdict"}
-    <p class="body">Did the problem still happen this run?</p>
+    <p class="body">Did the problem happen this round?</p>
     {#if crashHint === true}
-      <div class="hint bad">The log shows FS25 didn't exit cleanly. It looks like it crashed again.</div>
+      <div class="hint bad">The log shows the game didn't close cleanly. It looks like it crashed again.</div>
     {:else if crashHint === false}
-      <div class="hint good">The log shows a clean exit this run.</div>
+      <div class="hint good">The log shows the game closed normally this round.</div>
     {/if}
     <div class="actions">
-      <button class="btn danger" onclick={() => verdict(true)} disabled={!!working}>
-        Still broken
-      </button>
-      <button class="btn ok" onclick={() => verdict(false)} disabled={!!working}>
-        It's fine now
-      </button>
+      <button class="btn danger" onclick={() => verdict(true)} disabled={!!working}>It still happened</button>
+      <button class="btn ok" onclick={() => verdict(false)} disabled={!!working}>It's fine now</button>
     </div>
-  {:else if phase === "culprit"}
+  {:else if phase === "culprit" && culprit}
     <div class="result bad">
-      <div class="result-title">Most likely culprit</div>
-      <div class="culprit">{culprit}</div>
-      <p class="body">
-        The problem tracked to this mod. Disable or update it. If it only breaks
-        alongside another mod, the pair is worth reporting to its author.
-      </p>
+      <div class="result-title">Most likely: <span class="culprit">{culpritTitle}</span></div>
+      <p class="body">The crash followed this mod in every round.</p>
+      <p class="body muted">If it only breaks together with another mod, the pair is worth reporting to its author.</p>
     </div>
     <div class="actions">
-      <button class="btn primary" onclick={finish} disabled={!!working}>
-        Restore my mods & finish
+      <button class="btn" onclick={() => finish()} disabled={!!working}>Put my mods back</button>
+      <button class="btn primary" onclick={() => finish(culprit)} disabled={!!working}>
+        Put my mods back and park {culpritTitle}
       </button>
     </div>
   {:else if phase === "inconclusive"}
     <div class="result">
-      <div class="result-title">No single mod is at fault</div>
+      <div class="result-title">No single mod is at fault.</div>
       <p class="body">
-        Narrowing cleared every half, which means the problem only appears with a
-        <b>combination</b> of mods (or isn't mod-related). Bisection can't pin an interaction
-        on one mod. That's an honest dead end, not a Silo bug.
+        The problem only shows up when certain mods are on together, or it isn't caused by a mod.
       </p>
     </div>
     <div class="actions">
-      <button class="btn primary" onclick={finish} disabled={!!working}>
-        Restore my mods & finish
-      </button>
+      <button class="btn primary" onclick={() => finish()} disabled={!!working}>Put my mods back</button>
     </div>
   {:else if phase === "error"}
     <div class="actions">
-      <button class="btn primary" onclick={finish} disabled={!!working}>
-        Restore my mods & close
-      </button>
+      <button class="btn primary" onclick={() => finish()} disabled={!!working}>Put my mods back</button>
     </div>
   {/if}
 </div>
@@ -362,17 +371,6 @@
     line-height: 1.55;
     margin: 0 0 12px;
   }
-  .round {
-    display: inline-block;
-    background: var(--primary);
-    color: var(--on-primary);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 8px;
-    border-radius: 999px;
-    margin-right: 6px;
-    font-variant-numeric: tabular-nums;
-  }
   .steps {
     margin: 0 0 14px;
     padding-left: 20px;
@@ -405,18 +403,23 @@
     background: color-mix(in srgb, var(--danger) 8%, transparent);
   }
   .result-title {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-muted);
-    margin-bottom: 4px;
-  }
-  .culprit {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-display);
     font-size: 1.05rem;
     font-weight: 600;
     color: var(--text);
-    margin-bottom: 8px;
+    margin-bottom: 6px;
+  }
+  .culprit {
+    color: var(--text);
+  }
+  .stepper {
+    margin: 2px 0 0;
+    color: var(--text-muted);
+    font-size: var(--fs-sm);
+  }
+  .body.muted {
+    color: var(--text-muted);
+    font-size: var(--fs-sm);
   }
   .actions {
     display: flex;

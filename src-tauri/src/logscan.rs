@@ -317,9 +317,71 @@ pub fn parse(log: &str) -> LogReport {
     }
 }
 
+/// The `app_setting` key holding the log modification time (epoch ms) Silo last looked at, so a
+/// crash is announced once and not again on every start.
+pub const LAST_SEEN_KEY: &str = "log_last_seen_ms";
+
+/// A cheap look at `log.txt` for crash detection: no read, just a stat. The frontend re-reads
+/// the log (`scan_log`) only when `modified_ms` moved past `last_seen_ms` and the game is closed
+/// (a running game's log has no exit marker yet, so it would look like a crash).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogStatus {
+    /// Where the log should be, or None when the FS25 user folder wasn't found.
+    pub path: Option<String>,
+    /// The log's modification time in epoch ms, or None when there's no log yet.
+    pub modified_ms: Option<i64>,
+    /// FS25 (or its dedicated server) is running right now.
+    pub game_running: bool,
+    /// The modification time Silo last looked at (`LAST_SEEN_KEY`), if any.
+    pub last_seen_ms: Option<i64>,
+}
+
+/// A file's modification time in epoch milliseconds, or None if it's missing or unreadable.
+pub fn modified_ms(path: &std::path::Path) -> Option<i64> {
+    let t = std::fs::metadata(path).ok()?.modified().ok()?;
+    let ms = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+    i64::try_from(ms).ok()
+}
+
+/// Parse a stored last-seen value; anything that isn't a number counts as never seen.
+pub fn parse_last_seen(v: Option<&str>) -> Option<i64> {
+    v.and_then(|s| s.trim().parse::<i64>().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modified_ms_reads_mtime_and_none_when_missing() {
+        let dir = std::env::temp_dir().join(format!("silo_logstatus_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("log.txt");
+        std::fs::write(&f, "x").unwrap();
+        let ms = modified_ms(&f).expect("mtime of a fresh file");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert!(
+            (now - ms).abs() < 60_000,
+            "mtime {ms} should be close to now {now}"
+        );
+        assert_eq!(modified_ms(&dir.join("missing.txt")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn last_seen_parses_numbers_only() {
+        assert_eq!(
+            parse_last_seen(Some("1760000000000")),
+            Some(1_760_000_000_000)
+        );
+        assert_eq!(parse_last_seen(Some(" 42 ")), Some(42));
+        assert_eq!(parse_last_seen(Some("soon")), None);
+        assert_eq!(parse_last_seen(None), None);
+    }
 
     // Mirrors the real healthy FS25 log shapes observed 2026-07: timestamped + plain
     // Available-mod lines, both l10n warning styles (path-named and `in mod '...'`),

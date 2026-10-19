@@ -42,6 +42,7 @@ import type {
   CatalogModDetail,
   CategoryCount,
   LogReport,
+  LogStatus,
   BisectStep,
   BindingReport,
   MpModRef,
@@ -648,6 +649,16 @@ export function catalogCheckUpdates(
 /** Parse FS25's log.txt: did the last run crash, and which mods are at fault. */
 export function scanLog(): Promise<LogReport> {
   return invoke<LogReport>("scan_log");
+}
+
+/** A cheap look at log.txt for crash detection (a stat, no read) and whether the game runs. */
+export function logStatus(): Promise<LogStatus> {
+  return invoke<LogStatus>("log_status");
+}
+
+/** Remember the log change time Silo has looked at, so one crash is announced once. */
+export function markLogSeen(modifiedMs: number): Promise<void> {
+  return invoke<void>("mark_log_seen", { modifiedMs });
 }
 
 /** Parse inputBinding.xml into a per-device binding map. */

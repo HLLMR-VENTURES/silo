@@ -32,6 +32,8 @@
     /** "Harvest 2026, unchanged" / "Custom: 3 changes since Harvest 2026" / "No mod set". */
     activeSetLine?: string;
     open?: boolean;
+    /** The main part's word: "Play", or "Launch test round" while finding the problem mod. */
+    label?: string;
   }
 
   let {
@@ -44,6 +46,7 @@
     onmenuselect,
     activeSetLine,
     open = $bindable(false),
+    label = "Play",
   }: Props = $props();
 
   const uid = $props.id();
@@ -140,7 +143,7 @@
     >
       <span class="content" class:hidden={loading}>
         <Icon name="play" size={16} />
-        <span>Play</span>
+        <span>{label}</span>
         <span aria-hidden="true">·</span>
         <span class="tnum">{formatCount(count)}</span>
         <span class="vh">mods</span>

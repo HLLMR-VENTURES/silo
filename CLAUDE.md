@@ -29,9 +29,9 @@ Beyond the MVP management layer above:
   separates real errors from cosmetic noise.
 - **Guided bisection** — automates "disable half, relaunch" to isolate a crash the log
   can't name; crash-safe (snapshots + restores the active set).
-- **Conflict detection** — uniqueType/specialization/script collisions, **duplicate
-  active map** (instant-crash), **cross-mod fillType override** (same-name last-wins;
-  SDK-verified true-positive-only).
+- **Conflict detection** — uniqueType/specialization/script collisions, **cross-mod fillType
+  override** (same-name last-wins; SDK-verified true-positive-only), and a Note when more than one
+  map is active (FS25 loads only the savegame's map: in-game test 2026-10-18, so not a problem).
 - **Bindings map** (`⌨ bindings`) — the full control map from `inputBinding.xml`,
   grouped by device, reused inputs highlighted (a view, not a verdict).
 - **Multiplayer sync** — export a hashed manifest of the active set; a joiner verifies
