@@ -25,8 +25,9 @@ pub const OLD_SUFFIX: &str = ".silo-update-old";
 /// Previous versions kept per mod file.
 pub const KEEP_BACKUPS: usize = 3;
 
-/// 4 GiB bounds a runaway or hostile stream without rejecting a large map mod.
-const MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// 4 GiB bounds a runaway or hostile stream without rejecting a large map mod. Every mod
+/// download uses it (`siloapi::download_to_part` too), so a mod that installs also updates.
+pub(crate) const MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 pub fn part_path(dest: &Path) -> PathBuf {
     with_suffix(dest, PART_SUFFIX)

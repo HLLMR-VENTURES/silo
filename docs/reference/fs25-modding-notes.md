@@ -88,18 +88,24 @@ a place two mods can register the same name and clash:
 
 | Element | Child → key | Collision severity |
 |---|---|---|
-| `<specializations>` | `<specialization name … className filename>` | critical |
-| `<placeableSpecializations>` | `<specialization name …>` | critical |
-| `<handToolSpecializations>` | `<specialization name …>` | critical |
-| `<vehicleTypes>` | `<type name … className filename parent>` | critical |
-| `<placeableTypes>` | `<type name …>` | critical |
-| `<handToolTypes>` | `<type name …>` | critical |
+| `<specializations>` | `<specialization name … className filename>` | none: namespaced per mod (see below) |
+| `<placeableSpecializations>` | `<specialization name …>` | none: namespaced per mod (see below) |
+| `<handToolSpecializations>` | `<specialization name …>` | none: namespaced per mod (see below) |
+| `<vehicleTypes>` | `<type name … className filename parent>` | none: namespaced per mod (see below) |
+| `<placeableTypes>` | `<type name …>` | none: namespaced per mod (see below) |
+| `<handToolTypes>` | `<type name …>` | none: namespaced per mod (see below) |
 | `<extraSourceFiles>` | `<sourceFile filename>` (global Lua) | warning + safety flag |
 | `<actions>` | `<action name …>` | warning (input action clash) |
 | `<inputBinding>` | `<actionBinding action><binding …>` | info/warning |
 | `<brands>` | `<brand name title image>` | warning |
 | `<storeCategories>` | `<storeCategory name title type>` | warning |
 | `<uniqueType>` | (whole-mod) | critical (by GIANTS design) |
+
+**Types and specializations are namespaced per mod.** `TypeManager.lua` (gameSource) registers
+a mod's `<type name="x">` as `<modName>.x` and looks up a type's `<specialization name="y">`
+first as `y`, then as `<modName>.y`, which only works because mod specializations are
+registered under the mod's name too. So two mods using the same type or specialization name
+both load; Silo doesn't flag them.
 
 `<extraSourceFiles>` doubles as a **safety** signal: it injects Lua into the global
 game state. High source-file counts / overlap with other mods = elevated risk.
