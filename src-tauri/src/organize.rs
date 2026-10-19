@@ -369,7 +369,7 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
             //     If the user swapped in their own file at that name, neither matches — leave it.
             if !src.exists() {
                 rep.errors.push(format!(
-                    "{}: no archived copy behind the root file, so Silo kept it (it won't delete the only copy).",
+                    "{}: there's no copy in your library archive, so Silo kept the file in your mods folder. It won't delete the only copy.",
                     row.tech_name
                 ));
                 rep.skipped += 1;
@@ -377,7 +377,7 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
                 || is_silo_projection(&link, &src, &row.kind))
             {
                 rep.errors.push(format!(
-                    "{}: the file in the mods folder isn't the one Silo projected (did you replace it?), so Silo left it untouched.",
+                    "{}: the file in your mods folder isn't the one Silo linked (did you replace it?), so Silo left it alone.",
                     row.tech_name
                 ));
                 rep.skipped += 1;
@@ -662,12 +662,15 @@ pub fn adopt_foreign(conn: &Connection, layout: &Layout, file_name: &str) -> Res
         .ok_or_else(|| "Not a Silo-managed mod".to_string())?;
     let flat = root.join(file_name);
     let Ok(fmeta) = flat.symlink_metadata() else {
-        return Err("No file in the mods folder to adopt".into());
+        return Err("There's no file in your mods folder to use.".into());
     };
     // Promoting a link would file the link itself (not a mod) into the archive and back up the
     // real archived copy out of the way. Refuse before touching anything.
     if fmeta.file_type().is_symlink() {
-        return Err("The mods-folder entry is a link, not a file. Use Restore instead.".into());
+        return Err(
+            "That's a link, not a file, so Silo can't use it. Choose Keep Silo's copy instead."
+                .into(),
+        );
     }
     let archive = archive_path(&layout.archive, &row.category, file_name);
     // Back up the old archived copy before replacing it.
@@ -703,7 +706,7 @@ pub fn restore_projection(
         .ok_or_else(|| "Not a Silo-managed mod".to_string())?;
     let archive = archive_path(&layout.archive, &row.category, file_name);
     if !archive.exists() {
-        return Err("No archived copy to restore from".into());
+        return Err("There's no copy in your library archive to put back.".into());
     }
     let flat = root.join(file_name);
     // Back up the user's file, then free the slot.
@@ -802,7 +805,7 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             // copy — leave both in place and report the anomaly for the user to resolve.
             if occupied && !is_silo_projection(&link, &src, &row.kind) {
                 rep.errors.push(format!(
-                    "{}: the mods-folder file isn't Silo's projection, so Silo left it and the archived copy untouched.",
+                    "{}: the file in your mods folder isn't the one Silo linked, so Silo left it and the copy in your library archive alone.",
                     row.tech_name
                 ));
                 rep.skipped += 1;
@@ -835,7 +838,7 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             // exactly the state a crash between the manifest write and the move leaves. Never
             // delete it: keep the file, drop the stale manifest row.
             rep.errors.push(format!(
-                "{}: no archived copy, so Silo kept the file in the mods root (not deleted).",
+                "{}: there's no copy in your library archive, so Silo kept the file in your mods folder.",
                 row.tech_name
             ));
         }
@@ -860,7 +863,7 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             for p in leftover {
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
                 rep.errors.push(format!(
-                    "kept an unrecognized file in your library archive (NOT deleted): {}",
+                    "Silo kept an unrecognized file in your library archive: {}. Nothing was deleted.",
                     name.unwrap_or_else(|| p.display().to_string())
                 ));
             }
