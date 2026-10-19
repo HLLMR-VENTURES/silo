@@ -155,7 +155,8 @@ const GENERIC_NAMES: &[&str] = &[
     "steam",
 ];
 
-/// Replace the home folder with `~` and the user name with `<user>`.
+/// Replace the home folder with `~` and the user name with `<user>`, and mask anything
+/// shaped like a token (`error::mask_secrets`).
 ///
 /// The home folder goes in every spelling a path can take in a log or an error message: `\` or
 /// `/` separators, `\` doubled (a path printed with `{:?}`, or JSON), any case, and only as a
@@ -165,7 +166,7 @@ const GENERIC_NAMES: &[&str] = &[
 /// folder's own name counts as a user name too, since on Windows it can differ from the
 /// sign-in name.
 pub fn redact(text: &str, home: Option<&str>, user: Option<&str>) -> String {
-    let mut out = text.to_string();
+    let mut out = crate::error::mask_secrets(text);
     let home = home
         .map(|h| h.trim_end_matches(['/', '\\']))
         .filter(|h| h.chars().count() >= 2 && h.contains(['/', '\\']));
@@ -309,6 +310,15 @@ pub fn tail(path: &Path, max_lines: usize, max_bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tokens_in_the_log_are_masked_too() {
+        let text =
+            "ERROR [frontend] Saving: invalid header 'Authorization: Bearer ghp_abcdefgh12345678'";
+        let out = redact(text, Some(r"C:\Users\hllmr"), Some("hllmr"));
+        assert!(!out.contains("abcdefgh"), "{out}");
+        assert!(out.contains("invalid header '[redacted]'"), "{out}");
+    }
 
     #[test]
     fn removes_the_home_folder_and_the_user_name() {

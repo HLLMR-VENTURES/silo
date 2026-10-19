@@ -82,7 +82,7 @@ pub fn set(conn: &Connection, key: &str, value: Option<&str>) -> Result<(), Stri
             if let Some(e) = entry(key) {
                 if e.set_password(v).is_ok() {
                     // Ensure it isn't also left behind in SQLite from a prior build.
-                    let _ = db::set_app_setting(conn, key, None);
+                    clear_fallback(conn, key)?;
                     return Ok(());
                 }
             }
@@ -93,7 +93,61 @@ pub fn set(conn: &Connection, key: &str, value: Option<&str>) -> Result<(), Stri
             if let Some(e) = entry(key) {
                 let _ = e.delete_credential();
             }
-            db::set_app_setting(conn, key, None)
+            clear_fallback(conn, key)
         }
+    }
+}
+
+/// Delete `key`'s plaintext SQLite fallback row, and when there was one, VACUUM so the old
+/// value isn't left carve-able in the database's free pages (as the keychain migration in
+/// `get` does). No row, no VACUUM: saving a token doesn't rewrite the database every time.
+fn clear_fallback(conn: &Connection, key: &str) -> Result<(), String> {
+    if db::get_app_setting(conn, key).is_none() {
+        return Ok(());
+    }
+    db::set_app_setting(conn, key, None)?;
+    db::vacuum(conn);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Bytes of the database and its WAL, where a deleted row can linger.
+    fn file_bytes(db: &std::path::Path) -> Vec<u8> {
+        let mut b = std::fs::read(db).unwrap_or_default();
+        let wal = db.with_file_name("silo.db-wal");
+        b.extend(std::fs::read(wal).unwrap_or_default());
+        b
+    }
+
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// Clearing the plaintext fallback leaves no copy of the token in the file. Uses its own
+    /// key and never the keychain (`clear_fallback` is the SQLite half only).
+    #[test]
+    fn clearing_the_fallback_leaves_no_copy_in_the_file() {
+        let dir = std::env::temp_dir().join(format!("silo_secret_vacuum_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("silo.db");
+        let conn = db::open(&path).unwrap();
+        let token = "gho_SiloTestTokenThatMustNotLinger0123456789";
+        db::set_app_setting(&conn, "silo_test_secret", Some(token)).unwrap();
+        assert!(contains(&file_bytes(&path), token.as_bytes()));
+
+        clear_fallback(&conn, "silo_test_secret").unwrap();
+        assert_eq!(db::get_app_setting(&conn, "silo_test_secret"), None);
+        assert!(
+            !contains(&file_bytes(&path), token.as_bytes()),
+            "the deleted token is still in the database file"
+        );
+        // Nothing to clear is fine (and doesn't VACUUM).
+        clear_fallback(&conn, "silo_test_secret").unwrap();
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

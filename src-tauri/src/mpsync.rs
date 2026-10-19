@@ -67,14 +67,30 @@ pub struct VerifyReport {
 
 const ALGO: &str = "md5-zip-v1";
 
+/// MD5 of a file and its size, read in 64 KB chunks: an active set can hold several
+/// multi-GB maps, hashed in parallel, so a whole file never sits in memory.
+fn md5_file(path: &std::path::Path) -> std::io::Result<(String, u64)> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut ctx = md5::Context::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut size = 0u64;
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        ctx.consume(&buf[..n]);
+        size += n as u64;
+    }
+    Ok((format!("{:x}", ctx.compute()), size))
+}
+
 /// MD5 of a mod's bytes + its size. Zip mods hash the file; unpacked (dev) mods can't
 /// participate in a byte-exact manifest, so they hash empty and are flagged by size 0.
 fn hash_one(m: &ModRef) -> ManifestEntry {
     let (hash, size) = if m.kind == "zip" {
-        match std::fs::read(&m.path) {
-            Ok(bytes) => (format!("{:x}", md5::compute(&bytes)), bytes.len() as u64),
-            Err(_) => (String::new(), 0),
-        }
+        md5_file(std::path::Path::new(&m.path)).unwrap_or((String::new(), 0))
     } else {
         (String::new(), 0) // unpacked dir — not byte-comparable
     };
@@ -162,6 +178,21 @@ pub fn diff(manifest: &[ManifestEntry], local: &[ManifestEntry]) -> VerifyReport
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The streamed hash is the same MD5 as hashing the whole file at once, across chunk
+    /// boundaries (the check-file format doesn't change).
+    #[test]
+    fn streamed_hash_matches_the_whole_file_hash() {
+        let dir = std::env::temp_dir().join(format!("silo_mp_md5_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("FS25_Big.zip");
+        let bytes: Vec<u8> = (0..200_003u32).map(|i| (i * 7 % 251) as u8).collect();
+        std::fs::write(&p, &bytes).unwrap();
+        let (hash, size) = md5_file(&p).unwrap();
+        assert_eq!(hash, format!("{:x}", md5::compute(&bytes)));
+        assert_eq!(size, bytes.len() as u64);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_check_file_is_told_from_a_mod_set_file() {
