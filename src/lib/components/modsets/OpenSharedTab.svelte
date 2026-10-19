@@ -36,6 +36,7 @@
     MpVerifyReport,
   } from "../../types";
   import { formatCount, plural } from "../../plural";
+  import { displayVersion } from "../../format";
   import { baseName, sharedFileKind } from "../../modsets/modSets";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import { onDestroy, untrack } from "svelte";
@@ -345,7 +346,7 @@
     <section class="result" aria-labelledby="mp-h">
       <h3 id="mp-h">Multiplayer check file</h3>
       <p class="muted">{baseName(source.path)}</p>
-      <p>Silo compares the file with your {count(active.size)} active mods: names, versions and each file's fingerprint.</p>
+      <p>Silo compares the file with the {count(active.size)} you have active: names, versions and each file's fingerprint.</p>
       <div class="actions">
         <Button variant="primary" loading={checking} disabled={checking || activeRefs.length === 0} onclick={check}
           >{mpReport ? "Check again" : "Check my mods"}</Button
@@ -362,7 +363,7 @@
             {#each r.missing as m (m.techName)}
               <div class="mod">
                 <span class="mn">{label(m.techName)}</span>
-                <span class="rt">{m.version ?? ""}</span>
+                <span class="rt">{m.version ? displayVersion(m.version) : ""}</span>
                 {#if libraryTechs.has(m.techName)}
                   <Button size="sm" aria-label="Turn on: {label(m.techName)}" onclick={() => onTurnOn(m.techName)}>Turn on</Button>
                 {:else}
@@ -376,7 +377,7 @@
             {#each [...r.versionMismatch, ...r.hashMismatch] as m, i (m.techName + i)}
               <div class="mod">
                 <span class="mn">{label(m.techName)}</span>
-                <span class="rt">{m.got && m.expected && m.got !== m.expected ? `yours ${m.got}, server ${m.expected}` : "a different file"}</span>
+                <span class="rt">{i < r.versionMismatch.length && m.got && m.expected && m.got !== m.expected ? `yours ${m.got}, server ${m.expected}` : "a different file"}</span>
                 <Button size="sm" variant="ghost" aria-label="Find in Browse: {label(m.techName)}" onclick={() => onFindInBrowse(m.techName)}>Find in Browse</Button>
               </div>
             {/each}
@@ -410,8 +411,8 @@
             <div class="mod">
               <span class="mn">{label(m.techName)}</span>
               <span class="rt">
-                {#if kind === "drift"}yours {m.installedVersion || "?"}, set {m.version || "?"}
-                {:else}{m.version || ""}{m.source ? ` · ${m.source === "modhub" ? "ModHub" : m.source === "github" ? "GitHub" : m.source}` : ""}{/if}
+                {#if kind === "drift"}yours {m.installedVersion ? displayVersion(m.installedVersion) : "?"}, set {m.version ? displayVersion(m.version) : "?"}
+                {:else}{m.version ? displayVersion(m.version) : ""}{m.source ? ` · ${m.source === "modhub" ? "ModHub" : m.source === "github" ? "GitHub" : m.source}` : ""}{/if}
               </span>
               {#if kind === "missing"}
                 <Button size="sm" variant="ghost" aria-label="Find in Browse: {label(m.techName)}" onclick={() => onFindInBrowse(m.techName)}>Find in Browse</Button>

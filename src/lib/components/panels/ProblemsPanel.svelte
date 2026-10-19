@@ -9,7 +9,7 @@
   import Button from "../../ui/Button.svelte";
   import { formatCount, plural } from "../../plural";
   import type { ModEntry } from "../../types";
-  import { versionLabel } from "../drawer/drawerText";
+  import { displayVersion } from "../../format";
 
   interface ForeignFile {
     techName: string;
@@ -62,7 +62,7 @@
   }
 
   const name = (m: ModEntry) => m.title ?? m.techName;
-  const ver = (v: string | null) => (v ? versionLabel(v) : "unknown version");
+  const ver = (v: string | null) => (v ? displayVersion(v) : "unknown version");
 </script>
 
 <section class="problems-panel" aria-labelledby="problems-head">

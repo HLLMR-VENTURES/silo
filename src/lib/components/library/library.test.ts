@@ -327,3 +327,14 @@ describe("ModCard", () => {
     expect(props.onMenu).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("ModListRow meta", () => {
+  it("shows the version without a V. prefix (C2)", () => {
+    render(ModListRow, rowProps({ mod: mod({ version: "V.1.6.4.0" }) }));
+    expect(screen.getByText(/1\.6\.4\.0/).textContent).not.toMatch(/[.vV]1\.6\.4\.0/);
+  });
+  it("shows no 0 B size for a folder mod (C5)", () => {
+    render(ModListRow, rowProps({ mod: mod({ kind: "dir", size: 0, path: "C:/mods/FS25_Folder" }) }));
+    expect(screen.queryByText(/\b0 B\b/)).toBeNull();
+  });
+});

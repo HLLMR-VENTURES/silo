@@ -73,7 +73,7 @@
     </div>
     {#if lock.locked}<p class="reason">{lock.reason}</p>{/if}
   {:else}
-    <p class="hint">Available once your library is organized (Organize, on the Library tab).</p>
+    <p class="hint">Available once your library is organized. Organize is in Settings → Library.</p>
   {/if}
 </SettingsCard>
 
@@ -81,7 +81,7 @@
   {#if organizedCount > 0}
     <p class="hint">
       Puts every mod back in your mods folder and removes Silo's links. Nothing is deleted. To
-      organize again, use Organize on the Library tab.
+      organize again, use Organize in Settings → Library.
     </p>
     <div class="btnrow">
       <Button variant="danger" disabled={lock.locked} title={lock.reason} onclick={onRestoreVanilla}>

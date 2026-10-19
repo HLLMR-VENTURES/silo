@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { conflictPartners, drawerBadges, isProblem, modifiedFileCount } from "./drawerBadges";
 import { drawerMenuItems } from "./drawerMenu";
-import { conflictKindLabel, versionLabel, versionNewer } from "./drawerText";
+import { conflictKindLabel, versionNewer } from "./drawerText";
 import type { Conflict, LogReport, VerifyResult } from "../../types";
 
 const mod = { error: null, ignoredDigitPrefix: false, kind: "zip" as const, isMap: true, scriptCount: 3 };
@@ -104,10 +104,6 @@ describe("drawerText", () => {
     expect(conflictKindLabel("uniqueType")).toBe("Exclusive slot");
     expect(conflictKindLabel("fillType")).toBe("Fill type");
     expect(conflictKindLabel("somethingNew")).toBe("somethingNew");
-  });
-  it("never doubles the v", () => {
-    expect(versionLabel("1.2.0.0")).toBe("v1.2.0.0");
-    expect(versionLabel("v1.2.0.0")).toBe("v1.2.0.0");
   });
   it("compares versions segment by segment", () => {
     expect(versionNewer("1.10.0", "1.9.9")).toBe(true);
