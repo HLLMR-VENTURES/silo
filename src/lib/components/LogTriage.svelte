@@ -26,6 +26,10 @@
     /** Current active tech names, and which of them are maps (kept on during bisection). */
     activeMods: string[];
     activeMaps: string[];
+    /** Active mods Silo can't park (unzipped folder mods): kept on every round too. */
+    activeFixed?: string[];
+    /** Before a search starts: file loose zips so they can be parked (false stops it). */
+    onBisectPrepare?: () => Promise<boolean>;
     /** Passed through to guided bisection: apply a set, and report start/end. */
     onApply: (techNames: string[]) => Promise<void>;
     onBisecting: (active: boolean) => void;
@@ -52,6 +56,8 @@
   let {
     activeMods,
     activeMaps,
+    activeFixed = [],
+    onBisectPrepare,
     onApply,
     onBisecting,
     recoveryPending = false,
@@ -67,8 +73,10 @@
   }: Props = $props();
 
   let mode = $state<"report" | "bisect">("report");
-  // Bisect the active non-map mods; maps stay on so the save still loads.
-  const pool = $derived(activeMods.filter((m) => !activeMaps.includes(m)));
+  // Bisect the active non-map mods; maps stay on so the save still loads, and mods Silo can't
+  // park (unzipped folders) stay on because set_active can't move them.
+  const alwaysOn = $derived([...new Set([...activeMaps, ...activeFixed])]);
+  const pool = $derived(activeMods.filter((m) => !alwaysOn.includes(m)));
   const canBisect = $derived(pool.length >= 2);
   const bisectOff = "Turn on at least 2 mods that aren't maps to find the problem mod.";
 
@@ -167,7 +175,9 @@
   {#if mode === "bisect"}
     <BisectFlow
       {pool}
-      alwaysOn={activeMaps}
+      {alwaysOn}
+      onPrepare={onBisectPrepare}
+      stayOn={activeFixed.filter((m) => activeMods.includes(m) && !activeMaps.includes(m)).length}
       {onApply}
       {onBisecting}
       {recoveryPending}

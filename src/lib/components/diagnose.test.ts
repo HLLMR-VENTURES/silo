@@ -256,3 +256,51 @@ describe("Find the problem mod: the finish", () => {
     expect(onApply).toHaveBeenLastCalledWith(["FS25_A", "FS25_C"]);
   });
 });
+
+describe("Find the problem mod: mods Silo can't park yet", () => {
+  beforeEach(() => {
+    vi.mocked(bisectSnapshotGet).mockReset().mockResolvedValue(null);
+    vi.mocked(bisectSnapshotSave).mockReset().mockResolvedValue(undefined);
+    vi.mocked(bisectPlan).mockReset().mockResolvedValue({ kind: "culprit", modName: "FS25_B" });
+    vi.mocked(scanLog).mockReset().mockResolvedValue(report(false, []));
+    vi.mocked(logStatus).mockReset().mockResolvedValue({ path: "log.txt", modifiedMs: 1, gameRunning: false, lastSeenMs: null });
+  });
+
+  it("asks to file loose mods first; declining starts nothing and saves nothing", async () => {
+    const user = userEvent.setup();
+    const onPrepare = vi.fn(() => Promise.resolve(false));
+    const onApply = vi.fn(() => Promise.resolve());
+    render(BisectFlow, { pool: ["FS25_A", "FS25_B"], alwaysOn: [], onApply, onBisecting: vi.fn(), onExit: vi.fn(), onPrepare });
+    await user.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(onPrepare).toHaveBeenCalledOnce());
+    expect(bisectSnapshotSave).not.toHaveBeenCalled();
+    expect(onApply).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Start" })).toBeEnabled();
+  });
+
+  it("once they're filed, the run saves the set as it is then", async () => {
+    const user = userEvent.setup();
+    const onPrepare = vi.fn(() => Promise.resolve(true));
+    render(BisectFlow, { pool: ["FS25_A", "FS25_B"], alwaysOn: ["MAP"], onApply: vi.fn(() => Promise.resolve()), onBisecting: vi.fn(), onExit: vi.fn(), onPrepare });
+    await user.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText(/Most likely:/)).toBeInTheDocument();
+    expect(onPrepare).toHaveBeenCalledOnce();
+    expect(bisectSnapshotSave).toHaveBeenCalledWith(["MAP", "FS25_A", "FS25_B"]);
+  });
+
+  it("unzipped folder mods stay on every round (Silo can't park them), and it says so", async () => {
+    const user = userEvent.setup();
+    render(LogTriage, {
+      activeMods: ["MAP", "FS25_A", "FS25_B", "FS25_Folder"],
+      activeMaps: ["MAP"],
+      activeFixed: ["FS25_Folder"],
+      onApply: vi.fn(() => Promise.resolve()),
+      onBisecting: vi.fn(),
+    });
+    await user.click(await screen.findByRole("button", { name: "Find the problem mod" }));
+    expect(screen.getByText(/1 unzipped folder mod stays on every round/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(bisectPlan).toHaveBeenCalledWith(["FS25_A", "FS25_B"]));
+    expect(bisectSnapshotSave).toHaveBeenCalledWith(["MAP", "FS25_Folder", "FS25_A", "FS25_B"]);
+  });
+});

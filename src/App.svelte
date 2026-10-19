@@ -1022,6 +1022,35 @@
     }
   }
 
+  /**
+   * Before Find the problem mod starts: set_active parks only mods filed in the library, so
+   * loose active zips would stay on every round (and the newest mod, the likely culprit, is
+   * usually loose). Offer to file them first; they stay active.
+   * @return true to go on; false when declined, refused or not all of them could be filed
+   */
+  async function prepareBisect(): Promise<boolean> {
+    const loose = mods.filter((m) => activeSet.has(m.techName) && isFileable(m));
+    if (loose.length === 0) return true;
+    if (
+      !(await ask({
+        title: `File ${modsCount(loose.length)} into your library first?`,
+        body:
+          "Silo can only park mods it keeps in your library, and these are loose in your mods folder. " +
+          "Silo files them first: they stay active, and nothing is deleted. Undo organizing in Settings → Maintenance puts them back.",
+        list: loose.slice(0, 50).map((m) => m.title ?? m.techName),
+        confirm: "File them and start",
+      }))
+    )
+      return false;
+    const clean = await applyLoose(
+      loose.map(looseInput),
+      loose.map((m) => m.techName),
+      true,
+    );
+    // Refused (said why) or problems (reported): don't start with mods it can't park.
+    return clean === true && !mods.some((m) => activeSet.has(m.techName) && isFileable(m));
+  }
+
   // When a bisection ends, a snapshot still on disk means the restore didn't finish (or
   // the panel was closed mid-run): offer the restore banner now rather than next launch.
   // After a clean finish, rescan so the library shows the restored set.
@@ -3920,6 +3949,8 @@
         <LogTriage
           activeMods={[...activeSet]}
           activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
+          activeFixed={mods.filter((m) => activeSet.has(m.techName) && !m.organized && m.kind !== "zip").map((m) => m.techName)}
+          onBisectPrepare={prepareBisect}
           onApply={bisectRound}
           onBisecting={(v) => void bisectingChanged(v)}
           recoveryPending={bisectRecovery !== null}
