@@ -21,9 +21,22 @@ pub struct FirstRunState {
     pub whats_new_seen: bool,
     /// Any mods folder has organized mods in the library.
     pub has_organized: bool,
-    /// Any mod has a curation row (favorite, hidden, flagged or a note).
+    /// The user made something in Silo before: a curation row (favorite, hidden, flagged or a
+    /// note), a tag, a category override, a linked repo or saved source page, or a mod set. An
+    /// earlier Silo's user who never organized still has these, and gets "What's new", not setup.
     pub has_curation: bool,
 }
+
+/// Tables that only hold what the user made (beside `organized`). None of them is written before
+/// the first-run decision on a new library: the setup flow covers the app until it's done.
+const USER_TABLES: &[&str] = &[
+    "curation",
+    "mod_tag",
+    "category_override",
+    "mod_repo",
+    "mod_source",
+    "loadout",
+];
 
 fn exists(conn: &Connection, table: &str) -> Result<bool, String> {
     conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table})"), [], |r| {
@@ -45,8 +58,17 @@ pub fn read(conn: &Connection) -> Result<FirstRunState, String> {
         onboarding_done: on("onboarding_done"),
         whats_new_seen: on("whats_new_seen"),
         has_organized: exists(conn, "organized")?,
-        has_curation: exists(conn, "curation")?,
+        has_curation: any_rows(conn, USER_TABLES)?,
     })
+}
+
+fn any_rows(conn: &Connection, tables: &[&str]) -> Result<bool, String> {
+    for t in tables {
+        if exists(conn, t)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Set (or clear) one of the known flags.
@@ -128,6 +150,26 @@ mod tests {
         )
         .unwrap();
         assert!(read(&conn).unwrap().has_curation);
+    }
+
+    #[test]
+    fn an_earlier_silo_user_who_never_organized_is_an_upgrade() {
+        // 0.11.0 filed nothing until the user clicked Organize; they may still have made sets,
+        // tags, category overrides or source links.
+        let rows = [
+            "INSERT INTO mod_tag(tech_name, tag) VALUES('A', 'harvest')",
+            "INSERT INTO category_override(tech_name, category) VALUES('A', 'Tractors')",
+            "INSERT INTO mod_repo(tech_name, owner, repo) VALUES('A', 'o', 'r')",
+            "INSERT INTO mod_source(tech_name, url) VALUES('A', 'https://example.com/a')",
+            "INSERT INTO loadout(name) VALUES('Harvest 2026')",
+        ];
+        for (i, sql) in rows.iter().enumerate() {
+            let conn = db::open(&temp_db(&format!("upgrade{i}"))).unwrap();
+            assert!(!read(&conn).unwrap().has_curation);
+            conn.execute(sql, []).unwrap();
+            let s = read(&conn).unwrap();
+            assert!(s.has_curation && !s.has_organized, "{sql}");
+        }
     }
 
     #[test]

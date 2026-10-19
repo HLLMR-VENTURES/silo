@@ -134,7 +134,7 @@
     tryStart,
     type OpToken,
   } from "./lib/state/ops.svelte";
-  import { rescanGate } from "./lib/state/rescanGate";
+  import { focusRescanAllowed, rescanGate, waitWhile } from "./lib/state/rescanGate";
   import { describeError, formatDetail, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
   import {
     info,
@@ -1462,7 +1462,9 @@
   }
 
   async function rebuildLibrary() {
-    const op = beginWrite("Clearing the scan cache");
+    // A paused archive move doesn't stop it (it only re-reads, as Settings says); a running one
+    // holds the library, and beginWrite says so.
+    const op = beginWrite("Clearing the scan cache", false, { duringMove: !archiveMove.running });
     if (!op) return;
     // The write is held through the rescan, so nothing changes the library until it has been
     // read again. The status line names it: it re-reads every mod, so it takes a while.
@@ -2406,6 +2408,9 @@
     await archiveMove.refresh(); // the archive belongs to the mods folder
     roots = rootsFor(st);
     if ((roots[0] ?? null) === prev) return;
+    // A scan already running reads the old folder: let it land, then start over on the new one
+    // (runScan skips while one runs, which would leave the old folder's mods up).
+    await waitWhile(() => scanning);
     result = null;
     mods = [];
     libraryScanned = false;
@@ -2421,7 +2426,22 @@
     await loadSavegames();
   }
 
-  async function switchModsFolder(path: string) {
+  /** Mods-folder switches under way (the picker, its dialogs, the rescan): no focus rescan. */
+  let folderSwitches = 0;
+  async function whileSwitchingFolder<T>(fn: () => Promise<T>): Promise<T> {
+    folderSwitches++;
+    try {
+      return await fn();
+    } finally {
+      folderSwitches--;
+    }
+  }
+
+  function switchModsFolder(path: string) {
+    return whileSwitchingFolder(() => switchModsFolderNow(path));
+  }
+
+  async function switchModsFolderNow(path: string) {
     const why = await switchBlockReason();
     if (why) {
       refuse(why);
@@ -2475,8 +2495,10 @@
       refuse(why);
       return;
     }
-    const path = await pickFolderFor("modsFolder");
-    if (path) await switchModsFolder(path);
+    await whileSwitchingFolder(async () => {
+      const path = await pickFolderFor("modsFolder");
+      if (path) await switchModsFolder(path);
+    });
   }
 
   async function useGameFolder() {
@@ -2485,11 +2507,13 @@
       refuse(why);
       return;
     }
-    try {
-      await applyModsStatus(await clearModsRoot());
-    } catch (e) {
-      reportError(e, "Switching to the game's mods folder");
-    }
+    await whileSwitchingFolder(async () => {
+      try {
+        await applyModsStatus(await clearModsRoot());
+      } catch (e) {
+        reportError(e, "Switching to the game's mods folder");
+      }
+    });
   }
 
   async function pointGameHere() {
@@ -3017,12 +3041,15 @@
           if (focused) void crashWatch.check();
           if (
             focused &&
-            !scanning &&
-            !writeLock.blocked &&
-            !archiveMove.running &&
-            !bisecting &&
-            roots.length &&
-            Date.now() - lastScanAt > 4000
+            focusRescanAllowed({
+              scanning,
+              writeBlocked: writeLock.blocked,
+              moveRunning: archiveMove.running,
+              bisecting,
+              switchingFolder: folderSwitches > 0,
+              hasRoots: roots.length > 0,
+              sinceLastScanMs: Date.now() - lastScanAt,
+            })
           ) {
             void runScan(true);
           }

@@ -305,17 +305,25 @@ pub const LOOKUP_BATCH: usize = 500;
 pub fn lookup(base: &str, tech_names: &[String]) -> Result<Vec<LookupResult>, String> {
     let mut out = Vec::new();
     for batch in lookup_batches(tech_names) {
-        out.extend(lookup_one(base, batch)?);
+        out.extend(lookup_one(base, &batch)?);
     }
     Ok(out)
 }
 
-/// Split the names into request-sized batches (none when there are no names).
-fn lookup_batches(tech_names: &[String]) -> std::slice::Chunks<'_, String> {
-    tech_names.chunks(LOOKUP_BATCH)
+/// Split the names into request-sized batches (none when there are no names). Blank names are
+/// dropped (the API refuses a batch holding one, failing every other name in it) and so are
+/// repeats (each would cost a slot in a batch for an answer already asked for).
+fn lookup_batches(tech_names: &[String]) -> Vec<Vec<&str>> {
+    let mut seen = std::collections::HashSet::new();
+    let names: Vec<&str> = tech_names
+        .iter()
+        .map(String::as_str)
+        .filter(|n| !n.trim().is_empty() && seen.insert(*n))
+        .collect();
+    names.chunks(LOOKUP_BATCH).map(<[&str]>::to_vec).collect()
 }
 
-fn lookup_one(base: &str, tech_names: &[String]) -> Result<Vec<LookupResult>, String> {
+fn lookup_one(base: &str, tech_names: &[&str]) -> Result<Vec<LookupResult>, String> {
     let resp = crate::net::api()
         .post(&format!("{}/mods/lookup", base.trim_end_matches('/')))
         .set("Content-Type", "application/json")
@@ -518,7 +526,8 @@ fn urlencode(s: &str) -> String {
 }
 
 /// Download a resolved .zip to the temp file `part`, streaming so the caller can report
-/// progress. Validates PK magic, caps at 500 MB, and checks the whole archive (central
+/// progress. Validates PK magic, caps at `update::MAX_BYTES` (4 GiB, the same as updates), and
+/// checks the whole archive (central
 /// directory, `modDesc.xml`, and the catalog's SHA-256 when known). On any failure `part` is
 /// removed, so a failed download never leaves a half-written file; on success the caller
 /// places `part` (it needs no library lock until then). `on_progress` is called with
@@ -543,7 +552,7 @@ fn fetch_and_validate(
     expected_sha256: Option<&str>,
     on_progress: &dyn Fn(u64, Option<u64>),
 ) -> Result<(), String> {
-    const CAP: u64 = 500 * 1024 * 1024;
+    const CAP: u64 = crate::update::MAX_BYTES;
     // SSRF guard: the URL is catalog/frontend-influenced. Downloads must be public https —
     // never a private/loopback host (no dev localhost exception for a mod download).
     crate::net::validate_outbound_url(url, false)?;
@@ -581,7 +590,7 @@ fn fetch_and_validate(
         }
         done += n as u64;
         if done > CAP {
-            return Err("Download exceeds the 500 MB safety cap".to_string());
+            return Err("Download exceeds the 4 GB safety cap".to_string());
         }
         file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         // Throttle progress events to ~1 MB steps to avoid flooding the UI.
@@ -797,12 +806,26 @@ mod lookup_batch_tests {
 
     #[test]
     fn lookups_are_split_into_api_sized_batches() {
-        assert_eq!(lookup_batches(&names(0)).count(), 0);
-        assert_eq!(lookup_batches(&names(1)).count(), 1);
-        assert_eq!(lookup_batches(&names(LOOKUP_BATCH)).count(), 1);
+        assert_eq!(lookup_batches(&names(0)).len(), 0);
+        assert_eq!(lookup_batches(&names(1)).len(), 1);
+        assert_eq!(lookup_batches(&names(LOOKUP_BATCH)).len(), 1);
+        assert_eq!(lookup_batches(&names(LOOKUP_BATCH + 1)).len(), 2);
         let big = names(739);
-        let sizes: Vec<usize> = lookup_batches(&big).map(|b| b.len()).collect();
+        let sizes: Vec<usize> = lookup_batches(&big).iter().map(|b| b.len()).collect();
         assert_eq!(sizes, vec![500, 239]);
-        assert!(lookup_batches(&big).all(|b| b.len() <= LOOKUP_BATCH));
+        assert!(lookup_batches(&big).iter().all(|b| b.len() <= LOOKUP_BATCH));
+        assert_eq!(lookup_batches(&names(2_500)).len(), 5);
+        assert_eq!(lookup_batches(&names(2_501)).len(), 6);
+    }
+
+    #[test]
+    fn blank_and_repeated_names_are_not_sent() {
+        // The API refuses a whole batch (400) if any name is blank, so one empty entry in a
+        // shared set would hide every other mod's catalog match.
+        let mut list = names(3);
+        list.extend(["".to_string(), "  ".to_string(), "FS25_mod1".to_string()]);
+        let batches = lookup_batches(&list);
+        assert_eq!(batches, vec![vec!["FS25_mod0", "FS25_mod1", "FS25_mod2"]]);
+        assert!(lookup_batches(&["".to_string(), " ".to_string()]).is_empty());
     }
 }

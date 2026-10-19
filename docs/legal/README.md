@@ -32,7 +32,7 @@ good-faith compliance while review is pending).
   "DRAFT — NOT REVIEWED" banners until a lawyer has signed off.
 - **Network and data disclosure:** the privacy policy now has one table of every connection
   (update check at launch, catalog requests only on user action, images, GitHub with and
-  without sign-in, collections, downloads, website access logs and the counts on the Trust
+  without sign-in, shared mod sets, downloads, website access logs and the counts on the Trust
   page). Keep it in sync with the code whenever a new connection is added; `SECURITY.md`
   points to it.
 - **Hosting provider:** the website and API run on a rented virtual server. Confirm whether
