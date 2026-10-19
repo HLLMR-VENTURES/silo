@@ -3375,7 +3375,7 @@
         onOpenSettings={() =>
           (settingsMod = { techName: dm.techName, title: dm.title ?? dm.techName })}
         onFindInBrowse={() => openInBrowse(dm)}
-        onCurationChange={(row) => (curationMap = { ...curationMap, [dm.techName]: row })}
+        onCurationChange={(row) => (curationMap = { ...curationMap, [row.techName]: row })}
         onTagsChange={(t) => (tagMap = { ...tagMap, [dm.techName]: t })}
         onFilterTag={(t) => {
           libFilters = { ...libFilters, tag: t };
