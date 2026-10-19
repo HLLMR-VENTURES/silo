@@ -235,8 +235,10 @@ struct LookupResponse {
 
 fn get(url: &str) -> Result<ureq::Response, String> {
     crate::net::api().get(url).call().map_err(|e| match e {
-        ureq::Error::Status(code, _) => format!("SiloAPI returned {code}"),
-        other => format!("Could not reach SiloAPI: {other}"),
+        ureq::Error::Status(code, _) => format!(
+            "Silo's catalog isn't answering right now (error {code}). Try again in a few minutes."
+        ),
+        other => format!("Silo can't reach its catalog right now: {other}"),
     })
 }
 
@@ -329,8 +331,10 @@ fn lookup_one(base: &str, tech_names: &[&str]) -> Result<Vec<LookupResult>, Stri
         .set("Content-Type", "application/json")
         .send_json(ureq::json!({ "techNames": tech_names }))
         .map_err(|e| match e {
-            ureq::Error::Status(code, _) => format!("SiloAPI lookup returned {code}"),
-            other => format!("Could not reach SiloAPI: {other}"),
+            ureq::Error::Status(code, _) => format!(
+                "Silo's catalog isn't answering right now (error {code}). Try again in a few minutes."
+            ),
+            other => format!("Silo can't reach its catalog right now: {other}"),
         })?;
     let parsed: LookupResponse = resp.into_json().map_err(|e| e.to_string())?;
     Ok(parsed.results)
@@ -418,8 +422,10 @@ pub fn manifest(base: &str, id: &str, version: &str) -> Result<Option<CanonicalM
     match crate::net::api().get(url.as_str()).call() {
         Ok(resp) => resp.into_json().map(Some).map_err(|e| e.to_string()),
         Err(ureq::Error::Status(404, _)) => Ok(None),
-        Err(ureq::Error::Status(code, _)) => Err(format!("SiloAPI manifest returned {code}")),
-        Err(other) => Err(format!("Could not reach SiloAPI: {other}")),
+        Err(ureq::Error::Status(code, _)) => Err(format!(
+            "Silo's catalog isn't answering right now (error {code}). Try again in a few minutes."
+        )),
+        Err(other) => Err(format!("Silo can't reach its catalog right now: {other}")),
     }
 }
 
@@ -470,9 +476,10 @@ pub fn resolve_download(
     let url = pick
         .download_url
         .clone()
-        .ok_or_else(|| "That source has no download URL".to_string())?;
-    let filename = filename_from_url(&url)
-        .ok_or_else(|| "Could not derive a .zip filename from the download URL".to_string())?;
+        .ok_or_else(|| "This source doesn't offer a download.".to_string())?;
+    let filename = filename_from_url(&url).ok_or_else(|| {
+        "Silo couldn't tell what this download is called, so it didn't install it.".to_string()
+    })?;
 
     // Identity: the canonical whole-zip hash for the *version we're about to fetch*. Use the
     // /manifest endpoint (server does version-equivalence). A network/404 miss → None → the
@@ -590,7 +597,7 @@ fn fetch_and_validate(
         }
         done += n as u64;
         if done > CAP {
-            return Err("Download exceeds the 4 GB safety cap".to_string());
+            return Err("This download is over 4 GB, so Silo stopped it.".to_string());
         }
         file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         // Throttle progress events to ~1 MB steps to avoid flooding the UI.

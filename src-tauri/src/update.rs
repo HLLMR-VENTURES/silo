@@ -67,7 +67,8 @@ fn write_part(reader: impl Read, part: &Path, dest: &Path) -> Result<(), String>
         let n = std::io::copy(&mut limited, &mut out).map_err(|e| e.to_string())?;
         if n > MAX_BYTES {
             return Err(format!(
-                "The update is larger than the {MAX_BYTES}-byte limit."
+                "The update is larger than {} GB, so Silo stopped the download.",
+                MAX_BYTES / (1024 * 1024 * 1024)
             ));
         }
         out.sync_all().map_err(|e| e.to_string())?;

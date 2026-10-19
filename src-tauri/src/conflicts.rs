@@ -108,12 +108,6 @@ struct Parsed {
 
 fn kind_label(kind: &str) -> &str {
     match kind {
-        "specialization" => "feature",
-        "placeableSpecialization" => "building feature",
-        "handToolSpecialization" => "hand tool feature",
-        "vehicleType" => "vehicle type",
-        "placeableType" => "building type",
-        "handToolType" => "hand tool type",
         "action" => "control action",
         "brand" => "brand",
         "storeCategory" => "shop category",
@@ -293,7 +287,8 @@ pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
             "uniqueType",
             &ut,
             format!(
-                "These mods use the same exclusive slot (\"{ut}\"). The game loads only one mod per slot, so the others won't take effect.{}",
+                "These mods use the same exclusive slot (\"{ut}\"). The game loads only one mod per slot, so {} won't take effect.{}",
+                if involved.0.len() == 2 { "the other" } else { "the others" },
                 if sa { note_same_author } else { "" }
             ),
             involved,
@@ -312,7 +307,8 @@ pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
             &kind,
             &name,
             format!(
-                "These mods each add the {kl} \"{name}\". Only one of them takes effect when the game loads, so the others may not work as intended.{}",
+                "These mods each add the {kl} \"{name}\". Only one of them takes effect when the game loads, so {} may not work as intended.{}",
+                if involved.0.len() == 2 { "the other" } else { "the others" },
                 if sa { note_same_author } else { "" }
             ),
             involved,
@@ -384,7 +380,8 @@ pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
             "fillType",
             &name,
             format!(
-                "These mods each define the fill type \"{name}\". The game keeps only one definition: whichever loads last replaces the others' settings (capacity, price and so on), so one mod may misbehave.{}",
+                "These mods each define the fill type \"{name}\". The game keeps only one definition: whichever loads last replaces {} settings (capacity, price and so on), so one mod may misbehave.{}",
+                if involved.0.len() == 2 { "the other's" } else { "the others'" },
                 if sa { " They share an author, so this is likely coordinated." } else { "" }
             ),
             involved,
@@ -524,6 +521,19 @@ mod tests {
             );
             assert_eq!(c.tech_names, vec!["FS25_Mod0", "FS25_Mod1"]);
         }
+        // Two mods: "the other", never "the others".
+        let slot = found.iter().find(|c| c.kind == "uniqueType").unwrap();
+        assert!(
+            slot.explanation.contains("so the other won't take effect"),
+            "{:?}",
+            slot.explanation
+        );
+        let action = found.iter().find(|c| c.kind == "action").unwrap();
+        assert!(
+            action.explanation.contains("so the other may not work"),
+            "{:?}",
+            action.explanation
+        );
     }
 
     /// The game registers types and specializations as `<modName>.<name>`, so two mods by
