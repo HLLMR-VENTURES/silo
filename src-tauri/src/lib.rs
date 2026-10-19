@@ -4088,16 +4088,25 @@ fn read_collection_raw(
 /// Resolve every mod of a collection by techName with one catalog lookup, and fingerprint the
 /// file together with that result. Preview and apply both go through here, so apply installs
 /// exactly what the preview showed or refuses (`COLLECTION_CHANGED`).
+///
+/// A failed lookup is an error, not an empty answer: an empty answer would show every mod as
+/// "not in the catalog" while the catalog is only unreachable.
 fn resolve_collection(
     base: &str,
     coll: &collection::Collection,
     json: &str,
-) -> (Vec<collection::Target>, String) {
+) -> Result<(Vec<collection::Target>, String), String> {
     let names: Vec<String> = coll.mods.iter().map(|m| m.tech_name.clone()).collect();
-    let hits = siloapi::lookup(base, &names).unwrap_or_default();
+    let hits = siloapi::lookup(base, &names).map_err(|e| catalog_lookup_failed(&e))?;
     let targets = collection::resolve_targets(&coll.mods, &catalog_matches(&hits));
     let fingerprint = collection::fingerprint(json, &targets);
-    (targets, fingerprint)
+    Ok((targets, fingerprint))
+}
+
+/// What a shared set's preview or install says when the catalog lookup fails (the cause stays
+/// in the text, so it still classifies as offline / timeout).
+fn catalog_lookup_failed(cause: &str) -> String {
+    format!("Silo couldn't look up this set's mods in its catalog, so nothing was changed. Try again in a moment. ({cause})")
 }
 
 /// The catalog lookup keyed by techName, for `collection::resolve_targets`.
@@ -4291,7 +4300,7 @@ async fn collection_import_preview(
 
         // One lookup resolves catalog presence + best installable source for every mod, by
         // techName, exactly as apply resolves them.
-        let (targets, fingerprint) = resolve_collection(&base, &coll, &json);
+        let (targets, fingerprint) = resolve_collection(&base, &coll, &json)?;
 
         let mut plan = ImportPlan {
             name: coll.name.clone(),
@@ -4411,7 +4420,7 @@ async fn collection_apply(
         // Resolve every mod by techName, exactly as the preview did. A collection's own
         // `catalog_id` and source hint never decide what downloads. The fingerprint covers the
         // file and this resolution, so a changed gist or catalog answer is refused.
-        let (targets, fp) = resolve_collection(&base, &coll, &json);
+        let (targets, fp) = resolve_collection(&base, &coll, &json)?;
         const COLLECTION_CHANGED: &str =
             "This set changed since you previewed it. Preview it again before installing.";
         if fp != fingerprint {
@@ -5303,6 +5312,23 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    /// An unreachable catalog fails the preview with its cause, instead of listing every mod
+    /// as "not in the catalog".
+    #[test]
+    fn a_catalog_outage_is_an_error_not_an_empty_answer() {
+        let coll =
+            crate::collection::parse_set_file(r#"{ "silo": 1, "name": "W", "mods": ["FS25_A"] }"#)
+                .unwrap();
+        // Nothing listens on port 9 of loopback: the lookup fails at once.
+        let err = super::resolve_collection("http://127.0.0.1:9", &coll, "{}").unwrap_err();
+        assert!(err.contains("couldn't look up this set's mods"), "{err}");
+        assert_eq!(
+            crate::error::classify(&err),
+            crate::error::code::NET_OFFLINE,
+            "{err}"
+        );
+    }
 
     #[test]
     fn a_shared_set_file_is_read_only_from_a_plain_silo_or_json_path() {
