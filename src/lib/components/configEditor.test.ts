@@ -21,7 +21,7 @@ vi.mock("../api", async (importOriginal) => ({
 
 import ConfigEditor from "./ConfigEditor.svelte";
 import ModSettings from "./ModSettings.svelte";
-import { isNumberText, matchOptionCase, type CfgField } from "../configSchemas";
+import { inFileCase, isNumberText, matchOptionCase, type CfgField } from "../configSchemas";
 
 const FIELDS: CfgField[] = [
   { path: "a.n", label: "Max lights", kind: "number" },
@@ -83,6 +83,25 @@ describe("ConfigEditor: the game's casing", () => {
     expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
     expect(matchOptionCase(FIELDS, { "a.s": "Medium" })).toEqual({ "a.s": "Medium" });
     expect(matchOptionCase(FIELDS, { "a.s": "LOW" })).toEqual({ "a.s": "low" });
+  });
+});
+
+describe("ConfigEditor: writing a choice", () => {
+  it("writes the choice in the file's casing ('High' in the file → 'Low')", async () => {
+    api.getConfig.mockReset().mockResolvedValue({ "a.n": "4", "a.s": "High" });
+    api.setConfig.mockReset().mockResolvedValue(undefined);
+    open();
+    const sel = await screen.findByLabelText(/Quality/);
+    await fireEvent.change(sel, { target: { value: "low" } });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Save changes" }));
+    expect(api.setConfig).toHaveBeenCalledWith("C:/game.xml", [{ path: "a.s", value: "Low" }]);
+  });
+
+  it("keeps Silo's spelling when the file writes it lowercase, or has nothing", () => {
+    expect(inFileCase("veryHigh", "Medium")).toBe("VeryHigh");
+    expect(inFileCase("low", "auto")).toBe("low");
+    expect(inFileCase("low", undefined)).toBe("low");
+    expect(inFileCase("8", "4")).toBe("8");
   });
 });
 

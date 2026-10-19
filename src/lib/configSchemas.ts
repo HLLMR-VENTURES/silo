@@ -214,3 +214,15 @@ export function matchOptionCase(fields: CfgField[], values: Record<string, strin
   }
   return out;
 }
+
+/**
+ * A select's choice written the way the file writes its words. The game wrote
+ * `<performanceClass>Medium</performanceClass>` (the only evidence: the SDK has no game.xml
+ * schema), so when the file's value is capitalized, the choice is too ("veryHigh" → "VeryHigh").
+ * @param value the option chosen (Silo's spelling)
+ * @param fileValue the value the file has now, if any
+ */
+export function inFileCase(value: string, fileValue: string | undefined): string {
+  if (!fileValue || !/^[A-Z]/.test(fileValue.trim()) || !/^[a-z]/.test(value)) return value;
+  return value[0].toUpperCase() + value.slice(1);
+}

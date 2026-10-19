@@ -7,7 +7,7 @@
   import Switch from "../ui/Switch.svelte";
   import { inlineError } from "../state/notify.svelte";
   import { getConfig, setConfig } from "../api";
-  import { isNumberText, matchOptionCase, type CfgField, type CfgPreset } from "../configSchemas";
+  import { inFileCase, isNumberText, matchOptionCase, type CfgField, type CfgPreset } from "../configSchemas";
 
   interface Props {
     title: string;
@@ -20,6 +20,8 @@
   let { title, path, fields, presets = [], footnote, onClose }: Props = $props();
 
   let orig = $state<Record<string, string>>({});
+  /** The values as the file has them (its casing), for writing a choice the same way. */
+  let fileVals: Record<string, string> = {};
   let vals = $state<Record<string, string>>({});
   let loading = $state(true);
   /** The file couldn't be read: there's no form to show. */
@@ -40,6 +42,7 @@
       );
       // The game may write a choice in another case ("Medium" for "medium"): show it as that
       // option. Unchanged, it isn't written back.
+      fileVals = got;
       const shown = matchOptionCase(fields, got);
       orig = shown;
       vals = { ...shown };
@@ -62,12 +65,16 @@
   async function save() {
     const edits = fields
       .filter((f) => (vals[f.path] ?? "") !== (orig[f.path] ?? ""))
-      .map((f) => ({ path: f.path, value: vals[f.path] ?? "" }));
+      .map((f) => ({
+        path: f.path,
+        value: f.kind === "select" ? inFileCase(vals[f.path] ?? "", fileVals[f.path]) : (vals[f.path] ?? ""),
+      }));
     if (edits.length === 0 || badNumber) return;
     saveError = null;
     try {
       await setConfig(path, edits);
       orig = { ...vals };
+      for (const e of edits) fileVals[e.path] = e.value;
       saved = true;
       setTimeout(() => (saved = false), 1800);
     } catch (e) {
