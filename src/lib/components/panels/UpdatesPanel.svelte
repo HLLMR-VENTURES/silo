@@ -115,7 +115,8 @@
 {/snippet}
 
 <div class="updates">
-  {#if !checked && !checking}
+  <!-- A first check whose catalog request failed shows the failure, not "never checked". -->
+  {#if !checked && !checking && !catalogError}
     <EmptyState icon="update" title="Check your mods for updates" body={UPDATE_PRIVACY_LINE} level={3}>
       {#snippet actions()}
         <span use:tooltip={checkDisabledReason || null}>

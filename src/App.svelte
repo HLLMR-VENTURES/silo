@@ -1840,6 +1840,8 @@
   let updateCheckedAt = $state<number | null>(null);
   /** The last check's catalog request failed (Updates shows it with Try again). */
   let updateCatalogError = $state<ExplainedError | null>(null);
+  /** The mods the last check asked about (one added since isn't "not tracked"). */
+  let updateCheckedTechs = $state<ReadonlySet<string> | undefined>(undefined);
   /** Linked GitHub repos checked so far, while a check runs. */
   let updateProgress = $state<{ done: number; total: number } | null>(null);
   /** Per-mod install state in Updates (running, or the failure with Try again). */
@@ -1860,6 +1862,7 @@
       rows: updateResults,
       checkYourself,
       catalogReached: updateCheckedAt != null && !updateCatalogError,
+      checkedTechs: updateCheckedTechs,
     }),
   );
 
@@ -1900,19 +1903,28 @@
   };
 
   // The last check's rows stay up (and the badge with them) until the new check is done.
+  /** Bumped when the mods folder changes: a check of the old folder still running mustn't land. */
+  let updateFolderGen = 0;
+
   async function checkAllUpdates(quiet = false) {
     if (!quiet) go("updates");
     if (updateChecking || updateCheckBlocked) return;
     updateChecking = true;
     updateProgress = null;
+    const asked = new Set(mods.map((m) => m.techName));
+    const gen = updateFolderGen;
     try {
       const res = await runUpdateCheck(mods, repoMap, {
         ...updateCheckDeps,
-        onProgress: (done, total) => (updateProgress = { done, total }),
+        onProgress: (done, total) => {
+          if (gen === updateFolderGen) updateProgress = { done, total };
+        },
       });
+      if (gen !== updateFolderGen) return; // the other folder's files: dropped
       updateResults = res.rows;
       updateRowStates = {};
       updateCatalogError = res.catalogError;
+      updateCheckedTechs = asked;
       // A failed catalog request isn't a check: keep the last good time (or "Not checked yet").
       if (!res.catalogError) updateCheckedAt = Date.now();
     } finally {
@@ -1927,8 +1939,10 @@
     const r = repoMap[row.techName];
     if (!m || !r || updateChecking || updateRowStates[row.techName]) return;
     setRowState(row.techName, { phase: "checking" });
+    const gen = updateFolderGen;
     try {
       const next = await recheckRow(row, m, r, updateCheckDeps);
+      if (gen !== updateFolderGen) return; // the folder changed meanwhile
       updateResults = updateResults.map((x) => (x.techName === row.techName ? next : x));
     } finally {
       setRowState(row.techName, null);
@@ -2554,6 +2568,13 @@
     scanFailed = false;
     activeSet = new Set();
     foreignFiles = [];
+    // The last update check was of the other folder's files (and one still running is too).
+    updateFolderGen++;
+    updateResults = [];
+    updateCheckedAt = null;
+    updateCatalogError = null;
+    updateCheckedTechs = undefined;
+    updateRowStates = {};
     if (roots.length) {
       await runScan();
       hardlinkSupport()
