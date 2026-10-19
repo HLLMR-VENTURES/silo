@@ -27,6 +27,7 @@
     ontoggle?: (item: T) => void;
     onselect?: (item: T, intent: SelectIntent) => void;
     onmenu?: (item: T, anchor: HTMLElement) => void;
+    onselectall?: () => void;
   }
 
   let {
@@ -42,6 +43,7 @@
     ontoggle,
     onselect,
     onmenu,
+    onselectall,
   }: Props = $props();
 
   let grid = $state<{
@@ -90,4 +92,5 @@
   {ontoggle}
   {onselect}
   {onmenu}
+  {onselectall}
 />

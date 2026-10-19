@@ -110,7 +110,7 @@
     description="Tune Farming Simulator 25's graphics (presets: Performance / Balanced / Quality) without launching the game. Also in Tools → Graphics settings."
   >
     {#snippet actions()}
-      <Button icon="modSettings" onclick={onOpenGameGraphics}>Edit game.xml</Button>
+      <Button icon="modSettings" onclick={onOpenGameGraphics}>Edit graphics settings</Button>
     {/snippet}
   </SettingsCard>
 {/if}

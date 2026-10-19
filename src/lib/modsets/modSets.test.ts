@@ -130,6 +130,8 @@ describe("compareSet", () => {
     expect(c.text).toBe("+2 / −1");
     expect(c.label).toBe("2 turn on and 1 is parked");
     expect(c.same).toBe(false);
+    expect(compareSet(["A", "B"], new Set(["A"])).label).toBe("1 turns on");
+    expect(compareSet(["A"], new Set(["A", "B", "C"])).label).toBe("2 are parked");
   });
 
   it("counts mods missing from the library separately", () => {

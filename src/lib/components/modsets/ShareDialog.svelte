@@ -127,9 +127,9 @@
     const op = start("Fingerprinting your mods");
     try {
       const n = await mpExport(refs.have, name);
-      if (n != null) note = `Saved a Multiplayer check file for ${count(n)}. Send it to the friends joining your server.`;
+      if (n != null) note = `Saved a multiplayer check file for ${count(n)}. Send it to the friends joining your server.`;
     } catch (e) {
-      error = inlineError(e, "Saving the Multiplayer check file");
+      error = inlineError(e, "Saving the multiplayer check file");
     } finally {
       busy = false;
       op.end();
@@ -137,7 +137,7 @@
   }
 </script>
 
-<Dialog bind:open title={`Share ${name}`} size="md">
+<Dialog bind:open title={`Share “${name}”`} size="md">
   <RadioGroup legend="How to share" hideLegend options={OPTIONS} bind:value={how} disabled={busy} />
 
   <div class="how" aria-live="polite">

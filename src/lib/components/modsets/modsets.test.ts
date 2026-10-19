@@ -123,7 +123,7 @@ describe("Open a shared set", () => {
   it("Download installs exactly what was previewed (its fingerprint)", async () => {
     vi.mocked(collectionApply).mockResolvedValue({ loadoutId: 5, installed: 1, failed: 0, rows: [] });
     const p = openTab({ request: req("https://gist.github.com/u/abc") });
-    await fireEvent.click(await screen.findByRole("button", { name: "Download 1 and save as a set" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "Download 1 mod and save as a set" }));
     await waitFor(() => expect(p.onImported).toHaveBeenCalled());
     expect(collectionApply).toHaveBeenCalledWith("https://gist.github.com/u/abc", expect.any(Array), "fp1", null);
     expect(screen.getByText(/Saved Weekend pack as a set\. Downloaded 1 mod/)).toBeInTheDocument();
@@ -198,7 +198,7 @@ describe("Open a shared set: races and repeats", () => {
     let finish!: (r: unknown) => void;
     vi.mocked(collectionApply).mockReturnValue(new Promise((res) => (finish = res)) as never);
     const p = openTab({ request: req("https://gist.github.com/u/a") });
-    await fireEvent.click(await screen.findByRole("button", { name: "Download 1 and save as a set" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "Download 1 mod and save as a set" }));
     expect(screen.getByRole("button", { name: "Choose a file…" })).toBeDisabled();
     vi.mocked(collectionImportPreview).mockResolvedValue({ ...plan, name: "Other pack" });
     await p.rerender({ request: req("https://gist.github.com/u/b") });
@@ -252,7 +252,7 @@ describe("Open a shared set: races and repeats", () => {
       new AppError("CHANGED_SINCE_PREVIEW", "This set changed since you previewed it. Preview it again before installing."),
     );
     openTab({ request: req("https://gist.github.com/u/changed") });
-    await fireEvent.click(await screen.findByRole("button", { name: "Download 1 and save as a set" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "Download 1 mod and save as a set" }));
     await fireEvent.click(await screen.findByRole("button", { name: "Preview again" }));
     await waitFor(() => expect(collectionImportPreview).toHaveBeenCalledTimes(2));
   });
@@ -287,7 +287,7 @@ describe("Share dialog", () => {
   it("a link needs GitHub: Connect GitHub when it isn't connected", async () => {
     vi.mocked(ghStatus).mockResolvedValue(gh(false));
     const p = share();
-    expect(await screen.findByRole("dialog", { name: "Share Harvest 2026" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Share “Harvest 2026”" })).toBeInTheDocument();
     await fireEvent.click(await screen.findByRole("button", { name: "Connect GitHub" }));
     expect(p.onConnect).toHaveBeenCalled();
     expect(collectionExport).not.toHaveBeenCalled();

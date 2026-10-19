@@ -131,7 +131,7 @@
 
     <section aria-labelledby="help-about">
       <h3 id="help-about">About Silo</h3>
-      <p class="tnum">Silo {appVer ? `v${appVer}` : ""}</p>
+      <p class="tnum">Silo {appVer ?? ""}</p>
       <p>
         Silo is free and open source under the MIT License. Copyright © 2026 HLLMR Ventures LLC.
         Silo isn't affiliated with GIANTS Software. Farming Simulator is a trademark of its

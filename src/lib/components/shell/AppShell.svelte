@@ -157,6 +157,16 @@
     transform: none;
   }
 
+  /* App chrome isn't text to select (Ctrl+A or a stray drag would highlight it). */
+  .rail,
+  .header {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .header :global(input) {
+    -webkit-user-select: text;
+    user-select: text;
+  }
   .rail {
     grid-area: rail;
     z-index: var(--z-rail);

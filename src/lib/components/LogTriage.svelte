@@ -216,7 +216,7 @@
           <Button variant="primary" icon="diagnose" onclick={findProblemMod} disabled={!canBisect}>Find the problem mod</Button>
           <p class="cta-why">
             {#if canBisect}
-              Silo tests half your mods at a time, about {formatCount(Math.ceil(Math.log2(Math.max(pool.length, 2))))} launches.
+              Silo tests half your mods at a time, about {formatCount(Math.ceil(Math.log2(Math.max(pool.length, 2))))} {plural(Math.ceil(Math.log2(Math.max(pool.length, 2))), { one: "launch", other: "launches" })}.
             {:else}
               {bisectOff}
             {/if}

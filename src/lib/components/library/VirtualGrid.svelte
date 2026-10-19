@@ -55,6 +55,8 @@
     onselect?: (item: T, intent: SelectIntent) => void;
     /** Open the item's menu at `anchor` (the item element). */
     onmenu?: (item: T, anchor: HTMLElement) => void;
+    /** Ctrl+A / Cmd+A on an item: select every item shown. */
+    onselectall?: () => void;
   }
 
   let {
@@ -73,6 +75,7 @@
     ontoggle,
     onselect,
     onmenu,
+    onselectall,
   }: Props = $props();
 
   /** Room kept above/below an item scrolled into view (matches the CSS scroll-padding). */
@@ -260,6 +263,9 @@
       case "menu":
         onmenu?.(it, e.currentTarget as HTMLElement);
         return;
+      case "selectAll":
+        onselectall?.();
+        return;
     }
   }
 
@@ -326,6 +332,9 @@
     outline: none;
   }
   .vg-item {
+    /* Rows are controls: a drag or Ctrl+A doesn't paint them as selected text. */
+    -webkit-user-select: none;
+    user-select: none;
     position: absolute;
     box-sizing: border-box;
     border-radius: var(--r-sm);

@@ -12,6 +12,8 @@ import type { LogReport, LogStatus } from "../types";
 export const POLL_MS = 5_000;
 /** After Play, how long to wait for the game's process to show up before giving up. */
 export const LAUNCH_GRACE_MS = 3 * 60_000;
+/** Failed looks in a row after which polling gives up (a minute; focus checks still cover it). */
+export const MAX_FAILED_POLLS = 12;
 /** On the very first look (nothing stored yet), only a log this recent is news. */
 export const FIRST_LOOK_MAX_AGE_MS = 24 * 60 * 60_000;
 
@@ -71,6 +73,7 @@ export function createCrashWatch(deps: CrashWatchDeps): CrashWatch {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let pollStart = 0;
   let sawRunning = false;
+  let failedPolls = 0;
   let active = false;
   let generation = 0;
   /** The log change time this session already handled: a status taken before the stored
@@ -128,18 +131,27 @@ export function createCrashWatch(deps: CrashWatchDeps): CrashWatch {
       /* try again next tick */
     }
     if (gen !== generation) return; // stopped, or a newer launch took over
-    if (s?.gameRunning) {
+    if (!s) {
+      // One failed look doesn't end the wait (a long game would lose its exit), a minute of
+      // them does.
+      if (++failedPolls >= MAX_FAILED_POLLS) {
+        active = false;
+        return;
+      }
+      schedule(gen);
+      return;
+    }
+    failedPolls = 0;
+    if (s.gameRunning) {
       sawRunning = true;
-    } else if (s && sawRunning) {
-      // The game Silo launched has exited: stop polling and look now. A look already running
-      // (a focus check) may have started while the game still ran, so let it finish, then take
-      // a fresh status rather than reuse it or this tick's (possibly stale) one.
+    } else if (sawRunning || now() - pollStart >= LAUNCH_GRACE_MS) {
+      // The game Silo launched has exited (or the wait is over: it never showed up, or came and
+      // went between ticks): stop polling and look now. An unchanged log is skipped. A look
+      // already running (a focus check) may have started while the game still ran, so let it
+      // finish, then take a fresh status rather than reuse it or this tick's.
       active = false;
       if (inFlight) await inFlight;
       await check();
-      return;
-    } else if (now() - pollStart >= LAUNCH_GRACE_MS) {
-      active = false; // it never started (or came and went between ticks; focus covers that)
       return;
     }
     schedule(gen);
@@ -150,6 +162,7 @@ export function createCrashWatch(deps: CrashWatchDeps): CrashWatch {
     active = true;
     pollStart = now();
     sawRunning = false;
+    failedPolls = 0;
     schedule(generation);
   }
 

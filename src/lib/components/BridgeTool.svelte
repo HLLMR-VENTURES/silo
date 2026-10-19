@@ -105,9 +105,9 @@
 <div class="br">
   <div class="br-head">
     <div>
-      <h3>Filltype compatibility bridge</h3>
+      <h3>Fill type compatibility bridge</h3>
       <p class="sub">
-        Got a map filltype nothing can haul, store, or sell? Silo builds a small companion
+        Got a map fill type nothing can haul, store, or sell? Silo builds a small companion
         mod that adds it to the categories your equipment accepts, with no edits to other mods.
       </p>
     </div>
@@ -118,14 +118,14 @@
 
   {#if done}
     <div class="ok-note">
-      Created <b>{done}</b> in your mods folder and rescanned. Enable it (and load your save)
-      to test. The filltype should now work with the checked equipment.
+      Created <b>{done}</b> in your mods folder. Check it's active, then load your save to
+      test. The fill type should now work with the checked equipment.
     </div>
   {/if}
   {#if error}<div class="err">{error}</div>{/if}
 
   <div class="field">
-    <label for="br-ft">Fill type name(s)</label>
+    <label for="br-ft">Fill type names</label>
     <input
       id="br-ft"
       class="txt"
@@ -133,7 +133,7 @@
       bind:value={fillTypesRaw}
     />
     <p class="hint">
-      The internal name(s), space- or comma-separated. Case doesn't matter. If unsure, it's
+      Their internal names, separated by spaces or commas. Case doesn't matter. If unsure, it's
       usually the crop/material name in caps (check the mod that adds it).
     </p>
     {#if fillTypeList.length > 0}
@@ -158,7 +158,7 @@
   </div>
 
   <div class="field">
-    <label for="br-name">Mod name</label>
+    <label for="br-name">Mod ID</label>
     <input id="br-name" class="txt mono" bind:value={name} />
     <p class="hint">Must start with FS25_. This is the .zip that lands in your mods folder.</p>
   </div>
@@ -166,7 +166,7 @@
   <div class="caveat">
     Adds category membership only. It doesn't change balance or realism. If two mods
     both define the fill type, load order still decides its properties. Test in-game after
-    generating; if a control/category feels off, just delete the .zip (fully reversible).
+    generating. If something feels off, delete the .zip to undo it.
   </div>
 
   <div class="actions">

@@ -10,11 +10,13 @@ import ProblemsPanel from "./panels/ProblemsPanel.svelte";
 import LogTriage from "./LogTriage.svelte";
 import BisectFlow from "./BisectFlow.svelte";
 import {
+  bisectNarrow,
   bisectPlan,
   bisectSnapshotClear,
   bisectSnapshotGet,
   bisectSnapshotSave,
   copyText,
+  launchGame,
   logStatus,
   scanLog,
 } from "../api";
@@ -33,6 +35,12 @@ vi.mock("../api", async (importOriginal) => ({
   launchGame: vi.fn(() => Promise.resolve()),
   revealInFolder: vi.fn(() => Promise.resolve()),
   userDirPath: vi.fn(() => Promise.resolve("C:/fs25")),
+}));
+
+const ui = vi.hoisted(() => ({ ask: vi.fn(() => Promise.resolve(true)) }));
+vi.mock("../ui", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../ui")>()),
+  ask: ui.ask,
 }));
 
 function conflict(over: Partial<Conflict>): Conflict {
@@ -134,7 +142,7 @@ describe("Problems", () => {
     expect(screen.getByRole("heading", { level: 3 })).toHaveTextContent("4 mods need attention");
     expect(screen.getByRole("heading", { name: /Missing a required mod/ })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /Can't be read/ })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /Ignored by the game: the name starts with a digit/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Ignored by the game: the name starts with a number/ })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /A different build is in your mods folder/ })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Find it in Browse" }));
@@ -145,7 +153,7 @@ describe("Problems", () => {
     expect(onPark).toHaveBeenCalledWith("FS25_Broken");
     await user.click(screen.getByRole("button", { name: "Use this version" }));
     expect(onResolveForeign).toHaveBeenCalledWith("FS25_Plow.zip", "adopt");
-    await user.click(screen.getByRole("button", { name: "Keep Silo's" }));
+    await user.click(screen.getByRole("button", { name: "Keep Silo's copy" }));
     expect(onResolveForeign).toHaveBeenCalledWith("FS25_Plow.zip", "restore");
     // "Foreign files" is gone from the words.
     expect(screen.queryByText(/foreign/i)).toBeNull();
@@ -310,5 +318,97 @@ describe("Find the problem mod: the finish", () => {
     await user.click(await screen.findByRole("button", { name: "Put my mods back" }));
     await waitFor(() => expect(onFinished).toHaveBeenCalledWith(null));
     expect(onApply).toHaveBeenLastCalledWith(["FS25_A", "FS25_C"]);
+  });
+});
+
+describe("Find the problem mod: a run survives a hiccup", () => {
+  let snapshot: string[] | null;
+  const split = { kind: "split" as const, test: ["FS25_A"], rest: ["FS25_B"], roundsLeft: 1 };
+  beforeEach(() => {
+    snapshot = null;
+    vi.mocked(bisectSnapshotGet).mockImplementation(async () => snapshot);
+    vi.mocked(bisectSnapshotSave).mockImplementation(async (s: string[]) => void (snapshot = s));
+    vi.mocked(bisectSnapshotClear).mockReset().mockImplementation(async () => void (snapshot = null));
+    vi.mocked(bisectPlan).mockReset().mockResolvedValue(split);
+    vi.mocked(bisectNarrow).mockReset().mockResolvedValue(["FS25_A"]);
+    vi.mocked(scanLog).mockReset().mockResolvedValue({ crashed: true } as never);
+    vi.mocked(logStatus).mockReset().mockResolvedValue({ path: "log.txt", modifiedMs: 1, gameRunning: false, lastSeenMs: null });
+    vi.mocked(launchGame).mockReset().mockResolvedValue(undefined as never);
+  });
+  const start = async (onApply = vi.fn(() => Promise.resolve()), onBisecting = vi.fn()) => {
+    const user = userEvent.setup();
+    render(BisectFlow, { pool: ["FS25_A", "FS25_B"], alwaysOn: [], onApply, onBisecting, onExit: vi.fn() });
+    await user.click(screen.getByRole("button", { name: "Start" }));
+    await screen.findByRole("button", { name: "I've quit the game" });
+    return { user, onApply, onBisecting };
+  };
+
+  it("I've quit the game while FS25 still runs: no crash guess from a log still being written", async () => {
+    vi.mocked(logStatus).mockResolvedValue({ path: "log.txt", modifiedMs: 1, gameRunning: true, lastSeenMs: null });
+    const { user } = await start();
+    await user.click(screen.getByRole("button", { name: "I've quit the game" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/still running/);
+    expect(scanLog).not.toHaveBeenCalled();
+    expect(screen.queryByText(/crashed again/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "I've quit the game" })).toBeInTheDocument();
+  });
+
+  it("a failed launch keeps the round: the user can still come back and answer", async () => {
+    vi.mocked(launchGame).mockRejectedValue(new Error("Steam isn't running."));
+    const { user } = await start();
+    await user.click(screen.getByRole("button", { name: /Launch test round/ }));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "I've quit the game" }));
+    expect(await screen.findByRole("button", { name: "It still happened" })).toBeInTheDocument();
+  });
+
+  it("a round that couldn't be applied offers Try again instead of ending the run", async () => {
+    let fail = false;
+    const onApply = vi.fn(async () => {
+      if (fail) {
+        fail = false;
+        throw "FS25_A: in use";
+      }
+    });
+    const { user } = await start(onApply);
+    await user.click(screen.getByRole("button", { name: "I've quit the game" }));
+    fail = true;
+    await user.click(await screen.findByRole("button", { name: "It still happened" }));
+    await user.click(await screen.findByRole("button", { name: "Try again" }));
+    expect(await screen.findByText(/Round 2 of about/)).toBeInTheDocument();
+    expect(bisectNarrow).toHaveBeenCalledOnce();
+  });
+
+  it("the ✕ asks first once a round was applied; No keeps the run", async () => {
+    const onApply = vi.fn(() => Promise.resolve());
+    const { user } = await start(onApply);
+    ui.ask.mockResolvedValueOnce(false);
+    await user.click(screen.getByRole("button", { name: "Stop and put my mods back" }));
+    expect(ui.ask).toHaveBeenCalledWith(expect.objectContaining({ title: "Stop finding the problem mod?", confirm: "Stop" }));
+    expect(onApply).toHaveBeenCalledTimes(1); // the round only: nothing was restored
+    expect(screen.getByRole("button", { name: "I've quit the game" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Stop and put my mods back" }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(2));
+    expect(onApply).toHaveBeenLastCalledWith(["FS25_A", "FS25_B"]);
+  });
+
+  it("when putting the mods back fails, Close and restore later stops the run and keeps the saved set", async () => {
+    let restoring = false;
+    const onApply = vi.fn(async () => {
+      if (restoring) throw "FS25_B: the archive drive isn't connected";
+    });
+    const onExit = vi.fn();
+    const onBisecting = vi.fn();
+    const user = userEvent.setup();
+    render(BisectFlow, { pool: ["FS25_A", "FS25_B"], alwaysOn: [], onApply, onBisecting, onExit });
+    await user.click(screen.getByRole("button", { name: "Start" }));
+    await screen.findByRole("button", { name: "I've quit the game" });
+    restoring = true;
+    await user.click(screen.getByRole("button", { name: "Stop and put my mods back" }));
+    await user.click(await screen.findByRole("button", { name: "Close and restore later" }));
+    expect(onBisecting).toHaveBeenLastCalledWith(false);
+    expect(onExit).toHaveBeenCalled();
+    expect(bisectSnapshotClear).not.toHaveBeenCalled();
+    expect(snapshot).toEqual(["FS25_A", "FS25_B"]);
   });
 });

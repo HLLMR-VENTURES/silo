@@ -8,6 +8,8 @@ describe("displayVersion (C2)", () => {
     expect(displayVersion("V1.6.4.0")).toBe("1.6.4.0");
     expect(displayVersion("V.1.6.4.0")).toBe("1.6.4.0");
     expect(displayVersion("  v 2.0 ")).toBe("2.0");
+    expect(displayVersion("Ver 2.1")).toBe("2.1");
+    expect(displayVersion("version.3")).toBe("3");
   });
   it("leaves a version that doesn't start with v and a number alone", () => {
     expect(displayVersion("vanilla-2")).toBe("vanilla-2");

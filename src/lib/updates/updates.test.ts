@@ -14,6 +14,7 @@ import {
   newDroppedBuilds,
   droppedKey,
   isNewerVersion,
+  normVersion,
   sourceLabel,
   updatesBadge,
   versionChange,
@@ -139,12 +140,54 @@ describe("groupUpdates", () => {
     expect(s.ready).toEqual([]);
     expect(s.upToDate).toHaveLength(1);
   });
+
+  it("stops offering a version the library already has in other words, or a newer one", () => {
+    const offered = (version: string, latest: string) =>
+      groupUpdates({
+        mods: [mod("X", version)],
+        rows: [row("X", { hasUpdate: true, latest, assetUrl: "https://x/x.zip" })],
+        checkYourself: [],
+        catalogReached: true,
+      }).ready.length;
+    // A tag "v1.2.0" is the 1.2.0.0 the modDesc says.
+    expect(offered("1.2.0.0", "v1.2.0")).toBe(0);
+    // A newer build was installed since the check: Update all must not put 1.2 back over it.
+    expect(offered("1.3.0.0", "1.2.0.0")).toBe(0);
+    // Still older: still offered. Versions that aren't plain numbers only match exactly.
+    expect(offered("1.1.0.0", "1.2.0.0")).toBe(1);
+    expect(offered("1.2-beta", "1.2")).toBe(1);
+  });
+
+  it("doesn't call a mod added since the check 'not tracked'", () => {
+    const s = groupUpdates({
+      mods: [mod("A"), mod("NEW")],
+      rows: [row("A", { hasUpdate: false })],
+      checkYourself: [],
+      catalogReached: true,
+      checkedTechs: new Set(["A", "OLD"]),
+    });
+    expect(s.notTracked).toEqual([]);
+    const asked = groupUpdates({
+      mods: [mod("A"), mod("NEW")],
+      rows: [row("A", { hasUpdate: false })],
+      checkYourself: [],
+      catalogReached: true,
+      checkedTechs: new Set(["A", "NEW"]),
+    });
+    expect(asked.notTracked.map((m) => m.techName)).toEqual(["NEW"]);
+  });
 });
 
 describe("row words", () => {
   it("shows versions without a doubled v, and names the source", () => {
     expect(versionChange({ current: "v8.0.0.4", latest: "8.0.1.0" })).toBe("8.0.0.4 → 8.0.1.0");
     expect(versionChange({ latest: "2.0" })).toBe("2.0");
+    // Catalog versions as authors write them (coordinator smoke C2: "1.5.0.0 → V.1.6.4.0").
+    expect(versionChange({ current: "1.5.0.0", latest: "V.1.6.4.0" })).toBe("1.5.0.0 → 1.6.4.0");
+    expect(normVersion("Ver 2.1")).toBe("2.1");
+    expect(normVersion("version.3")).toBe("3");
+    expect(normVersion("vast")).toBe("vast");
+    expect(isNewerVersion("V.1.6.4.0", "1.5.0.0")).toBe(true);
     expect(sourceLabel({ source: "github" })).toBe("GitHub");
     expect(sourceLabel({ pageUrl: "https://www.farming-simulator.com/mod.php?mod_id=9" })).toBe("ModHub");
     expect(sourceLabel({})).toBeNull();
@@ -282,6 +325,25 @@ describe("runUpdateCheck", () => {
     });
     expect(res.catalogError?.message).toBe("why: offline");
     expect(res.rows).toEqual([expect.objectContaining({ techName: "A", hasUpdate: false })]);
+  });
+
+  it("a linked release with no .zip points at its release page, not the catalog's ModHub page", async () => {
+    const res = await runUpdateCheck([mod("A")], { A: { owner: "o", repo: "a" } }, {
+      catalog: async () => [
+        { techName: "A", latest: "1.1", hasUpdate: true, downloadUrl: null, source: null, pageUrl: "https://hub/a" },
+      ],
+      checkRepo: async () => ({
+        hasUpdate: true,
+        current: "1.0.0.0",
+        release: { tag: "v1.1", assetUrl: null, htmlUrl: "https://github.com/o/a/releases/tag/v1.1" } as never,
+      }),
+      explain,
+    });
+    expect(res.rows[0]).toMatchObject({
+      source: "github",
+      assetUrl: null,
+      pageUrl: "https://github.com/o/a/releases/tag/v1.1",
+    });
   });
 });
 

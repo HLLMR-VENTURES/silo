@@ -156,7 +156,7 @@
       {#if update.hasUpdate}
         <b>Update available:</b> {displayVersion(update.release.tag)} (you have {displayVersion(update.current)})
       {:else}
-        Up to date. Latest is {displayVersion(update.release.tag)}
+        Up to date. The latest is {displayVersion(update.release.tag)}.
       {/if}
       {#if update.release.htmlUrl}
         <button class="gh-open" onclick={() => openExternal(update!.release.htmlUrl!)}>
@@ -165,7 +165,7 @@
       {/if}
       {#if update.hasUpdate && update.release.assetUrl}
         <button class="gh-btn" onclick={installUpdate} disabled={installing}>
-          {installing ? "Installing…" : "Download & install"}
+          {installing ? "Installing…" : "Download and install"}
         </button>
       {/if}
     </div>

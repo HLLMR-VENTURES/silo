@@ -133,7 +133,7 @@
       </div>
     {/each}
 
-    {#if footnote}<p class="ms-foot">{footnote} Silo keeps the original and the three versions before your latest edit as <code>.bak</code> files.</p>{/if}
+    {#if footnote}<p class="ms-foot">{footnote} Silo keeps backup copies: the original and the three versions before your latest edit.</p>{/if}
   {/if}
   {#snippet footer()}
     <span class="ms-saved" role="status">{#if saved}Saved <Icon name="check" size={13} />{/if}</span>

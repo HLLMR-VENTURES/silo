@@ -93,8 +93,8 @@ export function lostCancelText(archivePath: string | null | undefined, homeDefau
   return (
     `The move finished before it could be cancelled. Your library is now in ${archivePath ?? "its new folder"}. ` +
     (homeDefault
-      ? "Use 'Use default' in Settings to move it back."
-      : "Use Change… in Settings to move it again.")
+      ? "To move it back, open Settings → Library and choose Use default."
+      : "To move it again, open Settings → Library and choose Change….")
   );
 }
 

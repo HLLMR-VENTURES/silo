@@ -119,8 +119,8 @@ export function bulkParkLooseConfirm(
     categories.size === 1
       ? `(archive${sep}${[...categories][0]})`
       : l === 1
-        ? "(its category folder in archive)"
-        : "(each into its category folder in archive)";
+        ? "(its category folder in your library archive)"
+        : "(each into its category folder in your library archive)";
   const who =
     l === count
       ? l === 1
@@ -129,12 +129,12 @@ export function bulkParkLooseConfirm(
       : l === 1
         ? "1 of them isn't filed yet, so Silo moves it"
         : `${l} of them aren't filed yet, so Silo moves those`;
-  let body = `${who} into your library folder ${where}. Nothing is deleted; Undo puts ${l === 1 && count === 1 ? "it" : "them"} back.`;
+  let body = `${who} into your library archive ${where}. Nothing is deleted. Undo puts ${l === 1 && count === 1 ? "it" : "them"} back.`;
   if (count > BULK_CONFIRM_OVER && opts.cloudSynced)
     body += " Your mods folder is cloud-synced, so each one is moved or removed on its own. This can take a while.";
   const facts = [
     { label: "Park", value: n },
-    { label: "Filed into the library", value: `${l} loose` },
+    { label: "Filed into your library first", value: modsCount(l) },
   ];
   if (opts.otherDrive) facts.push({ label: "Library folder", value: "On another drive" });
   const list = loose.slice(0, LOOSE_LIST_MAX).map(nameOf);
@@ -180,7 +180,9 @@ export async function runBulkSwitch<M extends BulkMod>(
 ): Promise<BulkSwitchOutcome> {
   const changing = bulkChanges(list, on, deps.active());
   if (changing.length === 0) {
-    deps.toast({ message: on ? "They're already on." : "They're already parked." });
+    deps.toast({
+      message: list.length === 1 ? (on ? "It's already on." : "It's already parked.") : on ? "They're already on." : "They're already parked.",
+    });
     return "nothing";
   }
   const why = deps.busy();

@@ -63,9 +63,9 @@
 
   const howLabel = (how: string | null) =>
     how === "exact"
-      ? "Byte-for-byte match with the published build."
+      ? "Exactly the same as the published build."
       : how === "content"
-        ? "Contents match the published build (repackaged, same files)."
+        ? "The same files as the published build, zipped again."
         : "Matches the published build.";
 
   // Cap each diff list so a wildly-modified mod can't blow out the drawer.
@@ -81,17 +81,17 @@
     {#if canVerify && phase === "idle"}
       <button class="prov-btn" onclick={run}>Verify integrity</button>
     {:else if phase === "running"}
-      <span class="prov-run">Hashing &amp; comparing…</span>
+      <span class="prov-run">Checking against the published build…</span>
     {:else if phase === "done" && (result?.status === "modified" || result?.status === "unverified")}
       <button class="prov-btn ghost" onclick={run}>Re-check</button>
     {/if}
   </div>
 
   {#if !canVerify}
-    <p class="prov-note">Folder mods can't be verified. There's no archive to hash.</p>
+    <p class="prov-note">Only zipped mods can be checked. This one is a folder.</p>
   {:else if phase === "idle"}
     <p class="prov-note">
-      Check this mod against the trusted build SiloAPI hashed from its source.
+      Check this mod against its published build in Silo's catalog.
     </p>
   {:else if phase === "error"}
     <p class="prov-err">{err}</p>
@@ -102,7 +102,7 @@
       <div class="verdict ok">
         <span class="dot"><Icon name="verifiedBuild" /></span>
         <div>
-          <div class="v-label">Verified</div>
+          <div class="v-label">Verified build</div>
           <div class="v-sub">
             {howLabel(r.how)}{#if r.matchedVersion}&nbsp;({ver(r.matchedVersion)}){/if}
           </div>
@@ -115,7 +115,7 @@
           <div class="v-label">Modified from the published build</div>
           <div class="v-sub">
             {r.changed.length} changed · {r.added.length} added · {r.removed.length} removed{#if r.matchedVersion}
-              &nbsp;(vs {ver(r.matchedVersion)}){/if}
+              &nbsp;(compared with {ver(r.matchedVersion)}){/if}
           </div>
         </div>
       </div>
@@ -136,13 +136,13 @@
         <span class="dot">?</span>
         <div>
           <div class="v-label">Unverified</div>
-          <div class="v-sub">{r.note ?? "No trusted build to compare against."}</div>
+          <div class="v-sub">{r.note ?? "Silo's catalog has nothing to compare it with yet."}</div>
         </div>
       </div>
     {/if}
     <p class="prov-fine">
-      Provenance check, not a virus scan. It confirms origin &amp; integrity, it can't
-      judge whether a mod is safe.
+      This checks where the mod came from and that it's unchanged. It isn't a virus scan and
+      can't tell whether a mod is safe.
     </p>
   {/if}
 </div>

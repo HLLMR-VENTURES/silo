@@ -24,9 +24,9 @@
 <SettingsCard id={ACCOUNTS_SECTION_ID} title="GitHub account">
   {#if !keychainOk}
     <div class="keychain-warn">
-      <Icon name="problem" size={14} /> No OS keychain is available on this machine, so a connected GitHub token
-      would be stored <strong>unencrypted</strong> in Silo's local database. Connect an account
-      only if you're comfortable with that; disconnecting removes the stored token.
+      <Icon name="problem" size={14} /> This computer has no secure password store Silo can use, so your
+      GitHub sign-in would be saved <strong>unencrypted</strong> on this computer. Connect only if
+      you're comfortable with that. Disconnecting removes it.
     </div>
   {/if}
   <GitHubAuth />

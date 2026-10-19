@@ -84,7 +84,7 @@ describe("Onboarding", () => {
     expect(screen.getByText("FS25_C.zip")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Organize 3 mods" }));
     expect(props.onOrganize).toHaveBeenCalledWith(["FS25_A", "FS25_B", "FS25_C"], true, expect.any(Function));
-    expect(await screen.findByRole("heading", { name: "Your library is organized." })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Your library is organized" })).toBeInTheDocument();
     expect(screen.getByText("3 mods filed, 3 active, nothing deleted.")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Go to my library" }));
     expect(props.onfinish).toHaveBeenCalledWith("done");
@@ -153,7 +153,7 @@ describe("Onboarding", () => {
     await user.click(await screen.findByRole("button", { name: "Organize 3 mods" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Close Farming Simulator 25 first");
     await user.click(screen.getByRole("button", { name: "Organize 3 mods" }));
-    expect(await screen.findByRole("heading", { name: "Your library is organized." })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Your library is organized" })).toBeInTheDocument();
   });
 
   it("Organize is off, with the reason, while a scan or another change runs", async () => {
@@ -207,7 +207,7 @@ describe("Onboarding", () => {
       cloudSynced: true,
       gameFound: false,
     });
-    expect(screen.getByText(/Farming Simulator is set to read/)).toHaveTextContent("D:\\FS25 Mods");
+    expect(screen.getByText(/Farming Simulator 25 is set to read/)).toHaveTextContent("D:\\FS25 Mods");
     expect(screen.getByText(/synced by a cloud service/)).toBeInTheDocument();
     expect(screen.getByText(/didn't find Farming Simulator 25/)).toBeInTheDocument();
   });
