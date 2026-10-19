@@ -25,6 +25,7 @@ pub mod notices;
 pub mod organize;
 pub mod paths;
 mod picked;
+pub mod profile;
 pub mod provenance;
 pub mod relocate;
 pub mod savegame;
@@ -68,8 +69,7 @@ fn effective_client_id(conn: &rusqlite::Connection) -> Option<String> {
 }
 
 fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
+    profile::app_data_dir(app)
         .map(|d| d.join("silo.db"))
         .map_err(|e| e.to_string())
 }
@@ -301,7 +301,7 @@ async fn get_mod_icon(
     icon_filename: Option<String>,
 ) -> Option<String> {
     let icon = icon_filename?;
-    let cache_dir = app.path().app_cache_dir().ok()?.join("icons-v2");
+    let cache_dir = profile::app_cache_dir(&app).ok()?.join("icons-v2");
     tauri::async_runtime::spawn_blocking(move || {
         icons::cached_data_url(&cache_dir, std::path::Path::new(&path), &kind, &icon)
     })
@@ -2555,7 +2555,7 @@ fn known_folder_path(which: KnownFolder, log_dir: Option<PathBuf>) -> Result<Pat
 #[tauri::command]
 async fn open_known_folder(app: tauri::AppHandle, which: KnownFolder) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let log_dir = app.path().app_log_dir().ok();
+    let log_dir = profile::app_log_dir(&app).ok();
     // Resolving the game folder reads Steam's files, and the shell call can stall: both off main.
     off_main(move || {
         let path = known_folder_path(which, log_dir)?;
@@ -3089,7 +3089,7 @@ fn start_move(
     create: bool,
 ) -> Result<Option<relocate::MoveMarker>, String> {
     ensure_no_move()?;
-    let app_data = app.path().app_data_dir().ok();
+    let app_data = profile::app_data_dir(app).ok();
     with_move_ctx(app, db, "start", |ctx, layout| {
         // Nothing to move out of a missing archive — and every mod would look "missing".
         if layout.archive_missing() {
@@ -3164,7 +3164,7 @@ async fn archive_move_preflight(
     path: String,
 ) -> Result<relocate::Preflight, error::AppError> {
     let db = db_path(&app)?;
-    let app_data = app.path().app_data_dir().ok();
+    let app_data = profile::app_data_dir(&app).ok();
     tauri::async_runtime::spawn_blocking(move || {
         ensure_no_move()?;
         ensure_archive_available()?;
@@ -3357,7 +3357,7 @@ async fn archive_repoint(
 ) -> Result<(), error::AppError> {
     ensure_no_move()?;
     let db = db_path(&app)?;
-    let app_data = app.path().app_data_dir().ok();
+    let app_data = profile::app_data_dir(&app).ok();
     tauri::async_runtime::spawn_blocking(move || {
         let _write = library_write()?;
         let (layout, key) = active_layout()?;
@@ -3653,6 +3653,11 @@ async fn detect_game() -> Result<Option<gamelaunch::GameInfo>, String> {
 
 #[tauri::command]
 async fn launch_game() -> Result<(), error::AppError> {
+    if profile::active() {
+        return Err(
+            "The demo profile can't start the game: FS25 would load your real mods.".into(),
+        );
+    }
     if relocate::is_running() {
         return Err("Silo is moving your library archive. Pause the move to play.".into());
     }
@@ -3681,7 +3686,7 @@ async fn diagnostics_bundle(
     report: String,
     include_log: bool,
 ) -> Result<String, String> {
-    let log_dir = app.path().app_log_dir().ok();
+    let log_dir = profile::app_log_dir(&app).ok();
     let log_error = app.try_state::<LogFileError>().and_then(|s| s.0.clone());
     let version = app.package_info().version.to_string();
     off_main(move || {
@@ -4950,8 +4955,13 @@ fn log_plugin<R: tauri::Runtime>(to_file: bool) -> tauri::plugin::TauriPlugin<R>
     use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
     let mut targets = vec![Target::new(TargetKind::Stderr)];
     if to_file {
-        targets.push(Target::new(TargetKind::LogDir {
-            file_name: Some(diagnostics::LOG_NAME.into()),
+        let file_name = Some(diagnostics::LOG_NAME.into());
+        targets.push(Target::new(match profile::dir() {
+            Some(p) => TargetKind::Folder {
+                path: p.join("logs"),
+                file_name,
+            },
+            None => TargetKind::LogDir { file_name },
         }));
     }
     tauri_plugin_log::Builder::new()
@@ -4972,13 +4982,25 @@ fn log_plugin<R: tauri::Runtime>(to_file: bool) -> tauri::plugin::TauriPlugin<R>
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default();
+    // A debug build pointed at a demo profile (docs/SHOWCASE.md) panics here on a bad path
+    // rather than ever falling back to the real one.
+    let profile = profile::dir();
+    let mut context = tauri::generate_context!();
+    if profile.is_some() {
+        // Its own identifier keeps the single-instance lock apart from an installed Silo, and
+        // the window is built in `setup` so its webview storage lives in the profile too.
+        context.config_mut().identifier = profile::IDENTIFIER.into();
+        for w in &mut context.config_mut().app.windows {
+            w.create = false;
+        }
+    }
 
     // single-instance MUST be registered first. Its `deep-link` feature forwards a silo://
     // URL to the running instance (rather than spawning a second one); the callback fires on
     // that second launch, so we just surface the existing window — the deep-link plugin has
     // already re-emitted the URL to the frontend's onOpenUrl listener.
     #[cfg(desktop)]
-    {
+    if profile.is_none() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             use tauri::Manager;
             if let Some(w) = app.get_webview_window("main") {
@@ -4988,12 +5010,131 @@ pub fn run() {
         }));
     }
 
+    // A profile never checks for app updates: the frontend's check fails quietly instead.
+    if profile.is_none() {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+    let handler = typed_handler(tauri::generate_handler![
+        scan_mods,
+        firstrun::first_run_state,
+        firstrun::set_first_run_flag,
+        get_mod_icon,
+        get_curation,
+        set_curation,
+        get_tags,
+        set_tags,
+        get_mod_repos,
+        set_mod_repo,
+        get_mod_sources,
+        set_mod_source,
+        mark_source_checked,
+        guess_repo,
+        check_mod_update,
+        gh_status,
+        gh_set_client_id,
+        gh_device_start,
+        gh_device_poll,
+        gh_set_pat,
+        gh_repo_stats,
+        gh_star,
+        gh_watch,
+        gh_logout,
+        download_update,
+        siloapi_status,
+        siloapi_set_base,
+        browse_mods,
+        siloapi_facets,
+        siloapi_stats,
+        siloapi_categories,
+        siloapi_mod_detail,
+        catalog_detail_by_tech,
+        catalog_image,
+        install_remote_mod,
+        catalog_check_updates,
+        verify_mod,
+        get_overrides,
+        set_override,
+        plan_organize,
+        apply_organize,
+        set_active,
+        flatten,
+        mods_root_status,
+        set_mods_root,
+        clear_mods_root,
+        point_game_at_mods_root,
+        create_mods_folder,
+        folder_looks_empty,
+        pick_folder,
+        open_known_folder,
+        archive_status,
+        archive_move_preflight,
+        archive_move_start,
+        archive_move_resume,
+        archive_move_pause,
+        archive_move_cancel,
+        archive_use_default,
+        archive_repoint,
+        archive_adopt_preview,
+        archive_adopt_apply,
+        get_loadouts,
+        save_loadout,
+        delete_loadout,
+        save_auto_snapshot,
+        export_set_file,
+        shared_file_kind,
+        get_savegames,
+        backup_savegame,
+        detect_conflicts,
+        detect_game,
+        launch_game,
+        save_text,
+        diagnostics_bundle,
+        copy_text,
+        user_dir_path,
+        clear_scan_cache,
+        scan_log,
+        log_status,
+        mark_log_seen,
+        scan_bindings,
+        mp_export,
+        mp_verify_file,
+        collection_export,
+        collection_update,
+        collection_import_preview,
+        collection_apply,
+        collections_list,
+        collection_delete,
+        generate_bridge,
+        bisect_plan,
+        bisect_narrow,
+        bisect_snapshot_save,
+        bisect_snapshot_get,
+        bisect_snapshot_clear,
+        get_config,
+        set_config,
+        mods_with_settings,
+        get_mod_settings,
+        save_mod_settings,
+        save_mod_settings_raw,
+        app_version,
+        log_frontend_error,
+        take_startup_notices,
+        secret_storage_secure,
+        detect_foreign_files,
+        adopt_foreign_file,
+        restore_foreign_file,
+        relink_projections,
+        hardlink_support,
+        app_busy,
+        force_quit,
+        set_self_updating
+    ]);
+
     builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         // Used by `copy_text` only; no clipboard permission is granted to the webview.
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
@@ -5011,6 +5152,15 @@ pub fn run() {
                 app.package_info().version,
                 std::env::consts::OS
             );
+            if let Some(p) = profile::dir() {
+                log::warn!("running in the demo profile at {}", p.display());
+                let stubbed = profile::stubs().as_object().map_or(0, |o| o.len());
+                log::warn!(
+                    "demo profile: {stubbed} commands answered from {}",
+                    profile::STUBS
+                );
+                build_profile_windows(app, p)?;
+            }
             // Resolve and publish the active layout (mods folder, archive, any unfinished move)
             // before the UI asks, so the write guards never act on an unknown layout. Off the
             // main thread: it reads gameSettings.xml and the DB.
@@ -5041,127 +5191,30 @@ pub fn run() {
                     }
                 }
                 // Icon thumbnails from the old (unstable) cache naming; `icons-v2` replaced it.
-                if let Ok(c) = handle.path().app_cache_dir() {
+                if let Ok(c) = profile::app_cache_dir(&handle) {
                     let _ = std::fs::remove_dir_all(c.join("icons"));
                 }
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            scan_mods,
-            firstrun::first_run_state,
-            firstrun::set_first_run_flag,
-            get_mod_icon,
-            get_curation,
-            set_curation,
-            get_tags,
-            set_tags,
-            get_mod_repos,
-            set_mod_repo,
-            get_mod_sources,
-            set_mod_source,
-            mark_source_checked,
-            guess_repo,
-            check_mod_update,
-            gh_status,
-            gh_set_client_id,
-            gh_device_start,
-            gh_device_poll,
-            gh_set_pat,
-            gh_repo_stats,
-            gh_star,
-            gh_watch,
-            gh_logout,
-            download_update,
-            siloapi_status,
-            siloapi_set_base,
-            browse_mods,
-            siloapi_facets,
-            siloapi_stats,
-            siloapi_categories,
-            siloapi_mod_detail,
-            catalog_detail_by_tech,
-            catalog_image,
-            install_remote_mod,
-            catalog_check_updates,
-            verify_mod,
-            get_overrides,
-            set_override,
-            plan_organize,
-            apply_organize,
-            set_active,
-            flatten,
-            mods_root_status,
-            set_mods_root,
-            clear_mods_root,
-            point_game_at_mods_root,
-            create_mods_folder,
-            folder_looks_empty,
-            pick_folder,
-            open_known_folder,
-            archive_status,
-            archive_move_preflight,
-            archive_move_start,
-            archive_move_resume,
-            archive_move_pause,
-            archive_move_cancel,
-            archive_use_default,
-            archive_repoint,
-            archive_adopt_preview,
-            archive_adopt_apply,
-            get_loadouts,
-            save_loadout,
-            delete_loadout,
-            save_auto_snapshot,
-            export_set_file,
-            shared_file_kind,
-            get_savegames,
-            backup_savegame,
-            detect_conflicts,
-            detect_game,
-            launch_game,
-            save_text,
-            diagnostics_bundle,
-            copy_text,
-            user_dir_path,
-            clear_scan_cache,
-            scan_log,
-            log_status,
-            mark_log_seen,
-            scan_bindings,
-            mp_export,
-            mp_verify_file,
-            collection_export,
-            collection_update,
-            collection_import_preview,
-            collection_apply,
-            collections_list,
-            collection_delete,
-            generate_bridge,
-            bisect_plan,
-            bisect_narrow,
-            bisect_snapshot_save,
-            bisect_snapshot_get,
-            bisect_snapshot_clear,
-            get_config,
-            set_config,
-            mods_with_settings,
-            get_mod_settings,
-            save_mod_settings,
-            save_mod_settings_raw,
-            app_version,
-            log_frontend_error,
-            take_startup_notices,
-            secret_storage_secure,
-            detect_foreign_files,
-            adopt_foreign_file,
-            restore_foreign_file,
-            relink_projections,
-            hardlink_support,
-            app_busy,
-            force_quit,
-            set_self_updating
-        ])
+        // In a demo profile, commands named in its stubs.json get their canned answer instead.
+        .invoke_handler(move |invoke| {
+            if profile::active() {
+                let args = match invoke.message.payload() {
+                    tauri::ipc::InvokeBody::Json(v) => v.clone(),
+                    _ => serde_json::Value::Null,
+                };
+                let stub = profile::answer(profile::stubs(), invoke.message.command(), &args);
+                if let Some(answer) = stub {
+                    match answer {
+                        Ok(v) => invoke.resolver.resolve(v),
+                        Err(e) => invoke.resolver.reject(e),
+                    }
+                    return true;
+                }
+            }
+            handler(invoke)
+        })
         // Closing the main window while Silo is changing files could leave a mod half-moved:
         // keep it open and let the frontend ask (it calls `force_quit` on "Quit anyway").
         .on_window_event(|window, event| {
@@ -5175,7 +5228,7 @@ pub fn run() {
                 }
             }
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building Silo")
         // Quitting the app another way (the macOS Quit menu, Cmd+Q) is held the same way.
         .run(|app, event| {
@@ -5191,6 +5244,29 @@ pub fn run() {
                 }
             }
         });
+}
+
+/// Gives `generate_handler!`'s closure its argument type, so it can be wrapped (see `run`).
+fn typed_handler<F: Fn(tauri::ipc::Invoke) -> bool>(f: F) -> F {
+    f
+}
+
+/// The configured windows, built by hand for a demo profile: same settings, but webview storage
+/// in the profile and, when asked for, the DevTools protocol on a local port for a capture script.
+fn build_profile_windows(app: &tauri::App, profile_dir: &std::path::Path) -> tauri::Result<()> {
+    let cdp = profile::cdp_arg(std::env::var(profile::CDP_PORT_ENV).ok().as_deref());
+    for cfg in app.config().app.windows.clone() {
+        let mut w = tauri::WebviewWindowBuilder::from_config(app, &cfg)?
+            .data_directory(profile::webview_dir(profile_dir));
+        if let Some(arg) = &cdp {
+            // Giving WebView2 any arguments replaces its defaults, so keep wry's.
+            w = w.additional_browser_args(&format!(
+                "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection {arg}"
+            ));
+        }
+        w.build()?;
+    }
+    Ok(())
 }
 
 /// Set while a thread waits to quit once Silo stops changing files (one at a time).

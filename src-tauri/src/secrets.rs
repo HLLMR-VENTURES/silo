@@ -19,7 +19,12 @@ const SERVICE: &str = "com.hllmr.silo";
 /// Every key stored through this module. Database snapshots drop these (`db::snapshot`).
 pub(crate) const SECRET_KEYS: &[&str] = &["gh_token"];
 
+/// The keychain entry for `key`. None in a demo profile, which keeps its (fake) tokens in its
+/// own database and never reads or writes the real keychain.
 fn entry(key: &str) -> Option<keyring::Entry> {
+    if crate::profile::active() {
+        return None;
+    }
     keyring::Entry::new(SERVICE, key).ok()
 }
 
@@ -29,6 +34,9 @@ fn entry(key: &str) -> Option<keyring::Entry> {
 /// Does a full write→read→delete round-trip on a throwaway probe entry, since some platforms
 /// create an `Entry` fine but fail on the actual store.
 pub fn keychain_available() -> bool {
+    if crate::profile::active() {
+        return false;
+    }
     match keyring::Entry::new(SERVICE, "silo-keychain-probe") {
         Ok(e) => {
             if e.set_password("probe").is_ok() {
