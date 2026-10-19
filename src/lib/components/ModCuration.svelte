@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import Icon from "../ui/Icon.svelte";
   import type { CurationRow } from "../types";
   import { setCuration, setTags } from "../api";
   import { tooltip } from "../ui/tooltip";
+  import { reportError } from "../state/notify.svelte";
 
   let {
     techName,
@@ -22,22 +24,36 @@
 
   const uid = $props.id();
   let noteDraft = $state("");
+  /** The row the note draft belongs to: the drawer can move to another mod with a draft unsaved. */
+  let noteRow: CurationRow | null = null;
   $effect(() => {
-    noteDraft = curation.note ?? "";
+    const c = curation;
+    untrack(() => {
+      if (noteRow && noteRow.techName !== c.techName) saveNote();
+      noteRow = c;
+      noteDraft = c.note ?? "";
+    });
   });
+  // Esc or a view switch removes the field, which doesn't reliably blur it first: keep the draft.
+  $effect(() => () => saveNote());
 
   let newTag = $state("");
 
   function persistCuration(patch: Partial<CurationRow>) {
     const next: CurationRow = { ...curation, ...patch };
     onCurationChange(next);
-    setCuration(next).catch(() => {});
+    setCuration(next).catch((e) => reportError(e, "Saving your mod flags"));
   }
   function setRating(r: number) {
     persistCuration({ rating: curation.rating === r ? 0 : r });
   }
   function saveNote() {
-    if ((curation.note ?? "") !== noteDraft) persistCuration({ note: noteDraft });
+    const row = noteRow;
+    if (!row || (row.note ?? "") === noteDraft) return;
+    const next: CurationRow = { ...row, note: noteDraft };
+    noteRow = next;
+    onCurationChange(next);
+    setCuration(next).catch((e) => reportError(e, "Saving your mod flags"));
   }
   function addTag() {
     const t = newTag.trim();
@@ -48,12 +64,12 @@
     const next = [...tags, t];
     newTag = "";
     onTagsChange(next);
-    setTags(techName, next).catch(() => {});
+    setTags(techName, next).catch((e) => reportError(e, "Saving your tags"));
   }
   function removeTag(t: string) {
     const next = tags.filter((x) => x !== t);
     onTagsChange(next);
-    setTags(techName, next).catch(() => {});
+    setTags(techName, next).catch((e) => reportError(e, "Saving your tags"));
   }
 </script>
 

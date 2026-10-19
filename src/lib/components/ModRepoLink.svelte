@@ -31,6 +31,7 @@
     repoInput = repo ? `${repo.owner}/${repo.repo}` : "";
     update = null;
     ghError = null;
+    checking = false;
     suggested = false;
     // Auto-suggest a repo from the mod's modDesc when none is linked yet.
     if (!repo) {
@@ -57,27 +58,35 @@
 
   async function checkUpdate() {
     if (!repo) return;
+    // The answer belongs to the mod it was asked for: the drawer may show another one by the
+    // time it lands (this panel is reused across mods), and Install would then replace that file.
+    const path = mod.path;
     checking = true;
     ghError = null;
     update = null;
     try {
-      update = await checkModUpdate(repo.owner, repo.repo, mod.version ?? "0");
+      const u = await checkModUpdate(repo.owner, repo.repo, mod.version ?? "0");
+      if (mod.path === path) update = u;
     } catch (e) {
-      ghError = inlineError(e, "Checking for an update");
+      if (mod.path === path) ghError = inlineError(e, "Checking for an update");
     }
     checking = false;
   }
 
   async function installUpdate() {
-    if (!update?.release.assetUrl) return;
+    const u = update;
+    const path = mod.path;
+    if (!u?.release.assetUrl) return;
     if (
       !(await ask({
-        title: `Install ${update.release.tag}?`,
+        title: `Install ${u.release.tag}?`,
         body: "Silo downloads it and replaces the installed version. The current version is kept in your mods folder's backups, so you can put it back from there.",
         confirm: "Download and install",
       }))
     )
       return;
+    // The drawer moved on while the dialog was up: this release isn't for the mod shown now.
+    if (mod.path !== path) return;
     // It replaces a mod in the library: a library write, one at a time.
     const op = tryStart("Installing an update", { exclusive: "library-write" });
     if (!op) {
@@ -87,10 +96,9 @@
     installing = true;
     ghError = null;
     installNote = null;
-    const path = mod.path;
     let installed = false;
     try {
-      const out = await downloadUpdate(path, update.release.assetUrl);
+      const out = await downloadUpdate(path, u.release.assetUrl);
       installNote = {
         path,
         backup: out.backup ? `The previous version is kept in ${out.backup}.` : null,
