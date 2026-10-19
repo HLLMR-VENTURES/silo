@@ -10,6 +10,7 @@ import ModRepoLink from "../ModRepoLink.svelte";
 import ModCuration from "../ModCuration.svelte";
 import { getVerdict } from "../../provenanceCache.svelte";
 import { checkModUpdate, setCuration, verifyMod } from "../../api";
+import { ask } from "../../ui";
 import type { ModEntry, UpdateInfo, VerifyResult } from "../../types";
 
 vi.mock("../../api", async (importOriginal) => ({
@@ -19,6 +20,10 @@ vi.mock("../../api", async (importOriginal) => ({
   guessRepo: vi.fn(() => Promise.resolve(null)),
   setCuration: vi.fn(() => Promise.resolve()),
   setTags: vi.fn(() => Promise.resolve()),
+}));
+vi.mock("../../ui", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../ui")>()),
+  ask: vi.fn(() => Promise.resolve(false)),
 }));
 
 function entry(i: number): ModEntry {
@@ -108,7 +113,7 @@ describe("Check for update across a drawer switch", () => {
     } as unknown as UpdateInfo);
     await settle();
     expect(screen.queryByText(/Update available/)).toBeNull();
-    expect(screen.queryByRole("button", { name: /Download & install/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Download and install/ })).toBeNull();
   });
 });
 
@@ -142,5 +147,57 @@ describe("Notes when the drawer moves on without a blur", () => {
     await fireEvent.input(screen.getByLabelText("Notes"), { target: { value: "typed, then Esc" } });
     unmount();
     expect(setCuration).toHaveBeenCalledWith(expect.objectContaining({ techName: "C", note: "typed, then Esc" }));
+  });
+});
+
+describe("review follow-ups", () => {
+  const release = (tag: string): UpdateInfo =>
+    ({
+      hasUpdate: true,
+      current: "1.0.0.0",
+      release: { tag, htmlUrl: null, assetUrl: "https://example.com/a.zip" },
+    }) as unknown as UpdateInfo;
+
+  it("a dropped answer for the first mod doesn't stop the second mod's check", async () => {
+    let answerA!: (u: UpdateInfo) => void;
+    vi.mocked(checkModUpdate)
+      .mockImplementationOnce(() => new Promise((r) => (answerA = r)))
+      .mockImplementationOnce(() => new Promise(() => {}));
+    const user = userEvent.setup();
+    const base = { onRepoChange: vi.fn(), onInstalled: vi.fn(), repo: { owner: "o", repo: "r" } };
+    const { rerender } = render(ModRepoLink, { ...base, mod: entry(7) });
+    await user.click(screen.getByRole("button", { name: "Check for update" }));
+    await rerender({ ...base, mod: entry(8) });
+    await settle();
+    await user.click(screen.getByRole("button", { name: "Check for update" }));
+    answerA(release("v2.0.0"));
+    await settle();
+    expect(screen.getByRole("button", { name: "Checking…" })).toBeDisabled();
+  });
+
+  it("the install dialog names the release without its V. prefix", async () => {
+    vi.mocked(checkModUpdate).mockResolvedValueOnce(release("V.2.0.0"));
+    const user = userEvent.setup();
+    render(ModRepoLink, { onRepoChange: vi.fn(), onInstalled: vi.fn(), repo: { owner: "o", repo: "r" }, mod: entry(9) });
+    await user.click(screen.getByRole("button", { name: "Check for update" }));
+    await settle();
+    await user.click(screen.getByRole("button", { name: /Download and install/ }));
+    expect(vi.mocked(ask)).toHaveBeenLastCalledWith(expect.objectContaining({ title: "Install 2.0.0?" }));
+  });
+
+  it("a check still running on a mod stays running across a switch away and back", async () => {
+    vi.mocked(verifyMod).mockImplementationOnce(() => new Promise(() => {}));
+    const a = entry(10);
+    const user = userEvent.setup();
+    const { rerender } = render(ProvenanceCheck, { mod: a });
+    await user.click(screen.getByRole("button", { name: /Verify integrity/i }));
+    await rerender({ mod: entry(11) });
+    await settle();
+    expect(screen.getByRole("button", { name: /Verify integrity/i })).toBeInTheDocument();
+    await rerender({ mod: a });
+    await settle();
+    expect(screen.queryByRole("button", { name: /Verify integrity/i })).toBeNull();
+    expect(screen.getByText(/Checking against the published build/)).toBeInTheDocument();
+    expect(verifyMod).toHaveBeenCalledTimes(1);
   });
 });

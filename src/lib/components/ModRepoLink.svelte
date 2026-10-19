@@ -71,7 +71,8 @@
     } catch (e) {
       if (mod.path === path) ghError = inlineError(e, "Checking for an update");
     }
-    checking = false;
+    // A dropped answer leaves the spinner to the check of the mod shown now.
+    if (mod.path === path) checking = false;
   }
 
   async function installUpdate() {
@@ -80,7 +81,7 @@
     if (!u?.release.assetUrl) return;
     if (
       !(await ask({
-        title: `Install ${u.release.tag}?`,
+        title: `Install ${displayVersion(u.release.tag)}?`,
         body: "Silo downloads it and replaces the installed version. The current version is kept in your mods folder's backups, so you can put it back from there.",
         confirm: "Download and install",
       }))

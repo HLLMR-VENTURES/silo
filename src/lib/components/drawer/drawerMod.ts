@@ -7,13 +7,15 @@
 import type { ModEntry } from "../../types";
 
 /**
- * Look the shown mod up again in the current list: by path, then (filing moved it) by tech name.
+ * Look the shown mod up again in the current list: by path, then (filing moved it) by tech name
+ * when exactly one entry has it.
  * @param shown the entry the drawer was opened with, or null when it is closed
  * @param list the library's entries now
  * @param prev what this returned last time: kept when the new entry is equal to it, so a rescan
  *   that changed nothing about the mod doesn't hand the drawer a new object (its parts reset
  *   their state when the mod changes)
- * @returns the current entry, or null when the drawer is closed or the library no longer has the mod
+ * @returns the current entry, or null when the drawer is closed or the mod can't be told apart
+ *   (gone, or its tech name is on more than one entry)
  */
 export function currentEntry<T extends Pick<ModEntry, "path" | "techName">>(
   shown: T | null,
@@ -21,7 +23,13 @@ export function currentEntry<T extends Pick<ModEntry, "path" | "techName">>(
   prev: T | null = null,
 ): T | null {
   if (!shown) return null;
-  const now = list.find((m) => m.path === shown.path) ?? list.find((m) => m.techName === shown.techName) ?? null;
+  let now = list.find((m) => m.path === shown.path) ?? null;
+  if (!now) {
+    // Filing moved it: the same tech name, but only when one entry has it. Two mods folders can
+    // hold the same tech name, and guessing would leave the drawer acting on the other copy.
+    const same = list.filter((m) => m.techName === shown.techName);
+    now = same.length === 1 ? same[0] : null;
+  }
   if (now && prev && now !== prev && JSON.stringify(now) === JSON.stringify(prev)) return prev;
   return now;
 }
