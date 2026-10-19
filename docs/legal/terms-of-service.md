@@ -36,8 +36,8 @@ The App has no telemetry, no analytics, no advertising, and no user account. It 
 
 The App checks GitHub for its own updates when it starts. Otherwise it goes online only when you use a feature that needs it:
 
-- **The API (silo-api.hllmr.com)**, to read the mod catalog when you browse, open a mod's details, check for updates, verify a mod, install from Browse or use Collections. For lookups, the App sends mod technical names, and for an integrity check the mod's version. File hashes are computed and compared on your computer and are not sent.
-- **GitHub**, to check mods linked to a GitHub repository for updates, show repository stats, download GitHub releases you install, and read shared collections. If you choose to sign in with GitHub's device-flow login, the token is used for those requests and for actions you take, such as starring or watching a repository or publishing a collection to your own GitHub account. The token is never attached to mod downloads.
+- **The API (silo-api.hllmr.com)**, to read the mod catalog when you browse, open a mod's details, check for updates, verify a mod, install from Browse, or share or open a mod set. For lookups, the App sends mod technical names, and for an integrity check the mod's version. File hashes are computed and compared on your computer and are not sent.
+- **GitHub**, to check mods linked to a GitHub repository for updates, show repository stats, download GitHub releases you install, and read shared mod set links. If you choose to sign in with GitHub's device-flow login, the token is used for those requests and for actions you take, such as starring or watching a repository or sharing a mod set as a link on your own GitHub account. The token is never attached to mod downloads.
 
 The [Privacy Policy](./privacy-policy.md) lists every connection in one table. Mod integrity and provenance hashing is performed locally on your computer.
 

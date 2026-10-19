@@ -3,8 +3,7 @@
 //! GIANTS namespaces that actually clash at load time:
 //!
 //! * `<uniqueType>` — GIANTS' own primitive: only one mod of a type loads (critical)
-//! * the six specialization/type registration surfaces — same name, same surface,
-//!   means one silently wins (critical)
+//! * input actions, brands and shop categories registered under the same name (critical)
 //! * `<extraSourceFiles>` global Lua with the same basename — they can overwrite
 //!   each other (warning)
 //! * more than one active map (info only: FS25 loads just the savegame's map)
@@ -13,6 +12,12 @@
 //! intentional (shared packs/utilities), and two mods shipping the **byte-identical
 //! script** aren't really fighting — both are down-ranked (critical→warning,
 //! warning→info) with a note, so the critical list stays trustworthy.
+//!
+//! Not flagged: the six specialization / type surfaces (`<specializations>`, `<vehicleTypes>`
+//! and their placeable / hand-tool twins). The game registers a mod's types as
+//! `<modName>.<type>` (`TypeManager.lua` in gameSource, `typeName = modName.."."..typeName`)
+//! and resolves a type's specializations with a `<modName>.<spec>` fallback, so two mods using
+//! the same name both load. Flagging them made every common name ("myTractor") a critical.
 //!
 //! Runs on demand for the active set only, so it stays cheap.
 
@@ -75,6 +80,21 @@ fn conflict(
         mods,
         tech_names,
     }
+}
+
+/// Registrations that share one game-wide namespace, so the same name from two mods clashes.
+/// Types and specializations don't: the game prefixes them with the mod's name (see the
+/// module docs).
+fn clashes_globally(kind: &str) -> bool {
+    !matches!(
+        kind,
+        "specialization"
+            | "placeableSpecialization"
+            | "handToolSpecialization"
+            | "vehicleType"
+            | "placeableType"
+            | "handToolType"
+    )
 }
 
 struct Parsed {
@@ -240,7 +260,11 @@ pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
     let mut scripts: HashMap<String, Vec<usize>> = HashMap::new();
 
     for (i, p) in parsed.iter().enumerate() {
-        for r in &p.md.registrations {
+        for r in
+            p.md.registrations
+                .iter()
+                .filter(|r| clashes_globally(&r.kind))
+        {
             registrations
                 .entry((r.kind.clone(), r.name.clone()))
                 .or_default()
@@ -459,7 +483,7 @@ mod tests {
                 dir.join("modDesc.xml"),
                 format!(
                     r#"<modDesc descVersion="92"><author>{author}</author><uniqueType>seedSlot</uniqueType>
-                    <specializations><specialization name="mulcher" className="M" filename="m{i}.lua"/></specializations>
+                    <actions><action name="MULCH_TOGGLE"/></actions>
                     <extraSourceFiles><sourceFile filename="scripts/util.lua"/></extraSourceFiles></modDesc>"#
                 ),
             )
@@ -477,7 +501,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let kinds: Vec<&str> = found.iter().map(|c| c.kind.as_str()).collect();
         assert!(kinds.contains(&"uniqueType"), "{kinds:?}");
-        assert!(kinds.contains(&"specialization"), "{kinds:?}");
+        assert!(kinds.contains(&"action"), "{kinds:?}");
         assert!(kinds.contains(&"script"), "{kinds:?}");
         for c in &found {
             for jargon in [
@@ -500,6 +524,42 @@ mod tests {
             );
             assert_eq!(c.tech_names, vec!["FS25_Mod0", "FS25_Mod1"]);
         }
+    }
+
+    /// The game registers types and specializations as `<modName>.<name>`, so two mods by
+    /// different authors using the same name both load: no conflict at all.
+    #[test]
+    fn same_type_or_specialization_name_in_two_mods_is_not_a_conflict() {
+        let base = std::env::temp_dir().join(format!("silo_conflict_ns_{}", std::process::id()));
+        let mut inputs = Vec::new();
+        for (i, author) in ["Ann", "Bob"].iter().enumerate() {
+            let dir = base.join(format!("FS25_Tractor{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("modDesc.xml"),
+                format!(
+                    r#"<modDesc descVersion="92"><author>{author}</author>
+                    <specializations><specialization name="mulcher" className="M" filename="m.lua"/></specializations>
+                    <placeableSpecializations><specialization name="silo" className="S" filename="s.lua"/></placeableSpecializations>
+                    <vehicleTypes><type name="myTractor" parent="baseDrivable" filename="t.lua"/></vehicleTypes>
+                    <placeableTypes><type name="myShed" filename="p.lua"/></placeableTypes>
+                    <handToolTypes><type name="myTool" filename="h.lua"/></handToolTypes>
+                    <brands><brand name="ACME" title="Acme"/></brands></modDesc>"#
+                ),
+            )
+            .unwrap();
+            inputs.push(ConflictInput {
+                tech_name: format!("FS25_Tractor{i}"),
+                title: None,
+                path: dir.to_string_lossy().into_owned(),
+                kind: "dir".into(),
+            });
+        }
+        let found = detect(&inputs);
+        let _ = std::fs::remove_dir_all(&base);
+        let kinds: Vec<&str> = found.iter().map(|c| c.kind.as_str()).collect();
+        // The brand is one game-wide name, so it still clashes; nothing else does.
+        assert_eq!(kinds, ["brand"], "{found:?}");
     }
 
     #[test]

@@ -113,7 +113,7 @@ pub fn latest_release(owner: &str, repo: &str, token: Option<&str>) -> Result<Re
         ureq::Error::Status(403, _) => {
             "GitHub rate limit hit (60/hr unauthenticated). Try again later.".to_string()
         }
-        other => other.to_string(),
+        other => transport_text(other),
     })?;
     let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
 
@@ -444,8 +444,41 @@ fn gh_err(e: ureq::Error) -> String {
                 .to_string()
         }
         ureq::Error::Status(404, _) => "Not found on GitHub".to_string(),
-        other => other.to_string(),
+        other => transport_text(other),
     }
+}
+
+/// A ureq error as text, except a refused header: ureq quotes the whole header line in that
+/// error, so for `Authorization` it would carry the token into the UI and the log.
+fn transport_text(e: ureq::Error) -> String {
+    match &e {
+        ureq::Error::Transport(t) if t.kind() == ureq::ErrorKind::BadHeader => {
+            "GitHub request had a malformed header, so it wasn't sent.".to_string()
+        }
+        _ => e.to_string(),
+    }
+}
+
+/// The longest token GitHub issues is well under this (fine-grained PATs are 93 characters).
+const PAT_MAX_LEN: usize = 255;
+
+/// A pasted personal access token, trimmed of surrounding whitespace and the invisible
+/// characters a copy can bring along (a byte-order mark, a zero-width space). What's left must
+/// be one run of printable ASCII: anything else can't be a GitHub token, and would make the
+/// HTTP request fail with an error that quotes it. The error never repeats the input.
+pub fn clean_pat(input: &str) -> Result<String, String> {
+    let pat = input.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}' || c == '\u{200b}');
+    if pat.is_empty() {
+        return Err("Empty token".to_string());
+    }
+    if pat.len() > PAT_MAX_LEN || !pat.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(
+            "That doesn't look like a GitHub token. Copy it again as one line, \
+                    with no spaces or line breaks."
+                .to_string(),
+        );
+    }
+    Ok(pat.to_string())
 }
 
 /// GET /repos/{owner}/{repo} plus (when authenticated) the user's star/watch state.
@@ -879,6 +912,46 @@ pub fn find_repo_in_text(text: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pasted_token_is_one_clean_line_or_refused() {
+        let tok = "ghp_0123456789abcdefABCDEF0123456789abcd";
+        assert_eq!(clean_pat(&format!("  {tok}\n")).unwrap(), tok);
+        assert_eq!(clean_pat(&format!("\u{feff}{tok}\u{200b}")).unwrap(), tok);
+        for bad in [
+            String::new(),
+            " \u{200b} ".to_string(),
+            format!("{}\n{}", &tok[..20], &tok[20..]),
+            format!("{}\u{200b}{}", &tok[..20], &tok[20..]),
+            format!("{} {}", &tok[..20], &tok[20..]),
+            format!("{tok}é"),
+            "x".repeat(256),
+        ] {
+            let err = clean_pat(&bad).unwrap_err();
+            assert!(
+                !err.contains(&tok[4..12]),
+                "the error never echoes the token: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_auth_header_never_reaches_the_error_text() {
+        // ureq refuses the header before connecting and quotes the whole header line in its
+        // error, token included; gh_err must not pass that on.
+        let secret = "ghp_SECRETsecret0123456789";
+        let err = crate::net::api()
+            .get("https://api.github.com/user")
+            .set("Authorization", &format!("Bearer {secret}\u{200b}"))
+            .call()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains(secret),
+            "ureq's own text does carry it"
+        );
+        let text = gh_err(err);
+        assert!(!text.contains("SECRET"), "{text}");
+    }
 
     #[test]
     fn finds_repo() {
