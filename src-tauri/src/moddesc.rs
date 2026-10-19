@@ -82,17 +82,28 @@ pub fn parse(xml: &str) -> ModDesc {
     let mut map_title: BTreeMap<String, String> = BTreeMap::new();
 
     let mut reader = Reader::from_str(xml);
-    // We trim text ourselves in `absorb_text`, so no reader-level trim config is
+    // We trim text ourselves before `absorb_text`, so no reader-level trim config is
     // needed (keeps us off quick-xml's version-specific Config API).
 
     // Stack of local element names, so text/attrs can be attributed to context.
     let mut stack: Vec<String> = Vec::new();
     let mut buf = Vec::new();
+    // Text of the current element, which quick-xml splits at every `&amp;` (#266).
+    // Routed to its field when the next tag arrives, while `stack` still names the
+    // element it belongs to.
+    let mut run = crate::xmltext::TextRun::default();
+    let mut flush = |md: &mut ModDesc, stack: &[String], run: &mut crate::xmltext::TextRun| {
+        if !run.is_empty() {
+            let txt = run.take();
+            absorb_text(md, &mut mod_title, &mut map_title, stack, txt.trim());
+        }
+    };
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Eof) | Err(_) => break,
             Ok(Event::Start(e)) => {
+                flush(&mut md, &stack, &mut run);
                 let name = local_name(&e);
                 handle_open(&mut md, &e, &name, &stack);
                 stack.push(name);
@@ -100,20 +111,19 @@ pub fn parse(xml: &str) -> ModDesc {
             Ok(Event::Empty(e)) => {
                 // Empty (self-closing) elements have NO End event — pushing them
                 // would corrupt parent detection for every following sibling.
+                flush(&mut md, &stack, &mut run);
                 let name = local_name(&e);
                 handle_open(&mut md, &e, &name, &stack);
             }
             Ok(Event::End(_)) => {
+                flush(&mut md, &stack, &mut run);
                 stack.pop();
             }
-            Ok(Event::Text(t)) => {
-                if let Some(txt) = crate::xmltext::text(&t) {
-                    absorb_text(&mut md, &mut mod_title, &mut map_title, &stack, txt.trim());
-                }
-            }
+            Ok(Event::Text(t)) => run.push_text(&t),
+            Ok(Event::GeneralRef(r)) => run.push_ref(&r),
             Ok(Event::CData(c)) => {
                 if let Ok(txt) = std::str::from_utf8(&c) {
-                    absorb_text(&mut md, &mut mod_title, &mut map_title, &stack, txt.trim());
+                    run.push_str(txt);
                 }
             }
             _ => {}
@@ -223,7 +233,7 @@ fn handle_open(md: &mut ModDesc, e: &quick_xml::events::BytesStart, name: &str, 
     }
 }
 
-/// Route a text run to the right field based on the element stack.
+/// Route an element's whole (trimmed) text to the right field based on the element stack.
 fn absorb_text(
     md: &mut ModDesc,
     mod_title: &mut BTreeMap<String, String>,
@@ -310,6 +320,27 @@ mod tests {
         assert!(md.mp_supported);
         assert_eq!(md.scripts.len(), 2);
         assert!(!md.is_map);
+    }
+
+    /// #266: quick-xml splits text at each entity reference; the whole value must survive.
+    #[test]
+    fn keeps_text_after_an_escaped_ampersand() {
+        let xml = r#"<modDesc descVersion="105">
+            <author>Elm &amp; Ash</author>
+            <version>1.0.0.0</version>
+            <title><en>Rust &amp; Wear Skins</en><de>Rost &#38; Verschlei&#223;</de></title>
+            <maps><map id="m"><title><en>Hills &amp; Dales</en></title></map></maps>
+            <uniqueType><![CDATA[a&b]]> &lt;x&gt;</uniqueType>
+        </modDesc>"#;
+        let md = parse(xml);
+        assert_eq!(md.author.as_deref(), Some("Elm & Ash"));
+        assert_eq!(md.title.as_deref(), Some("Rust & Wear Skins"));
+        assert_eq!(md.map_title.as_deref(), Some("Hills & Dales"));
+        assert_eq!(md.unique_type.as_deref(), Some("a&b <x>"));
+
+        let de_only =
+            parse(r#"<modDesc><title><de>Rost &#38; Verschlei&#223;</de></title></modDesc>"#);
+        assert_eq!(de_only.title.as_deref(), Some("Rost & Verschleiß"));
     }
 
     #[test]

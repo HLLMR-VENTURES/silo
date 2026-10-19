@@ -1,5 +1,9 @@
 # Collections — Phase 1 wiring plan
 
+> **Status: shipped** (epic #61, PRs #63–#69). Kept as the original plan; some components
+> ended up with other names. In Silo 1.0 the feature is *sharing a mod set* and *Mod sets →
+> Open a shared set*.
+
 > Companion to [`COLLECTIONS.md`](COLLECTIONS.md) (the parked design). This is the
 > concrete, code-grounded plan for **Phase 1: share a mod-set list via a GitHub
 > secret gist**. Written 2026-08-01 after a subsystem survey; **for review, not yet

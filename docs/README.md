@@ -25,13 +25,15 @@ Per-feature notes:
 
 - **[COLLECTIONS.md](COLLECTIONS.md)** (design) and
   **[COLLECTIONS_WIRING.md](COLLECTIONS_WIRING.md)** (Phase 1 plan) — shareable mod-set
-  links. Phase 1 has shipped; both docs are kept as written.
-- **[BASE_SAVES.md](BASE_SAVES.md)** — base-save generator scope.
+  links (in the app: *Share* on a mod set, and *Mod sets → Open a shared set*). Phase 1 has
+  shipped; both docs are kept as written.
+- **[BASE_SAVES.md](BASE_SAVES.md)** — base-save generator scope (not built).
 - **[COMMUNITY_SERVER.md](COMMUNITY_SERVER.md)** — parked design.
 
 Building, testing, releasing:
 
 - **[BUILD.md](BUILD.md)** — building from source.
+- **[SHOWCASE.md](SHOWCASE.md)** — the demo profile and screenshot capture for the website.
 - **[RC_TESTING.md](RC_TESTING.md)** — release-candidate protocol (read first), then the
   **[SMOKE_TEST.md](SMOKE_TEST.md)** feature checklist.
 - **[RELEASE_VALIDATION.md](RELEASE_VALIDATION.md)** — per-release validation records.

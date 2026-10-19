@@ -69,32 +69,43 @@ pub fn get_values(xml: &str, paths: &[String]) -> HashMap<String, String> {
         }
     };
 
+    // Element text arrives split at every `&amp;` (#266): gather it, then read it when
+    // the next tag arrives, while `stack` still names the element it belongs to.
+    let mut run = crate::xmltext::TextRun::default();
+    let take_text =
+        |stack: &[String], run: &mut crate::xmltext::TextRun, out: &mut HashMap<String, String>| {
+            if run.is_empty() {
+                return;
+            }
+            let v = run.take();
+            if let Some(rk) = want_text.get(&stack.join(".")) {
+                let v = v.trim();
+                if !v.is_empty() {
+                    out.insert(rk.clone(), v.to_string());
+                }
+            }
+        };
+
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Eof) | Err(_) => break,
             Ok(Event::Start(e)) => {
+                take_text(&stack, &mut run, &mut out);
                 stack.push(local(e.name().as_ref()));
                 check_attrs(&e, &stack.join("."), &mut out);
             }
             Ok(Event::Empty(e)) => {
+                take_text(&stack, &mut run, &mut out);
                 stack.push(local(e.name().as_ref()));
                 check_attrs(&e, &stack.join("."), &mut out);
                 stack.pop();
             }
             Ok(Event::End(_)) => {
+                take_text(&stack, &mut run, &mut out);
                 stack.pop();
             }
-            Ok(Event::Text(t)) => {
-                let path = stack.join(".");
-                if let Some(rk) = want_text.get(&path) {
-                    if let Some(v) = crate::xmltext::text(&t) {
-                        let v = v.trim();
-                        if !v.is_empty() {
-                            out.insert(rk.clone(), v.to_string());
-                        }
-                    }
-                }
-            }
+            Ok(Event::Text(t)) => run.push_text(&t),
+            Ok(Event::GeneralRef(r)) => run.push_ref(&r),
             _ => {}
         }
         buf.clear();
@@ -131,8 +142,12 @@ pub fn set_values(xml: &str, edits: &[Edit]) -> Result<String, String> {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     let mut buf = Vec::new();
     let mut stack: Vec<String> = Vec::new();
-    // When the previous Start matched a text-edit path, replace the next Text.
+    // When the open element matched a text-edit path: the replacement value, and whether
+    // it has been written yet. The element's own text (split at every `&amp;` into Text
+    // and GeneralRef events, #266) is dropped in favour of the one replacement; an
+    // element with no text at all (`<x></x>`) gets the value written before its End.
     let mut pending_text: Option<String> = None;
+    let mut replaced = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -149,6 +164,7 @@ pub fn set_values(xml: &str, edits: &[Edit]) -> Result<String, String> {
                     .iter()
                     .find(|ed| ed.path == path)
                     .map(|ed| ed.value.clone());
+                replaced = false;
             }
             Ok(Event::Empty(e)) => {
                 stack.push(local(e.name().as_ref()));
@@ -161,20 +177,28 @@ pub fn set_values(xml: &str, edits: &[Edit]) -> Result<String, String> {
             }
             Ok(Event::End(e)) => {
                 stack.pop();
-                pending_text = None;
+                if let Some(v) = pending_text.take() {
+                    if !replaced {
+                        writer
+                            .write_event(Event::Text(BytesText::new(&v)))
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                replaced = false;
                 writer
                     .write_event(Event::End(e))
                     .map_err(|e| e.to_string())?;
             }
-            Ok(Event::Text(t)) => {
-                if let Some(v) = pending_text.take() {
-                    writer
-                        .write_event(Event::Text(BytesText::new(&v)))
-                        .map_err(|e| e.to_string())?;
-                } else {
-                    writer
-                        .write_event(Event::Text(t))
-                        .map_err(|e| e.to_string())?;
+            Ok(ev @ (Event::Text(_) | Event::GeneralRef(_) | Event::CData(_))) => {
+                match &pending_text {
+                    Some(v) if !replaced => {
+                        writer
+                            .write_event(Event::Text(BytesText::new(v)))
+                            .map_err(|e| e.to_string())?;
+                        replaced = true;
+                    }
+                    Some(_) => {} // the rest of the old value: already replaced
+                    None => writer.write_event(ev).map_err(|e| e.to_string())?,
                 }
             }
             Ok(ev) => writer.write_event(ev).map_err(|e| e.to_string())?,
@@ -249,5 +273,43 @@ mod tests {
         assert!(out.contains("quality=\"3\""));
         // Untouched structure preserved.
         assert!(out.contains("<graphic>"));
+    }
+
+    /// #266: a value with an entity reads whole, and replacing it drops every piece of
+    /// the old value (quick-xml splits it at the `&amp;`), keeping other entities intact.
+    #[test]
+    fn reads_and_replaces_text_split_at_an_entity() {
+        let xml =
+            r#"<game><player><name>Elm &amp; Ash</name><club>A &amp; B</club></player></game>"#;
+        let v = get_values(xml, &["game.player.name".into()]);
+        assert_eq!(
+            v.get("game.player.name").map(String::as_str),
+            Some("Elm & Ash")
+        );
+
+        let out = set_values(
+            xml,
+            &[Edit {
+                path: "game.player.name".into(),
+                value: "Oak & Pine".into(),
+            }],
+        )
+        .unwrap();
+        assert!(out.contains("<name>Oak &amp; Pine</name>"), "{out}");
+        assert!(out.contains("<club>A &amp; B</club>"), "{out}");
+    }
+
+    /// An empty element (`<x></x>`) has no Text event; the edit must still land.
+    #[test]
+    fn sets_text_of_an_empty_element() {
+        let out = set_values(
+            "<game><a></a></game>",
+            &[Edit {
+                path: "game.a".into(),
+                value: "1".into(),
+            }],
+        )
+        .unwrap();
+        assert!(out.contains("<a>1</a>"), "{out}");
     }
 }
