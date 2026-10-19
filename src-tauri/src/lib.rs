@@ -572,10 +572,7 @@ async fn gh_device_poll(
 async fn gh_set_pat(app: tauri::AppHandle, pat: String) -> Result<String, String> {
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let pat = pat.trim().to_string();
-        if pat.is_empty() {
-            return Err("Empty token".into());
-        }
+        let pat = github::clean_pat(&pat)?;
         let (user, scopes) = github::whoami_scoped(&pat)?;
         if user.is_empty() {
             return Err("GitHub did not recognize that token".into());
