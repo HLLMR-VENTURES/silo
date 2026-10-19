@@ -397,6 +397,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it no longer waits up to 30 seconds on the library archive before opening links or offering to
   restore an unfinished guided bisection. (#222)
 
+- Smaller fixes: **Save raw XML** in mod settings refuses text that isn't valid XML instead of
+  saving it and saying "Saved"; checking a mod with no version shows Unverified instead of an
+  error; a mod's shop-item file is read with a size limit; disconnecting GitHub no longer leaves
+  an old fallback token readable in Silo's database file; and a filltype bridge that fails to
+  write no longer leaves a half-written mod in the mods folder.
+
 ## [0.11.0] - 2026-10-17
 
 ### Added

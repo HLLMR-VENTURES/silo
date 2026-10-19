@@ -1346,6 +1346,16 @@ async fn catalog_check_updates(
 /// up in the catalog, fetch the canonical manifest for the local version, and compare.
 /// Verified (byte/content match), Modified (with the exact file diff), or Unverified (no
 /// hashed build to compare — not proof of anything). Provenance, not antivirus.
+/// Why a mod without a `<version>` can't be verified.
+const NO_VERSION: &str =
+    "This mod's modDesc.xml has no version, so there's no build to compare against.";
+
+/// The version to look up a canonical build for: the modDesc version, unless it's missing or
+/// blank (which the API answers with a 400, not "no build").
+fn verifiable_version(version: Option<&str>) -> Option<&str> {
+    version.map(str::trim).filter(|v| !v.is_empty())
+}
+
 #[tauri::command]
 async fn verify_mod(
     app: tauri::AppHandle,
@@ -1370,7 +1380,10 @@ async fn verify_mod(
 
         // The server does version-equivalence (ModHub `1.2.0` ↔ GitHub `v1.2.0`), so send
         // the local modDesc version verbatim. 404 → no hashed build for this version.
-        let ver = version.as_deref().unwrap_or("");
+        let Some(ver) = verifiable_version(version.as_deref()) else {
+            // The API refuses a blank version (400 "version query param required").
+            return Ok(provenance::VerifyResult::unverified(NO_VERSION));
+        };
         match siloapi::manifest(&base, &hit.id, ver)? {
             Some(cm) => {
                 let canon_entries: Vec<provenance::Entry> = cm
@@ -4864,6 +4877,7 @@ async fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Res
 #[tauri::command]
 async fn save_mod_settings_raw(path: String, content: String) -> Result<(), String> {
     off_main(move || {
+        ensure_well_formed(&content)?;
         config_write_refusal(gamelaunch::fs25_running())?;
         let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
         let p = std::path::Path::new(&path);
@@ -4871,6 +4885,51 @@ async fn save_mod_settings_raw(path: String, content: String) -> Result<(), Stri
         paths::guarded_xml_write(&[user], p, &content)
     })
     .await
+}
+
+/// Refuse text that isn't one well-formed XML document (parsed to the end: every tag closed
+/// and matched, one root element, nothing but whitespace or comments around it). The raw
+/// editor writes what the user typed, and a broken settings file makes the mod fall back to
+/// its defaults or fail to load.
+fn ensure_well_formed(xml: &str) -> Result<(), String> {
+    use quick_xml::events::Event;
+    let refuse = |why: String| {
+        Err(format!(
+            "That isn't valid XML, so Silo didn't save it ({why}). Fix it and save again."
+        ))
+    };
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut depth = 0usize;
+    let mut roots = 0usize;
+    loop {
+        match reader.read_event() {
+            Err(e) => {
+                return refuse(format!("at byte {}: {e}", reader.error_position()));
+            }
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(_)) => {
+                if depth == 0 {
+                    roots += 1;
+                }
+                depth += 1;
+            }
+            Ok(Event::Empty(_)) if depth == 0 => roots += 1,
+            Ok(Event::End(_)) => depth = depth.saturating_sub(1),
+            Ok(Event::Text(t)) if depth == 0 && !t.iter().all(u8::is_ascii_whitespace) => {
+                return refuse("text outside the root element".into());
+            }
+            Ok(Event::GeneralRef(_) | Event::CData(_)) if depth == 0 => {
+                return refuse("text outside the root element".into());
+            }
+            Ok(_) => {}
+        }
+    }
+    match (depth, roots) {
+        (0, 1) => Ok(()),
+        (d, _) if d > 0 => refuse(format!("{d} unclosed tag(s)")),
+        (_, 0) => refuse("no root element".into()),
+        _ => refuse("more than one root element".into()),
+    }
 }
 
 // ── Savegames ──
@@ -5306,6 +5365,38 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn raw_settings_must_be_one_well_formed_document() {
+        for good in [
+            r#"<?xml version="1.0" encoding="utf-8"?><settings a="1"><x>2</x></settings>"#,
+            "<!-- c --><settings/>\n",
+            "  <settings>\n  <x>a &amp; b</x>\n</settings>  ",
+        ] {
+            assert!(super::ensure_well_formed(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "<settings><x>1</settings>",
+            "<settings><x>1</x>",
+            "<settings></settings><other/>",
+            "",
+            "just text",
+            "<settings>a & b</settings>",
+            "<settings/>trailing",
+        ] {
+            let e = super::ensure_well_formed(bad).unwrap_err();
+            assert!(e.contains("didn't save it"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_blank_version_is_not_looked_up() {
+        assert_eq!(super::verifiable_version(Some("1.2.0.0")), Some("1.2.0.0"));
+        assert_eq!(super::verifiable_version(Some(" v1 ")), Some("v1"));
+        assert_eq!(super::verifiable_version(Some("  ")), None);
+        assert_eq!(super::verifiable_version(Some("")), None);
+        assert_eq!(super::verifiable_version(None), None);
+    }
 
     #[test]
     fn a_shared_set_file_is_read_only_from_a_plain_silo_or_json_path() {
