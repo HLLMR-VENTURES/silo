@@ -422,6 +422,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Shared sets have a size limit.** A shared set (a link, gist, repo or `.silo` file) may list
+  up to 5,000 mods, and a shared file may be up to 8 MB. A bigger one is refused before Silo looks
+  anything up, so a hostile link can't make Silo send hundreds of catalog requests.
+
+- **A blank mod name no longer hides a set's catalog matches.** Catalog lookups skip blank and
+  repeated names. Before, one blank entry made the catalog refuse the whole batch, so every mod in
+  the set showed as "not in the catalog".
+
 - **A mistyped GitHub token can't end up in the log.** A pasted token with a line break or an
   invisible character in it is refused with a plain message before it's sent. Before, the
   request failed with an error that quoted the token, and that error went into Silo's log and
