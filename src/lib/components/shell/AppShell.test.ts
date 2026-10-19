@@ -4,6 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
+import { tick } from "svelte";
 import ShellHarness from "./__tests__/ShellHarness.svelte";
 import ViewHeaderHarness from "./__tests__/ViewHeaderHarness.svelte";
 import StatusStrip from "./StatusStrip.svelte";
@@ -155,5 +156,28 @@ describe("StatusStrip", () => {
   it("renders without items", () => {
     render(StatusStrip, { left: "Ready to play" });
     expect(screen.queryByRole("list")).toBeNull();
+  });
+});
+
+describe("AppShell scroll", () => {
+  it("a new view starts at the top of the main area (C1)", async () => {
+    render(ShellHarness);
+    const main = document.getElementById("main")!;
+    main.scrollTop = 900;
+    expect(main.scrollTop).toBe(900);
+    const { go } = await import("../../state/nav.svelte");
+    go("tools");
+    await tick();
+    expect(main.scrollTop).toBe(0);
+  });
+
+  it("keeps the scroll when the view didn't change", async () => {
+    render(ShellHarness);
+    const main = document.getElementById("main")!;
+    main.scrollTop = 300;
+    const { setTab } = await import("../../state/nav.svelte");
+    setTab("library", "x");
+    await tick();
+    expect(main.scrollTop).toBe(300);
   });
 });

@@ -55,12 +55,15 @@
   let error = $state<string | null>(null);
   let done = $state<string | null>(null);
 
-  const fillTypeList = $derived(
-    fillTypesRaw
-      .split(/[\s,]+/)
-      .map((s) => s.trim().toUpperCase())
-      .filter(Boolean),
-  );
+  // Once each: "sugarbeet SUGARBEET" is one fill type (and the chips are keyed by name).
+  const fillTypeList = $derived([
+    ...new Set(
+      fillTypesRaw
+        .split(/[\s,]+/)
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean),
+    ),
+  ]);
   const canGenerate = $derived(fillTypeList.length > 0 && selected.size > 0 && !generating);
 
   function toggle(id: string) {

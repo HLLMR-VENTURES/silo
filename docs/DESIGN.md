@@ -221,16 +221,16 @@ keyboard behavior, so a view gets them for free. Each file's header comment show
   farm?"). **The body says the consequence, then how to undo it** ("Your mods aren't
   affected." / "To undo it, run Organize again."). If there is no way back, say so.
 - **Show what changes.** Counts go in the facts table and affected mods in the list, so the
-  user sees exactly what the button will do (switching a loadout lists the mods that turn on
+  user sees exactly what the button will do (switching a mod set lists the mods that turn on
   and the mods that get parked).
-- **Danger tone only when Silo can't undo it** (deleting a collection from GitHub, forgetting
+- **Danger tone only when Silo can't undo it** (stopping sharing a mod set on GitHub, forgetting
   an interrupted diagnosis) or when the Undo is only a short-lived notice (deleting a
-  loadout). Danger makes the button red, puts the starting focus on Cancel and makes the dialog
+  mod set). Danger makes the button red, puts the starting focus on Cancel and makes the dialog
   an `alertdialog`. The body is the dialog's accessible description.
 - **Offer Undo after the fact** where Silo can put things back: a toast with an Undo action
-  after switching a loadout, using a savegame's mods, replacing a loadout's mods or deleting a
-  loadout. An Undo checks first that nothing moved on (the active set is still the one the
-  switch left, no diagnosis or library move is running, the loadout wasn't changed again) and
+  after switching a mod set, using a savegame's mods, replacing a mod set's mods or deleting a
+  mod set. An Undo checks first that nothing moved on (the active set is still the one the
+  switch left, no diagnosis or library move is running, the mod set wasn't changed again) and
   otherwise says why it can't undo instead of guessing. A new switch dismisses the previous
   switch's Undo.
 - **One gesture answers one dialog.** A confirm's verb button (and a name dialog's submit)
@@ -278,13 +278,14 @@ keyboard behavior, so a view gets them for free. Each file's header comment show
 
 Follow the GIANTS in-game approach: **plain, literal words that translate cleanly
 into dozens of languages.** No invented vocabulary, no metaphor decoder ring. Use
-the obvious terms — *library, loadout, apply, clear, conflict, health check,
+the obvious terms — *library, mod set, apply, clear, conflict, health check,
 updates, savegame mods, favorite, hidden, broken.* "Silo" is the app's working
 name only; it is not a term users have to learn.
 
-Terminology is deliberately **not finalized here** — final wording (and any light
-flavor) will be refined by hand once the app is built and every string is a
-translation key. Until then, code and UI use plain descriptive names.
+The 1.0 names: the pages are **Library, Browse, Mod sets, Diagnose, Updates, Tools,
+Settings and Help**; a mod is **active** or **parked**; the guided search is **Find the problem
+mod**; putting every mod back in the mods folder is **Undo organizing**. Code identifiers keep
+older names (`loadout`, `collection`, `bisect`); user-facing text never does.
 
 ## Give the tinkerers things to do (power layer)
 

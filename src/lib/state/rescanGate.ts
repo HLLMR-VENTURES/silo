@@ -44,3 +44,40 @@ export function rescanGate(run: (auto: boolean) => void): RescanGate {
     },
   };
 }
+
+/** The focus rescan waits this long after any scan, so alt-tabbing doesn't thrash. */
+export const FOCUS_RESCAN_AFTER_MS = 4000;
+
+/**
+ * Whether coming back to the window may rescan the library. Not while a scan, a library write,
+ * a running archive move or a diagnosis runs; not while the mods folder is being switched (its
+ * folder picker and dialogs take focus, and a scan started then reads the old folder); and not
+ * within FOCUS_RESCAN_AFTER_MS of the last scan.
+ */
+export function focusRescanAllowed(s: {
+  scanning: boolean;
+  writeBlocked: boolean;
+  moveRunning: boolean;
+  bisecting: boolean;
+  switchingFolder: boolean;
+  hasRoots: boolean;
+  sinceLastScanMs: number;
+}): boolean {
+  return (
+    !s.scanning &&
+    !s.writeBlocked &&
+    !s.moveRunning &&
+    !s.bisecting &&
+    !s.switchingFolder &&
+    s.hasRoots &&
+    s.sinceLastScanMs > FOCUS_RESCAN_AFTER_MS
+  );
+}
+
+/**
+ * Resolve once `busy()` is false (checked every `stepMs`), e.g. a scan of the old mods folder
+ * that was already running when the folder changed.
+ */
+export async function waitWhile(busy: () => boolean, stepMs = 50): Promise<void> {
+  while (busy()) await new Promise((r) => setTimeout(r, stepMs));
+}
