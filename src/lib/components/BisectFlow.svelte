@@ -5,6 +5,7 @@
   // auto-detected from the log). The player's real mod set is snapshotted first and
   // restored on finish/cancel — nothing here is destructive.
   import Icon from "../ui/Icon.svelte";
+  import { ask } from "../ui";
   import { inlineError } from "../state/notify.svelte";
   import { onDestroy } from "svelte";
   import {
@@ -14,6 +15,7 @@
     bisectSnapshotGet,
     bisectSnapshotClear,
     launchGame,
+    logStatus,
     scanLog,
   } from "../api";
   import { BISECT_RESTORE_FIRST, canStartBisect, finishBisect } from "../bisect";
@@ -40,6 +42,11 @@
     onFinished?: (parked: string | null) => void;
     /** A mod's title for display (tech name when unknown). */
     titleOf?: (techName: string) => string;
+    /** Before anything is saved: get the pool ready to be parked (file loose zips into the
+     *  library; set_active only parks filed mods). False stops the start with nothing changed. */
+    onPrepare?: () => Promise<boolean>;
+    /** Active mods Silo can't park (unzipped folder mods), kept on every round. */
+    stayOn?: number;
   }
   let {
     pool,
@@ -51,6 +58,8 @@
     onProgress,
     onFinished,
     titleOf = (t: string) => t,
+    onPrepare,
+    stayOn = 0,
   }: Props = $props();
 
   type Phase =
@@ -70,6 +79,10 @@
   let round = $state(0);
   let crashHint = $state<boolean | null>(null); // from the log after a round
   let culprit = $state<string | null>(null);
+  /** What "Try again" re-runs after a round couldn't be applied (the run keeps its rounds). */
+  let retry = $state<(() => Promise<void>) | null>(null);
+  /** Putting the mods back failed: the user can leave it to App's restore banner. */
+  let restoreFailed = $state(false);
 
   let started = $state(false); // true once the snapshot is saved; until then nothing changed
   // Set when the panel closes under us. Every await re-checks it so an unmounted flow never
@@ -99,7 +112,15 @@
         onBisecting(false); // App re-reads the snapshot and shows the restore banner
         return;
       }
-      // Snapshot the REAL set first (crash-safe restore lives in the DB).
+      if (onPrepare) {
+        working = null; // its dialog speaks for itself
+        const ready = await onPrepare();
+        if (destroyed) return abandon();
+        if (!ready) return; // declined or refused (said so): nothing was saved
+        working = "Saving your current mod set…";
+      }
+      // Snapshot the REAL set first (crash-safe restore lives in the DB). Read after the
+      // preparation, so the props are the library as it is now.
       await bisectSnapshotSave([...alwaysOn, ...pool]);
       if (destroyed) {
         // Nothing was changed yet, so the fresh snapshot isn't needed.
@@ -108,7 +129,7 @@
       }
       started = true;
       onBisecting(true); // no await since the check above, so we're still mounted
-      await advance([...pool]);
+      await advanceOrStop([...pool]);
     } catch (e) {
       if (destroyed) return abandon();
       error = inlineError(e, "Starting the diagnosis");
@@ -141,46 +162,82 @@
     }
   }
 
-  async function launch() {
-    working = "Launching FS25…";
+  /** `advance`, and when it fails (the round couldn't be applied), stop with Try again rather
+   *  than losing the rounds played so far. */
+  async function advanceOrStop(next: string[]) {
     try {
-      await launchGame();
+      await advance(next);
     } catch (e) {
-      error = inlineError(e, "Launching the game");
+      if (destroyed) return;
+      error = inlineError(e, "Applying the next test set");
+      retry = () => advanceOrStop(next);
       phase = "error";
     } finally {
       working = null;
     }
   }
 
-  // User is back from the game. Peek the log to pre-answer "did it crash?".
-  async function backFromGame() {
-    onProgress?.({ round, about, launching: false });
-    working = "Reading the log…";
+  async function runRetry() {
+    const r = retry;
+    if (!r || working) return;
+    retry = null;
+    error = null;
+    await r();
+  }
+
+  async function launch() {
+    working = "Launching FS25…";
+    error = null;
     try {
-      const r = await scanLog();
-      crashHint = r.crashed;
-    } catch {
-      crashHint = null; // best-effort hint only
+      await launchGame();
+    } catch (e) {
+      // The round is still set up: the user can launch from Steam, or try again.
+      error = inlineError(e, "Launching the game");
     } finally {
       working = null;
+    }
+  }
+
+  // User is back from the game. Peek the log to pre-answer "did it crash?". A running game's log
+  // has no exit marker yet (it would read as a crash), and the next round can't move its files.
+  async function backFromGame() {
+    working = "Reading the log…";
+    error = null;
+    try {
+      const st = await logStatus().catch(() => null);
+      if (destroyed) return;
+      if (st?.gameRunning) {
+        error = "Farming Simulator 25 is still running. Quit to the desktop, then press I've quit the game again.";
+        return;
+      }
+      onProgress?.({ round, about, launching: false });
+      try {
+        const r = await scanLog();
+        crashHint = r.crashed;
+      } catch {
+        crashHint = null; // best-effort hint only
+      }
       phase = "verdict";
+    } finally {
+      working = null;
     }
   }
 
   async function verdict(stillBroken: boolean) {
     if (step?.kind !== "split") return;
     working = "Narrowing…";
+    error = null;
+    let next: string[];
     try {
-      const next = await bisectNarrow(step.test, step.rest, stillBroken);
-      if (destroyed) return;
-      await advance(next);
+      next = await bisectNarrow(step.test, step.rest, stillBroken);
     } catch (e) {
+      // Nothing changed: the same question can be answered again.
       error = inlineError(e, "Narrowing down the suspects");
-      phase = "error";
-    } finally {
       working = null;
+      return;
     }
+    if (destroyed) return;
+    await advanceOrStop(next);
   }
 
   // Always restore the real set before leaving, however we leave. The set comes from the
@@ -206,15 +263,42 @@
     working = null;
     if (!r.ok) {
       // Stay open with the message (and any culprit still on screen); ✕ or the restore
-      // button retries. Closing the panel instead leaves the snapshot for App's banner.
-      if (!destroyed) error = inlineError(r.error, "Restoring your mods");
+      // button retries, and "Close and restore later" leaves the snapshot for App's banner.
+      if (!destroyed) {
+        error = inlineError(r.error, "Restoring your mods");
+        restoreFailed = true;
+      }
       return;
     }
+    restoreFailed = false;
     started = false;
     // Called even if the panel closed mid-restore: App re-reads the (now cleared) snapshot.
     onBisecting(false);
     onFinished?.(park);
     if (!destroyed) onExit();
+  }
+
+  /** After a failed restore: stop the run and leave the saved set to App's restore banner. */
+  function restoreLater() {
+    if (working) return;
+    started = false;
+    restoreFailed = false;
+    onBisecting(false);
+    onExit();
+  }
+
+  /** The ✕: after a round was applied, stopping loses the rounds played, so ask first. */
+  async function stop() {
+    if (working) return;
+    if (started && round > 0 && (phase === "await-launch" || phase === "verdict" || phase === "error")) {
+      const ok = await ask({
+        title: "Stop finding the problem mod?",
+        body: "Your mods go back to how they were. The rounds played so far are lost.",
+        confirm: "Stop",
+      });
+      if (!ok || destroyed) return;
+    }
+    await finish();
   }
 
   function exitUnchanged() {
@@ -245,7 +329,7 @@
         <p class="stepper tnum">Round {round} of about {about}</p>
       {/if}
     </div>
-    <button class="x" use:tooltip={cancelLabel} aria-label={cancelLabel} onclick={() => finish()} disabled={!!working}><Icon name="close" /></button>
+    <button class="x" use:tooltip={cancelLabel} aria-label={cancelLabel} onclick={() => void stop()} disabled={!!working}><Icon name="close" /></button>
   </div>
 
   <div role="status" aria-live="polite">
@@ -253,6 +337,11 @@
   </div>
   {#if error}
     <div class="err" role="alert">{error}</div>
+  {/if}
+  {#if restoreFailed && started}
+    <div class="actions">
+      <button class="btn ghost" onclick={restoreLater} disabled={!!working}>Close and restore later</button>
+    </div>
   {/if}
 
   {#if phase === "intro"}
@@ -263,6 +352,12 @@
       > launches. Maps and required mods stay on the whole time. Silo saves your exact mods now and
       puts them back when you finish.
     </p>
+    {#if stayOn > 0}
+      <p class="body muted">
+        {stayOn === 1 ? "1 unzipped folder mod stays" : `${stayOn} unzipped folder mods stay`} on every round:
+        Silo can only park mod zips.
+      </p>
+    {/if}
     {#if recoveryPending && !error}
       <div class="err">{BISECT_RESTORE_FIRST}</div>
     {/if}
@@ -273,7 +368,8 @@
   {:else if phase === "await-launch"}
     {#if step?.kind === "split"}
       <p class="body">
-        Testing <b>{step.test.length}</b> mods this round ({step.rest.length} parked for now).
+        Testing <b>{step.test.length}</b> {step.test.length === 1 ? "mod" : "mods"} this round ({step.rest.length}
+        parked for now).
       </p>
       <ol class="steps">
         <li>Launch the game and load the save that was crashing.</li>
@@ -320,6 +416,7 @@
     </div>
   {:else if phase === "error"}
     <div class="actions">
+      {#if retry}<button class="btn" onclick={runRetry} disabled={!!working}>Try again</button>{/if}
       <button class="btn primary" onclick={() => finish()} disabled={!!working}>Put my mods back</button>
     </div>
   {/if}

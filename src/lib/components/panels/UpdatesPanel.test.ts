@@ -217,10 +217,10 @@ describe("UpdatesView auto-check offer", () => {
     expect(autoCheckEnabled()).toBe(false);
   });
 
-  it("Check on start turns it on and closes the offer", async () => {
+  it("Check when Silo starts turns it on and closes the offer", async () => {
     const user = userEvent.setup();
     view();
-    await user.click(screen.getByRole("button", { name: "Check on start" }));
+    await user.click(screen.getByRole("button", { name: "Check when Silo starts" }));
     expect(autoCheckEnabled()).toBe(true);
     expect(screen.queryByText("Check for mod updates when Silo starts?")).toBeNull();
   });
