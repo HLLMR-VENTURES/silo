@@ -39,7 +39,7 @@ describe("describeError copy", () => {
     ["GITHUB_RATE_LIMIT", "GitHub is limiting requests for a while. Connecting your GitHub account raises the limit.", false],
     ["NOT_A_MOD", "That file isn't a Farming Simulator mod.", false],
     ["DOWNLOAD_BROKEN", "The download was cut off or damaged. Try again.", true],
-    ["NO_LOG", "No game log yet. Play once, then come back here.", false],
+    ["NO_LOG", "No game log yet. Play Farming Simulator 25 once, then come back here.", false],
     ["CHANGED_SINCE_PREVIEW", "This set changed after you opened it. Preview it again.", false],
     ["DB_NEWER", "This library was used by a newer Silo. Install the latest Silo to open it.", false],
     ["UNKNOWN", "Something went wrong while moving mods.", true],
@@ -103,7 +103,7 @@ describe("describeError copy", () => {
 
   it("no log yet is its own code (L5)", () => {
     expect(classifyMessage("No log.txt found. Launch FS25 at least once first.")).toBe("NO_LOG");
-    expect(classifyMessage("No game log yet. Play once, then come back here.")).toBe("NO_LOG");
+    expect(classifyMessage("No game log yet. Play Farming Simulator 25 once, then come back here.")).toBe("NO_LOG");
   });
 
   it("the rate-limit copy suggests connecting only when GitHub isn't connected (L12)", () => {

@@ -20,29 +20,29 @@ import LogTriage from "./LogTriage.svelte";
 import BindingsView from "./BindingsView.svelte";
 import ErrorState from "../ui/ErrorState.svelte";
 
-const noLog = { code: "NO_LOG", message: "No game log yet. Play once, then come back here." };
+const noLog = { code: "NO_LOG", message: "No game log yet. Play Farming Simulator 25 once, then come back here." };
 
 describe("no game log yet (L5)", () => {
   it("Last run shows a calm empty state, not an error", async () => {
     api.scanLog.mockRejectedValue(noLog);
     api.logStatus.mockResolvedValue({ path: null, modifiedMs: null, gameRunning: false, lastSeenMs: null });
     render(LogTriage, { activeMods: [], activeMaps: [], onApply: vi.fn(), onBisecting: vi.fn() });
-    expect(await screen.findByText("No game log yet. Play once, then come back here.")).toBeInTheDocument();
+    expect(await screen.findByText("No game log yet. Play Farming Simulator 25 once, then come back here.")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByText(/Something went wrong/)).not.toBeInTheDocument();
   });
 
   it("the controls map shows an empty state too", async () => {
-    api.scanBindings.mockRejectedValue({ code: "NO_LOG", message: "No controls file yet." });
+    api.scanBindings.mockRejectedValue({ code: "NO_LOG", message: "No control settings yet." });
     render(BindingsView, {});
-    expect(await screen.findByText("No controls file yet. Play once, then come back here.")).toBeInTheDocument();
+    expect(await screen.findByText("No control settings yet. Play Farming Simulator 25 once, then come back here.")).toBeInTheDocument();
     expect(screen.queryByText(/Something went wrong/)).not.toBeInTheDocument();
   });
 
   it("also from the older backend's plain text", async () => {
     api.scanBindings.mockRejectedValue("No inputBinding.xml found. Launch FS25 at least once first.");
     render(BindingsView, {});
-    expect(await screen.findByText("No controls file yet. Play once, then come back here.")).toBeInTheDocument();
+    expect(await screen.findByText("No control settings yet. Play Farming Simulator 25 once, then come back here.")).toBeInTheDocument();
   });
 });
 

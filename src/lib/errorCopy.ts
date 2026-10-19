@@ -110,7 +110,7 @@ export function classifyMessage(msg: string): ErrorCode {
   if (/finish or cancel the (?:archive|library) move first|archive move is already|already unfinished/i.test(msg)) {
     return "MOVE_UNFINISHED";
   }
-  if (/no game log yet|no controls file yet|no log\.txt found|no inputbinding\.xml found/i.test(msg)) return "NO_LOG";
+  if (/no game log yet|no control settings yet|no log\.txt found|no inputbinding\.xml found/i.test(msg)) return "NO_LOG";
   if (/download(?:ed file)? (?:isn't|is not) a valid \.zip/i.test(msg)) return "DOWNLOAD_BROKEN";
   if (/doesn't look like a silo set link/i.test(msg)) return "NOT_A_SET_LINK";
   if (/rate limit/i.test(msg)) return "GITHUB_RATE_LIMIT";
@@ -207,7 +207,7 @@ function copyFor(code: ErrorCode, message: string, op: string): string {
 }
 
 /** No game log (or controls file) yet: FS25 hasn't been played. An empty state, not a failure. */
-export const NO_LOG_COPY = "No game log yet. Play once, then come back here.";
+export const NO_LOG_COPY = "No game log yet. Play Farming Simulator 25 once, then come back here.";
 
 let githubConnected = false;
 

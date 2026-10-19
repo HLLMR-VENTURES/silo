@@ -89,7 +89,7 @@
   {#if loading}
     <div class="empty">Reading your control settings…</div>
   {:else if noFile}
-    <div class="empty">No controls file yet. Play once, then come back here.</div>
+    <div class="empty">No control settings yet. Play Farming Simulator 25 once, then come back here.</div>
   {:else if error}
     <div class="err">{error}</div>
   {:else if report}
