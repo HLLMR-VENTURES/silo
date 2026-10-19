@@ -58,10 +58,10 @@ describe("LibraryToolbar", () => {
     expect(screen.getByRole("button", { name: "Filters (1)" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Filters (1)" }));
     const panel = await screen.findByRole("dialog", { name: "Filters" });
-    for (const name of ["Hidden", "Flagged", "In conflict", "Has settings", "Needs update", "Maps (2)", "Script mods"]) {
+    for (const name of ["Include hidden mods", "Flagged", "In conflict", "Has settings", "Needs update", "Maps (2)", "Script mods"]) {
       expect(screen.getByRole("checkbox", { name })).toBeInTheDocument();
     }
-    expect(screen.getByRole("checkbox", { name: "Hidden" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Include hidden mods" })).toBeChecked();
     // No conflicts: In conflict can't narrow anything.
     expect(screen.getByRole("checkbox", { name: "In conflict" })).toBeDisabled();
     await user.click(screen.getByRole("checkbox", { name: "Maps (2)" }));

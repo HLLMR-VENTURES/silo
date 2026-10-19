@@ -9,7 +9,7 @@
 </script>
 
 <ViewBoundary name="Browse">
-  <ViewHeader title="Browse" description="Find mods in the catalog: ModHub and GitHub listings." />
+  <ViewHeader title="Browse" description="Find mods in Silo's catalog of ModHub and GitHub listings." />
   <div class="browse">{@render children()}</div>
 </ViewBoundary>
 

@@ -689,7 +689,7 @@ export function mpVerifyPath(path: string, local: MpModRef[]): Promise<MpVerifyR
 export async function mpVerify(local: MpModRef[]): Promise<MpVerifyReport | null> {
   const path = await open({
     multiple: false,
-    filters: [{ name: "Silo mod-set", extensions: ["silomp", "json"] }],
+    filters: [{ name: "Multiplayer check file", extensions: ["silomp", "json"] }],
   });
   if (!path || Array.isArray(path)) return null;
   return await invoke<MpVerifyReport>("mp_verify_file", { path, local });

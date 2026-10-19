@@ -2,6 +2,7 @@
   import Icon from "../../ui/Icon.svelte";
   import type { ModEntry } from "../../types";
   import { fmtSize } from "../../format";
+  import { plural } from "../../plural";
 
   let {
     modCount,
@@ -33,10 +34,10 @@
   </div>
 
   <div class="st-tiles">
-    <div class="st-tile"><b class="tnum">{modCount}</b><span>mods</span></div>
+    <div class="st-tile"><b class="tnum">{modCount}</b><span>{plural(modCount, { one: "mod", other: "mods" })}</span></div>
     <div class="st-tile"><b class="tnum">{organizedCount}</b><span>organized</span></div>
     <div class="st-tile"><b class="tnum">{activeCount}</b><span>active</span></div>
-    <div class="st-tile"><b class="tnum">{mapsCount}</b><span>maps</span></div>
+    <div class="st-tile"><b class="tnum">{mapsCount}</b><span>{plural(mapsCount, { one: "map", other: "maps" })}</span></div>
     <div class="st-tile"><b class="tnum">{libStats.tagged}</b><span>tagged</span></div>
     <div class="st-tile">
       <b class="tnum">{libStats.avgRating ? libStats.avgRating.toFixed(1) : "–"}</b>

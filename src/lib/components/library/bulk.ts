@@ -32,13 +32,11 @@ export function bulkChanges<M extends { techName: string }>(
 export function bulkConfirm(count: number, on: boolean, cloudSynced: boolean): ConfirmOptions | null {
   if (count <= BULK_CONFIRM_OVER) return null;
   const verb = on ? "Turn on" : "Park";
-  const tail = cloudSynced
-    ? " Your mods folder is cloud-synced, so each one is copied or removed on its own. This can take a while."
-    : "";
+  const tail = cloudSynced ? " Your mods folder is cloud-synced, so this can take a while." : "";
   return {
     title: `${verb} ${modsCount(count)}?`,
     body:
-      `Each one is ${on ? "linked into" : "removed from"} your mods folder; nothing is deleted from your library.${tail} ` +
+      `Each one is ${on ? (cloudSynced ? "copied into" : "linked into") : "removed from"} your mods folder. Nothing is deleted from your library.${tail} ` +
       "You can undo it right after.",
     facts: [{ label: on ? "Turn on" : "Park", value: modsCount(count) }],
     confirm: `${verb} ${modsCount(count)}`,

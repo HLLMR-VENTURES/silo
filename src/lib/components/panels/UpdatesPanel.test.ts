@@ -59,6 +59,16 @@ describe("UpdatesPanel", () => {
     expect(h.onCheck).toHaveBeenCalledOnce();
   });
 
+  it("a first check whose catalog failed shows that, not the never-checked state", () => {
+    setup(
+      { failed: [row("C", { hasUpdate: undefined, error: "GitHub is limiting requests for a while." })] },
+      { checked: false, catalogError: { message: "offline", detail: "", offline: true } },
+    );
+    expect(screen.queryByText("Check your mods for updates")).not.toBeInTheDocument();
+    expect(screen.getByText(/Silo can't reach its catalog/)).toBeInTheDocument();
+    expect(screen.getByText("GitHub is limiting requests for a while.")).toBeInTheDocument();
+  });
+
   it("shows sections in order and hides empty ones", () => {
     setup({
       ready: [row("A", { assetUrl: "https://x/a.zip", source: "github" })],

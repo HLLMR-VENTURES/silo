@@ -118,7 +118,7 @@
         {#if d.techName}<div class="dh-tech tnum">{d.techName}</div>{/if}
         {#if badges.length}<div class="dh-badges"><BadgeRow {badges} max={4} /></div>{/if}
       </div>
-      <button class="drawer-x" use:tooltip={"Close"} aria-label="Close" onclick={onClose}><Icon name="close" /></button>
+      <button class="drawer-x" use:tooltip={"Close details"} aria-label="Close details" onclick={onClose}><Icon name="close" /></button>
     </div>
     <div class="drawer-body">
       {#if cover}
@@ -141,7 +141,7 @@
       {#if d.description}
         <p class="drawer-desc clamped">{d.description}</p>
         {#if canExpand(d)}
-          <button class="read-more" onclick={() => onOpenDesc(d)}>Read more →</button>
+          <button class="read-more" onclick={() => onOpenDesc(d)}>Read more</button>
         {/if}
       {/if}
 

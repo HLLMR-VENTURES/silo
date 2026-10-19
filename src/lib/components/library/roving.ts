@@ -1,5 +1,6 @@
 // Keyboard model shared by the library's VirtualList and VirtualGrid: one tab stop, arrows move
-// the focused item, Enter opens, Space toggles, Shift+arrows extend the selection. Pure, so the
+// the focused item, Enter opens, Space toggles, Shift+arrows extend the selection, Ctrl+A selects
+// every item. Pure, so the
 // key table unit-tests without a DOM.
 //   keyAction({ key: "ArrowDown" }, { index: 3, count: 10, columns: 1, pageRows: 5, onItem: true })
 //     -> { kind: "move", to: 4, extend: false }
@@ -21,6 +22,7 @@ export type KeyAction =
   | { kind: "open" }
   | { kind: "toggle" }
   | { kind: "select" }
+  | { kind: "selectAll" }
   | { kind: "menu" };
 
 /** The parts of a KeyboardEvent the table reads. */
@@ -63,6 +65,8 @@ export function keyAction(e: KeyLike, ctx: KeyContext): KeyAction | null {
   const shift = !!e.shiftKey;
 
   if ((e.key === "F10" && shift && !mod) || e.key === "ContextMenu") return { kind: "menu" };
+  // Ctrl+A / Cmd+A: every shown item, from the item or a control in it (not the page's text).
+  if (mod && !shift && (e.key === "a" || e.key === "A")) return { kind: "selectAll" };
 
   const move = (to: number, extend = false): KeyAction => ({ kind: "move", to: clamp(to, last), extend });
   switch (e.key) {

@@ -56,7 +56,7 @@ export function rowBadges(mod: BadgeMod, ctx: RowBadgeContext = {}): BadgeSpec[]
     add({ id: "error", label: "Can't load", tone: "danger", icon: "problem", group: "problem", title: mod.error });
   }
   if (mod.ignoredDigitPrefix) {
-    add({ id: "ignored", label: "Ignored name", tone: "warn", icon: "problem", group: "problem", title: "The name starts with a digit, so the game ignores this mod" });
+    add({ id: "ignored", label: "Ignored name", tone: "warn", icon: "problem", group: "problem", title: "The name starts with a number, so the game ignores this mod." });
   }
   if (ctx.conflicted) {
     add({ id: "conflict", label: "Conflict", tone: "warn", icon: "problem", group: "problem", title: "Conflicts with another mod. See Diagnose." });

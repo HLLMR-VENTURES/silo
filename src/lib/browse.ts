@@ -52,7 +52,7 @@ export function sourceChip(s: Pick<ModSourceOption, "source" | "version">): stri
 export function gatedReason(source: string): string {
   if (source === "modhub")
     return "ModHub mods download from GIANTS' website, so Silo opens the mod's page there.";
-  return "This source doesn't allow direct downloads. Opens the mod page.";
+  return "This source doesn't allow direct downloads, so Silo opens the mod's page.";
 }
 
 /** Compact download counts: 980, 12k, 1.3M. */
@@ -236,7 +236,7 @@ export function browseBadges(
       tone: "success",
       icon: "verifiedBuild",
       group: "status",
-      title: "Silo's catalog hashed the published build, so Silo can check that your copy matches it byte for byte.",
+      title: "Silo's catalog recorded the published build, so Silo can check that your copy is exactly the same.",
     });
   const author = verifiedAuthorLogin(m);
   if (author)

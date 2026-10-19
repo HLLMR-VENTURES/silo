@@ -109,7 +109,10 @@ pub fn latest_release(owner: &str, repo: &str, token: Option<&str>) -> Result<Re
         req = req.set("Authorization", &format!("Bearer {t}"));
     }
     let resp = req.call().map_err(|e| match e {
-        ureq::Error::Status(404, _) => "No releases found for this repo".to_string(),
+        ureq::Error::Status(404, _) => {
+            "This mod's GitHub page has no releases yet, so Silo can't check it for updates."
+                .to_string()
+        }
         ureq::Error::Status(403, _) => {
             "GitHub rate limit hit (60/hr unauthenticated). Try again later.".to_string()
         }
@@ -439,11 +442,14 @@ fn gh_err(e: ureq::Error) -> String {
             "GitHub rejected the token. Reconnect your account.".to_string()
         }
         ureq::Error::Status(403, _) => {
-            "This token can't perform that action. Reconnect with actions enabled \
-             (public_repo), or use a PAT with Starring permission."
+            "This token can't perform that action. Reconnect GitHub and allow the extra \
+             permission."
                 .to_string()
         }
-        ureq::Error::Status(404, _) => "Not found on GitHub".to_string(),
+        ureq::Error::Status(404, _) => {
+            "Silo couldn't find this on GitHub. It may have been renamed, made private or deleted."
+                .to_string()
+        }
         other => transport_text(other),
     }
 }
@@ -469,7 +475,7 @@ const PAT_MAX_LEN: usize = 255;
 pub fn clean_pat(input: &str) -> Result<String, String> {
     let pat = input.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}' || c == '\u{200b}');
     if pat.is_empty() {
-        return Err("Empty token".to_string());
+        return Err("Paste a token first.".to_string());
     }
     if pat.len() > PAT_MAX_LEN || !pat.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(
@@ -486,7 +492,10 @@ pub fn repo_stats(owner: &str, repo: &str, token: Option<&str>) -> Result<RepoSt
     check_repo(owner, repo)?;
     let v = gh_get(api_url(&["repos", owner, repo])?.as_str(), token)?;
     if v["full_name"].as_str().unwrap_or("").is_empty() {
-        return Err("Repo not found on GitHub".into());
+        return Err(
+            "Silo couldn't find this on GitHub. It may have been renamed, made private or deleted."
+                .into(),
+        );
     }
     let (you_starred, you_watching) = match token {
         Some(t) => (

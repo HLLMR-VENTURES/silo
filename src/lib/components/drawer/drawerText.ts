@@ -7,8 +7,9 @@ export function conflictKindLabel(kind: string): string {
     fillType: "Fill type",
     script: "Script",
     map: "Map",
-    specialization: "Specialization",
-    vehicleType: "Vehicle type",
+    action: "Control action",
+    brand: "Brand",
+    storeCategory: "Shop category",
   };
   return words[kind] ?? kind;
 }

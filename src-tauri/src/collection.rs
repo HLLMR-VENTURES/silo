@@ -111,9 +111,9 @@ pub fn parse(json: &str) -> Result<Collection, String> {
 /// [`parse`] without the size limit, so `parse_set_file` can tell "too big" from "not a set".
 fn parse_document(json: &str) -> Result<Collection, String> {
     let c: Collection =
-        serde_json::from_str(json).map_err(|_| "That isn't a valid Silo shared set".to_string())?;
+        serde_json::from_str(json).map_err(|_| "That isn't a Silo mod set.".to_string())?;
     if !c.schema.starts_with(SCHEMA_PREFIX) {
-        return Err("That isn't a valid Silo shared set".to_string());
+        return Err("That isn't a Silo mod set.".to_string());
     }
     Ok(c)
 }
@@ -140,7 +140,7 @@ pub struct SetFile {
 /// Read a shared mod set file: a collection document, or a `.silo` set file (which becomes a
 /// collection with bare tech names, so it previews and installs through the same path).
 pub fn parse_set_file(json: &str) -> Result<Collection, String> {
-    const NOT_A_SET: &str = "That file isn't a Silo mod set";
+    const NOT_A_SET: &str = "That file isn't a Silo mod set.";
     if let Ok(c) = parse_document(json) {
         return within_limit(c);
     }
@@ -717,7 +717,7 @@ mod tests {
         ] {
             assert_eq!(
                 parse_set_file(bad).unwrap_err(),
-                "That file isn't a Silo mod set",
+                "That file isn't a Silo mod set.",
                 "{bad}"
             );
         }

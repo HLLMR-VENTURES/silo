@@ -152,13 +152,13 @@ function copyFor(code: ErrorCode, message: string, op: string): string {
   switch (code) {
     case "FILE_IN_USE": {
       const file = fileNameIn(message);
-      const what = file ? `move ${file}` : "change a file";
-      return `Silo couldn't ${what} because another program is using it. Close Farming Simulator 25 or the program that has it open, then try again.`;
+      const what = file ? `${file}, so Silo couldn't change it` : "a file Silo needs";
+      return `Another program is using ${what}. Close Farming Simulator 25 or the program that has it open, then try again.`;
     }
     case "GAME_RUNNING":
       return "Close Farming Simulator 25 first, then try again.";
     case "NOT_A_SET_LINK":
-      return "That doesn't look like a Silo set link. Links look like https://silo.hllmr.com/c/… or a GitHub gist.";
+      return "That doesn't look like a Silo set link. Links look like https://silo.hllmr.com/c/… or a link from GitHub.";
     case "LIBRARY_BUSY":
       return "Silo is finishing another change to your library. Try again in a moment.";
     case "MOVE_UNFINISHED":
@@ -176,7 +176,7 @@ function copyFor(code: ErrorCode, message: string, op: string): string {
     case "NET_OFFLINE":
       return "Silo can't reach the internet right now.";
     case "NET_TIMEOUT":
-      return "The download stopped responding.";
+      return "The connection stopped responding. Try again in a moment.";
     case "GITHUB_AUTH":
       return "GitHub needs you to sign in again.";
     case "GITHUB_RATE_LIMIT":
@@ -184,7 +184,7 @@ function copyFor(code: ErrorCode, message: string, op: string): string {
     case "NOT_A_MOD":
       return "That file isn't a Farming Simulator mod.";
     case "CHANGED_SINCE_PREVIEW":
-      return "This changed after you opened it. Preview it again.";
+      return "This set changed after you opened it. Preview it again.";
     case "DB_NEWER":
       return "This library was used by a newer Silo. Install the latest Silo to open it.";
     case "STILL_LOADING":
