@@ -36,18 +36,20 @@ export function parkLooseOptions(
     return {
       title: `Park ${name}?`,
       body:
-        "Silo moves them into your library folder, each into its category folder in archive, so the game stops loading them. " +
-        "They stay in your library. Switch them on any time.",
+        "Silo moves them into your library archive, each into its category folder, so the game stops loading them. " +
+        "They stay in your library. Turn them on any time.",
       confirm: "Park them",
       checkbox: { label: "Don't explain this again" },
     };
   }
-  const where = category ? ` (archive${sep}${category})` : "";
+  // The category only: the archive may have been moved anywhere, so no path.
+  void sep;
+  const where = category ? ` (its ${category} folder)` : "";
   return {
     title: `Park ${name}?`,
     body:
-      `Silo moves it into your library folder${where} so the game stops loading it. ` +
-      "It stays in your library. Switch it on any time.",
+      `Silo moves it into your library archive${where} so the game stops loading it. ` +
+      "It stays in your library. Turn it on any time.",
     confirm: "Park it",
     checkbox: { label: "Don't explain this again" },
   };

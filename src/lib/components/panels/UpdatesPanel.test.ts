@@ -59,6 +59,16 @@ describe("UpdatesPanel", () => {
     expect(h.onCheck).toHaveBeenCalledOnce();
   });
 
+  it("a first check whose catalog failed shows that, not the never-checked state", () => {
+    setup(
+      { failed: [row("C", { hasUpdate: undefined, error: "GitHub is limiting requests for a while." })] },
+      { checked: false, catalogError: { message: "offline", detail: "", offline: true } },
+    );
+    expect(screen.queryByText("Check your mods for updates")).not.toBeInTheDocument();
+    expect(screen.getByText(/Silo can't reach its catalog/)).toBeInTheDocument();
+    expect(screen.getByText("GitHub is limiting requests for a while.")).toBeInTheDocument();
+  });
+
   it("shows sections in order and hides empty ones", () => {
     setup({
       ready: [row("A", { assetUrl: "https://x/a.zip", source: "github" })],
@@ -207,10 +217,10 @@ describe("UpdatesView auto-check offer", () => {
     expect(autoCheckEnabled()).toBe(false);
   });
 
-  it("Check on start turns it on and closes the offer", async () => {
+  it("Check when Silo starts turns it on and closes the offer", async () => {
     const user = userEvent.setup();
     view();
-    await user.click(screen.getByRole("button", { name: "Check on start" }));
+    await user.click(screen.getByRole("button", { name: "Check when Silo starts" }));
     expect(autoCheckEnabled()).toBe(true);
     expect(screen.queryByText("Check for mod updates when Silo starts?")).toBeNull();
   });

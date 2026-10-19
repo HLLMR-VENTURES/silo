@@ -6,6 +6,7 @@
   import Switch from "../../ui/Switch.svelte";
   import type { ArchiveStatus } from "../../api";
   import SettingsCard from "./SettingsCard.svelte";
+  import { nMods } from "../../firstRun/firstRun";
   import { folderOpener } from "./folders.svelte";
   import { settingsLock } from "./lock";
 
@@ -48,14 +49,14 @@
 
 <SettingsCard title="Library layout">
   <p class="hint">
-    Organize sorts your <code>.zip</code> mods into <code>mods/archive/&lt;Category&gt;/</code>
-    (subfolders the game ignores) and links the active set back into your mods folder.
+    Organize files your zipped mods into your library archive, sorted by category, where the
+    game ignores them. Active mods are linked back into your mods folder.
     <b>Undo organizing</b> (in Maintenance) puts every mod back.
-    {#if organizedCount > 0}{organizedCount} mod(s) currently organized.{/if}
+    {#if organizedCount > 0}{nMods(organizedCount)} organized now.{/if}
   </p>
   <div class="btnrow">
     <Button disabled={lock.locked} title={lock.reason} onclick={onOrganize}>
-      Organize {unorganizedCount > 0 ? unorganizedCount : "library"}
+      Organize {unorganizedCount > 0 ? nMods(unorganizedCount) : "library"}
     </Button>
   </div>
   {#if lock.locked}<p class="reason">{lock.reason}</p>{/if}
@@ -63,7 +64,7 @@
 
 <SettingsCard title="Auto-file new mods">
   <div class="row">
-    <p class="hint">On load, move newly-downloaded .zip mods into the library and keep them active.</p>
+    <p class="hint">When Silo reads your mods folder, it files newly downloaded mods into your library and keeps them active.</p>
     <Switch
       checked={autoFileNew}
       ariaLabel="Auto-file new mods"

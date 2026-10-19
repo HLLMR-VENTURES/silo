@@ -21,11 +21,16 @@
   import type { LibraryLookup } from "../diagnose/crashNotice";
   import { formatCount, plural } from "../plural";
   import { latestOnly } from "../diagnose/latest";
+  import { describeError, NO_LOG_COPY } from "../errorCopy";
 
   interface Props {
     /** Current active tech names, and which of them are maps (kept on during bisection). */
     activeMods: string[];
     activeMaps: string[];
+    /** Active mods Silo can't park (unzipped folder mods): kept on every round too. */
+    activeFixed?: string[];
+    /** Before a search starts: file loose zips so they can be parked (false stops it). */
+    onBisectPrepare?: () => Promise<boolean>;
     /** Passed through to guided bisection: apply a set, and report start/end. */
     onApply: (techNames: string[]) => Promise<void>;
     onBisecting: (active: boolean) => void;
@@ -52,6 +57,8 @@
   let {
     activeMods,
     activeMaps,
+    activeFixed = [],
+    onBisectPrepare,
     onApply,
     onBisecting,
     recoveryPending = false,
@@ -67,8 +74,10 @@
   }: Props = $props();
 
   let mode = $state<"report" | "bisect">("report");
-  // Bisect the active non-map mods; maps stay on so the save still loads.
-  const pool = $derived(activeMods.filter((m) => !activeMaps.includes(m)));
+  // Bisect the active non-map mods; maps stay on so the save still loads, and mods Silo can't
+  // park (unzipped folders) stay on because set_active can't move them.
+  const alwaysOn = $derived([...new Set([...activeMaps, ...activeFixed])]);
+  const pool = $derived(activeMods.filter((m) => !alwaysOn.includes(m)));
   const canBisect = $derived(pool.length >= 2);
   const bisectOff = "Turn on at least 2 mods that aren't maps to find the problem mod.";
 
@@ -76,12 +85,15 @@
   let logTime = $state<string | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  /** The game hasn't written a log yet (never played): an empty state, not an error. */
+  let noLog = $state(false);
 
   // Reads can overlap (a new log read elsewhere while "Read the log again" runs): the newest wins.
   const reads = latestOnly<{ r: LogReport; ms: number | null }>();
   async function scan() {
     loading = true;
     error = null;
+    noLog = false;
     try {
       const applied = await reads.run(
         async () => {
@@ -96,7 +108,9 @@
       );
       if (!applied) return; // a newer read owns `loading`
     } catch (e) {
-      error = inlineError(e, "Reading the game log");
+      // By code, or by the older backend's text ("No log.txt found…").
+      if (describeError(e).code === "NO_LOG") noLog = true;
+      else error = inlineError(e, "Reading the game log");
       report = null;
     }
     loading = false;
@@ -167,7 +181,9 @@
   {#if mode === "bisect"}
     <BisectFlow
       {pool}
-      alwaysOn={activeMaps}
+      {alwaysOn}
+      onPrepare={onBisectPrepare}
+      stayOn={activeFixed.filter((m) => activeMods.includes(m) && !activeMaps.includes(m)).length}
       {onApply}
       {onBisecting}
       {recoveryPending}
@@ -193,7 +209,9 @@
     <div role="status" aria-live="polite" class="live">
       {#if loading && !report}<div class="empty">Reading log.txt…</div>{/if}
     </div>
-    {#if error}
+    {#if noLog}
+      <div class="empty">{NO_LOG_COPY}</div>
+    {:else if error}
       <div class="verdict bad" role="alert">{error}</div>
     {:else if report && verdict}
       {@const r = report}
@@ -206,7 +224,7 @@
           <Button variant="primary" icon="diagnose" onclick={findProblemMod} disabled={!canBisect}>Find the problem mod</Button>
           <p class="cta-why">
             {#if canBisect}
-              Silo tests half your mods at a time, about {formatCount(Math.ceil(Math.log2(Math.max(pool.length, 2))))} launches.
+              Silo tests half your mods at a time, about {formatCount(Math.ceil(Math.log2(Math.max(pool.length, 2))))} {plural(Math.ceil(Math.log2(Math.max(pool.length, 2))), { one: "launch", other: "launches" })}.
             {:else}
               {bisectOff}
             {/if}
@@ -292,7 +310,7 @@
       class="sample"
       class:open
       aria-expanded={open}
-      aria-label={`${open ? "Collapse" : "Expand"} the log line for ${title}`}
+      aria-label={`line ${m.sampleLine}, the log line for ${title}`}
       onclick={() => toggleLine(m.modName)}
     >
       <span class="line-no tnum">line {m.sampleLine}</span>

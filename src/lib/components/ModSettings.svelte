@@ -12,6 +12,7 @@
     saveModSettingsRaw,
   } from "../api";
   import type { SettingsFile, SettingsEdit } from "../types";
+  import { isNumberText } from "../configSchemas";
 
   interface Props {
     modName: string;
@@ -32,6 +33,7 @@
 
   async function load() {
     loading = true;
+    error = null;
     try {
       files = await getModSettings(modName);
       const v: Record<number, string> = {};
@@ -49,7 +51,8 @@
     const edits: SettingsEdit[] = file.fields
       .filter((fld) => values[fld.id] !== fld.value)
       .map((fld) => ({ id: fld.id, value: values[fld.id] }));
-    if (edits.length === 0) return;
+    if (edits.length === 0 || badNumber(file)) return;
+    error = null;
     try {
       await saveModSettings(file.path, edits);
       flashSaved(file.path);
@@ -60,6 +63,7 @@
   }
 
   async function saveRaw(file: SettingsFile) {
+    error = null;
     try {
       await saveModSettingsRaw(file.path, rawText[file.path]);
       flashSaved(file.path);
@@ -77,6 +81,16 @@
 
   function dirty(file: SettingsFile): boolean {
     return file.fields.some((fld) => values[fld.id] !== fld.value);
+  }
+
+  /** A changed number field that isn't a number (emptied, or a fraction in a whole-number one). */
+  function badNumber(file: SettingsFile): boolean {
+    return file.fields.some(
+      (fld) =>
+        (fld.kind === "int" || fld.kind === "float") &&
+        values[fld.id] !== fld.value &&
+        !isNumberText(values[fld.id] ?? "", fld.kind === "int"),
+    );
   }
 </script>
 
@@ -116,7 +130,7 @@
         <Button variant="primary" class="ms-save" onclick={() => saveRaw(file)}>Save raw XML</Button>
       {:else if file.fields.length === 0}
         <p class="ms-empty small">
-          Silo couldn't model this file as a form. Use Raw XML to edit it directly.
+          Silo can't show this file as a form. Use Raw XML to edit it directly.
         </p>
       {:else}
         {#each file.fields as fld (fld.id)}
@@ -136,21 +150,22 @@
                 class="ms-input tnum"
                 type="number"
                 step={fld.kind === "float" ? "any" : "1"}
-                bind:value={values[fld.id]}
+                value={values[fld.id] ?? ""}
+                oninput={(e) => (values[fld.id] = e.currentTarget.value)}
               />
             {:else}
               <input id={fid} class="ms-input" type="text" bind:value={values[fld.id]} />
             {/if}
           </div>
         {/each}
-        <Button variant="primary" class="ms-save" onclick={() => saveForm(file)} disabled={!dirty(file)}>
+        <Button variant="primary" class="ms-save" onclick={() => saveForm(file)} disabled={!dirty(file) || badNumber(file)}>
           Save changes
         </Button>
       {/if}
     </section>
   {/each}
 
-  <p class="ms-foot">Silo keeps the original and the three versions before your latest edit as <code>.bak</code> files.</p>
+  <p class="ms-foot">Silo keeps backup copies: the original and the three versions before your latest edit.</p>
   {#snippet footer()}
     <Button onclick={() => (open = false)}>Close</Button>
   {/snippet}

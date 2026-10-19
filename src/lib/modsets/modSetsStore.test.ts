@@ -56,6 +56,20 @@ beforeEach(() => {
 });
 
 describe("switchTo", () => {
+  it("Undo expects what the switch left, including a mod Silo couldn't park", async () => {
+    const t = setup(["A", "B", "F"], ["A", "B", "C", "D", "F"]);
+    // App's switch keeps an unzipped folder mod (F) on: set_active can't park it.
+    const live = t.active() as Set<string>;
+    t.setActiveSetTo.mockImplementation(async (mods: string[]) => {
+      live.clear();
+      for (const m of [...mods, "F"]) live.add(m);
+      return true;
+    });
+    await t.store.load();
+    await t.store.switchTo(forestry);
+    expect(t.undo.offer).toHaveBeenCalledWith(expect.objectContaining({ expected: ["C", "D", "Z", "F"] }));
+  });
+
   it("shows the diff, switches, saves a Before snapshot of the previous mods and offers Undo", async () => {
     const t = setup();
     await t.store.load();
@@ -252,6 +266,9 @@ describe("useSave", () => {
     expect(opts.title).toBe("Use Riverbend's mods?");
     expect(opts.body).toContain("Silo saves 1 mod from this save as a set called Riverbend and switches to it.");
     expect(opts.body).toContain("1 mod the save used isn't in your library and is left out.");
+    // Said once (L14): not again as "stays off until you get it", since it isn't in the set.
+    expect(opts.body).not.toMatch(/until you get/);
+    expect(opts.facts?.map((f) => f.label)).not.toContain("Not in your library");
     expect(t.setActiveSetTo).toHaveBeenCalledWith(["C"], "Switching to Riverbend");
     expect(saveAutoSnapshot).toHaveBeenCalledWith("Before Riverbend", ["A", "B"]);
     expect(saveLoadout).toHaveBeenCalledWith(null, "Riverbend", ["C"]);
@@ -280,7 +297,7 @@ describe("switchSummary", () => {
     const on = Array.from({ length: 60 }, (_, i) => `M${i}`);
     const s = switchSummary(activeSetDiff([], on), (t) => `T${t}`);
     expect(s.list).toHaveLength(51);
-    expect(s.list[0]).toBe("On: TM0");
+    expect(s.list[0]).toBe("Turn on: TM0");
     expect(s.list.at(-1)).toBe("…and 10 more");
     expect(s.facts.map((f) => f.label)).toEqual(["Turn on", "Park"]);
   });

@@ -25,8 +25,9 @@ pub const OLD_SUFFIX: &str = ".silo-update-old";
 /// Previous versions kept per mod file.
 pub const KEEP_BACKUPS: usize = 3;
 
-/// 4 GiB bounds a runaway or hostile stream without rejecting a large map mod.
-const MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// 4 GiB bounds a runaway or hostile stream without rejecting a large map mod. Every mod
+/// download uses it (`siloapi::download_to_part` too), so a mod that installs also updates.
+pub(crate) const MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 pub fn part_path(dest: &Path) -> PathBuf {
     with_suffix(dest, PART_SUFFIX)
@@ -66,7 +67,8 @@ fn write_part(reader: impl Read, part: &Path, dest: &Path) -> Result<(), String>
         let n = std::io::copy(&mut limited, &mut out).map_err(|e| e.to_string())?;
         if n > MAX_BYTES {
             return Err(format!(
-                "The update is larger than the {MAX_BYTES}-byte limit."
+                "The update is larger than {} GB, so Silo stopped the download.",
+                MAX_BYTES / (1024 * 1024 * 1024)
             ));
         }
         out.sync_all().map_err(|e| e.to_string())?;

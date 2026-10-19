@@ -44,7 +44,7 @@ Keep `scan`, `moddesc`, `library`, `profile`, `projection`, `conflict`, and
 running app.
 
 > **The shipped module set** has grown well beyond the original sketch above — the same
-> pure-logic-behind-thin-command pattern held (230+ Rust unit tests). The sketch's
+> pure-logic-behind-thin-command pattern held (about 450 Rust unit tests). The sketch's
 > `library`/`profile`/`projection` became `organize` + `db`, and the command wrappers live
 > in `lib.rs`. Feature-level release gate: `docs/SMOKE_TEST.md`.
 
@@ -54,10 +54,10 @@ running app.
 |------|---------|
 | Scan & parse | `scan` (walk + parse + cache), `moddesc` (modDesc.xml model), `category` (two-level categorization), `store` (storeItem category), `icons` (DDS/PNG thumbnails) |
 | Game & folders | `fsgame` (per-OS user-dir discovery: Steam libraries, Proton prefix, Mac App Store), `modsroot` (which mods folder is live: FS25's `modsDirectoryOverride`, the user's choice, per-folder state — #162), `gamelaunch` (launch, `fs25_running`) |
-| Library on disk | `organize` (archive layout, projection — hardlink/symlink/junction/copy — and Restore vanilla), `relocate` (moving the library archive to another folder/drive as a resumable, verified job — #166, landed in #185) |
-| Analysis | `conflicts`, `logscan` (crash triage), `bisect` (guided bisection), `bindings` (input map) |
+| Library on disk | `organize` (archive layout, projection — hardlink/symlink/junction/copy — and Undo organizing), `relocate` (moving the library archive to another folder/drive as a resumable, verified job — #166, landed in #185) |
+| Analysis | `conflicts`, `logscan` (crash triage), `bisect` (Find the problem mod: the guided halving search), `bindings` (input map) |
 | Saves & config | `savegame` (saves + bound mod lists), `xmlconfig` (game.xml / careerSavegame.xml fields), `settings_form` (mod settings XML → form ↔ XML), `xmltext` |
-| Network & sources | `siloapi` (catalog client), `github`, `collection` (shareable mod-set lists), `net` (outbound-URL guard) |
+| Network & sources | `siloapi` (catalog client), `github`, `collection` (shared mod sets; the UI says *shared set*), `net` (outbound-URL guard) |
 | Sharing & generators | `mpsync` (multiplayer manifest), `bridge` (filltype companion mod), `provenance` (integrity hashing) |
 | Persistence & safety | `db` (SQLite), `paths` (write confinement + `.bak` writes), `secrets` (OS keychain) |
 
@@ -143,7 +143,7 @@ marked **copy**. Every projection is recorded so cleanup only touches Silo-owned
   `<modsDirectoryOverride>` is followed; the user can choose another folder and optionally
   write the override back (with a `.bak`). Organize state is keyed per folder, and
   `allowed_roots()` follows the active folder so every write command does too.
-- **Where the archive lives** (`relocate`, #166 — landed in #185, unreleased as of v0.8.0):
+- **Where the archive lives** (`relocate`, #166 — landed in #185, shipped in v0.9.0):
   per mods folder, the archive can be moved to any drive while the mods folder stays put.
   The move is a resumable job with a DB marker — copy to a temp name, verify, place without
   replacing an existing file, then remove the original — with Pause / Resume / Cancel

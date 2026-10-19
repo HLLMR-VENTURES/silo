@@ -135,8 +135,8 @@ describe("runBulkSwitch: parking loose mods", () => {
     const o = t.ask.mock.calls[0][0];
     expect(o.title).toBe("Park 2 mods?");
     expect(o.confirm).toBe("Park 2 mods");
-    expect(o.body).toContain("moves them into your library folder");
-    expect(o.body).toContain("Nothing is deleted; Undo puts them back.");
+    expect(o.body).toContain("moves them into your library archive");
+    expect(o.body).toContain("Nothing is deleted. Undo puts them back.");
     expect(t.calls).toEqual(["file:A,B"]);
     expect(t.undos[0]).toMatchObject({ message: "Parked 2 mods.", tone: "neutral", previous: ["A", "B"], expected: [] });
   });
@@ -155,10 +155,10 @@ describe("runBulkSwitch: parking loose mods", () => {
     expect(t.ask).toHaveBeenCalledTimes(1);
     const o = t.ask.mock.calls[0][0];
     expect(o.title).toBe("Park 29 mods?");
-    expect(o.body).toContain("2 of them aren't filed yet, so Silo moves those into your library folder (archive\\Tractors)");
+    expect(o.body).toContain("2 of them aren't filed yet, so Silo moves those into your library archive (its Tractors folder)");
     expect(o.facts).toEqual([
       { label: "Park", value: "29 mods" },
-      { label: "Filed into the library", value: "2 loose" },
+      { label: "Filed into your library first", value: "2 mods" },
     ]);
     expect(t.calls[0]).toBe("file:L1,L2");
     expect(t.calls[1]).toMatch(/^apply:off:P0,/);
@@ -213,11 +213,11 @@ describe("the bulk filing dialog", () => {
   it("several categories, another drive, cloud-synced over 25", () => {
     const loose = [mod("A", true, "Maps"), mod("B", true, "Tractors")];
     const o = bulkParkLooseConfirm(30, loose, { otherDrive: true, cloudSynced: true, sep: "/" });
-    expect(o.body).toContain("(each into its category folder in archive)");
+    expect(o.body).toContain("(each into its category folder in your library archive)");
     expect(o.body).toContain("cloud-synced");
     expect(o.facts).toContainEqual({ label: "Library folder", value: "On another drive" });
     expect(bulkParkLooseConfirm(2, [mod("A", true, "Maps")], { sep: "/" }).body).toContain(
-      "1 of them isn't filed yet, so Silo moves it into your library folder (archive/Maps)",
+      "1 of them isn't filed yet, so Silo moves it into your library archive (its Maps folder)",
     );
   });
 

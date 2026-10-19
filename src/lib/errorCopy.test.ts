@@ -4,6 +4,7 @@ import {
   classifyMessage,
   describeError,
   ERROR_CODES,
+  setGithubConnected,
   fileNameIn,
   formatDetail,
   HUMAN_COPY_MAX,
@@ -22,21 +23,24 @@ const LINUX_UA = { userAgent: "Mozilla/5.0 (X11; Linux x86_64)", platform: "Linu
 
 describe("describeError copy", () => {
   const table: [code: string, title: string, retryable: boolean][] = [
-    ["FILE_IN_USE", "Silo couldn't change a file because another program is using it. Close Farming Simulator 25 or the program that has it open, then try again.", true],
+    ["FILE_IN_USE", "Another program is using a file Silo needs. Close Farming Simulator 25 or the program that has it open, then try again.", true],
     ["GAME_RUNNING", "Close Farming Simulator 25 first, then try again.", true],
-    ["NOT_A_SET_LINK", "That doesn't look like a Silo set link. Links look like https://silo.hllmr.com/c/… or a GitHub gist.", false],
+    ["NOT_A_SET_LINK", "That doesn't look like a Silo set link. Links look like https://silo.hllmr.com/c/… or a link from GitHub.", false],
     ["LIBRARY_BUSY", "Silo is finishing another change to your library. Try again in a moment.", true],
     ["MOVE_UNFINISHED", "Finish or cancel the library move first. You can resume or cancel it from the notice at the top.", false],
+    ["MOVE_RUNNING", "Silo is moving your library archive. Pause the move to play, or wait for it to finish.", false],
     ["ARCHIVE_UNAVAILABLE", "Your library archive isn't available. Connect the drive, or choose another folder.", true],
     ["PERMISSION_DENIED", "Windows didn't let Silo change this file. If it's in a protected folder, choose a mods folder in your Documents.", false],
     ["DISK_FULL", "There isn't enough space on the drive for this. Free some space and try again.", true],
     ["NOT_FOUND", "Silo couldn't find a file it needed. It may have been moved or deleted. Rescan and try again.", false],
     ["NET_OFFLINE", "Silo can't reach the internet right now.", true],
-    ["NET_TIMEOUT", "The download stopped responding.", true],
+    ["NET_TIMEOUT", "The connection stopped responding. Try again in a moment.", true],
     ["GITHUB_AUTH", "GitHub needs you to sign in again.", false],
     ["GITHUB_RATE_LIMIT", "GitHub is limiting requests for a while. Connecting your GitHub account raises the limit.", false],
     ["NOT_A_MOD", "That file isn't a Farming Simulator mod.", false],
-    ["CHANGED_SINCE_PREVIEW", "This changed after you opened it. Preview it again.", false],
+    ["DOWNLOAD_BROKEN", "The download was cut off or damaged. Try again.", true],
+    ["NO_LOG", "No game log yet. Play Farming Simulator 25 once, then come back here.", false],
+    ["CHANGED_SINCE_PREVIEW", "This set changed after you opened it. Preview it again.", false],
     ["DB_NEWER", "This library was used by a newer Silo. Install the latest Silo to open it.", false],
     ["UNKNOWN", "Something went wrong while moving mods.", true],
   ];
@@ -76,11 +80,39 @@ describe("describeError copy", () => {
       "Finish or cancel the archive move first.",
       "An archive move is already running.",
       "An archive move is already unfinished. Resume or cancel it first.",
-      "Silo is moving your library archive. Pause the move to play.",
     ]) {
       expect(classifyMessage(msg)).toBe("MOVE_UNFINISHED");
       expect(describeError(msg).retryable).toBe(false);
     }
+  });
+
+  it("launching while a move runs says to pause it, not to finish or cancel it (L2)", () => {
+    expect(classifyMessage("Silo is moving your library archive. Pause the move to play.")).toBe("MOVE_RUNNING");
+  });
+
+  it("a cut-off download can be tried again; a local file that isn't a mod can't (L11)", () => {
+    for (const msg of [
+      "The download isn't a valid .zip (it may be corrupt or cut off). Try again.",
+      "Downloaded file is not a valid .zip",
+    ]) {
+      expect(classifyMessage(msg)).toBe("DOWNLOAD_BROKEN");
+      expect(describeError(msg).retryable).toBe(true);
+    }
+    expect(describeError({ code: "NOT_A_MOD", message: "x" }).retryable).toBe(false);
+  });
+
+  it("no log yet is its own code (L5)", () => {
+    expect(classifyMessage("No log.txt found. Launch FS25 at least once first.")).toBe("NO_LOG");
+    expect(classifyMessage("No game log yet. Play Farming Simulator 25 once, then come back here.")).toBe("NO_LOG");
+  });
+
+  it("the rate-limit copy suggests connecting only when GitHub isn't connected (L12)", () => {
+    setGithubConnected(true);
+    expect(describeError({ code: "GITHUB_RATE_LIMIT", message: "x" }).title).toBe(
+      "GitHub is limiting requests for a while. Try again in a few minutes.",
+    );
+    setGithubConnected(false);
+    expect(describeError({ code: "GITHUB_RATE_LIMIT", message: "x" }).title).toMatch(/Connecting your GitHub account/);
   });
 
   it("OTHER and codes this build doesn't know read as UNKNOWN, keeping the raw code in detail", () => {
@@ -103,7 +135,7 @@ describe("describeError copy", () => {
     const msg =
       'failed to rename "C:\\Users\\me\\Documents\\My Games\\FarmingSimulator2025\\mods\\FS25_Big_Tractor.zip": The process cannot access the file because it is being used by another process. (os error 32)';
     expect(describeError(msg).title).toBe(
-      "Silo couldn't move FS25_Big_Tractor.zip because another program is using it. Close Farming Simulator 25 or the program that has it open, then try again.",
+      "Another program is using FS25_Big_Tractor.zip, so Silo couldn't change it. Close Farming Simulator 25 or the program that has it open, then try again.",
     );
   });
 

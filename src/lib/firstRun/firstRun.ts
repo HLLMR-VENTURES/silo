@@ -11,6 +11,7 @@ export interface FirstRunState {
   onboardingDone: boolean;
   whatsNewSeen: boolean;
   hasOrganized: boolean;
+  /** Anything else the user made: curation, tags, category overrides, repo or page links, sets. */
   hasCuration: boolean;
 }
 
@@ -28,7 +29,7 @@ export function setFirstRunFlag(name: FirstRunFlag, on = true): Promise<void> {
 /**
  * Which first-run screen to show, if any.
  * - The setup flow: never finished or skipped, and the library has nothing Silo made (no
- *   organized mods, no curation rows). An upgrading user never sees it.
+ *   organized mods, nothing the user made: curation, tags, sets…). An upgrading user never sees it.
  * - The "What's new" card: an upgrading user (organized mods or curation rows) who hasn't
  *   dismissed it.
  */
@@ -81,7 +82,7 @@ export function filingFailures(errors: string[], plan: PlannedMove[]): FilingFai
 /** `message`: why nothing was filed, when it was tried and stopped (the game is running…). */
 export type OrganizeOutcome =
   | { refused: true; message?: string }
-  | { refused?: false; failures: FilingFailure[]; filed: number };
+  | { refused?: false; failures: FilingFailure[]; filed: number; relinkFailed?: boolean };
 /** What choosing another archive folder did: cancelled, a problem to show, or the new path. */
 export type ArchiveChoice = null | { problem: string } | { path: string };
 /** How the setup flow ended: Skip setup, Not now, or after organizing. */
@@ -89,7 +90,7 @@ export type FinishHow = "skip" | "notNow" | "done";
 
 /** The text "Copy details" copies for a partial failure. */
 export function failureDetails(failures: FilingFailure[], filed: number, total: number): string {
-  const lines = [`Silo filed ${filed} of ${total} mods. These couldn't be moved:`];
+  const lines = [`Silo filed ${filed} of ${nMods(total)}. These couldn't be moved:`];
   for (const f of failures) lines.push(`- ${f.fileName || f.techName || "?"}: ${f.message}`);
   return lines.join("\n");
 }
@@ -102,6 +103,21 @@ export interface FilingRun {
   changed: number;
   /** Mods handed to apply_organize before it finished or threw. */
   done: number;
+  /** Linking the filed mods back into the mods folder threw (see `relinkFiled`). */
+  relinkError?: unknown;
+}
+
+/**
+ * After filing, link the filed mods back into the mods folder so they stay active. A throw (the
+ * archive drive went away, Silo is updating itself) is kept on `run` instead of escaping, so the
+ * Organize dialog or the setup flow that filed them can finish and say so.
+ */
+export async function relinkFiled(run: FilingRun, relink: () => Promise<unknown>): Promise<void> {
+  try {
+    await relink();
+  } catch (e) {
+    run.relinkError = e;
+  }
 }
 
 /**

@@ -19,6 +19,11 @@ pub mod code {
     /// A library archive move is paused or unfinished (or already under way): it must be
     /// resumed or cancelled before this can run.
     pub const MOVE_UNFINISHED: &str = "MOVE_UNFINISHED";
+    /// A library archive move is running right now (it can be paused): e.g. launching the game.
+    pub const MOVE_RUNNING: &str = "MOVE_RUNNING";
+    /// The game hasn't written this file yet (log.txt, inputBinding.xml): FS25 was never played
+    /// with this user folder. Not a failure; the UI shows an empty state.
+    pub const NO_LOG: &str = "NO_LOG";
     pub const GAME_RUNNING: &str = "GAME_RUNNING";
     /// Text pasted into "Open a shared set" isn't a Silo set link or a GitHub gist.
     pub const NOT_A_SET_LINK: &str = "NOT_A_SET_LINK";
@@ -36,6 +41,8 @@ pub mod code {
     pub const GITHUB_RATE_LIMIT: &str = "GITHUB_RATE_LIMIT";
     /// The file isn't a Farming Simulator mod (no modDesc.xml, or not a readable .zip).
     pub const NOT_A_MOD: &str = "NOT_A_MOD";
+    /// A download arrived cut off or damaged (not a readable .zip): trying again can help.
+    pub const DOWNLOAD_BROKEN: &str = "DOWNLOAD_BROKEN";
     /// A collection changed between its preview and the apply.
     pub const CHANGED_SINCE_PREVIEW: &str = "CHANGED_SINCE_PREVIEW";
     /// The library database was written by a newer Silo.
@@ -160,7 +167,7 @@ fn known_phrase(lower: &str) -> Option<&'static str> {
             code::MOVE_UNFINISHED,
         ),
         // Before the plain "moving" phrase: launching while a move runs.
-        ("pause the move to play", code::MOVE_UNFINISHED),
+        ("pause the move to play", code::MOVE_RUNNING),
         ("silo is moving your library archive", code::LIBRARY_BUSY),
         ("close farming simulator 25 first", code::GAME_RUNNING),
         ("reconnect its drive", code::ARCHIVE_UNAVAILABLE),
@@ -171,6 +178,11 @@ fn known_phrase(lower: &str) -> Option<&'static str> {
         ("saved by a newer version of silo", code::DB_NEWER),
         ("isn't a farming simulator mod", code::NOT_A_MOD),
         ("doesn't look like a silo set link", code::NOT_A_SET_LINK),
+        // A download that isn't a readable .zip was cut off or damaged (retry), before the
+        // general "not a valid .zip" (a local file that isn't a mod).
+        ("download isn't a valid .zip", code::DOWNLOAD_BROKEN),
+        ("downloaded file is not a valid .zip", code::DOWNLOAD_BROKEN),
+        ("downloaded file isn't a valid .zip", code::DOWNLOAD_BROKEN),
         ("not a valid .zip", code::NOT_A_MOD),
         ("isn't a valid .zip", code::NOT_A_MOD),
         ("invalid zip archive", code::NOT_A_MOD),
@@ -368,7 +380,7 @@ pub fn format_frontend_log(
 /// `s` on one line (CR/LF runs → ` | `; every other control character → a space, see
 /// `log_safe_char`), cut to `FRONTEND_LOG_MAX` bytes on a char boundary.
 fn one_line(s: &str) -> String {
-    let flat = s
+    let flat = mask_secrets(s)
         .split(['\r', '\n'])
         .filter(|part| !part.is_empty())
         .map(|part| part.chars().map(log_safe_char).collect::<String>())
@@ -382,6 +394,72 @@ fn one_line(s: &str) -> String {
         end -= 1;
     }
     format!("{}…", &flat[..end])
+}
+
+/// What replaces a masked secret.
+const REDACTED: &str = "[redacted]";
+
+/// GitHub token prefixes: fine-grained PATs, classic PATs, OAuth, user-to-server,
+/// server-to-server and refresh tokens.
+const TOKEN_PREFIXES: [&str; 6] = ["github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"];
+
+/// `s` with anything shaped like a credential replaced by `[redacted]`, for text bound for the
+/// log or diagnostics: the quoted header in ureq's "invalid header '…'" error (which carries the
+/// whole `Authorization` line, even across a line break), the word after `Bearer `, and GitHub
+/// tokens (a known prefix plus 8+ token characters, not inside a longer word). Callers should
+/// never pass secrets; this is the backstop for one that slips through.
+pub fn mask_secrets(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let rest = &s[i..];
+        let after_word = s[..i]
+            .chars()
+            .next_back()
+            .map_or(true, |c| !(c.is_alphanumeric() || c == '_'));
+        if let Some(n) = starts_with_ci(rest, "invalid header '") {
+            let quoted = rest[n..].find('\'').unwrap_or(rest.len() - n);
+            out.push_str(&rest[..n]);
+            out.push_str(REDACTED);
+            i += n + quoted;
+            continue;
+        }
+        if after_word {
+            if let Some(n) = starts_with_ci(rest, "bearer ") {
+                let run = rest[n..]
+                    .find(|c: char| c.is_whitespace() || c == '\'' || c == '"')
+                    .unwrap_or(rest.len() - n);
+                if run > 0 {
+                    out.push_str(&rest[..n]);
+                    out.push_str(REDACTED);
+                    i += n + run;
+                    continue;
+                }
+            }
+            if let Some(p) = TOKEN_PREFIXES.iter().find(|p| rest.starts_with(**p)) {
+                let run = rest[p.len()..]
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len() - p.len());
+                if run >= 8 {
+                    out.push_str(p);
+                    out.push_str(REDACTED);
+                    i += p.len() + run;
+                    continue;
+                }
+            }
+        }
+        let c = rest.chars().next().unwrap_or_default();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// The length of `prefix` (ASCII) when `s` starts with it in any case.
+fn starts_with_ci(s: &str, prefix: &str) -> Option<usize> {
+    let head = s.as_bytes().get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix.as_bytes())
+        .then_some(prefix.len())
 }
 
 /// A space for any character that could break or fake a log line: C0 controls (tab included),
@@ -583,7 +661,7 @@ mod tests {
             (
                 "Silo is moving your library archive. Pause the move to play.",
                 UNIX,
-                code::MOVE_UNFINISHED,
+                code::MOVE_RUNNING,
             ),
             (
                 "Silo is moving your library archive.",
@@ -637,12 +715,18 @@ mod tests {
                 WIN,
                 code::NOT_A_MOD,
             ),
-            ("Downloaded file is not a valid .zip", UNIX, code::NOT_A_MOD),
+            ("Downloaded file is not a valid .zip", UNIX, code::DOWNLOAD_BROKEN),
+            (
+                "Downloaded file isn't a valid .zip (corrupt or truncated)",
+                WIN,
+                code::DOWNLOAD_BROKEN,
+            ),
             (
                 "The download isn't a valid .zip (it may be corrupt or cut off). Try again.",
                 WIN,
-                code::NOT_A_MOD,
+                code::DOWNLOAD_BROKEN,
             ),
+            ("FS25_X.zip is not a valid .zip", WIN, code::NOT_A_MOD),
             ("invalid Zip archive: Could not find EOCD", UNIX, code::NOT_A_MOD),
             // Not matched
             ("", WIN, code::UNKNOWN),
@@ -766,6 +850,52 @@ mod tests {
             code::NET_OFFLINE
         );
         assert_eq!(transport_code(K::InvalidUrl, "x: Bad URL"), code::UNKNOWN);
+    }
+
+    #[test]
+    fn token_shaped_text_is_masked() {
+        let cases = [
+            (
+                "invalid header 'Authorization: Bearer ghp_abcdefgh12345678\u{200b}' then",
+                "invalid header '[redacted]' then",
+            ),
+            (
+                "invalid header 'Authorization: Bearer ghp_abcd\nefgh12345678' x",
+                "invalid header '[redacted]' x",
+            ),
+            (
+                "auth Bearer abc.def-ghi done",
+                "auth Bearer [redacted] done",
+            ),
+            ("token ghp_0123456789abcdefABCDEF.", "token ghp_[redacted]."),
+            (
+                "pat github_pat_11ABCDEFG0123456789_xyz end",
+                "pat github_pat_[redacted] end",
+            ),
+            (
+                "gho_abcdefghijk and ghs_ABCDEFGHIJ",
+                "gho_[redacted] and ghs_[redacted]",
+            ),
+            // Not tokens: too short, or inside a longer word.
+            (
+                "ghp_short myghp_0123456789abcdef",
+                "ghp_short myghp_0123456789abcdef",
+            ),
+            ("a Bearer  b", "a Bearer  b"),
+            ("Ünïcode ok — caf\u{e9}", "Ünïcode ok — caf\u{e9}"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(mask_secrets(input), want, "{input:?}");
+        }
+        let (_, line) = format_frontend_log(
+            "error",
+            "Saving your GitHub token: invalid header 'Authorization: Bearer ghp_abcd\nefgh12345678'",
+            Some("Bearer ghp_0123456789abcdef"),
+        );
+        assert!(
+            !line.contains("abcd") && !line.contains("efgh") && !line.contains("0123"),
+            "{line}"
+        );
     }
 
     #[test]

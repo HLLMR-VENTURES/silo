@@ -7,7 +7,7 @@
   import Switch from "../ui/Switch.svelte";
   import { inlineError } from "../state/notify.svelte";
   import { getConfig, setConfig } from "../api";
-  import type { CfgField, CfgPreset } from "../configSchemas";
+  import { inFileCase, isNumberText, matchOptionCase, type CfgField, type CfgPreset } from "../configSchemas";
 
   interface Props {
     title: string;
@@ -20,9 +20,14 @@
   let { title, path, fields, presets = [], footnote, onClose }: Props = $props();
 
   let orig = $state<Record<string, string>>({});
+  /** The values as the file has them (its casing), for writing a choice the same way. */
+  let fileVals: Record<string, string> = {};
   let vals = $state<Record<string, string>>({});
   let loading = $state(true);
+  /** The file couldn't be read: there's no form to show. */
   let error = $state<string | null>(null);
+  /** The last save failed (the game is running…): shown above the form, which stays. */
+  let saveError = $state<string | null>(null);
   let saved = $state(false);
   let open = $state(true);
   const uid = $props.id();
@@ -35,8 +40,12 @@
         path,
         fields.map((f) => f.path),
       );
-      orig = got;
-      vals = { ...got };
+      // The game may write a choice in another case ("Medium" for "medium"): show it as that
+      // option. Unchanged, it isn't written back.
+      fileVals = got;
+      const shown = matchOptionCase(fields, got);
+      orig = shown;
+      vals = { ...shown };
     } catch (e) {
       error = inlineError(e, "Reading the settings file");
     }
@@ -44,7 +53,10 @@
   }
   load();
 
-  const dirty = $derived(fields.some((f) => (vals[f.path] ?? "") !== (orig[f.path] ?? "")));
+  const changed = (f: CfgField) => (vals[f.path] ?? "") !== (orig[f.path] ?? "");
+  const dirty = $derived(fields.some(changed));
+  /** A changed number field that isn't a number (emptied): Save waits for a real value. */
+  const badNumber = $derived(fields.some((f) => f.kind === "number" && changed(f) && !isNumberText(vals[f.path] ?? "")));
 
   function applyPreset(p: CfgPreset) {
     vals = { ...vals, ...p.values };
@@ -53,15 +65,20 @@
   async function save() {
     const edits = fields
       .filter((f) => (vals[f.path] ?? "") !== (orig[f.path] ?? ""))
-      .map((f) => ({ path: f.path, value: vals[f.path] ?? "" }));
-    if (edits.length === 0) return;
+      .map((f) => ({
+        path: f.path,
+        value: f.kind === "select" ? inFileCase(vals[f.path] ?? "", fileVals[f.path]) : (vals[f.path] ?? ""),
+      }));
+    if (edits.length === 0 || badNumber) return;
+    saveError = null;
     try {
       await setConfig(path, edits);
       orig = { ...vals };
+      for (const e of edits) fileVals[e.path] = e.value;
       saved = true;
       setTimeout(() => (saved = false), 1800);
     } catch (e) {
-      error = inlineError(e, "Saving the settings file");
+      saveError = inlineError(e, "Saving the settings file");
     }
   }
 </script>
@@ -72,6 +89,7 @@
   {:else if error}
     <p class="ms-error" role="alert">{error}</p>
   {:else}
+    {#if saveError}<p class="ms-error" role="alert">{saveError}</p>{/if}
     {#if presets.length > 0}
       <div class="ce-presets" role="group" aria-label="Presets">
         <span class="ce-presets-label" aria-hidden="true">Presets:</span>
@@ -101,19 +119,26 @@
             {/each}
           </select>
         {:else if f.kind === "number"}
-          <input id={fieldId(i)} class="ce-input tnum" type="number" bind:value={vals[f.path]} />
+          <!-- Not bind:value: on a number input that holds a JS number, and Rust takes strings. -->
+          <input
+            id={fieldId(i)}
+            class="ce-input tnum"
+            type="number"
+            value={vals[f.path] ?? ""}
+            oninput={(e) => (vals[f.path] = e.currentTarget.value)}
+          />
         {:else}
           <input id={fieldId(i)} class="ce-input" type="text" bind:value={vals[f.path]} />
         {/if}
       </div>
     {/each}
 
-    {#if footnote}<p class="ms-foot">{footnote} Silo keeps the original and the three versions before your latest edit as <code>.bak</code> files.</p>{/if}
+    {#if footnote}<p class="ms-foot">{footnote} Silo keeps backup copies: the original and the three versions before your latest edit.</p>{/if}
   {/if}
   {#snippet footer()}
     <span class="ms-saved" role="status">{#if saved}Saved <Icon name="check" size={13} />{/if}</span>
     <Button onclick={() => (open = false)}>Close</Button>
-    <Button variant="primary" onclick={save} disabled={loading || !!error || !dirty}>Save changes</Button>
+    <Button variant="primary" onclick={save} disabled={loading || !!error || !dirty || badNumber}>Save changes</Button>
   {/snippet}
 </Dialog>
 

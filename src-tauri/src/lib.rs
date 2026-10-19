@@ -572,13 +572,10 @@ async fn gh_device_poll(
 async fn gh_set_pat(app: tauri::AppHandle, pat: String) -> Result<String, String> {
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let pat = pat.trim().to_string();
-        if pat.is_empty() {
-            return Err("Empty token".into());
-        }
+        let pat = github::clean_pat(&pat)?;
         let (user, scopes) = github::whoami_scoped(&pat)?;
         if user.is_empty() {
-            return Err("GitHub did not recognize that token".into());
+            return Err("GitHub didn't accept that token. Check it and paste it again.".into());
         }
         let conn = db::open(&db)?;
         secrets::set(&conn, "gh_token", Some(&pat))?;
@@ -624,7 +621,7 @@ async fn gh_star(
     tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token")
-            .ok_or_else(|| "Connect your GitHub account first".to_string())?;
+            .ok_or_else(|| "Connect your GitHub account first.".to_string())?;
         github::set_star(&owner, &repo, &token, on)
     })
     .await
@@ -643,7 +640,7 @@ async fn gh_watch(
     tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token")
-            .ok_or_else(|| "Connect your GitHub account first".to_string())?;
+            .ok_or_else(|| "Connect your GitHub account first.".to_string())?;
         github::set_watch(&owner, &repo, &token, on)
     })
     .await
@@ -1346,6 +1343,16 @@ async fn catalog_check_updates(
 /// up in the catalog, fetch the canonical manifest for the local version, and compare.
 /// Verified (byte/content match), Modified (with the exact file diff), or Unverified (no
 /// hashed build to compare — not proof of anything). Provenance, not antivirus.
+/// Why a mod without a `<version>` can't be verified.
+const NO_VERSION: &str =
+    "This mod's modDesc.xml has no version, so there's no build to compare against.";
+
+/// The version to look up a canonical build for: the modDesc version, unless it's missing or
+/// blank (which the API answers with a 400, not "no build").
+fn verifiable_version(version: Option<&str>) -> Option<&str> {
+    version.map(str::trim).filter(|v| !v.is_empty())
+}
+
 #[tauri::command]
 async fn verify_mod(
     app: tauri::AppHandle,
@@ -1364,13 +1371,16 @@ async fn verify_mod(
             .find(|r| r.tech_name.as_deref() == Some(tech_name.as_str()))
         else {
             return Ok(provenance::VerifyResult::unverified(
-                "This mod isn't in the catalog yet. No trusted build to compare against.",
+                "This mod isn't in Silo's catalog yet, so there's nothing to compare it with.",
             ));
         };
 
         // The server does version-equivalence (ModHub `1.2.0` ↔ GitHub `v1.2.0`), so send
         // the local modDesc version verbatim. 404 → no hashed build for this version.
-        let ver = version.as_deref().unwrap_or("");
+        let Some(ver) = verifiable_version(version.as_deref()) else {
+            // The API refuses a blank version (400 "version query param required").
+            return Ok(provenance::VerifyResult::unverified(NO_VERSION));
+        };
         match siloapi::manifest(&base, &hit.id, ver)? {
             Some(cm) => {
                 let canon_entries: Vec<provenance::Entry> = cm
@@ -1391,7 +1401,7 @@ async fn verify_mod(
                 Ok(r)
             }
             None => Ok(provenance::VerifyResult::unverified(
-                "No hashed build for this version yet. Coverage is GitHub-first and growing.",
+                "Silo's catalog has no published build of this version to compare with yet.",
             )),
         }
     })
@@ -1818,7 +1828,7 @@ fn primary_root(root: Option<String>) -> Result<PathBuf, String> {
         Some(r) if !r.is_empty() => {
             let want = PathBuf::from(&r)
                 .canonicalize()
-                .map_err(|_| "That mods folder doesn't exist".to_string())?;
+                .map_err(|_| "That mods folder isn't there anymore.".to_string())?;
             allowed
                 .into_iter()
                 .find(|a| a.canonicalize().map(|ac| ac == want).unwrap_or(false))
@@ -2094,7 +2104,7 @@ fn resolve_layout(
         if matches!(mods_folder_check(conn, mods, &known(false)), Ok(None)) {
             return Err(blocked(
                 format!(
-                    "Farming Simulator 25's mods folder setting points at {}, which shares files with this folder. Point FS25 at this folder, or choose another one.",
+                    "Farming Simulator 25's mods folder setting points at {}, which shares files with this folder. Point Farming Simulator 25 at this folder, or choose another one.",
                     g.display()
                 ),
                 modsroot::BlockCause::GameSetting,
@@ -2226,17 +2236,23 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
     let default = loc.as_ref().map(|l| l.user_dir.join("mods"));
     let map = loc.as_ref().map(path_map).unwrap_or_default();
     let (ov, game_setting_problem) = match loc.as_ref() {
-        None => (None, Some("FS25 user folder not found".to_string())),
+        None => (
+            None,
+            Some("Silo can't find your Farming Simulator 25 user folder.".to_string()),
+        ),
         Some(l) => match std::fs::read_to_string(l.user_dir.join("gameSettings.xml")) {
             Err(_) => (
                 None,
-                Some("gameSettings.xml not found. Start FS25 once to create it.".to_string()),
+                Some(
+                    "Start Farming Simulator 25 once so it creates its settings, then try again."
+                        .to_string(),
+                ),
             ),
             Ok(xml) => match modsroot::read_override(&xml) {
                 Some(o) => (Some(o), None),
                 None => (
                     None,
-                    Some("gameSettings.xml has no modsDirectoryOverride setting".to_string()),
+                    Some("The game's settings don't have a mods folder entry yet.".to_string()),
                 ),
             },
         },
@@ -2328,7 +2344,7 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
 /// original (`gameSettings.xml.silo-original.bak`) and the last three versions (`.bak`,
 /// `.bak.2`, `.bak.3`), then swaps the new file in atomically.
 fn point_game_at(folder: &std::path::Path) -> Result<(), String> {
-    let loc = fsgame::locate().ok_or_else(|| "FS25 user folder not found".to_string())?;
+    let loc = fsgame::locate().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
     let gs = loc.user_dir.join("gameSettings.xml");
     let roots = [loc.user_dir.clone()];
     let xml = paths::guarded_xml_read(&roots, &gs)?;
@@ -2453,7 +2469,7 @@ async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus
 async fn create_mods_folder(app: tauri::AppHandle) -> Result<ModsRootStatus, error::AppError> {
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<ModsRootStatus, String> {
-        let loc = fsgame::locate().ok_or_else(|| "FS25 user folder not found".to_string())?;
+        let loc = fsgame::locate().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         std::fs::create_dir_all(loc.user_dir.join("mods")).map_err(|e| e.to_string())?;
         let conn = db::open(&db)?;
         Ok(compute_mods_root_status(&conn))
@@ -3585,9 +3601,11 @@ async fn delete_loadout(app: tauri::AppHandle, id: i64) -> Result<(), error::App
 #[tauri::command]
 async fn shared_file_kind(path: String) -> Result<String, String> {
     off_main(move || {
-        let p = std::path::Path::new(&path);
-        paths::safe_inbound(p, &["silo", "silomp", "json"])?;
-        let text = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
+        let text = paths::read_inbound_text(
+            std::path::Path::new(&path),
+            &["silo", "silomp", "json"],
+            paths::SHARED_FILE_MAX_BYTES,
+        )?;
         let kind = if mpsync::is_manifest(&text) {
             "multiplayer"
         } else {
@@ -3659,7 +3677,10 @@ async fn launch_game() -> Result<(), error::AppError> {
         );
     }
     if relocate::is_running() {
-        return Err("Silo is moving your library archive. Pause the move to play.".into());
+        return Err(error::AppError::new(
+            error::code::MOVE_RUNNING,
+            "Silo is moving your library archive. Pause the move to play.",
+        ));
     }
     tauri::async_runtime::spawn_blocking(gamelaunch::launch)
         .await
@@ -3787,10 +3808,13 @@ async fn mp_verify_file(
     local: Vec<mpsync::ModRef>,
 ) -> Result<mpsync::VerifyReport, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<mpsync::VerifyReport, String> {
-        paths::safe_inbound(std::path::Path::new(&path), &["silomp", "json"])?;
-        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let text = paths::read_inbound_text(
+            std::path::Path::new(&path),
+            &["silomp", "json"],
+            paths::SHARED_FILE_MAX_BYTES,
+        )?;
         let manifest: mpsync::Manifest = serde_json::from_str(&text)
-            .map_err(|_| "That file isn't a Silo Multiplayer check file".to_string())?;
+            .map_err(|_| "That file isn't a multiplayer check file.".to_string())?;
         let local_hashed = mpsync::hash_mods(&local);
         Ok(mpsync::diff(&manifest.mods, &local_hashed))
     })
@@ -3876,11 +3900,11 @@ async fn collection_export(
     tauri::async_runtime::spawn_blocking(move || -> Result<ExportResult, String> {
         let name = name.trim().to_string();
         if name.is_empty() {
-            return Err("Give the set a name".into());
+            return Err("Give the set a name.".into());
         }
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token")
-            .ok_or_else(|| "Connect your GitHub account first".to_string())?;
+            .ok_or_else(|| "Connect your GitHub account first.".to_string())?;
         let author = db::get_app_setting(&conn, "gh_user");
 
         // Pin the packaged mods (dev/unpacked ones can't be byte-pinned — reported as omitted).
@@ -3909,7 +3933,11 @@ async fn collection_export(
             let repo = github::create_public_repo(
                 &token,
                 &collection::repo_slug(&name),
-                &format!("A Silo FS25 mod set ({} mods)", coll.mods.len()),
+                &format!(
+                    "A Silo mod set for Farming Simulator 25 ({} {})",
+                    coll.mods.len(),
+                    if coll.mods.len() == 1 { "mod" } else { "mods" }
+                ),
             )?;
             let (owner, rname) = repo
                 .full_name
@@ -3975,16 +4003,16 @@ async fn collection_update(
     tauri::async_runtime::spawn_blocking(move || -> Result<ExportResult, String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token")
-            .ok_or_else(|| "Connect your GitHub account first".to_string())?;
+            .ok_or_else(|| "Connect your GitHub account first.".to_string())?;
         let where_ = collection::parse_collection_ref(&reference)
-            .ok_or_else(|| "That shared link isn't valid".to_string())?;
+            .ok_or_else(|| "That shared link isn't valid.".to_string())?;
 
         // Preserve the collection's identity (name/description/author/date); re-pin the mods.
         let existing = read_collection_json(&reference, Some(&token))?;
         let (entries, omitted) = build_collection_entries(&base, mods);
         if entries.is_empty() {
             return Err(
-                "Nothing to update with — the active set has no packaged (.zip) mods".into(),
+                "Nothing to update. Your active mods include no packaged (.zip) mods.".into(),
             );
         }
         let coll = collection::Collection {
@@ -4060,9 +4088,11 @@ fn read_set_source(
     let Some(path) = file else {
         return read_collection_raw(url_or_id, token);
     };
-    let path = std::path::Path::new(path);
-    paths::safe_inbound(path, &["silo", "json"])?;
-    let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let json = paths::read_inbound_text(
+        std::path::Path::new(path),
+        &["silo", "json"],
+        paths::SHARED_FILE_MAX_BYTES,
+    )?;
     Ok((collection::parse_set_file(&json)?, json))
 }
 
@@ -4091,16 +4121,25 @@ fn read_collection_raw(
 /// Resolve every mod of a collection by techName with one catalog lookup, and fingerprint the
 /// file together with that result. Preview and apply both go through here, so apply installs
 /// exactly what the preview showed or refuses (`COLLECTION_CHANGED`).
+///
+/// A failed lookup is an error, not an empty answer: an empty answer would show every mod as
+/// "not in the catalog" while the catalog is only unreachable.
 fn resolve_collection(
     base: &str,
     coll: &collection::Collection,
     json: &str,
-) -> (Vec<collection::Target>, String) {
+) -> Result<(Vec<collection::Target>, String), String> {
     let names: Vec<String> = coll.mods.iter().map(|m| m.tech_name.clone()).collect();
-    let hits = siloapi::lookup(base, &names).unwrap_or_default();
+    let hits = siloapi::lookup(base, &names).map_err(|e| catalog_lookup_failed(&e))?;
     let targets = collection::resolve_targets(&coll.mods, &catalog_matches(&hits));
     let fingerprint = collection::fingerprint(json, &targets);
-    (targets, fingerprint)
+    Ok((targets, fingerprint))
+}
+
+/// What a shared set's preview or install says when the catalog lookup fails (the cause stays
+/// in the text, so it still classifies as offline / timeout).
+fn catalog_lookup_failed(cause: &str) -> String {
+    format!("Silo couldn't look up this set's mods in its catalog, so nothing was changed. Try again in a moment. ({cause})")
 }
 
 /// The catalog lookup keyed by techName, for `collection::resolve_targets`.
@@ -4148,7 +4187,7 @@ async fn collections_list(app: tauri::AppHandle) -> Result<Vec<CollectionSummary
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<CollectionSummary>, String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token")
-            .ok_or_else(|| "Connect your GitHub account first".to_string())?;
+            .ok_or_else(|| "Connect your GitHub account first.".to_string())?;
         let mut out: Vec<CollectionSummary> = Vec::new();
 
         if let Ok(gists) = github::list_user_gists(&token) {
@@ -4224,11 +4263,11 @@ async fn collection_delete(
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token")
-            .ok_or_else(|| "Connect your GitHub account first".to_string())?;
+            .ok_or_else(|| "Connect your GitHub account first.".to_string())?;
         match kind.as_str() {
             "gist" => github::delete_gist(&token, &reference),
             _ => Err(
-                "Silo can delete gist collections here. For a public repo, delete it on GitHub."
+                "Silo can delete unlisted links here. For a public repository, delete it on GitHub."
                     .into(),
             ),
         }
@@ -4294,7 +4333,7 @@ async fn collection_import_preview(
 
         // One lookup resolves catalog presence + best installable source for every mod, by
         // techName, exactly as apply resolves them.
-        let (targets, fingerprint) = resolve_collection(&base, &coll, &json);
+        let (targets, fingerprint) = resolve_collection(&base, &coll, &json)?;
 
         let mut plan = ImportPlan {
             name: coll.name.clone(),
@@ -4414,7 +4453,7 @@ async fn collection_apply(
         // Resolve every mod by techName, exactly as the preview did. A collection's own
         // `catalog_id` and source hint never decide what downloads. The fingerprint covers the
         // file and this resolution, so a changed gist or catalog answer is refused.
-        let (targets, fp) = resolve_collection(&base, &coll, &json);
+        let (targets, fp) = resolve_collection(&base, &coll, &json)?;
         const COLLECTION_CHANGED: &str =
             "This set changed since you previewed it. Preview it again before installing.";
         if fp != fingerprint {
@@ -4459,7 +4498,7 @@ async fn collection_apply(
                     filename: None,
                     status: "skipped".into(),
                     verdict: None,
-                    detail: Some("Not in the catalog. Find it manually.".into()),
+                    detail: Some("Not in Silo's catalog. Find it on its own page.".into()),
                 });
                 continue;
             };
@@ -4646,7 +4685,7 @@ fn gated_row(tech_name: &str) -> ApplyRow {
         filename: None,
         status: "skipped".into(),
         verdict: None,
-        detail: Some("Download-gated. Get it from its page.".into()),
+        detail: Some("This site doesn't allow direct downloads. Get it from its page.".into()),
     }
 }
 
@@ -4667,21 +4706,25 @@ fn verdict_against_pin(zip: &std::path::Path, pinned: Option<&str>) -> String {
 /// Parse the FS25 log.txt and report which mods are throwing errors/warnings, whether
 /// the last run crashed, and the culprit ranking. Read-only; touches nothing.
 #[tauri::command]
-async fn scan_log() -> Result<logscan::LogReport, String> {
+async fn scan_log() -> Result<logscan::LogReport, error::AppError> {
     let path = fsgame::user_dir()
         .map(|d| d.join("log.txt"))
-        .ok_or_else(|| "Could not locate the FS25 user directory".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || -> Result<logscan::LogReport, String> {
+        .ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<logscan::LogReport, error::AppError> {
         if !path.exists() {
-            return Err("No log.txt found. Launch FS25 at least once first.".to_string());
+            // The game hasn't been played yet: an empty state, not a failure.
+            return Err(error::AppError::new(
+                error::code::NO_LOG,
+                "No game log yet. Play Farming Simulator 25 once, then come back here.",
+            ));
         }
         // Logs are read as lossy UTF-8; FS writes mostly ASCII but paths can carry stray bytes.
-        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let bytes = std::fs::read(&path)?;
         let text = String::from_utf8_lossy(&bytes);
         Ok(logscan::parse(&text))
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| error::AppError::from(e.to_string()))?
 }
 
 /// Crash detection's cheap check (Diagnose, #260): where log.txt is, when it last changed,
@@ -4724,19 +4767,25 @@ async fn mark_log_seen(app: tauri::AppHandle, modified_ms: i64) -> Result<(), St
 
 /// Parse inputBinding.xml into a per-device binding map (read-only).
 #[tauri::command]
-async fn scan_bindings() -> Result<bindings::BindingReport, String> {
+async fn scan_bindings() -> Result<bindings::BindingReport, error::AppError> {
     let path = fsgame::user_dir()
         .map(|d| d.join("inputBinding.xml"))
-        .ok_or_else(|| "Could not locate the FS25 user directory".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || -> Result<bindings::BindingReport, String> {
-        if !path.exists() {
-            return Err("No inputBinding.xml found. Launch FS25 at least once first.".to_string());
-        }
-        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-        Ok(bindings::parse(&String::from_utf8_lossy(&bytes)))
-    })
+        .ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
+    tauri::async_runtime::spawn_blocking(
+        move || -> Result<bindings::BindingReport, error::AppError> {
+            if !path.exists() {
+                // The game writes it on first launch: an empty state, not a failure.
+                return Err(error::AppError::new(
+                    error::code::NO_LOG,
+                    "No control settings yet. Play Farming Simulator 25 once, then come back here.",
+                ));
+            }
+            let bytes = std::fs::read(&path)?;
+            Ok(bindings::parse(&String::from_utf8_lossy(&bytes)))
+        },
+    )
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| error::AppError::from(e.to_string()))?
 }
 
 // ── Guided bisection ──
@@ -4797,7 +4846,7 @@ async fn get_config(
     paths: Vec<String>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
     off_main(move || {
-        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let user = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let xml = crate::paths::guarded_xml_read(&[user], std::path::Path::new(&path))?;
         Ok(xmlconfig::get_values(&xml, &paths))
     })
@@ -4811,7 +4860,7 @@ async fn get_config(
 async fn set_config(path: String, edits: Vec<xmlconfig::Edit>) -> Result<(), String> {
     off_main(move || {
         config_write_refusal(gamelaunch::fs25_running())?;
-        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let user = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let roots = [user];
         let p = std::path::Path::new(&path);
         let xml = paths::guarded_xml_read(&roots, p)?;
@@ -4836,7 +4885,7 @@ async fn mods_with_settings() -> Result<Vec<String>, String> {
 #[tauri::command]
 async fn get_mod_settings(mod_name: String) -> Result<Vec<settings_form::SettingsFile>, String> {
     off_main(move || {
-        let dir = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let dir = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let mut files = Vec::new();
         for path in settings_form::find_files(&dir, &mod_name) {
             files.push(settings_form::load_file(&path)?);
@@ -4850,7 +4899,7 @@ async fn get_mod_settings(mod_name: String) -> Result<Vec<settings_form::Setting
 async fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Result<(), String> {
     off_main(move || {
         config_write_refusal(gamelaunch::fs25_running())?;
-        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let user = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let roots = [user];
         let p = std::path::Path::new(&path);
         let raw = paths::guarded_xml_read(&roots, p)?;
@@ -4864,13 +4913,59 @@ async fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Res
 #[tauri::command]
 async fn save_mod_settings_raw(path: String, content: String) -> Result<(), String> {
     off_main(move || {
+        ensure_well_formed(&content)?;
         config_write_refusal(gamelaunch::fs25_running())?;
-        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let user = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let p = std::path::Path::new(&path);
         ensure_override_kept(&user, p, None, &content)?;
         paths::guarded_xml_write(&[user], p, &content)
     })
     .await
+}
+
+/// Refuse text that isn't one well-formed XML document (parsed to the end: every tag closed
+/// and matched, one root element, nothing but whitespace or comments around it). The raw
+/// editor writes what the user typed, and a broken settings file makes the mod fall back to
+/// its defaults or fail to load.
+fn ensure_well_formed(xml: &str) -> Result<(), String> {
+    use quick_xml::events::Event;
+    let refuse = |why: String| {
+        Err(format!(
+            "That isn't valid XML, so Silo didn't save it ({why}). Fix it and save again."
+        ))
+    };
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut depth = 0usize;
+    let mut roots = 0usize;
+    loop {
+        match reader.read_event() {
+            Err(e) => {
+                return refuse(format!("at byte {}: {e}", reader.error_position()));
+            }
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(_)) => {
+                if depth == 0 {
+                    roots += 1;
+                }
+                depth += 1;
+            }
+            Ok(Event::Empty(_)) if depth == 0 => roots += 1,
+            Ok(Event::End(_)) => depth = depth.saturating_sub(1),
+            Ok(Event::Text(t)) if depth == 0 && !t.iter().all(u8::is_ascii_whitespace) => {
+                return refuse("text outside the root element".into());
+            }
+            Ok(Event::GeneralRef(_) | Event::CData(_)) if depth == 0 => {
+                return refuse("text outside the root element".into());
+            }
+            Ok(_) => {}
+        }
+    }
+    match (depth, roots) {
+        (0, 1) => Ok(()),
+        (d, _) if d > 0 => refuse(format!("{d} unclosed tag(s)")),
+        (_, 0) => refuse("no root element".into()),
+        _ => refuse("more than one root element".into()),
+    }
 }
 
 // ── Savegames ──
@@ -4887,7 +4982,7 @@ async fn get_savegames() -> Result<Vec<savegame::Savegame>, String> {
 #[tauri::command]
 async fn backup_savegame(folder: String) -> Result<String, String> {
     off_main(move || {
-        let dir = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let dir = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         savegame::backup(&dir, &folder)
     })
     .await
@@ -5306,6 +5401,55 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    /// An unreachable catalog fails the preview with its cause, instead of listing every mod
+    /// as "not in the catalog".
+    #[test]
+    fn a_catalog_outage_is_an_error_not_an_empty_answer() {
+        let coll =
+            crate::collection::parse_set_file(r#"{ "silo": 1, "name": "W", "mods": ["FS25_A"] }"#)
+                .unwrap();
+        // Nothing listens on port 9 of loopback: the lookup fails at once.
+        let err = super::resolve_collection("http://127.0.0.1:9", &coll, "{}").unwrap_err();
+        assert!(err.contains("couldn't look up this set's mods"), "{err}");
+        assert_eq!(
+            crate::error::classify(&err),
+            crate::error::code::NET_OFFLINE,
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn raw_settings_must_be_one_well_formed_document() {
+        for good in [
+            r#"<?xml version="1.0" encoding="utf-8"?><settings a="1"><x>2</x></settings>"#,
+            "<!-- c --><settings/>\n",
+            "  <settings>\n  <x>a &amp; b</x>\n</settings>  ",
+        ] {
+            assert!(super::ensure_well_formed(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "<settings><x>1</settings>",
+            "<settings><x>1</x>",
+            "<settings></settings><other/>",
+            "",
+            "just text",
+            "<settings>a & b</settings>",
+            "<settings/>trailing",
+        ] {
+            let e = super::ensure_well_formed(bad).unwrap_err();
+            assert!(e.contains("didn't save it"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_blank_version_is_not_looked_up() {
+        assert_eq!(super::verifiable_version(Some("1.2.0.0")), Some("1.2.0.0"));
+        assert_eq!(super::verifiable_version(Some(" v1 ")), Some("v1"));
+        assert_eq!(super::verifiable_version(Some("  ")), None);
+        assert_eq!(super::verifiable_version(Some("")), None);
+        assert_eq!(super::verifiable_version(None), None);
+    }
 
     #[test]
     fn a_shared_set_file_is_read_only_from_a_plain_silo_or_json_path() {

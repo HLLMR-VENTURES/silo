@@ -74,7 +74,7 @@ describe("conflict copy", () => {
 
   it("plain titles by kind", () => {
     const two = ["A", "B"];
-    expect(conflictTitle({ kind: "specialization", mods: two })).toBe("Two mods add the same feature name");
+    expect(conflictTitle({ kind: "action", mods: two })).toBe("Two mods add the same control action");
     expect(conflictTitle({ kind: "script", mods: two })).toBe("Two mods ship a script with the same file name");
     expect(conflictTitle({ kind: "fillType", mods: ["A", "B", "C"] })).toBe("3 mods define the same fill type");
     expect(conflictTitle({ kind: "uniqueType", mods: two })).toBe("Two mods claim the same exclusive slot");
@@ -99,6 +99,7 @@ describe("conflict copy", () => {
     expect(conflictHeadline(c, false)).toEqual(["0 problems", "2 to review", "2 notes hidden"]);
     expect(conflictHeadline(c, true)).toEqual(["0 problems", "2 to review", "2 notes"]);
     expect(conflictHeadline({ problems: 1, review: 0, notes: 0 }, false)).toEqual(["1 problem", "0 to review"]);
+    expect(conflictHeadline({ problems: 0, review: 0, notes: 0 }, false)).toEqual(["No conflicts"]);
   });
 });
 

@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0] - TBD
+## [1.0.0] - 2026-10-19
 
 Silo 1.0 is a redesign from end to end: a new layout, plainer words, and every page rebuilt
 around what you do next. Your library, tags, notes and saved loadouts (now **mod sets**) carry
@@ -98,6 +98,10 @@ database; that copy is kept in case you need to go back.
 
 ### Changed
 
+- **Fewer false conflicts.** More than one active map is a Note (only the map your savegame uses
+  loads), and two mods using the same vehicle, building or tool type name are no longer a
+  conflict: the game files each mod's types under the mod's own name, so both load. (#260, #275)
+
 - **"Loadouts" and "Collections" are now "mod sets" and "shared sets"**, and guided bisection
   is **Find the problem mod**, everywhere in the app. A `silo://collection` link and a
   `silo.hllmr.com/c/…` link both open in Mod sets → Open a shared set. (#251)
@@ -148,6 +152,59 @@ database; that copy is kept in case you need to go back.
 - Tooltips no longer linger after their button disappears; flagged mods are "Flagged"
   everywhere. (#238)
 - Browse no longer leaks a listener on every visit. (#246)
+- **Find the problem mod parks every mod it tests.** Mods you hadn't filed into the library yet
+  were never actually parked, so the newest mod (usually the culprit) could never be found. Silo
+  now offers to file them first (they stay active), keeps unzipped folder mods on every round,
+  stops a round if a mod it meant to park is still in the mods folder, checks that the game has
+  really closed before asking how the round went, and keeps the round when a launch or a step
+  fails. Stopping asks first. The Library and Play show the round's real mods. (#283, #291)
+- **Number fields in the settings editors save again.** Editing a number in Graphics settings,
+  a savegame's settings or a mod's settings failed on save. A failed save also keeps your edits,
+  and Performance class shows the game's own value. (#278)
+- **A mod's details stay with that mod.** An integrity verdict, a GitHub update check or a note
+  you were typing could land on the next mod you clicked; a check for one mod could offer to
+  install onto another. The details also follow the mod after a rescan, filing or category
+  change. (#270, #276, #297)
+- A mod's title or author with an `&` in it was cut short ("Elm & Ash" showed as "Elm"), and a
+  savegame or map name with one lost its first half. Silo reads the whole name, and re-reads mods
+  it had already scanned once after the update. (#266, #268)
+- Organizing, parking or flattening a mod the game (or an antivirus or sync client) had open could
+  leave two copies of it, or a half-deleted mod folder. Silo copies only when the mod is going to
+  another drive, and takes its copy back out if the original can't be removed. (#279)
+- Installing from Browse or a shared set stopped at 500 MB; every download now allows up to
+  4 GB. Previewing a shared set while the catalog couldn't be reached no longer lists every mod as
+  "not in the catalog". The Multiplayer check reads mods in small pieces instead of whole files.
+  (#282)
+- **Updates.** A failed first check says so (with Try again) instead of starting over; a release
+  you already have under another spelling ("v1.2.0" vs "1.2.0.0") or an older one is no longer
+  offered; a GitHub release with no zip opens its page; results from another mods folder are
+  cleared when you switch. Versions show the same way everywhere ("1.6.4.0", never "V.1.6.4.0").
+  (#273, #294)
+- An earlier Silo's user who never organized but had sets, tags or notes gets What's new, not the
+  first-run setup. (#289)
+- The Library's In conflict badge and filter match the right mods; "Needs update" no longer says
+  everything is current when Silo couldn't check; switching a mod during a scan no longer bounces
+  back. (#284, #297)
+- Smaller fixes: each page opens at the top; Ctrl+A selects every shown mod; no stray
+  horizontal scrollbar in dialogs; a cleared notice no longer turns the bell red; the Organize
+  dialog can't get stuck when re-linking fails; a duplicate fill type no longer crashes the
+  bridge tool; Save raw XML refuses text that isn't valid XML; a mod with no version shows
+  Unverified; an unfinished bridge write leaves nothing behind; "No game log yet" is a calm empty
+  state, not an error. (#271, #280, #285, #292, #293, #295, #296, #299, #300)
+- Plainer words across the app: the 1.0 names everywhere, real plurals, one Check now, and error
+  messages that say what to do. (#286, #287, #288, #290, #298)
+
+### Security
+
+- **Shared sets have a size limit.** A shared set (a link, gist, repo or `.silo` file) may list up
+  to 5,000 mods, and a shared file may be up to 8 MB, so a hostile link can't make Silo send
+  hundreds of catalog requests. Catalog lookups also skip blank and repeated names. (#277)
+- **A mistyped GitHub token can't end up in the log.** A pasted token with a line break or an
+  invisible character is refused before it's sent, and anything shaped like a GitHub token or a
+  `Bearer` credential is masked in the log and in diagnostics. Disconnecting GitHub no longer
+  leaves an old fallback token readable in Silo's database file. (#281, #293)
+- Silo's outbound-address check also refuses IPv4 addresses written as IPv6, `0.x.x.x`, and
+  other spellings of localhost. (#282)
 
 ## [0.11.0] - 2026-10-17
 

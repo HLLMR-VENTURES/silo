@@ -327,3 +327,30 @@ describe("ModCard", () => {
     expect(props.onMenu).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("ModListRow meta", () => {
+  it("shows the version without a V. prefix (C2)", () => {
+    render(ModListRow, rowProps({ mod: mod({ version: "V.1.6.4.0" }) }));
+    expect(screen.getByText(/1\.6\.4\.0/).textContent).not.toMatch(/[.vV]1\.6\.4\.0/);
+  });
+  it("shows no 0 B size for a folder mod (C5)", () => {
+    render(ModListRow, rowProps({ mod: mod({ kind: "dir", size: 0, path: "C:/mods/FS25_Folder" }) }));
+    expect(screen.queryByText(/\b0 B\b/)).toBeNull();
+  });
+});
+
+describe("Ctrl+A in the list (C14)", () => {
+  it("selects all shown, from a row or a control inside it, and keeps the page text unselected", async () => {
+    const user = userEvent.setup();
+    const onselectall = vi.fn();
+    const { container } = render(ListHarness, { items, onselectall });
+    itemEl(container, "k0")!.focus();
+    const ev = new KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true, cancelable: true });
+    itemEl(container, "k0")!.dispatchEvent(ev);
+    expect(onselectall).toHaveBeenCalledTimes(1);
+    expect(ev.defaultPrevented).toBe(true);
+    screen.getByRole("button", { name: "Inner Item 0" }).focus();
+    await user.keyboard("{Control>}a{/Control}");
+    expect(onselectall).toHaveBeenCalledTimes(2);
+  });
+});

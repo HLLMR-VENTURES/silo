@@ -3,6 +3,7 @@
 import type { BrowseMod, CatalogModDetail, ModSourceOption } from "./types";
 import type { BadgeSpec } from "./components/library/rowBadges";
 import { catalogImage } from "./api";
+import { displayVersion } from "./format";
 import { describeError, formatDetail } from "./errorCopy";
 
 // GIANTS' ModHub CDN refuses requests that don't come from its own site. Silo respects
@@ -44,14 +45,14 @@ export const label = (s: string): string => SOURCE_LABEL[s] ?? s;
  */
 export function sourceChip(s: Pick<ModSourceOption, "source" | "version">): string {
   const v = s.version?.trim();
-  return v ? `${label(s.source)} ${v}` : label(s.source);
+  return v ? `${label(s.source)} ${displayVersion(v)}` : label(s.source);
 }
 
 /** Why a source can't be installed directly — shown on hover and in the drawer. */
 export function gatedReason(source: string): string {
   if (source === "modhub")
     return "ModHub mods download from GIANTS' website, so Silo opens the mod's page there.";
-  return "This source doesn't allow direct downloads. Opens the mod page.";
+  return "This source doesn't allow direct downloads, so Silo opens the mod's page.";
 }
 
 /** Compact download counts: 980, 12k, 1.3M. */
@@ -235,7 +236,7 @@ export function browseBadges(
       tone: "success",
       icon: "verifiedBuild",
       group: "status",
-      title: "Silo's catalog hashed the published build, so Silo can check that your copy matches it byte for byte.",
+      title: "Silo's catalog recorded the published build, so Silo can check that your copy is exactly the same.",
     });
   const author = verifiedAuthorLogin(m);
   if (author)

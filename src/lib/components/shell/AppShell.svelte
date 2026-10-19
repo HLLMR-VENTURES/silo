@@ -12,7 +12,7 @@
   // The rail collapses to icons below 1200px window width unless pinned (nav.rail); without a
   // `rail` snippet it renders NavRail bound to the nav state. Content is capped at --content-max
   // (1280px), or --content-max-wide (1920px) for the grid views that pass `wide`.
-  import type { Snippet } from "svelte";
+  import { untrack, type Snippet } from "svelte";
   import {
     go,
     nav,
@@ -63,6 +63,17 @@
   const collapsed = $derived(railCollapsedFor(width, railPin));
 
   let mainEl = $state<HTMLElement | null>(null);
+
+  // Every view scrolls the same main area, so its scroll would carry over: a view starts at the top.
+  let shownView = untrack(() => nav.view);
+  $effect(() => {
+    const v = nav.view;
+    if (v === shownView) return;
+    shownView = v;
+    untrack(() => {
+      if (mainEl) mainEl.scrollTop = 0;
+    });
+  });
 
   function skipToContent(e: MouseEvent) {
     e.preventDefault();
@@ -146,6 +157,16 @@
     transform: none;
   }
 
+  /* App chrome isn't text to select (Ctrl+A or a stray drag would highlight it). */
+  .rail,
+  .header {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .header :global(input) {
+    -webkit-user-select: text;
+    user-select: text;
+  }
   .rail {
     grid-area: rail;
     z-index: var(--z-rail);
@@ -167,6 +188,8 @@
     min-width: 0;
     min-height: 0;
     overflow: auto;
+    /* Room for the scrollbar either way, so content doesn't shift when a tab gets taller. */
+    scrollbar-gutter: stable;
   }
   .main:focus {
     outline: none;
@@ -183,6 +206,8 @@
   }
   .main.fill {
     overflow: hidden;
+    /* The view scrolls itself (virtual lists): no gutter of its own. */
+    scrollbar-gutter: auto;
   }
   .main.fill .content {
     display: flex;

@@ -106,7 +106,7 @@
   {:else if error && !stats}
     <div class="src-body">
       <span class="err">{error}</span>
-      <button class="mini" onclick={load}>Retry</button>
+      <button class="mini" onclick={load}>Try again</button>
     </div>
   {:else if stats}
     <div class="src-nums tnum">
@@ -114,7 +114,7 @@
       <span title="Forks"><Icon name="fork" size={13} label="forks" /> {fmt(stats.forks)}</span>
       <span title="Watchers"><Icon name="visible" size={13} label="watchers" /> {fmt(stats.watchers)}</span>
       <span title="Open issues"><Icon name="dot" size={13} label="open issues" /> {fmt(stats.openIssues)}</span>
-      {#if stats.archived}<span class="archived" title="Archived repo">archived</span>{/if}
+      {#if stats.archived}<span class="archived" title="The author archived this GitHub project.">Archived</span>{/if}
     </div>
 
     <div class="src-actions">
@@ -141,7 +141,7 @@
         </button>
       {:else}
         <button class="act connect" onclick={() => onConnect?.()}>
-          {connected ? "Enable Star & Watch" : "Connect GitHub to Star"}
+          {connected ? "Allow starring and watching" : "Connect GitHub to star"}
         </button>
       {/if}
     </div>

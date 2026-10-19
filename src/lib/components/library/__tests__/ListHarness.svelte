@@ -11,6 +11,7 @@
     ontoggle,
     onselect,
     onmenu,
+    onselectall,
     oninner,
     itemLabel,
   }: {
@@ -20,6 +21,7 @@
     ontoggle?: (it: Item) => void;
     onselect?: (it: Item, intent: SelectIntent) => void;
     onmenu?: (it: Item, anchor: HTMLElement) => void;
+    onselectall?: () => void;
     oninner?: (it: Item) => void;
     itemLabel?: (it: Item) => string;
   } = $props();
@@ -52,6 +54,7 @@
     {ontoggle}
     {onselect}
     {onmenu}
+    {onselectall}
   >
     {#snippet row(it)}
       <span>{it.name}</span>

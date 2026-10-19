@@ -15,6 +15,7 @@
   import type { UpdateRow } from "../../types";
   import { checkedDate, type CheckYourselfRow } from "../../sources";
   import { formatCount, plural } from "../../plural";
+  import { displayVersion } from "../../format";
   import {
     droppedBuildFor,
     normVersion,
@@ -114,7 +115,8 @@
 {/snippet}
 
 <div class="updates">
-  {#if !checked && !checking}
+  <!-- A first check whose catalog request failed shows the failure, not "never checked". -->
+  {#if !checked && !checking && !catalogError}
     <EmptyState icon="update" title="Check your mods for updates" body={UPDATE_PRIVACY_LINE} level={3}>
       {#snippet actions()}
         <span use:tooltip={checkDisabledReason || null}>
@@ -220,7 +222,7 @@
                 <div class="detail tnum">{versionChange(r)}</div>
                 {#if dropped}
                   <p class="found">
-                    <Icon name="check" size={14} /> Found {dropped.flatVersion} in your mods folder.
+                    <Icon name="check" size={14} /> Found {displayVersion(dropped.flatVersion)} in your mods folder.
                   </p>
                 {/if}
               </div>

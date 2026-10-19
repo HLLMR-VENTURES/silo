@@ -27,6 +27,7 @@ export const GAME_GRAPHICS_FIELDS: CfgField[] = [
     label: "Performance class",
     kind: "select",
     options: ["minimal", "low", "medium", "high", "veryHigh"],
+    optionLabels: { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", veryHigh: "Very high" },
   },
   {
     path: `${G}textureFiltering`,
@@ -85,6 +86,7 @@ export const SAVEGAME_FIELDS: CfgField[] = [
     label: "Economic difficulty",
     kind: "select",
     options: ["EASY", "NORMAL", "HARD"],
+    optionLabels: { EASY: "Easy", NORMAL: "Normal", HARD: "Hard" },
   },
   {
     path: `${S}growthMode`,
@@ -187,3 +189,42 @@ export const GAME_GRAPHICS_PRESETS: CfgPreset[] = [
     },
   },
 ];
+
+/**
+ * Whether a number field's text is a number the settings file can take: digits with an optional
+ * sign and decimals ("6", "-1", "0.75"), not empty.
+ * @param text what the input holds (a number input reads "" while it's empty or not a number)
+ * @param whole only whole numbers
+ */
+export function isNumberText(text: string, whole = false): boolean {
+  return (whole ? /^-?\d+$/ : /^-?(\d+(\.\d*)?|\.\d+)$/).test(text.trim());
+}
+
+/**
+ * File values as the form shows them: a select's value that matches one of its options in
+ * another case ("Medium" for "medium") becomes that option, so the select isn't blank.
+ * @param fields the form's fields
+ * @param values the file's values by path
+ */
+export function matchOptionCase(fields: CfgField[], values: Record<string, string>): Record<string, string> {
+  const out = { ...values };
+  for (const f of fields) {
+    const v = out[f.path];
+    if (f.kind !== "select" || v === undefined || f.options?.includes(v)) continue;
+    const hit = f.options?.find((o) => o.toLowerCase() === v.trim().toLowerCase());
+    if (hit) out[f.path] = hit;
+  }
+  return out;
+}
+
+/**
+ * A select's choice written the way the file writes its words. The game wrote
+ * `<performanceClass>Medium</performanceClass>` (the only evidence: the SDK has no game.xml
+ * schema), so when the file's value is capitalized, the choice is too ("veryHigh" → "VeryHigh").
+ * @param value the option chosen (Silo's spelling)
+ * @param fileValue the value the file has now, if any
+ */
+export function inFileCase(value: string, fileValue: string | undefined): string {
+  if (!fileValue || !/^[A-Z]/.test(fileValue.trim()) || !/^[a-z]/.test(value)) return value;
+  return value[0].toUpperCase() + value.slice(1);
+}

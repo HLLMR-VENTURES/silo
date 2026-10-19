@@ -39,7 +39,7 @@ node scripts/showcase/stage.mjs
 Then start the debug build on it. In PowerShell:
 
 ```powershell
-$env:SILO_PROFILE_DIR = "F:\silo-demo"; .\src-tauri\target\debug\silo.exe
+$env:SILO_PROFILE_DIR = "D:\silo-demo"; .\src-tauri\target\debug\silo.exe
 ```
 
 ## The shots
