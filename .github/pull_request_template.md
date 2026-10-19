@@ -10,8 +10,8 @@ See CONTRIBUTING.md for the full flow and working principles.
 ## Checklist
 
 - [ ] **What/why** is described above (and an issue is linked if there is one).
-- [ ] **Checks pass:** `npm run build` (svelte-check + build), and in `src-tauri/`:
-      `cargo fmt --all --check` and `cargo test`.
+- [ ] **Checks pass:** `npm test`, `npm run build` (svelte-check + build), and in `src-tauri/`:
+      `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`.
 - [ ] **Tests** added or updated for changed core logic (modules unit-test without a running app).
 - [ ] **Off-thread & reversible** where relevant — heavy work stays in Rust off the UI
       thread; any file write into the user's game files has an undo path.
