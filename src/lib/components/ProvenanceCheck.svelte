@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "../ui/Icon.svelte";
+  import { displayVersion } from "../format";
   import { inlineError } from "../state/notify.svelte";
   import type { ModEntry, VerifyResult } from "../types";
   import { verifyMod } from "../api";
@@ -49,9 +50,7 @@
     }
   }
 
-  // Normalize the version label so we never render a doubled "v" (matchedVersion may or
-  // may not already carry one).
-  const ver = (v: string) => "v" + v.replace(/^v/i, "");
+  const ver = displayVersion;
 
   const howLabel = (how: string | null) =>
     how === "exact"
