@@ -572,10 +572,7 @@ async fn gh_device_poll(
 async fn gh_set_pat(app: tauri::AppHandle, pat: String) -> Result<String, String> {
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let pat = pat.trim().to_string();
-        if pat.is_empty() {
-            return Err("Empty token".into());
-        }
+        let pat = github::clean_pat(&pat)?;
         let (user, scopes) = github::whoami_scoped(&pat)?;
         if user.is_empty() {
             return Err("GitHub did not recognize that token".into());
@@ -1346,6 +1343,16 @@ async fn catalog_check_updates(
 /// up in the catalog, fetch the canonical manifest for the local version, and compare.
 /// Verified (byte/content match), Modified (with the exact file diff), or Unverified (no
 /// hashed build to compare — not proof of anything). Provenance, not antivirus.
+/// Why a mod without a `<version>` can't be verified.
+const NO_VERSION: &str =
+    "This mod's modDesc.xml has no version, so there's no build to compare against.";
+
+/// The version to look up a canonical build for: the modDesc version, unless it's missing or
+/// blank (which the API answers with a 400, not "no build").
+fn verifiable_version(version: Option<&str>) -> Option<&str> {
+    version.map(str::trim).filter(|v| !v.is_empty())
+}
+
 #[tauri::command]
 async fn verify_mod(
     app: tauri::AppHandle,
@@ -1370,7 +1377,10 @@ async fn verify_mod(
 
         // The server does version-equivalence (ModHub `1.2.0` ↔ GitHub `v1.2.0`), so send
         // the local modDesc version verbatim. 404 → no hashed build for this version.
-        let ver = version.as_deref().unwrap_or("");
+        let Some(ver) = verifiable_version(version.as_deref()) else {
+            // The API refuses a blank version (400 "version query param required").
+            return Ok(provenance::VerifyResult::unverified(NO_VERSION));
+        };
         match siloapi::manifest(&base, &hit.id, ver)? {
             Some(cm) => {
                 let canon_entries: Vec<provenance::Entry> = cm
@@ -3591,9 +3601,11 @@ async fn delete_loadout(app: tauri::AppHandle, id: i64) -> Result<(), error::App
 #[tauri::command]
 async fn shared_file_kind(path: String) -> Result<String, String> {
     off_main(move || {
-        let p = std::path::Path::new(&path);
-        paths::safe_inbound(p, &["silo", "silomp", "json"])?;
-        let text = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
+        let text = paths::read_inbound_text(
+            std::path::Path::new(&path),
+            &["silo", "silomp", "json"],
+            paths::SHARED_FILE_MAX_BYTES,
+        )?;
         let kind = if mpsync::is_manifest(&text) {
             "multiplayer"
         } else {
@@ -3793,8 +3805,11 @@ async fn mp_verify_file(
     local: Vec<mpsync::ModRef>,
 ) -> Result<mpsync::VerifyReport, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<mpsync::VerifyReport, String> {
-        paths::safe_inbound(std::path::Path::new(&path), &["silomp", "json"])?;
-        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let text = paths::read_inbound_text(
+            std::path::Path::new(&path),
+            &["silomp", "json"],
+            paths::SHARED_FILE_MAX_BYTES,
+        )?;
         let manifest: mpsync::Manifest = serde_json::from_str(&text)
             .map_err(|_| "That file isn't a Silo Multiplayer check file".to_string())?;
         let local_hashed = mpsync::hash_mods(&local);
@@ -4066,9 +4081,11 @@ fn read_set_source(
     let Some(path) = file else {
         return read_collection_raw(url_or_id, token);
     };
-    let path = std::path::Path::new(path);
-    paths::safe_inbound(path, &["silo", "json"])?;
-    let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let json = paths::read_inbound_text(
+        std::path::Path::new(path),
+        &["silo", "json"],
+        paths::SHARED_FILE_MAX_BYTES,
+    )?;
     Ok((collection::parse_set_file(&json)?, json))
 }
 
@@ -4097,16 +4114,25 @@ fn read_collection_raw(
 /// Resolve every mod of a collection by techName with one catalog lookup, and fingerprint the
 /// file together with that result. Preview and apply both go through here, so apply installs
 /// exactly what the preview showed or refuses (`COLLECTION_CHANGED`).
+///
+/// A failed lookup is an error, not an empty answer: an empty answer would show every mod as
+/// "not in the catalog" while the catalog is only unreachable.
 fn resolve_collection(
     base: &str,
     coll: &collection::Collection,
     json: &str,
-) -> (Vec<collection::Target>, String) {
+) -> Result<(Vec<collection::Target>, String), String> {
     let names: Vec<String> = coll.mods.iter().map(|m| m.tech_name.clone()).collect();
-    let hits = siloapi::lookup(base, &names).unwrap_or_default();
+    let hits = siloapi::lookup(base, &names).map_err(|e| catalog_lookup_failed(&e))?;
     let targets = collection::resolve_targets(&coll.mods, &catalog_matches(&hits));
     let fingerprint = collection::fingerprint(json, &targets);
-    (targets, fingerprint)
+    Ok((targets, fingerprint))
+}
+
+/// What a shared set's preview or install says when the catalog lookup fails (the cause stays
+/// in the text, so it still classifies as offline / timeout).
+fn catalog_lookup_failed(cause: &str) -> String {
+    format!("Silo couldn't look up this set's mods in its catalog, so nothing was changed. Try again in a moment. ({cause})")
 }
 
 /// The catalog lookup keyed by techName, for `collection::resolve_targets`.
@@ -4300,7 +4326,7 @@ async fn collection_import_preview(
 
         // One lookup resolves catalog presence + best installable source for every mod, by
         // techName, exactly as apply resolves them.
-        let (targets, fingerprint) = resolve_collection(&base, &coll, &json);
+        let (targets, fingerprint) = resolve_collection(&base, &coll, &json)?;
 
         let mut plan = ImportPlan {
             name: coll.name.clone(),
@@ -4420,7 +4446,7 @@ async fn collection_apply(
         // Resolve every mod by techName, exactly as the preview did. A collection's own
         // `catalog_id` and source hint never decide what downloads. The fingerprint covers the
         // file and this resolution, so a changed gist or catalog answer is refused.
-        let (targets, fp) = resolve_collection(&base, &coll, &json);
+        let (targets, fp) = resolve_collection(&base, &coll, &json)?;
         const COLLECTION_CHANGED: &str =
             "This set changed since you previewed it. Preview it again before installing.";
         if fp != fingerprint {
@@ -4870,6 +4896,7 @@ async fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Res
 #[tauri::command]
 async fn save_mod_settings_raw(path: String, content: String) -> Result<(), String> {
     off_main(move || {
+        ensure_well_formed(&content)?;
         config_write_refusal(gamelaunch::fs25_running())?;
         let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
         let p = std::path::Path::new(&path);
@@ -4877,6 +4904,51 @@ async fn save_mod_settings_raw(path: String, content: String) -> Result<(), Stri
         paths::guarded_xml_write(&[user], p, &content)
     })
     .await
+}
+
+/// Refuse text that isn't one well-formed XML document (parsed to the end: every tag closed
+/// and matched, one root element, nothing but whitespace or comments around it). The raw
+/// editor writes what the user typed, and a broken settings file makes the mod fall back to
+/// its defaults or fail to load.
+fn ensure_well_formed(xml: &str) -> Result<(), String> {
+    use quick_xml::events::Event;
+    let refuse = |why: String| {
+        Err(format!(
+            "That isn't valid XML, so Silo didn't save it ({why}). Fix it and save again."
+        ))
+    };
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut depth = 0usize;
+    let mut roots = 0usize;
+    loop {
+        match reader.read_event() {
+            Err(e) => {
+                return refuse(format!("at byte {}: {e}", reader.error_position()));
+            }
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(_)) => {
+                if depth == 0 {
+                    roots += 1;
+                }
+                depth += 1;
+            }
+            Ok(Event::Empty(_)) if depth == 0 => roots += 1,
+            Ok(Event::End(_)) => depth = depth.saturating_sub(1),
+            Ok(Event::Text(t)) if depth == 0 && !t.iter().all(u8::is_ascii_whitespace) => {
+                return refuse("text outside the root element".into());
+            }
+            Ok(Event::GeneralRef(_) | Event::CData(_)) if depth == 0 => {
+                return refuse("text outside the root element".into());
+            }
+            Ok(_) => {}
+        }
+    }
+    match (depth, roots) {
+        (0, 1) => Ok(()),
+        (d, _) if d > 0 => refuse(format!("{d} unclosed tag(s)")),
+        (_, 0) => refuse("no root element".into()),
+        _ => refuse("more than one root element".into()),
+    }
 }
 
 // ── Savegames ──
@@ -5312,6 +5384,55 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    /// An unreachable catalog fails the preview with its cause, instead of listing every mod
+    /// as "not in the catalog".
+    #[test]
+    fn a_catalog_outage_is_an_error_not_an_empty_answer() {
+        let coll =
+            crate::collection::parse_set_file(r#"{ "silo": 1, "name": "W", "mods": ["FS25_A"] }"#)
+                .unwrap();
+        // Nothing listens on port 9 of loopback: the lookup fails at once.
+        let err = super::resolve_collection("http://127.0.0.1:9", &coll, "{}").unwrap_err();
+        assert!(err.contains("couldn't look up this set's mods"), "{err}");
+        assert_eq!(
+            crate::error::classify(&err),
+            crate::error::code::NET_OFFLINE,
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn raw_settings_must_be_one_well_formed_document() {
+        for good in [
+            r#"<?xml version="1.0" encoding="utf-8"?><settings a="1"><x>2</x></settings>"#,
+            "<!-- c --><settings/>\n",
+            "  <settings>\n  <x>a &amp; b</x>\n</settings>  ",
+        ] {
+            assert!(super::ensure_well_formed(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "<settings><x>1</settings>",
+            "<settings><x>1</x>",
+            "<settings></settings><other/>",
+            "",
+            "just text",
+            "<settings>a & b</settings>",
+            "<settings/>trailing",
+        ] {
+            let e = super::ensure_well_formed(bad).unwrap_err();
+            assert!(e.contains("didn't save it"), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_blank_version_is_not_looked_up() {
+        assert_eq!(super::verifiable_version(Some("1.2.0.0")), Some("1.2.0.0"));
+        assert_eq!(super::verifiable_version(Some(" v1 ")), Some("v1"));
+        assert_eq!(super::verifiable_version(Some("  ")), None);
+        assert_eq!(super::verifiable_version(Some("")), None);
+        assert_eq!(super::verifiable_version(None), None);
+    }
 
     #[test]
     fn a_shared_set_file_is_read_only_from_a_plain_silo_or_json_path() {

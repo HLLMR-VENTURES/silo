@@ -66,7 +66,16 @@ pub struct ModEntry {
     /// How the settings were detected — governs whether Silo can edit them right now.
     #[serde(default)]
     pub settings_source: SettingsSource,
+    /// The [`PARSE_REV`] that produced this entry. A cached row from an older parser is
+    /// parsed again even when the file is unchanged; rows from before this field read as 0.
+    #[serde(default)]
+    pub parse_rev: u32,
 }
+
+/// Bumped when a parser fix changes what an unchanged mod file reads as, so cached rows
+/// from the old parser are refreshed once instead of staying wrong until the file
+/// changes. 1: element text is no longer cut at an `&amp;` (#266).
+pub const PARSE_REV: u32 = 1;
 
 /// How a mod's settings were detected, which decides whether Silo can edit them now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -301,6 +310,7 @@ fn build_entry(c: &Candidate) -> ModEntry {
         error: None,
         has_settings: false,
         settings_source: SettingsSource::None,
+        parse_rev: PARSE_REV,
     };
 
     let xml = match c.kind {
@@ -492,8 +502,11 @@ fn resolve_entry(c: &Candidate, cache: &HashMap<String, CacheEntry>) -> (ModEntr
         if ce.mtime_ms == mtime_ms && ce.size == size {
             // A schema change that fails deserialization simply falls through to a
             // fresh parse — we never trust a partial decode.
+            // A row from an older parser is re-read too (see `PARSE_REV`).
             if let Ok(entry) = serde_json::from_str::<ModEntry>(&ce.json) {
-                return (entry, false);
+                if entry.parse_rev >= PARSE_REV {
+                    return (entry, false);
+                }
             }
         }
     }
@@ -807,6 +820,45 @@ mod layout_tests {
         scan_layouts(layouts, &HashMap::new(), |_, _| {})
             .result
             .mods
+    }
+
+    /// A cache row written by the pre-#266 parser (no `parseRev`, title cut at the `&`)
+    /// is parsed again even though the file is unchanged; a current row is reused as is.
+    #[test]
+    fn rows_from_an_older_parser_are_parsed_again() {
+        let base = fresh("parse_rev");
+        let mods = base.join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        let zip = mods.join("FS25_ElmAsh.zip");
+        moddesc_zip(&zip, "Elm &amp; Ash");
+        let c = Candidate {
+            path: zip.clone(),
+            tech_name: "FS25_ElmAsh".into(),
+            kind: "zip",
+        };
+        let (fresh_entry, parsed) = resolve_entry(&c, &HashMap::new());
+        assert!(parsed);
+        assert_eq!(fresh_entry.title.as_deref(), Some("Elm & Ash"));
+
+        let mut old = serde_json::to_value(&fresh_entry).unwrap();
+        old["title"] = "Elm".into();
+        old.as_object_mut().unwrap().remove("parseRev");
+        let row = |json: String| CacheEntry {
+            mtime_ms: fresh_entry.mtime_ms,
+            size: fresh_entry.size,
+            json,
+        };
+        let key = zip.to_string_lossy().into_owned();
+
+        let stale = HashMap::from([(key.clone(), row(old.to_string()))]);
+        let (entry, parsed) = resolve_entry(&c, &stale);
+        assert!(parsed, "an old-parser row must be re-read");
+        assert_eq!(entry.title.as_deref(), Some("Elm & Ash"));
+
+        let current = HashMap::from([(key, row(serde_json::to_string(&fresh_entry).unwrap()))]);
+        let (_, parsed) = resolve_entry(&c, &current);
+        assert!(!parsed, "a current row is reused");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -84,6 +84,13 @@ describe("notices", () => {
     expect(activity).toHaveLength(1);
     expect(activity[0]).toMatchObject({ kind: "notice", level: "error", message: "Farming Simulator 25 is running" });
   });
+
+  it("a blocking notice going away doesn't light the bell as a new error", () => {
+    setNotice(notice("folder", "blocking", "Your mods folder isn't available"));
+    markActivitySeen();
+    clearNotice("folder");
+    expect(unseenErrorCount()).toBe(0);
+  });
 });
 
 describe("toasts", () => {

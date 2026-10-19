@@ -149,14 +149,40 @@ pub fn validate(spec: &BridgeSpec) -> Result<(), String> {
     Ok(())
 }
 
-/// Write the companion mod zip (modDesc.xml + fillTypes.xml + icon.png) to `dest`.
+/// Write the companion mod zip (modDesc.xml + fillTypes.xml + icon.png) to `dest`. It's built
+/// under a temporary name beside `dest` (`.{name}.silo-tmp`, which scans skip) and renamed into
+/// place only once complete, so a failed write (a full disk) never leaves a half-written mod
+/// in the mods folder for the game to choke on, or for a retry to call "already exists".
+/// Refuses when `dest` already exists, and never replaces it.
 pub fn generate(spec: &BridgeSpec, dest: &Path) -> Result<(), String> {
     validate(spec)?;
+    if dest.symlink_metadata().is_ok() {
+        return Err(format!("{} already exists", dest.display()));
+    }
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| "The bridge needs a file name".to_string())?;
+    let tmp = dest.with_file_name(format!(".{name}.silo-tmp"));
+    let written = write_zip(spec, &tmp).and_then(|()| {
+        // Checked again right before the rename, which would replace a file on Windows.
+        if dest.symlink_metadata().is_ok() {
+            return Err(format!("{} already exists", dest.display()));
+        }
+        std::fs::rename(&tmp, dest).map_err(|e| e.to_string())
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
+fn write_zip(spec: &BridgeSpec, path: &Path) -> Result<(), String> {
     let moddesc = build_moddesc(&spec.title, &spec.fill_types, &spec.categories);
     let fill_types = build_fill_types_xml(&spec.fill_types, &spec.categories);
     let icon = make_icon()?;
 
-    let file = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipWriter::new(file);
     let opts: zip::write::FileOptions<()> =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
@@ -168,8 +194,8 @@ pub fn generate(spec: &BridgeSpec, dest: &Path) -> Result<(), String> {
     put("modDesc.xml", moddesc.as_bytes())?;
     put("fillTypes.xml", fill_types.as_bytes())?;
     put("icon.png", &icon)?;
-    zip.finish().map_err(|e| e.to_string())?;
-    Ok(())
+    let file = zip.finish().map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -253,6 +279,35 @@ mod tests {
         assert!(names.contains(&"modDesc.xml".to_string()));
         assert!(names.contains(&"fillTypes.xml".to_string()));
         assert!(names.contains(&"icon.png".to_string()));
+        assert!(
+            !dir.join(".FS25_TestBridge.zip.silo-tmp").exists(),
+            "no temp left"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An existing file is never replaced, and a write that fails leaves nothing at `dest`
+    /// (here the temp name is taken by a folder, so the zip can't be created).
+    #[test]
+    fn a_failed_or_refused_generate_leaves_the_mods_folder_as_it_was() {
+        let dir = std::env::temp_dir().join(format!("silo_bridge_fail_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let spec = BridgeSpec {
+            tech_name: "FS25_TestBridge".into(),
+            title: "Test".into(),
+            fill_types: vec!["SUGARBEET".into()],
+            categories: vec!["BULK".into()],
+        };
+        let dest = dir.join("FS25_TestBridge.zip");
+        std::fs::write(&dest, b"mine").unwrap();
+        assert!(generate(&spec, &dest).is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"mine");
+
+        let dest = dir.join("FS25_Other.zip");
+        std::fs::create_dir_all(dir.join(".FS25_Other.zip.silo-tmp")).unwrap();
+        assert!(generate(&spec, &dest).is_err());
+        assert!(!dest.exists(), "no half-written zip");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

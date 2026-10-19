@@ -13,7 +13,7 @@ By participating you agree to abide by our
 You need three things:
 
 1. **Rust** (stable, via [rustup](https://rustup.rs)).
-2. **Node 20+** ([nodejs.org](https://nodejs.org)) — CI builds on Node 20.
+2. **Node 22** ([nodejs.org](https://nodejs.org)) — CI builds on Node 22.
 3. **Tauri v2 prerequisites** for your OS — the system libraries (WebView, build
    tools, etc.). Follow the official list:
    <https://v2.tauri.app/start/prerequisites/>. On Linux that's `webkit2gtk-4.1`
@@ -75,12 +75,15 @@ full version). PRs are reviewed against them:
 
 ## Running the checks CI enforces
 
-Before opening a PR, run what CI runs. Two workflows gate `main`
-(`.github/workflows/ci.yml`):
+Before opening a PR, run what CI runs. `.github/workflows/ci.yml` gates `main`: the
+frontend job, Rust on Ubuntu (fmt, clippy, test), clippy + test on macOS and Windows, and
+`cargo audit`.
 
 **Frontend**
 
 ```bash
+npm ci
+npm test              # Vitest unit and component tests (CI runs this)
 npm run check         # svelte-check — type/Svelte diagnostics
 npm run build         # what CI actually runs: svelte-check + vite build
 ```
@@ -94,7 +97,7 @@ production Vite build, catching type errors and a broken bundle in one step.
 cd src-tauri
 cargo fmt --all --check   # CI fails on unformatted code — run `cargo fmt` to fix
 cargo clippy --all-targets -- -D warnings   # CI fails on any warning
-cargo test                # the module unit tests (60+ and counting)
+cargo test                # the module unit tests (hundreds of them)
 cargo audit               # blocking: CI fails on a vulnerable dependency
 ```
 
@@ -127,7 +130,7 @@ straight to `main`.
    [feature](.github/ISSUE_TEMPLATE/feature_request.md) template). For anything more
    than a trivial change, agree on the approach in the issue before writing code.
 2. **Branch off `main`** with a short descriptive name: `fix/…`, `feat/…`, or
-   `docs/…` — e.g. `fix/duplicate-map-crash`, `feat/loadout-export`.
+   `docs/…` — e.g. `fix/duplicate-map-crash`, `feat/mod-set-export`.
 3. Make focused commits; keep unrelated changes out of the PR.
 4. **Update the changelog** — add a line under `## [Unreleased]` in
    [`CHANGELOG.md`](CHANGELOG.md) for any user-facing change (see below).
@@ -157,16 +160,19 @@ maintainers and are gated on the hostile-QA protocol in
 
 1. **Freeze** a release candidate (record the commit + installer hash) and run the
    RC battery on the packaged build against a *sacrificial* library — never the real one.
-2. When it survives (no hard-stop; see the doc's stop-list), **bump the version in
-   every source together**: `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`,
-   `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`, and cut `## [Unreleased]` to
-   `## [x.y.z] - <date>` in the changelog (leaving a fresh empty `[Unreleased]`).
-3. **Tag `vX.Y.Z`** on a green-CI commit → the release workflow
-   (`.github/workflows/release.yml`) builds the platform installers and opens a draft
-   prerelease.
+2. When it survives (no hard-stop; see the doc's stop-list), on a `release/X.Y.Z` branch
+   **bump the version in every source together**: `package.json`, `package-lock.json`
+   (two places), `src-tauri/Cargo.toml`, the `silo` entry in `src-tauri/Cargo.lock`, and
+   `src-tauri/tauri.conf.json`, and cut `## [Unreleased]` to `## [X.Y.Z] - <date>` in the
+   changelog (leaving a fresh empty `[Unreleased]`). Open a PR; merge it on green CI.
+3. **Tag `vX.Y.Z`** on that `main` commit → the release workflow
+   (`.github/workflows/release.yml`) builds and signs the platform installers into a
+   **draft, non-prerelease** release with `latest.json`, `SHA256SUMS.txt`, an SBOM and
+   build-provenance attestations.
 4. **Verify the draft** (embedded version, checksums of the *CI-built* artifacts, a
-   clean-machine install, release notes state beta/unsigned/known limitations/upgrade
-   guidance), mark the previous version superseded, and publish.
+   clean-machine install, an upgrade from the previous release, release notes stating the
+   signing state, known limitations and upgrade guidance), then publish. Publishing makes it
+   *Latest*, which is what the in-app updater offers every user straight away.
 
 ## Questions
 

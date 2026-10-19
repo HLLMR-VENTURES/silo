@@ -11,6 +11,7 @@ export interface FirstRunState {
   onboardingDone: boolean;
   whatsNewSeen: boolean;
   hasOrganized: boolean;
+  /** Anything else the user made: curation, tags, category overrides, repo or page links, sets. */
   hasCuration: boolean;
 }
 
@@ -28,7 +29,7 @@ export function setFirstRunFlag(name: FirstRunFlag, on = true): Promise<void> {
 /**
  * Which first-run screen to show, if any.
  * - The setup flow: never finished or skipped, and the library has nothing Silo made (no
- *   organized mods, no curation rows). An upgrading user never sees it.
+ *   organized mods, nothing the user made: curation, tags, sets…). An upgrading user never sees it.
  * - The "What's new" card: an upgrading user (organized mods or curation rows) who hasn't
  *   dismissed it.
  */

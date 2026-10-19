@@ -55,31 +55,34 @@
         ? `Mod updates · Last checked ${lastCheckedText(checkedAt, now)}`
         : "Mod updates · Not checked yet",
   );
+  // Before the first check the panel's empty state carries the privacy line and Check now, so the
+  // header doesn't repeat them.
+  const neverChecked = $derived(!checking && checkedAt == null);
   const progressLabel = $derived(
     progress && progress.total > 0
-      ? `Checked ${progress.done} of ${progress.total} linked GitHub mods`
+      ? `Checked ${progress.done} of ${progress.total} ${progress.total === 1 ? "mod" : "mods"} on GitHub`
       : "Asking Silo's catalog…",
   );
 </script>
 
+{#snippet checkNow()}
+  <span use:tooltip={checkDisabled && checkDisabledReason ? checkDisabledReason : null}>
+    <Button icon="update" loading={checking} disabled={checkDisabled} onclick={oncheck}>
+      Check now
+    </Button>
+  </span>
+{/snippet}
+
 <ViewBoundary name="Updates">
-  <ViewHeader title="Updates" {description}>
-    {#snippet actions()}
-      <span use:tooltip={checkDisabled && checkDisabledReason ? checkDisabledReason : null}>
-        <Button icon="update" loading={checking} disabled={checkDisabled} onclick={oncheck}>
-          Check now
-        </Button>
-      </span>
-    {/snippet}
-  </ViewHeader>
-  <p class="privacy">{UPDATE_PRIVACY_LINE}</p>
+  <ViewHeader title="Updates" {description} actions={neverChecked ? undefined : checkNow} />
+  {#if !neverChecked}<p class="privacy">{UPDATE_PRIVACY_LINE}</p>{/if}
 
   {#if autoCheckOffer.open}
     <section class="offer" aria-labelledby="auto-check-offer">
       <h3 id="auto-check-offer">Check for mod updates when Silo starts?</h3>
       <p>You can change this in Settings.</p>
       <div class="offer-acts">
-        <Button variant="primary" onclick={() => answerAutoCheckOffer(true)}>Check on start</Button>
+        <Button variant="primary" onclick={() => answerAutoCheckOffer(true)}>Check when Silo starts</Button>
         <Button onclick={() => answerAutoCheckOffer(false)}>Only when I ask</Button>
       </div>
     </section>
