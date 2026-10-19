@@ -181,10 +181,12 @@
     type LibraryViewMode,
   } from "./lib/components/library/viewPref";
   import {
+    conflictedTechNames,
     filterChips,
     filterMods,
     NO_FILTERS,
     needsAttention,
+    needsUpdateOutcome,
     withoutFilter,
     type FilterContext,
     type LibraryFilters,
@@ -393,6 +395,8 @@
   }
   /** The scan's own notice (it failed, or recovery left problems). A scan touches no other key. */
   const SCAN_KEY = "scan";
+  /** Why a switch or a filing waits: a running scan would land on top of it with the old state. */
+  const SCAN_WAIT = "Wait for the scan to finish.";
   /** What Silo did while starting (e.g. restored the database), until dismissed. */
   const STARTUP_KEY = "startup";
   // Mods folder is on a cloud-sync filesystem that can't do hardlinks → Silo uses copies.
@@ -764,16 +768,9 @@
     conflicts.filter((c) => c.severity === "critical").length,
   );
 
-  // Every mod named in a non-info conflict, for the "In conflict" library filter.
-  // Conflict.mods carries tech names (and sometimes titles), so we match on both.
-  const conflictedSet = $derived.by(() => {
-    const s = new Set<string>();
-    for (const c of conflicts) {
-      if (c.severity === "info") continue;
-      for (const name of c.mods) s.add(name);
-    }
-    return s;
-  });
+  // Every mod (by tech name) in a non-info conflict: the Conflict badge, the "In conflict"
+  // library filter and its count.
+  const conflictedSet = $derived(conflictedTechNames(conflicts));
 
   // Only the newest check's answer lands: a slow check of an earlier active set must not
   // overwrite the check of the set that's active now (#260: after a mod set switch the chip
@@ -1059,6 +1056,12 @@
 
   /** Turn one mod on or park it, then offer Undo (the switch toast). */
   async function toggleActive(techName: string) {
+    // A scan running now read the active set before this switch: landing after it, it would put
+    // the switch back (and the next switch would re-apply that stale set). Wait for it.
+    if (scanning) {
+      refuse(SCAN_WAIT);
+      return;
+    }
     const turningOff = activeSet.has(techName);
     const mod = effectiveMods.find((m) => m.techName === techName);
     const name = mod?.title ?? techName;
@@ -1762,11 +1765,16 @@
       return;
     }
     if (updateResults.length === 0 && !updateChecking) await checkAllUpdates(true);
-    if (availableUpdates.length > 0) {
-      libFilters = { ...libFilters, needsUpdate: true };
-    } else {
-      success("All mods are up to date");
-    }
+    const out = needsUpdateOutcome({
+      available: availableUpdates.length,
+      checking: updateChecking,
+      checked: updateCheckedAt != null,
+      catalogError: updateCatalogError?.message ?? null,
+      blocked: updateCheckBlocked,
+    });
+    if (out.filter) libFilters = { ...libFilters, needsUpdate: true };
+    else if (out.tone === "warn") refuse(out.say);
+    else success(out.say);
   }
 
   /** A failure as Updates shows it in a row: logged, worded, and the "Copy details" text. */
@@ -1998,7 +2006,7 @@
   const filterCtx: FilterContext = {
     curation: (t) => cur(t),
     active: (t) => activeSet.has(t),
-    conflicted: (m) => conflictedSet.has(m.techName) || conflictedSet.has(m.title ?? ""),
+    conflicted: (m) => conflictedSet.has(m.techName),
     hasUpdate: (t) => updatesSet.has(t),
     tags: (t) => tagsOf(t),
     verdict: (m) => getVerdict(m as ModEntry)?.status,
@@ -2138,6 +2146,13 @@
       detailMod = null;
     }
   }
+  // The list goes when filters (or a switch under the Active / Parked segment) empty it: if a row
+  // had focus, it goes to the empty state's first button, else the main area.
+  returnFocusWhenHidden(
+    () => scanning || filtered.length > 0,
+    () => listBodyEl,
+    () => (listBodyEl?.querySelector<HTMLElement>("button") ?? document.getElementById("main"))?.focus(),
+  );
   // The BulkBar goes when the selection clears (Clear, Esc, a filter pruning it): if it had focus,
   // focus goes to the list's row, else the toolbar's first control.
   returnFocusWhenHidden(
@@ -2155,7 +2170,8 @@
   function writeRefusal(): string | null {
     if (archiveMove.unfinished && !archiveMove.running) return MOVE_UNFINISHED_COPY;
     const b = blocked("library-write");
-    return b.blocked ? `${b.reason} Try again when it's done.` : null;
+    if (b.blocked) return `${b.reason} Try again when it's done.`;
+    return scanning ? SCAN_WAIT : null;
   }
 
   /**
@@ -2177,6 +2193,10 @@
       ask,
       explain: (name, category) => explainParkLoose(name, category),
       fileLoose: async (techNames) => {
+        if (scanning) {
+          refuse(SCAN_WAIT);
+          return null;
+        }
         // Built from the scan as it is now (as Try again does): mods filed meanwhile are skipped.
         const wanted = new Set(techNames);
         const fresh = looseInputs();
@@ -2195,6 +2215,10 @@
         return effectiveMods.filter((m) => wanted.has(m.techName) && isFileable(m)).length;
       },
       applyProjected: async (techNames, turnOn) => {
+        if (scanning) {
+          refuse(SCAN_WAIT);
+          return null;
+        }
         const op = beginWrite(turnOn ? "Activating mods" : "Deactivating mods");
         if (!op) return null;
         switchUndo.dismiss();
@@ -3241,7 +3265,7 @@
   /** Why the old "Organize N" button was off: a library write, a scan, or an unfinished move. */
   const organizeOffReason = $derived(
     fgLock.reason ||
-      (scanning ? "Wait for the scan to finish." : "") ||
+      (scanning ? SCAN_WAIT : "") ||
       (archiveMove.unfinished ? "Finish or cancel the archive move first" : ""),
   );
   const libraryStripItems = $derived.by((): StatusStripItem[] => {
