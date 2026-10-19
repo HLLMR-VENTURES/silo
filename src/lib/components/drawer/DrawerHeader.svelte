@@ -5,7 +5,7 @@
   import BadgeRow from "../library/BadgeRow.svelte";
   import IconButton from "../../ui/IconButton.svelte";
   import type { BadgeSpec } from "../library/rowBadges";
-  import { versionLabel } from "./drawerText";
+  import { displayVersion } from "../../format";
 
   interface Props {
     title: string;
@@ -32,7 +32,7 @@
   <div class="text">
     <h2 class="title" tabindex="-1" bind:this={titleEl}>{title}</h2>
     <div class="sub">
-      {author ?? "Unknown author"}{version ? ` · ${versionLabel(version)}` : ""}
+      {author ?? "Unknown author"}{version ? ` · ${displayVersion(version)}` : ""}
     </div>
     {#if badges.length > 0}
       <!-- The pills' explanations are hover tooltips; screen readers get them as text instead. -->

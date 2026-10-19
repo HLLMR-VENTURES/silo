@@ -3,6 +3,7 @@
   // The drawer does the (best-effort) lookup and passes the result: `checked` false while it
   // runs, `catalog` null when the mod isn't in the catalog or the lookup failed.
   import Icon from "../ui/Icon.svelte";
+  import { displayVersion } from "../format";
   import type { ModEntry, CatalogUpdate } from "../types";
   import { openExternal } from "../api";
 
@@ -30,7 +31,7 @@
   {:else if catalog.hasUpdate}
     {@const c = catalog}
     <div class="d-log warn">
-      Update available: you have {mod.version ?? "an unknown version"}, the catalog has <b>{c.latest}</b>{c.source
+      Update available: you have {mod.version ? displayVersion(mod.version) : "an unknown version"}, the catalog has <b>{displayVersion(c.latest)}</b>{c.source
         ? ` (${c.source})`
         : ""}.
       {#if link}<button class="d-cat-link" onclick={() => openExternal(link)}
@@ -38,7 +39,7 @@
         >{/if}
     </div>
   {:else}
-    <div class="d-log ok">Up to date with the catalog{catalog.latest ? ` (${catalog.latest})` : ""}.</div>
+    <div class="d-log ok">Up to date with the catalog{catalog.latest ? ` (${displayVersion(catalog.latest)})` : ""}.</div>
   {/if}
 </div>
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from "../ui/Icon.svelte";
+  import { displayVersion } from "../format";
   import { inlineError } from "../state/notify.svelte";
   import type { ModEntry, UpdateInfo } from "../types";
   import { setModRepo, guessRepo, checkModUpdate, downloadUpdate, openExternal } from "../api";
@@ -135,7 +136,7 @@
     />
     <button class="gh-btn" onclick={linkRepo}>{repo ? "Update link" : "Link"}</button>
   </div>
-  {#if suggested && !repo}<div class="gh-suggest">Suggested from the mod's page. Click Link to confirm.</div>{/if}
+  {#if suggested && !repo}<div class="gh-suggest">Found in the mod's own files. Select Link to confirm.</div>{/if}
   {#if repo}
     <div class="gh-actions">
       <button class="gh-btn" onclick={checkUpdate} disabled={checking}>
@@ -152,9 +153,9 @@
   {#if update}
     <div class="gh-result" class:has={update.hasUpdate}>
       {#if update.hasUpdate}
-        <b>Update available:</b> {update.release.tag} (you have {update.current})
+        <b>Update available:</b> {displayVersion(update.release.tag)} (you have {displayVersion(update.current)})
       {:else}
-        Up to date. Latest is {update.release.tag}
+        Up to date. Latest is {displayVersion(update.release.tag)}
       {/if}
       {#if update.release.htmlUrl}
         <button class="gh-open" onclick={() => openExternal(update!.release.htmlUrl!)}>

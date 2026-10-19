@@ -42,6 +42,11 @@
     onFinished?: (parked: string | null) => void;
     /** A mod's title for display (tech name when unknown). */
     titleOf?: (techName: string) => string;
+    /** Before anything is saved: get the pool ready to be parked (file loose zips into the
+     *  library; set_active only parks filed mods). False stops the start with nothing changed. */
+    onPrepare?: () => Promise<boolean>;
+    /** Active mods Silo can't park (unzipped folder mods), kept on every round. */
+    stayOn?: number;
   }
   let {
     pool,
@@ -53,6 +58,8 @@
     onProgress,
     onFinished,
     titleOf = (t: string) => t,
+    onPrepare,
+    stayOn = 0,
   }: Props = $props();
 
   type Phase =
@@ -105,7 +112,15 @@
         onBisecting(false); // App re-reads the snapshot and shows the restore banner
         return;
       }
-      // Snapshot the REAL set first (crash-safe restore lives in the DB).
+      if (onPrepare) {
+        working = null; // its dialog speaks for itself
+        const ready = await onPrepare();
+        if (destroyed) return abandon();
+        if (!ready) return; // declined or refused (said so): nothing was saved
+        working = "Saving your current mod set…";
+      }
+      // Snapshot the REAL set first (crash-safe restore lives in the DB). Read after the
+      // preparation, so the props are the library as it is now.
       await bisectSnapshotSave([...alwaysOn, ...pool]);
       if (destroyed) {
         // Nothing was changed yet, so the fresh snapshot isn't needed.
@@ -337,6 +352,12 @@
       > launches. Maps and required mods stay on the whole time. Silo saves your exact mods now and
       puts them back when you finish.
     </p>
+    {#if stayOn > 0}
+      <p class="body muted">
+        {stayOn === 1 ? "1 unzipped folder mod stays" : `${stayOn} unzipped folder mods stay`} on every round:
+        Silo can only park mod zips.
+      </p>
+    {/if}
     {#if recoveryPending && !error}
       <div class="err">{BISECT_RESTORE_FIRST}</div>
     {/if}
@@ -347,7 +368,8 @@
   {:else if phase === "await-launch"}
     {#if step?.kind === "split"}
       <p class="body">
-        Testing <b>{step.test.length}</b> mods this round ({step.rest.length} parked for now).
+        Testing <b>{step.test.length}</b> {step.test.length === 1 ? "mod" : "mods"} this round ({step.rest.length}
+        parked for now).
       </p>
       <ol class="steps">
         <li>Launch the game and load the save that was crashing.</li>
