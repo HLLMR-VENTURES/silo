@@ -90,7 +90,7 @@ export type FinishHow = "skip" | "notNow" | "done";
 
 /** The text "Copy details" copies for a partial failure. */
 export function failureDetails(failures: FilingFailure[], filed: number, total: number): string {
-  const lines = [`Silo filed ${filed} of ${total} mods. These couldn't be moved:`];
+  const lines = [`Silo filed ${filed} of ${nMods(total)}. These couldn't be moved:`];
   for (const f of failures) lines.push(`- ${f.fileName || f.techName || "?"}: ${f.message}`);
   return lines.join("\n");
 }

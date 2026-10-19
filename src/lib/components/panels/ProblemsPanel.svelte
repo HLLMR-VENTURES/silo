@@ -69,7 +69,7 @@
   <div class="lp-head">
     <h3 id="problems-head" class="lp-title tnum">
       <!-- Not "problems": the status chip counts only active mods as problems, so this says what it is. -->
-      <strong>{formatCount(total)} {plural(total, { one: "mod needs", other: "mods need" })} attention</strong>
+      <strong>{total === 0 ? "Nothing needs attention" : `${formatCount(total)} ${plural(total, { one: "mod needs", other: "mods need" })} attention`}</strong>
     </h3>
   </div>
   {#if lockReason}<p class="lock">{lockReason}</p>{/if}
@@ -121,7 +121,7 @@
   {/if}
 
   {#if health.ignored.length > 0}
-    <h4 class="hz-group">Ignored by the game: the name starts with a digit ({formatCount(health.ignored.length)})</h4>
+    <h4 class="hz-group">Ignored by the game: the name starts with a number ({formatCount(health.ignored.length)})</h4>
     <ul class="rows">
       {#each health.ignored as m (m.techName)}
         <li class="hz-row">
@@ -148,7 +148,7 @@
           <div class="hz-name"><code>{f.fileName}</code></div>
           <p class="hz-detail">
             The file in your mods folder ({ver(f.flatVersion)}) isn't the one Silo keeps ({ver(f.managedVersion)}). Pick
-            which build to keep. The other goes to <code>backups/</code>, so nothing is lost.
+            which build to keep. The other is moved to a backup folder, so nothing is lost.
           </p>
           <div class="hz-actions">
             <Button
@@ -160,7 +160,7 @@
               Use this version
             </Button>
             <Button size="sm" disabled={pendingFile === f.fileName || !!lockReason} onclick={() => resolve(f.fileName, "restore")}>
-              Keep Silo's
+              Keep Silo's copy
             </Button>
           </div>
         </li>

@@ -53,8 +53,8 @@ export function archiveNotice(s: ArchiveNoticeState, a: ArchiveNoticeActions): N
         title: `${s.cancelling ? "Moving your library back" : "Moving your library"}${where}.`,
         body:
           (counted
-            ? `${p.done}/${p.total} mods · ${fmtSize(p.bytesDone)} of ${fmtSize(p.bytesTotal)}. `
-            : "Starting. ") + "Launch is blocked until it pauses or finishes.",
+            ? `${p.done} of ${modsCount(p.total)} · ${fmtSize(p.bytesDone)} of ${fmtSize(p.bytesTotal)}. `
+            : "Starting. ") + "You can't press Play until it pauses or finishes.",
         progress: counted ? { done: p.done, total: p.total, label: "Mods moved" } : undefined,
         actions: [
           {
@@ -77,8 +77,8 @@ export function archiveNotice(s: ArchiveNoticeState, a: ArchiveNoticeActions): N
         title: `${modsCount(moving.errors.length)} couldn't be moved.`,
         body:
           `${sentence(capList(moving.errors.map(unDot), 3, "; "))} ${reason}The move is paused. ` +
-          `Retry tries them again${s.cancelling ? "." : ", or Cancel moves everything back."}`,
-        actions: [{ label: "Retry", run: a.resume, primary: true }, ...cancel],
+          `Press Try again to move them${s.cancelling ? "." : ", or Cancel move to move everything back."}`,
+        actions: [{ label: "Try again", run: a.resume, primary: true }, ...cancel],
         dismissible: false,
       };
     }
@@ -88,7 +88,7 @@ export function archiveNotice(s: ArchiveNoticeState, a: ArchiveNoticeActions): N
         key: ARCHIVE_MOVE_KEY,
         level: "warning",
         icon: "archive",
-        title: s.cancelling ? "Moving your library back is paused." : "Archive move paused.",
+        title: s.cancelling ? "Moving your library back is paused." : "Library move paused.",
         body: `${reason}You can play, then resume when you're done.`,
         actions: [{ label: "Resume", run: a.resume, primary: true }, ...cancel],
         dismissible: false,

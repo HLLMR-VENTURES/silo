@@ -23,7 +23,7 @@
 
   // Friendly device names for the common FS device ids.
   function deviceLabel(id: string): string {
-    if (id === "KB_MOUSE_DEFAULT") return "Keyboard & Mouse";
+    if (id === "KB_MOUSE_DEFAULT") return "Keyboard and mouse";
     if (id === "GAMEPAD" || id.startsWith("GAMEPAD")) return "Gamepad";
     return id || "Unknown device";
   }
@@ -80,7 +80,7 @@
   </div>
 
   {#if loading}
-    <div class="empty">Reading inputBinding.xml…</div>
+    <div class="empty">Reading your control settings…</div>
   {:else if error}
     <div class="err">{error}</div>
   {:else if report}
@@ -132,7 +132,7 @@
     {/each}
 
     {#if r.devices.length === 0}
-      <div class="empty">No bindings found. Configure controls in FS25 first.</div>
+      <div class="empty">No bindings found. Set up your controls in Farming Simulator 25 first.</div>
     {/if}
   {/if}
 </div>

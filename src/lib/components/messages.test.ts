@@ -209,7 +209,7 @@ describe("ViewBoundary", () => {
     const user = userEvent.setup();
     failing.now = true;
     render(BoundaryHarness);
-    expect(screen.getByRole("heading", { name: "This part of Silo hit a problem." })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "This part of Silo hit a problem" })).toBeInTheDocument();
     // No claim about the mods unless the view says it can't change any.
     expect(screen.getByText("Something went wrong showing this part of Silo.")).toBeInTheDocument();
     expect(screen.queryByText("Your mods weren't changed.")).toBeNull();

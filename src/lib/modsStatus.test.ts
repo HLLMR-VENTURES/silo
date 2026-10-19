@@ -33,7 +33,7 @@ describe("switchBlockReason", () => {
   it("waits for a move, a scan or a busy action first", async () => {
     const none = async () => false;
     expect(await switchBlockReason({ ...idle, moveUnfinished: true }, none)).toBe(
-      "Finish or cancel the archive move first.",
+      "Finish or cancel the library move first.",
     );
     expect(await switchBlockReason({ ...idle, scanning: true }, none)).toBe(
       "Wait for the scan to finish.",
@@ -45,7 +45,7 @@ describe("switchBlockReason", () => {
   });
 
   it("keeps an interrupted bisection's folder until it's dealt with", async () => {
-    expect(await switchBlockReason(idle, async () => true)).toMatch(/guided bisection/);
+    expect(await switchBlockReason(idle, async () => true)).toMatch(/Find the problem mod/);
   });
 
   it("never gates leaving a blocked folder on a bisection snapshot", async () => {
@@ -58,7 +58,7 @@ describe("switchBlockReason", () => {
     expect(asked).toBe(false);
     // A move still comes first, even then.
     expect(await switchBlockReason({ ...idle, blocked: true, moveUnfinished: true }, snap)).toBe(
-      "Finish or cancel the archive move first.",
+      "Finish or cancel the library move first.",
     );
   });
 });
@@ -171,15 +171,15 @@ describe("modsFolderNotices (#228)", () => {
     expect(n.override).toMatchObject({
       key: "override",
       level: "warning",
-      title: "FS25 is reading a different mods folder (D:/fs).",
+      title: "Farming Simulator 25 is reading a different mods folder (D:/fs).",
     });
-    expect(labels(n.override)).toEqual(["Point FS25 here", "Switch Silo to the game's folder"]);
+    expect(labels(n.override)).toEqual(["Point FS25 here", "Use the game's folder"]);
     const cantWrite = modsFolderNotices(
       status({ mismatch: true, canWriteGameSetting: false }),
       false,
       acts(),
     );
-    expect(labels(cantWrite.override)).toEqual(["Switch Silo to the game's folder"]);
+    expect(labels(cantWrite.override)).toEqual(["Use the game's folder"]);
   });
 
   it("the one-time 'now follows FS25' notice is dismissible and remembers it", () => {

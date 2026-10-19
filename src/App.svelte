@@ -238,6 +238,7 @@
     filingFailures,
     firstRunScreen,
     firstRunState,
+    nMods,
     setFirstRunFlag,
     type ArchiveChoice,
     type FilingFailure,
@@ -663,7 +664,7 @@
   function openGameGraphics() {
     if (!userDir) return;
     configEditor = {
-      title: "Graphics settings: game.xml",
+      title: "Graphics settings",
       path: `${userDir}/game.xml`,
       fields: GAME_GRAPHICS_FIELDS,
       presets: GAME_GRAPHICS_PRESETS,
@@ -1120,7 +1121,7 @@
   // Returns true when it worked; false when it was refused (another write) or failed, so the
   // drawer stays open.
   async function resolveForeign(fileName: string, action: "adopt" | "restore"): Promise<boolean> {
-    const op = beginWrite(action === "adopt" ? "Adopting the dropped build" : "Restoring Silo's copy");
+    const op = beginWrite(action === "adopt" ? "Using the version in your mods folder" : "Putting Silo's version back");
     if (!op) return false;
     let done = false;
     try {
@@ -1128,7 +1129,7 @@
       else await restoreForeignFile(fileName);
       done = true;
     } catch (e) {
-      reportError(e, action === "adopt" ? "Adopting the dropped build" : "Restoring Silo's copy");
+      reportError(e, action === "adopt" ? "Using the version in your mods folder" : "Putting Silo's version back");
     } finally {
       op.end();
     }
@@ -1407,7 +1408,7 @@
         return {
           problem: `That folder already holds ${modsCount(pf.looseMods)}. Choose an empty folder, or set it up later in Settings → Library.`,
         };
-      const op = beginWrite("Pointing Silo at the archive");
+      const op = beginWrite("Switching to the new library archive");
       if (!op) return { problem: blocked("library-write").reason || "Silo is busy. Try again in a moment." };
       try {
         await archiveRepoint(path);
@@ -1419,18 +1420,18 @@
       await runScan(false);
       return { path };
     } catch (e) {
-      return { problem: inlineError(e, "Pointing Silo at the archive") };
+      return { problem: inlineError(e, "Switching to the new library archive") };
     }
   }
 
   /** The setup flow's "Inside your mods folder" after choosing another drive. */
   async function useDefaultArchiveFirstRun(): Promise<string | null> {
-    const op = beginWrite("Pointing Silo at the archive");
+    const op = beginWrite("Switching to the new library archive");
     if (!op) return blocked("library-write").reason || "Silo is busy. Try again in a moment.";
     try {
       await archiveRepoint(null);
     } catch (e) {
-      return inlineError(e, "Pointing Silo at the archive");
+      return inlineError(e, "Switching to the new library archive");
     } finally {
       op.end();
     }
@@ -1468,7 +1469,7 @@
   async function rebuildLibrary() {
     // A paused archive move doesn't stop it (it only re-reads, as Settings says); a running one
     // holds the library, and beginWrite says so.
-    const op = beginWrite("Clearing the scan cache", false, { duringMove: !archiveMove.running });
+    const op = beginWrite("Re-reading every mod", false, { duringMove: !archiveMove.running });
     if (!op) return;
     // The write is held through the rescan, so nothing changes the library until it has been
     // read again. The status line names it: it re-reads every mod, so it takes a while.
@@ -1476,10 +1477,10 @@
       try {
         await clearScanCache();
       } catch (e) {
-        reportError(e, "Clearing the scan cache", { retry: rebuildLibrary });
+        reportError(e, "Re-reading every mod", { retry: rebuildLibrary });
         return;
       }
-      op.setLabel("Rebuilding your library (re-scanning every mod)");
+      op.setLabel("Re-reading every mod");
       await runScan(false, undefined, true);
     } finally {
       op.end();
@@ -1490,8 +1491,17 @@
     if (
       !(await ask({
         title: "Put every mod back in your mods folder?",
-        body: "Silo moves all parked and active mods out of the library folder and removes its links. Nothing is deleted.",
+        body: (() => {
+          // Say the consequence: parked mods land in the mods folder too, so the game loads them.
+          const parked = mods.filter((m) => !activeSet.has(m.techName)).length;
+          return (
+            `All ${nMods(mods.length)} go back into your mods folder, so the game loads every one of them` +
+            (parked > 0 ? `, including the ${nMods(parked)} parked now` : "") +
+            ". Silo removes its links. Nothing is deleted."
+          );
+        })(),
         confirm: "Undo organizing",
+        tone: "danger",
       }))
     )
       return;
@@ -1569,7 +1579,7 @@
     const isActive = activeSet.has(mod.techName);
     const hasSettings = settingsModsSet.has(mod.techName);
     const items: MenuItem[] = [
-      { id: "active", label: isActive ? "Park (deactivate)" : "Activate", icon: isActive ? "circle" : "dot" },
+      { id: "active", label: isActive ? "Park" : "Turn on", icon: isActive ? "circle" : "dot" },
       { id: "details", label: "Open details", icon: "info" },
       { id: "browse", label: "Find in Browse", icon: "search" },
       { id: "category", label: "Change category…", icon: "tag", separatorBefore: true },
@@ -1619,7 +1629,7 @@
     const now = effectiveMods.find((m) => m.techName === techName)?.category;
     return [
       ...CATEGORIES.map((c) => ({ id: c, label: c, icon: c === now ? ("check" as const) : undefined })),
-      { id: CATEGORY_RESET, label: "Reset to auto", icon: "undo" as const, separatorBefore: true },
+      { id: CATEGORY_RESET, label: "Use Silo's category", icon: "undo" as const, separatorBefore: true },
     ];
   }
   function modTitle(techName: string): string {
@@ -1884,7 +1894,7 @@
       problems = out.problems;
       const backup = out.backup;
       success(
-        `Updated ${row.title}${row.latest ? ` to ${row.latest}` : ""}. The previous version is in backups.`,
+        `Updated ${row.title}${row.latest ? ` to ${displayVersion(row.latest)}` : ""}. The previous version is in backups.`,
         {
           duration: 10_000,
           action: backup ? { label: "Show", run: () => void revealInFolder(backup) } : undefined,
@@ -2229,7 +2239,7 @@
           refuse(SCAN_WAIT);
           return null;
         }
-        const op = beginWrite(turnOn ? "Activating mods" : "Deactivating mods");
+        const op = beginWrite(turnOn ? "Turning on mods" : "Parking mods");
         if (!op) return null;
         switchUndo.dismiss();
         const next = new Set(activeSet);
@@ -2252,7 +2262,7 @@
         // projection (e.g. a file Silo couldn't prove was its own) leaves the two out of sync.
         await runScan(false);
         if (problem !== null) {
-          reportError(problem, turnOn ? "Activating mods" : "Deactivating mods");
+          reportError(problem, turnOn ? "Turning on mods" : "Parking mods");
           return "failed";
         }
         return clean;
@@ -2333,7 +2343,7 @@
       } else if (rep.hardlinksUnsupported) {
         explained = true;
         cloudSynced = true;
-        done = "Your mods folder is cloud-synced. Hardlinks aren't available, so there's no space to reclaim.";
+        done = "Your mods folder can't use links, so Silo keeps copies there and there's no space to reclaim.";
       } else {
         if (rep.errors.length) problem = rep.errors.slice(0, 3).join("; ");
         const gb = rep.reclaimedBytes / 1024 ** 3;
@@ -2341,8 +2351,8 @@
           gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(rep.reclaimedBytes / 1024 ** 2)} MB`;
         done =
           rep.upgraded > 0
-            ? `Reclaimed ${freed} from ${rep.upgraded} mod${rep.upgraded === 1 ? "" : "s"}.`
-            : "Links are already optimized. Nothing to reclaim.";
+            ? `Reclaimed ${freed} from ${modsCount(rep.upgraded)}.`
+            : "Nothing to reclaim. Your active mods already share space with your library.";
       }
     } catch (e) {
       problem = e;
@@ -2405,7 +2415,7 @@
         const n = untrack(() => mods.length);
         scanSaid = untrack(() => scanFailed)
           ? "The scan didn't finish."
-          : `Scan finished: ${n.toLocaleString()} mod${n === 1 ? "" : "s"}.`;
+          : `Scan finished: ${nMods(n)}.`;
       }
       // After the DOM update, then after the frame that paints it; skipped if a newer scan has
       // started meanwhile (its start mark isn't this scan's).
@@ -2498,15 +2508,15 @@
         st.mismatch &&
         st.canWriteGameSetting &&
         (await ask({
-          title: "Point Farming Simulator at this folder too?",
+          title: "Point Farming Simulator 25 at this folder too?",
           body:
-            "Silo updates FS25's gameSettings.xml and keeps a backup of it, so you can switch back later. " +
-            "Close FS25 first. The game rewrites that file when it exits.",
+            "Silo updates the game's mods folder setting and keeps a backup, so you can switch back later. " +
+            "Close Farming Simulator 25 first. The game rewrites that setting when it exits.",
           facts: [
-            { label: "FS25 reads now", value: st.gameReads ?? "(unknown)" },
+            { label: "The game reads now", value: st.gameReads ?? "(unknown)" },
             { label: "Silo uses", value: path },
           ],
-          confirm: "Update FS25's setting",
+          confirm: "Update the game's setting",
           cancel: "Only in Silo",
         }))
       ) {
@@ -2687,7 +2697,7 @@
     );
     if (!ok) return;
     try {
-      const op = beginWrite("Pointing Silo at the archive");
+      const op = beginWrite("Switching to the new library archive");
       if (!op) return;
       try {
         await archiveRepoint(path);
@@ -2698,7 +2708,7 @@
       modsStatus = await modsRootStatus().catch(() => modsStatus);
       await runScan();
     } catch (e) {
-      reportError(e, "Pointing Silo at the archive");
+      reportError(e, "Switching to the new library archive");
     }
   }
 
@@ -2848,10 +2858,9 @@
         ? {
             level: "warning",
             icon: "cloud",
-            title:
-              "Your mods folder is synced by a cloud service (OneDrive, Google Drive, or Proton Drive), which doesn't support hardlinks.",
+            title: "Your mods folder can't use links, so Silo copies your active mods.",
             body:
-              "Silo projects your active mods as file copies instead. That works, but uses more disk and makes bulk activate and deactivate slower. For the best performance, exclude …\\My Games\\FarmingSimulator2025 from your cloud sync.",
+              "That works, but it takes more disk space and makes turning many mods on or off slower. This usually means the folder is synced by OneDrive, Google Drive or Proton Drive. Leave your mods folder out of the sync and Silo can link them instead.",
             dismissible: true,
             onDismiss: dismissCloudNotice,
           }
@@ -2868,8 +2877,8 @@
       bisectRecovery
         ? {
             level: "blocking",
-            title: "A guided diagnosis was interrupted.",
-            body: "Your active mods may be partially applied.",
+            title: "Find the problem mod was interrupted.",
+            body: "Your active mods may still be one of its test sets, not your usual mods.",
             actions: [
               { label: "Restore my mod set", run: restoreBisect, primary: true, ...off },
               { label: "Discard", run: discardBisect, ...off },
@@ -3147,9 +3156,9 @@
   async function discardBisect() {
     if (!bisectRecovery) return;
     const ok = await ask({
-      title: "Forget the interrupted diagnosis?",
+      title: "Forget the interrupted search for the problem mod?",
       body: "Your active mods stay as they are now, and Silo won't offer to restore the earlier set again. This can't be undone.",
-      confirm: "Discard",
+      confirm: "Forget it",
       cancel: "Keep it",
       tone: "danger",
     });
@@ -3158,7 +3167,7 @@
       await bisectSnapshotClear();
       bisectRecovery = null;
     } catch (e) {
-      reportError(e, "Discarding the interrupted diagnosis");
+      reportError(e, "Forgetting the interrupted search for the problem mod");
     }
   }
 
@@ -3242,7 +3251,7 @@
   // Play keeps the old Launch button's guards: off during a foreground library write or while an
   // archive move is copying (launching would race it).
   const playOffReason = $derived(
-    archiveMove.running ? "An archive move is running. Pause it to play." : fgLock.reason,
+    archiveMove.running ? "A library move is running. Pause it to play." : fgLock.reason,
   );
 
   /** Saves (already loaded) that use mods the library doesn't have. */
@@ -3301,7 +3310,7 @@
   const organizeOffReason = $derived(
     fgLock.reason ||
       (scanning ? SCAN_WAIT : "") ||
-      (archiveMove.unfinished ? "Finish or cancel the archive move first" : ""),
+      (archiveMove.unfinished ? "Finish or cancel the library move first." : ""),
   );
   const libraryStripItems = $derived.by((): StatusStripItem[] => {
     const run: Record<string, () => void> = {
@@ -3876,7 +3885,7 @@
               Quality) without launching the game. Changes take effect the next time you launch it.
             </p>
             {#if userDir}
-              <Button icon="modSettings" onclick={openGameGraphics}>Edit game.xml</Button>
+              <Button icon="modSettings" onclick={openGameGraphics}>Edit graphics settings</Button>
             {:else}
               <p class="muted">Silo couldn't find your Farming Simulator 25 user folder.</p>
             {/if}
@@ -3972,8 +3981,8 @@
        cut short, and comes back where it was. -->
   <KeepMounted target={diagnoseLastRunSlot} keep={bisecting}>
     <ViewBoundary
-      name="Crash & log triage"
-      bodyText="Your mods are as they were before this view failed. If a diagnosis was running, Silo keeps your place."
+      name="Last run"
+      bodyText="Your mods are as they were before this view failed. If Find the problem mod was running, Silo keeps your place."
     >
       <div class="page-card">
         <LogTriage

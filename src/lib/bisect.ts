@@ -15,7 +15,7 @@ export function bisectRestoreSet(
 
 /** Shown when a new bisection would overwrite an interrupted run's snapshot. */
 export const BISECT_RESTORE_FIRST =
-  "Finish restoring your last bisection first: use Restore in the banner above.";
+  "Put your mods back from the interrupted search first: use Restore my mod set in the notice above.";
 
 /** A new bisection may start only when no earlier run's snapshot is waiting to be
  *  restored; starting would overwrite the only record of the user's real set.

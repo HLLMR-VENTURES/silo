@@ -33,9 +33,9 @@
   {/if}
   <p class="modal-note">
     {#if modal.source === "catalog"}
-      Full body from the catalog. The source page has the original formatting.
+      Full description from Silo's catalog. The mod's page has the original formatting.
     {:else}
-      Catalog summary. The full write-up lives on the mod's page.
+      Summary from Silo's catalog. The full description is on the mod's page.
     {/if}
   </p>
   {#snippet footer()}

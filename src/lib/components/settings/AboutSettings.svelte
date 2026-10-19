@@ -41,7 +41,7 @@
 </script>
 
 <SettingsCard title="Silo">
-  <p class="version tnum">Silo {appVer ? `v${appVer}` : "—"}</p>
+  <p class="version tnum">Silo {appVer ?? "—"}</p>
   {#if scanMs !== null}
     <p class="hint tnum">Last library scan: scanned in {scanMs} ms.</p>
   {/if}

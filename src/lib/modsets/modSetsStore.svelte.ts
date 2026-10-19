@@ -90,10 +90,14 @@ export function switchSummary(
     { label: "Park", value: modsCount(off) },
     ...(missingCount ? [{ label: "Not in your library", value: modsCount(missingCount) }] : []),
   ];
-  const changed = [...diff.on.map((t) => `On: ${title(t)}`), ...diff.off.map((t) => `Park: ${title(t)}`)];
+  const changed = [...diff.on.map((t) => `Turn on: ${title(t)}`), ...diff.off.map((t) => `Park: ${title(t)}`)];
   const list = changed.slice(0, 50);
   if (changed.length > 50) list.push(`…and ${changed.length - 50} more`);
-  let body = `${modsCount(on)} ${plural(on, { one: "turns", other: "turn" })} on and ${formatCount(off)} ${plural(off, { one: "is", other: "are" })} parked. Nothing is deleted.`;
+  // "693 mods turn on." / "5 mods are parked." / "2 mods turn on and 2 are parked." (no "0 are").
+  const onPart = on > 0 ? `${modsCount(on)} ${plural(on, { one: "turns", other: "turn" })} on` : "";
+  const offPart =
+    off > 0 ? `${on > 0 ? formatCount(off) : modsCount(off)} ${plural(off, { one: "is", other: "are" })} parked` : "";
+  let body = `${[onPart, offPart].filter(Boolean).join(" and ")}. Nothing is deleted.`;
   if (missingCount)
     body += plural(missingCount, {
       one: " 1 mod in this set isn't in your library, so it stays off until you get it.",

@@ -134,7 +134,7 @@ describe("Problems", () => {
     expect(screen.getByRole("heading", { level: 3 })).toHaveTextContent("4 mods need attention");
     expect(screen.getByRole("heading", { name: /Missing a required mod/ })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /Can't be read/ })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /Ignored by the game: the name starts with a digit/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Ignored by the game: the name starts with a number/ })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /A different build is in your mods folder/ })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Find it in Browse" }));
@@ -145,7 +145,7 @@ describe("Problems", () => {
     expect(onPark).toHaveBeenCalledWith("FS25_Broken");
     await user.click(screen.getByRole("button", { name: "Use this version" }));
     expect(onResolveForeign).toHaveBeenCalledWith("FS25_Plow.zip", "adopt");
-    await user.click(screen.getByRole("button", { name: "Keep Silo's" }));
+    await user.click(screen.getByRole("button", { name: "Keep Silo's copy" }));
     expect(onResolveForeign).toHaveBeenCalledWith("FS25_Plow.zip", "restore");
     // "Foreign files" is gone from the words.
     expect(screen.queryByText(/foreign/i)).toBeNull();

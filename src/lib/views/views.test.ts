@@ -172,7 +172,7 @@ describe("ToolsView", () => {
       graphicsTab: stub("Graphics body"),
     });
     expect(screen.getAllByRole("tab").map((t) => t.textContent?.trim())).toEqual([
-      "Library stats",
+      "Library statistics",
       "Controls map",
       "Fill type bridge",
       "Graphics settings",
@@ -376,7 +376,7 @@ describe("HelpView", () => {
 
   it("About lists the third-party licenses, the fonts first", () => {
     render(HelpView, { onopen: vi.fn(), oncopydiagnostics: vi.fn(), appVer: "1.0.0" });
-    expect(screen.getByText("Silo v1.0.0")).toBeInTheDocument();
+    expect(screen.getByText("Silo 1.0.0")).toBeInTheDocument();
     const names = [...document.querySelectorAll(".lic-name")].map((e) => e.textContent);
     expect(names.slice(0, 2)).toEqual(["Fraunces (font)", "Hanken Grotesk (font)"]);
     expect(names).toContain("@lucide/svelte");

@@ -37,7 +37,7 @@
 
   {#snippet failed(error, reset)}
     {#snippet state()}
-      <ErrorState title="This part of Silo hit a problem." body={bodyText} details={details(error)}>
+      <ErrorState title="This part of Silo hit a problem" body={bodyText} details={details(error)}>
         {#snippet actions()}
           <Button variant="primary" icon="rescan" onclick={reset}>Reload this view</Button>
           {#if onClose}

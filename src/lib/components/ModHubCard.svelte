@@ -37,7 +37,7 @@
         <Icon name="favorite" size={13} filled label="rating" /> {rating.toFixed(1)}{#if ratingCount}<span class="sub">&nbsp;({fmt(ratingCount)})</span>{/if}
       </span>
     {:else}
-      <span class="muted">Rating not synced yet</span>
+      <span class="muted">No rating yet</span>
     {/if}
   </div>
 

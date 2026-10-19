@@ -130,7 +130,7 @@
         <Button variant="primary" class="ms-save" onclick={() => saveRaw(file)}>Save raw XML</Button>
       {:else if file.fields.length === 0}
         <p class="ms-empty small">
-          Silo couldn't model this file as a form. Use Raw XML to edit it directly.
+          Silo can't show this file as a form. Use Raw XML to edit it directly.
         </p>
       {:else}
         {#each file.fields as fld (fld.id)}
@@ -165,7 +165,7 @@
     </section>
   {/each}
 
-  <p class="ms-foot">Silo keeps the original and the three versions before your latest edit as <code>.bak</code> files.</p>
+  <p class="ms-foot">Silo keeps backup copies: the original and the three versions before your latest edit.</p>
   {#snippet footer()}
     <Button onclick={() => (open = false)}>Close</Button>
   {/snippet}

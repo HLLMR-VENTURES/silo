@@ -55,8 +55,12 @@
 
   {#if conflicts.length === 0}
     <p class="lp-empty">
-      No conflicts among your {formatCount(activeCount)} active {plural(activeCount, { one: "mod", other: "mods" })}. Silo
-      checks again whenever you change which mods are active.
+      {#if activeCount === 0}
+        No mods are active, so nothing can conflict. Silo checks again whenever you change which mods are active.
+      {:else}
+        No conflicts among your {formatCount(activeCount)} active {plural(activeCount, { one: "mod", other: "mods" })}. Silo
+        checks again whenever you change which mods are active.
+      {/if}
     </p>
   {:else if shown.length === 0}
     <p class="lp-empty">No problems and nothing to review. Notes are only for your information.</p>

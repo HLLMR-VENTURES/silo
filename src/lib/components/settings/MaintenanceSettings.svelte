@@ -55,16 +55,16 @@
 <SettingsCard title="Reclaim disk space">
   {#if organizedCount > 0 && cloudSynced}
     <p class="hint">
-      <Icon name="cloud" size={14} /> Your mods folder is on a cloud-synced drive (OneDrive / Google Drive /
-      Proton Drive), which doesn't support hardlinks, so Silo projects active mods as <b>copies</b>.
-      That works, but uses more disk. Excluding this folder from cloud sync lets Silo use hardlinks
-      instead (no duplication).
+      <Icon name="cloud" size={14} /> Your mods folder can't use links, so Silo keeps your active mods
+      there as <b>copies</b>. That works, but uses more disk space. This usually means the folder is
+      synced by OneDrive, Google Drive or Proton Drive. Leave it out of the sync and Silo can link
+      them instead, with no duplicates.
     </p>
   {:else if organizedCount > 0}
     <p class="hint">
-      Collapses any active mod that was projected as a full copy (rather than a hardlink) back into
-      a hardlink. This frees the duplicated space and makes activating/deactivating instant. Safe: only
-      touches files byte-identical to the archived copy, never a build you swapped in.
+      Turns active mods that were copied into your mods folder back into links. This frees the
+      duplicate space and makes turning mods on and off instant. It only touches files identical to
+      the copy in your library archive, never a build you swapped in.
     </p>
     <div class="btnrow">
       <Button icon="link" disabled={lock.locked} title={lock.reason} onclick={onOptimizeLinks}>

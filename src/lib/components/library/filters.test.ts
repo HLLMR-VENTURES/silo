@@ -189,7 +189,7 @@ describe("needsUpdateOutcome (switching Needs update on)", () => {
     expect(needsUpdateOutcome({ ...base, available: 3 })).toEqual({ filter: true });
   });
   it("says up to date only after a clean check", () => {
-    expect(needsUpdateOutcome(base)).toEqual({ filter: false, say: "All mods are up to date", tone: "success" });
+    expect(needsUpdateOutcome(base)).toEqual({ filter: false, say: "Every mod Silo can check is up to date.", tone: "success" });
   });
   it("doesn't say up to date when the catalog couldn't be reached", () => {
     const o = needsUpdateOutcome({ ...base, checked: false, catalogError: "Silo couldn't reach its catalog." });
