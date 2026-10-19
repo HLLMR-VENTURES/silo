@@ -1,0 +1,22 @@
+{
+  "library@2x.png": "Silo's Library: a list of about 700 Farming Simulator 25 mods with icons, authors, versions and categories, each switched Active or Parked. The status line reads Ready to play, 189 of 693 active, Harvest 2026.",
+  "verified-build@2x.png": "The mod drawer for a tractor mod, with a Verified build badge: its files match the build Silo's catalog hashed from the mod's source.",
+  "modified-build@2x.png": "The mod drawer for a baler mod flagged Modified: Silo lists the files that differ from the published build.",
+  "mod-sets@2x.png": "My sets: three saved mod sets with their mod counts and how each differs from the mods active now. Harvest 2026 is marked Active; the others offer Switch to this set.",
+  "share-set@2x.png": "The Share dialog for the Harvest 2026 mod set: a share link has just been created for its 189 mods, with a Copy link button.",
+  "updates@2x.png": "Updates after a check: mods ready to install from GitHub with an Update all button, and newer ModHub versions to download from their pages.",
+  "browse@2x.png": "Browse: a grid of catalog mods with their ModHub and GitHub sources spelled out, ratings and downloads, and whether each is in your library, has an update, or can be installed.",
+  "help-mods-folder@2x.png": "Settings, Mods folder: the folder Silo manages and Farming Simulator 25 loads mods from, with Open folder and Change, and where the game is installed.",
+  "help-organize-preview@2x.png": "The Organize dialog before anything moves: three new mods and the library category folder each will be filed into.",
+  "help-undo-organizing@2x.png": "Settings, Maintenance: the Undo organizing confirmation, which puts every mod back in the mods folder and deletes nothing.",
+  "help-savegames@2x.png": "Mod sets, Savegames: each savegame with its map, when it was last played, whether its mods are all in the library, and Use this save's mods.",
+  "help-mp-check-file@2x.png": "The Share dialog with Multiplayer check file chosen: a file with each mod's exact fingerprint, so friends can check they match a server before joining.",
+  "help-filltype-bridge@2x.png": "Tools, Fill type bridge: Silo builds a small companion mod that adds a map's fill type to the categories your trailers, silos and sell points accept.",
+  "help-bindings@2x.png": "Tools, Controls map: every key, mouse and gamepad binding from the game's control settings, grouped by device, with inputs used by more than one action highlighted.",
+  "help-accounts@2x.png": "Settings, Accounts: a connected GitHub account with star, watch and sharing links turned on, and a Disconnect button.",
+  "help-copy-diagnostics@2x.png": "Settings, Diagnostics: Copy diagnostics and Export report give a summary of the library, conflicts and Silo's recent log, with the user name removed.",
+  "conflicts@2x.png": "Diagnose, Conflicts: one problem. Two mods claim the same exclusive slot, so the game would load only one of them; a Park one button fixes it.",
+  "crash-notice@2x.png": "Back from a crashed game, Silo's notice says the last game ended unexpectedly and names the most likely mod, with a Park button for it.",
+  "diagnose-last-run@2x.png": "Diagnose, Last run: the crashed run's mods ranked by the errors they logged, the likely culprit first, each with Park and Show in library.",
+  "find-problem-mod@2x.png": "Find the problem mod, mid-run: round 1 of about 8, testing half of the active mods while the other half are parked, with steps to launch the game and report back."
+}
