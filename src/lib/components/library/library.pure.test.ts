@@ -61,6 +61,13 @@ describe("rowBadges", () => {
 });
 
 describe("keyAction", () => {
+  it("Ctrl+A / Cmd+A selects all, on the item or a control in it (C14)", () => {
+    const ctx = { index: 0, count: 3, columns: 1, pageRows: 1, onItem: false };
+    expect(keyAction({ key: "a", ctrlKey: true }, ctx)).toEqual({ kind: "selectAll" });
+    expect(keyAction({ key: "A", metaKey: true }, { ...ctx, onItem: true })).toEqual({ kind: "selectAll" });
+    expect(keyAction({ key: "a" }, ctx)).toBeNull();
+    expect(keyAction({ key: "a", ctrlKey: true, shiftKey: true }, ctx)).toBeNull();
+  });
   const ctx = { index: 5, count: 20, columns: 1, pageRows: 4, onItem: true };
   it("moves with arrows, Home, End and the page keys, clamped", () => {
     expect(keyAction({ key: "ArrowDown" }, ctx)).toEqual({ kind: "move", to: 6, extend: false });

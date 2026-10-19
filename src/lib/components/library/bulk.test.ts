@@ -55,6 +55,24 @@ describe("BulkBar", () => {
     render(BulkBar, { count: 12, shownCount: 140, ...h, ...extra });
     return { user: userEvent.setup(), ...h };
   }
+  it("makes the action the selection needs the primary one (C15)", () => {
+    const variant = (name: string) => screen.getByRole("button", { name }).className;
+    setup({ count: 3, activeCount: 0 });
+    expect(variant("Turn on")).toMatch(/btn-primary/);
+    expect(variant("Park")).not.toMatch(/btn-primary/);
+  });
+  it("Park is primary when every selected mod is on", () => {
+    const variant = (name: string) => screen.getByRole("button", { name }).className;
+    setup({ count: 3, activeCount: 3 });
+    expect(variant("Park")).toMatch(/btn-primary/);
+    expect(variant("Turn on")).not.toMatch(/btn-primary/);
+  });
+  it("neither is primary for a mixed selection", () => {
+    const variant = (name: string) => screen.getByRole("button", { name }).className;
+    setup({ count: 3, activeCount: 1 });
+    expect(variant("Park")).not.toMatch(/btn-primary/);
+    expect(variant("Turn on")).not.toMatch(/btn-primary/);
+  });
   it("clears the selection on Esc", async () => {
     const { user, onclear } = setup();
     screen.getByRole("button", { name: /turn on/i }).focus();
