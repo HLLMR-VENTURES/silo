@@ -20,6 +20,9 @@
     allFavorite?: boolean;
     /** Every selected mod is hidden: the button unhides instead. */
     allHidden?: boolean;
+    /** How many of the selected mods are active: Turn on is the primary action when none is,
+     *  Park when all are, neither for a mix. */
+    activeCount?: number;
     /** Why Turn on / Park can't run now ("Silo is moving mods."), or "". */
     writeReason?: string;
     onturnon: () => void;
@@ -38,6 +41,7 @@
     allShownSelected = false,
     allFavorite = false,
     allHidden = false,
+    activeCount = 0,
     writeReason = "",
     onturnon,
     onpark,
@@ -98,8 +102,12 @@
   <span class="count tnum" aria-live="polite">{count} selected</span>
   <span class="sep" aria-hidden="true">·</span>
   <span class="group" use:tooltip={writeReason || null}>
-    <Button size="sm" variant="primary" disabled={!!writeReason} onclick={onturnon}>Turn on</Button>
-    <Button size="sm" disabled={!!writeReason} onclick={onpark}>Park</Button>
+    <Button size="sm" variant={activeCount === 0 ? "primary" : "secondary"} disabled={!!writeReason} onclick={onturnon}
+      >Turn on</Button
+    >
+    <Button size="sm" variant={activeCount === count ? "primary" : "secondary"} disabled={!!writeReason} onclick={onpark}
+      >Park</Button
+    >
   </span>
   <Button size="sm" icon="favorite" onclick={() => onfavorite(!allFavorite)}>
     {allFavorite ? "Remove favorite" : "Favorite"}

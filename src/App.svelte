@@ -2259,6 +2259,10 @@
   const selectedMods = $derived(
     selection.size === 0 ? [] : visible.filter((m) => selection.has(modKey(m))),
   );
+  // A selection belongs to the Library visit it was made in: leaving the Library clears it.
+  $effect(() => {
+    if (nav.view !== "library") untrack(() => selection.clear());
+  });
   // Filters, search or a rescan changed the list: forget selected mods that aren't in it.
   $effect(() => {
     const keys = new Set(visibleKeys);
@@ -2322,7 +2326,7 @@
         if (list.length === 0) return;
       }
     }
-    await runBulkSwitch(list, on, {
+    const outcome = await runBulkSwitch(list, on, {
       active: () => activeSet,
       isLoose: isFileable,
       busy: writeRefusal,
@@ -2389,6 +2393,9 @@
       toast,
       offerUndo: (o) => switchUndo.offer(o),
     });
+    // Done (its toast offers Undo): the selection was for this change. Kept when it was cancelled
+    // or refused, so it can be tried again.
+    if (outcome === "done") selection.clear();
   }
 
   /**
@@ -2425,6 +2432,7 @@
           ? `Hid ${n}.`
           : `Unhid ${n}.`;
     if (res.failed.length) message += ` Couldn't update ${modsCount(res.failed.length)}.`;
+    selection.clear();
     toast({
       message,
       tone: res.failed.length ? "warn" : "neutral",
@@ -3694,6 +3702,7 @@
               count={selection.size}
               shownCount={visible.length}
               allShownSelected={selection.size === visible.length}
+              activeCount={selectedMods.filter((m) => activeSet.has(m.techName)).length}
               allFavorite={selectedMods.every((m) => cur(m.techName).favorite)}
               allHidden={selectedMods.every((m) => cur(m.techName).hidden)}
               writeReason={writeLock.reason}
@@ -3763,6 +3772,7 @@
                 ontoggle={(mod) => toggleActive(mod.techName)}
                 onselect={(mod, intent) => selectMod(modKey(mod), intent)}
                 onmenu={(mod, anchor) => openRowMenu(mod, { anchor })}
+                onselectall={() => selection.selectAll(visibleKeys)}
               >
                 {#snippet item(mod)}
                   {@const c = cur(mod.techName)}
@@ -3796,6 +3806,7 @@
                 ontoggle={(mod) => toggleActive(mod.techName)}
                 onselect={(mod, intent) => selectMod(modKey(mod), intent)}
                 onmenu={(mod, anchor) => openRowMenu(mod, { anchor })}
+                onselectall={() => selection.selectAll(visibleKeys)}
               >
                 {#snippet row(mod)}
                   {@const c = cur(mod.techName)}
