@@ -202,6 +202,7 @@
   import ModSettings from "./lib/components/ModSettings.svelte";
   import ModDetail from "./lib/components/ModDetail.svelte";
   import { returnFocusOnDrawerClose } from "./lib/components/drawer/drawerFocus.svelte";
+  import { currentEntry } from "./lib/components/drawer/drawerMod";
   import ConfigEditor from "./lib/components/ConfigEditor.svelte";
   import ModBrowser from "./lib/components/ModBrowser.svelte";
   import LogTriage from "./lib/components/LogTriage.svelte";
@@ -1668,6 +1669,13 @@
   // Tags: techName -> string[]
   let tagMap = $state<Record<string, string[]>>({});
   let detailMod = $state<ModEntry | null>(null);
+  // The drawer's mod as the library has it now (a rescan, a category change or filing replaces
+  // the entry it was opened with); the drawer closes when the mod is gone.
+  let drawerPrev: ModEntry | null = null;
+  const drawerMod = $derived.by(() => (drawerPrev = currentEntry(detailMod, effectiveMods, drawerPrev)));
+  $effect(() => {
+    if (detailMod && !drawerMod) untrack(() => (detailMod = null));
+  });
 
   const allTags = $derived.by(() => {
     const s = new Set<string>();
@@ -3362,8 +3370,8 @@
   // The mod drawer hands focus back when it closes: to the row of the mod it showed, else to what
   // had focus in the main area when it opened, else to the main area (drawer/drawerFocus).
   returnFocusOnDrawerClose({
-    open: () => !!detailMod && nav.view === "library",
-    key: () => (detailMod ? modKey(detailMod) : null), // follows the shown mod (Find in Library can swap it)
+    open: () => !!drawerMod && nav.view === "library",
+    key: () => (drawerMod ? modKey(drawerMod) : null), // follows the shown mod (Find in Library can swap it)
     focusKey: (k) => libList?.focusKey(k) ?? false,
     keepOpener: (el) => regionOf(el) === "main",
     fallback: () => document.getElementById("main"),
@@ -3371,8 +3379,8 @@
 </script>
 
 {#snippet modDrawer()}
-  {#if detailMod}
-    {@const dm = detailMod}
+  {#if drawerMod}
+    {@const dm = drawerMod}
     {@const fgn = foreignFiles.find((f) => f.techName === dm.techName) ?? null}
     <ViewBoundary name="the mod details" onClose={() => (detailMod = null)}>
       <ModDetail
@@ -3430,8 +3438,8 @@
   badges={{ updates: updatesBadge(updateSections, updateCheckedAt != null), diagnose: bisecting ? BISECT_BADGE : undefined }}
   fill={nav.view === "library" || nav.view === "browse"}
   wide={nav.view === "library" || nav.view === "browse"}
-  drawer={detailMod && nav.view === "library" ? modDrawer : undefined}
-  drawerLabel={detailMod ? `Mod details: ${detailMod.title ?? detailMod.techName}` : "Mod details"}
+  drawer={drawerMod && nav.view === "library" ? modDrawer : undefined}
+  drawerLabel={drawerMod ? `Mod details: ${drawerMod.title ?? drawerMod.techName}` : "Mod details"}
 >
   {#snippet header()}
     <AppHeader
