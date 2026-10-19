@@ -40,5 +40,7 @@ Building, testing, releasing:
 - **[VERIFY_DOWNLOAD.md](VERIFY_DOWNLOAD.md)** — verifying a download's signature,
   checksum, and build provenance.
 
-Also: [legal/](legal/) (privacy policy, terms, disclaimer, takedown). Per-feature design
+The legal pages (privacy policy, terms, disclaimer, takedown) are on the website,
+[silo.hllmr.com/legal/](https://silo.hllmr.com/legal/privacy-policy.html), maintained in
+[HLLMR/web](https://github.com/HLLMR/web). Per-feature design
 specs and plans live with each feature's issue and pull request.
