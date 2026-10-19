@@ -345,6 +345,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (nanoid, postcss and source-map-js updated). Nothing in the shipped app changes. (#234)
 
 ### Fixed
+- **Find the problem mod** showed "Round 1 of about NaN", and a finished run couldn't name the
+  mod it found: Silo sent the step's fields in the wrong case. (#263)
+
 - **Faster sorting.** Sorting the Library by version, and grouping a large Updates check, no
   longer slow down on big libraries (version sort on 2,500 mods went from about 60 ms to 3 ms).
   (#258)

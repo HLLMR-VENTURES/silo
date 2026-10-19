@@ -16,8 +16,14 @@
 
 use serde::Serialize;
 
+// `rename_all` on an enum renames only the variant tags ("split", "culprit"); the fields inside
+// each variant need `rename_all_fields` to reach the frontend as `roundsLeft` / `modName`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum BisectStep {
     /// Project `test` (rest disabled), relaunch, report whether the problem persists.
     Split {
@@ -78,6 +84,34 @@ mod tests {
 
     fn names(xs: &[&str]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn steps_reach_the_frontend_in_camel_case() {
+        // types.ts reads `roundsLeft` and `modName`; snake_case left "Round 1 of about NaN"
+        // and a finished run that couldn't name the culprit.
+        let split = serde_json::to_value(BisectStep::Split {
+            test: names(&["a"]),
+            rest: names(&["b"]),
+            rounds_left: 1,
+        })
+        .unwrap();
+        assert_eq!(
+            split,
+            serde_json::json!({ "kind": "split", "test": ["a"], "rest": ["b"], "roundsLeft": 1 })
+        );
+        let culprit = serde_json::to_value(BisectStep::Culprit {
+            mod_name: "FS25_X".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            culprit,
+            serde_json::json!({ "kind": "culprit", "modName": "FS25_X" })
+        );
+        assert_eq!(
+            serde_json::to_value(BisectStep::Inconclusive).unwrap(),
+            serde_json::json!({ "kind": "inconclusive" })
+        );
     }
 
     #[test]
