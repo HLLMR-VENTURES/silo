@@ -57,3 +57,25 @@ export function fixedOnText(names: string[]): string {
   const who = names.length === 1 ? `${names[0]} stays` : `${formatCount(names.length)} ${plural(names.length, { one: "mod", other: "mods" })} stay`;
   return `${who} on: Silo can't park unzipped folder mods. Move ${names.length === 1 ? "its folder" : "their folders"} out of your mods folder to stop the game loading ${names.length === 1 ? "it" : "them"}.`;
 }
+
+/**
+ * Whether a diagnosis may start after filing its loose mods: the filing was clean, no active
+ * non-map zip is still loose (it couldn't be parked), and every filed mod is still active (one
+ * filed but not linked back would be missing from the saved set and stay parked at the end).
+ * @param clean what the filing returned (true clean, false problems, null refused)
+ * @param filed the mods that were to be filed
+ * @param mods the library after the filing
+ * @param active tech names active after the filing
+ */
+export function readyAfterFiling<M extends ParkableMod & { isMap?: boolean }>(
+  clean: boolean | null,
+  filed: readonly M[],
+  mods: readonly M[],
+  active: ReadonlySet<string>,
+): boolean {
+  return (
+    clean === true &&
+    !mods.some((m) => active.has(m.techName) && isLooseZip(m) && !m.isMap) &&
+    filed.every((m) => active.has(m.techName))
+  );
+}

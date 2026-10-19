@@ -1,7 +1,7 @@
 // What set_active can park (#C12): loose zips are filed first, folder mods can't be parked, and a
 // diagnosis round checks afterwards that nothing it meant to park is still loaded.
 import { describe, expect, it } from "vitest";
-import { fixedOnText, isLooseZip, isUnparkable, parkPlan, stillOn } from "./parkable";
+import { fixedOnText, isLooseZip, isUnparkable, parkPlan, readyAfterFiling, stillOn } from "./parkable";
 
 const mod = (techName: string, organized: boolean, kind = "zip") => ({ techName, title: techName, organized, kind });
 const library = [
@@ -50,5 +50,25 @@ describe("fixedOnText", () => {
   it("names one mod, counts several", () => {
     expect(fixedOnText(["Big Pack"])).toMatch(/^Big Pack stays on: Silo can't park unzipped folder mods\. Move its folder/);
     expect(fixedOnText(["A", "B"])).toMatch(/^2 mods stay on: .* their folders .* loading them\.$/);
+  });
+});
+
+describe("readyAfterFiling (before a diagnosis starts)", () => {
+  const filedA = { ...mod("A", true), isMap: false };
+  const looseB = { ...mod("B", false), isMap: false };
+  const looseMap = { ...mod("MAP", false), isMap: true };
+
+  it("starts when the filed mods are in the library and still active", () => {
+    expect(readyAfterFiling(true, [filedA], [filedA, looseMap], new Set(["A", "MAP"]))).toBe(true);
+  });
+
+  it("doesn't start when a filed mod wasn't linked back (it would stay parked at the end)", () => {
+    expect(readyAfterFiling(true, [filedA], [filedA], new Set())).toBe(false);
+  });
+
+  it("doesn't start when a zip is still loose, or the filing was refused or had problems", () => {
+    expect(readyAfterFiling(true, [looseB], [looseB], new Set(["B"]))).toBe(false);
+    expect(readyAfterFiling(null, [filedA], [filedA], new Set(["A"]))).toBe(false);
+    expect(readyAfterFiling(false, [filedA], [filedA], new Set(["A"]))).toBe(false);
   });
 });

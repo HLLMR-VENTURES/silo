@@ -192,7 +192,7 @@
   import { saveEach } from "./lib/components/library/bulk";
   import { onOtherDrive, runBulkSwitch } from "./lib/components/library/bulkSwitch";
   import { focusInside, returnFocusWhenHidden } from "./lib/components/library/focusReturn.svelte";
-  import { fixedOnText, isUnparkable, parkPlan, stillOn } from "./lib/parkable";
+  import { fixedOnText, isUnparkable, parkPlan, readyAfterFiling, stillOn } from "./lib/parkable";
   import { createParkLooseExplainer } from "./lib/components/library/parkLoose";
   import BulkBar from "./lib/components/library/BulkBar.svelte";
   import ActiveFilters from "./lib/components/library/ActiveFilters.svelte";
@@ -944,10 +944,12 @@
       const one = loose.length === 1 ? loose[0] : null;
       const name = one ? (one.title ?? one.techName) : modsCount(loose.length);
       if (!(await explainParkLoose(name, one?.category ?? null, loose.length))) return null;
+      // Filed and kept active (linked back): the switch below parks them through set_active, so
+      // if it's refused they're simply still on, as before.
       const filed = await applyLoose(
         loose.map(looseInput),
         loose.map((m) => m.techName),
-        false,
+        true,
       );
       if (filed === null) return null; // refused, and said why: nothing changed
     }
@@ -1051,19 +1053,21 @@
     if (!op) throw blocked("library-write").reason;
     try {
       await bisectApply(techNames);
+      // Read the mods folder again, still holding the write so nothing changes it first: the
+      // Library, the strip and Play show the round's real mods, and a mod meant to be parked
+      // that the game would still load stops the run (set_active skips what it can't park
+      // without saying so) instead of testing the wrong mods.
+      while (scanning) await new Promise((r) => setTimeout(r, 50));
+      await runScan(false, undefined, true);
     } finally {
       op.end();
     }
-    // Read the mods folder again: the Library, the strip and Play show the round's real mods,
-    // and a mod meant to be parked that the game would still load stops the run (set_active
-    // skips what it can't park without saying so) instead of testing the wrong mods.
-    while (scanning) await new Promise((r) => setTimeout(r, 50));
-    await runScan(false);
-    if (scanFailed) return; // can't tell; the scan's notice says why
+    if (scanFailed)
+      throw "Silo couldn't read your mods folder to check this round, so it can't tell what the round tests. Put your mods back, then start again.";
     const stuck = stillOn(activeSet, techNames, bisectStartSet);
     if (stuck.length > 0) {
       const names = stuck.map((t) => libraryLookup(t)?.title ?? t);
-      throw `Silo couldn't park ${names.slice(0, 3).join(", ")}${names.length > 3 ? ` and ${names.length - 3} more` : ""}: still in your mods folder, so this round wouldn't test what it says. Put your mods back, file the mod in the Library, then start again.`;
+      throw `Silo couldn't park ${names.slice(0, 3).join(", ")}${names.length > 3 ? ` and ${names.length - 3} more` : ""}: still in your mods folder, so this round wouldn't test what it says. Trying again won't help: put your mods back, file the mod in the Library, then start again.`;
     }
   }
 
@@ -1074,7 +1078,8 @@
    * @return true to go on; false when declined, refused or not all of them could be filed
    */
   async function prepareBisect(): Promise<boolean> {
-    const loose = mods.filter((m) => activeSet.has(m.techName) && isFileable(m));
+    // Maps stay on every round, so they never need parking.
+    const loose = mods.filter((m) => activeSet.has(m.techName) && isFileable(m) && !m.isMap);
     if (loose.length === 0) return true;
     if (
       !(await ask({
@@ -1092,8 +1097,10 @@
       loose.map((m) => m.techName),
       true,
     );
-    // Refused (said why) or problems (reported): don't start with mods it can't park.
-    return clean === true && !mods.some((m) => activeSet.has(m.techName) && isFileable(m));
+    // Refused (said why) or problems (reported): don't start with mods it can't park, or with
+    // filed mods that weren't linked back (the snapshot would leave them out, and Put my mods
+    // back would leave them parked).
+    return readyAfterFiling(clean, loose, mods, activeSet);
   }
 
   // When a bisection ends, a snapshot still on disk means the restore didn't finish (or
