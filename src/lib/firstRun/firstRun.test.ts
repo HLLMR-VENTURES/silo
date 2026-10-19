@@ -10,6 +10,7 @@ import {
   folderVariant,
   groupPlan,
   nMods,
+  relinkFiled,
   type FirstRunState,
 } from "./firstRun";
 import type { ModsRootStatus } from "../api";
@@ -164,6 +165,24 @@ describe("fileInRuns", () => {
     const out = await fileInRuns(["a", "b"], apply(new Set(), 0), 2, () => {});
     expect(out.changed).toBe(0);
     expect(out.thrown).not.toBeNull();
+  });
+});
+
+describe("relinkFiled", () => {
+  it("keeps a throw on the run instead of rejecting, so the dialog can finish", async () => {
+    const run = { errors: [], thrown: null, changed: 3, done: 3 };
+    await expect(
+      relinkFiled(run, async () => {
+        throw new Error("The library archive drive isn't connected.");
+      }),
+    ).resolves.toBeUndefined();
+    expect(String((run as { relinkError?: unknown }).relinkError)).toContain("archive drive");
+  });
+
+  it("leaves a clean run as it was", async () => {
+    const run = { errors: [], thrown: null, changed: 1, done: 1 };
+    await relinkFiled(run, async () => ({ errors: [] }));
+    expect(run).toEqual({ errors: [], thrown: null, changed: 1, done: 1 });
   });
 });
 
