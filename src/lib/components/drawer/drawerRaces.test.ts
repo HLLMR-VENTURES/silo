@@ -113,7 +113,7 @@ describe("Check for update across a drawer switch", () => {
     } as unknown as UpdateInfo);
     await settle();
     expect(screen.queryByText(/Update available/)).toBeNull();
-    expect(screen.queryByRole("button", { name: /Download & install/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Download and install/ })).toBeNull();
   });
 });
 
@@ -181,7 +181,7 @@ describe("review follow-ups", () => {
     render(ModRepoLink, { onRepoChange: vi.fn(), onInstalled: vi.fn(), repo: { owner: "o", repo: "r" }, mod: entry(9) });
     await user.click(screen.getByRole("button", { name: "Check for update" }));
     await settle();
-    await user.click(screen.getByRole("button", { name: /Download & install/ }));
+    await user.click(screen.getByRole("button", { name: /Download and install/ }));
     expect(vi.mocked(ask)).toHaveBeenLastCalledWith(expect.objectContaining({ title: "Install 2.0.0?" }));
   });
 
@@ -197,7 +197,7 @@ describe("review follow-ups", () => {
     await rerender({ mod: a });
     await settle();
     expect(screen.queryByRole("button", { name: /Verify integrity/i })).toBeNull();
-    expect(screen.getByText(/Hashing/)).toBeInTheDocument();
+    expect(screen.getByText(/Checking against the published build/)).toBeInTheDocument();
     expect(verifyMod).toHaveBeenCalledTimes(1);
   });
 });
