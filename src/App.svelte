@@ -1223,7 +1223,9 @@
       };
       reportError(problem, "Filing mods into the library", { retry });
     }
-    return problem === null;
+    // Filed but not linked back (reported by fileLoose): not clean, so a caller that needs
+    // them active (the auto-filer, Find the problem mod) doesn't carry on as if they were.
+    return problem === null && out.relinkError === undefined;
   }
 
   // Auto-filer (opt-in): file new mods and keep them active — no prompt, they chose it.
