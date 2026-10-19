@@ -74,7 +74,7 @@ describe("conflict copy", () => {
 
   it("plain titles by kind", () => {
     const two = ["A", "B"];
-    expect(conflictTitle({ kind: "specialization", mods: two })).toBe("Two mods add the same feature name");
+    expect(conflictTitle({ kind: "action", mods: two })).toBe("Two mods add the same control action");
     expect(conflictTitle({ kind: "script", mods: two })).toBe("Two mods ship a script with the same file name");
     expect(conflictTitle({ kind: "fillType", mods: ["A", "B", "C"] })).toBe("3 mods define the same fill type");
     expect(conflictTitle({ kind: "uniqueType", mods: two })).toBe("Two mods claim the same exclusive slot");
