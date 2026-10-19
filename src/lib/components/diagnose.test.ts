@@ -230,6 +230,14 @@ describe("Find the problem mod: mods Silo can't park yet", () => {
     expect(screen.getByRole("button", { name: "Start" })).toBeEnabled();
   });
 
+  it("a round testing one mod says 'Testing 1 mod'", async () => {
+    const user = userEvent.setup();
+    vi.mocked(bisectPlan).mockResolvedValue({ kind: "split", test: ["FS25_A"], rest: ["FS25_B", "FS25_C"], roundsLeft: 1 });
+    render(BisectFlow, { pool: ["FS25_A", "FS25_B", "FS25_C"], alwaysOn: [], onApply: vi.fn(() => Promise.resolve()), onBisecting: vi.fn(), onExit: vi.fn() });
+    await user.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText(/this round/)).toHaveTextContent("Testing 1 mod this round (2 parked for now).");
+  });
+
   it("once they're filed, the run saves the set as it is then", async () => {
     const user = userEvent.setup();
     const onPrepare = vi.fn(() => Promise.resolve(true));

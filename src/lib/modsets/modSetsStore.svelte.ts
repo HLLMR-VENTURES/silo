@@ -176,7 +176,8 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       message: clean ? `Switched to ${name}.` : `Switch to ${name} finished with problems.`,
       tone: clean ? "neutral" : "warn",
       previous,
-      expected: [...mods],
+      // What the switch left (mods Silo couldn't park stay on), so Undo's staleness check holds.
+      expected: [...deps.active()],
     });
   }
 

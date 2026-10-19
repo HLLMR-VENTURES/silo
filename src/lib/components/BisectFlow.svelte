@@ -294,7 +294,8 @@
   {:else if phase === "await-launch"}
     {#if step?.kind === "split"}
       <p class="body">
-        Testing <b>{step.test.length}</b> mods this round ({step.rest.length} parked for now).
+        Testing <b>{step.test.length}</b> {step.test.length === 1 ? "mod" : "mods"} this round ({step.rest.length}
+        parked for now).
       </p>
       <ol class="steps">
         <li>Launch the game and load the save that was crashing.</li>

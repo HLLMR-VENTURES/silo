@@ -192,6 +192,7 @@
   import { saveEach } from "./lib/components/library/bulk";
   import { onOtherDrive, runBulkSwitch } from "./lib/components/library/bulkSwitch";
   import { focusInside, returnFocusWhenHidden } from "./lib/components/library/focusReturn.svelte";
+  import { fixedOnText, isUnparkable, parkPlan, stillOn } from "./lib/parkable";
   import { createParkLooseExplainer } from "./lib/components/library/parkLoose";
   import BulkBar from "./lib/components/library/BulkBar.svelte";
   import ActiveFilters from "./lib/components/library/ActiveFilters.svelte";
@@ -479,6 +480,8 @@
   // Set when a previous bisection didn't finish (app closed mid-run) — the user's mod
   // set may be partially applied, so offer to restore it.
   let bisectRecovery = $state<string[] | null>(null);
+  /** The active mods when the running diagnosis started (each round must park the rest). */
+  let bisectStartSet: ReadonlySet<string> = new Set();
   // True while a guided bisection is running (snapshot saved, test halves applied). The
   // focus rescan holds off meanwhile so returning from FS25 can't rewrite the active set.
   let bisecting = $state(false);
@@ -924,8 +927,39 @@
   const switchUndo = createSwitchUndo({
     toast,
     blocked: (expected) => activeUndoBlocked(expected),
-    reapply: (previous) => setActiveSetTo(previous, "Switching back"),
+    reapply: (previous) => switchActiveSet(previous, "Switching back"),
   });
+
+  /**
+   * `setActiveSetTo` without a silent skip: set_active only parks filed mods, so the active mods
+   * a new set leaves out that are loose zips are filed into the library first (that is how a
+   * loose mod is parked; the switch's confirmation already said they'd be parked), and unzipped
+   * folder mods, which Silo can't park, stay on and are named. Used by mod set switches, Use
+   * this save's mods and the switch Undo.
+   * @return as setActiveSetTo: true clean, false with problems, null refused or cancelled
+   */
+  async function switchActiveSet(target: string[], label: string): Promise<boolean | null> {
+    const { loose } = parkPlan(mods, activeSet, target);
+    if (loose.length > 0) {
+      const one = loose.length === 1 ? loose[0] : null;
+      const name = one ? (one.title ?? one.techName) : modsCount(loose.length);
+      if (!(await explainParkLoose(name, one?.category ?? null, loose.length))) return null;
+      const filed = await applyLoose(
+        loose.map(looseInput),
+        loose.map((m) => m.techName),
+        false,
+      );
+      if (filed === null) return null; // refused, and said why: nothing changed
+    }
+    // Whatever is still active and can't be parked (folder mods, a zip that couldn't be filed)
+    // stays in the set, so what Silo shows is what the game loads.
+    const { loose: stillLoose, fixed } = parkPlan(mods, activeSet, target);
+    const stay = [...stillLoose, ...fixed];
+    const result = await setActiveSetTo([...target, ...stay.map((m) => m.techName)], label);
+    if (result !== null && fixed.length > 0)
+      toast({ message: fixedOnText(fixed.map((m) => m.title ?? m.techName)), tone: "warn" });
+    return result === null ? null : result && stay.length === 0;
+  }
 
   /**
    * Why an Undo that puts the active set back can't run now, or null.
@@ -956,7 +990,7 @@
       const m = mods.find((x) => x.techName === t);
       return m?.title ?? t;
     },
-    setActiveSetTo,
+    setActiveSetTo: switchActiveSet,
     undo: switchUndo,
     editRefused: loadoutEditRefused,
     refuse,
@@ -1020,6 +1054,17 @@
     } finally {
       op.end();
     }
+    // Read the mods folder again: the Library, the strip and Play show the round's real mods,
+    // and a mod meant to be parked that the game would still load stops the run (set_active
+    // skips what it can't park without saying so) instead of testing the wrong mods.
+    while (scanning) await new Promise((r) => setTimeout(r, 50));
+    await runScan(false);
+    if (scanFailed) return; // can't tell; the scan's notice says why
+    const stuck = stillOn(activeSet, techNames, bisectStartSet);
+    if (stuck.length > 0) {
+      const names = stuck.map((t) => libraryLookup(t)?.title ?? t);
+      throw `Silo couldn't park ${names.slice(0, 3).join(", ")}${names.length > 3 ? ` and ${names.length - 3} more` : ""}: still in your mods folder, so this round wouldn't test what it says. Put your mods back, file the mod in the Library, then start again.`;
+    }
   }
 
   /**
@@ -1057,7 +1102,10 @@
   async function bisectingChanged(active: boolean) {
     const wasRunning = bisecting;
     bisecting = active;
-    if (active) return;
+    if (active) {
+      bisectStartSet = new Set(activeSet); // the mods the search started with
+      return;
+    }
     bisectRoundNo = null;
     bisectLaunching = false;
     // The test rounds' logs are the flow's, not news: don't announce the last round's crash.
@@ -1109,6 +1157,11 @@
       );
       // Problems were reported by applyLoose; a refusal changed nothing.
       if (filed) switchUndo.offer({ message: switchMessage([name], false), previous, expected: [...activeSet] });
+      return;
+    }
+    // An unzipped folder mod Silo hasn't filed: set_active would leave it on without a word.
+    if (turningOff && mod && isUnparkable(mod)) {
+      refuse(fixedOnText([name]));
       return;
     }
     const op = beginWrite(turningOff ? "Parking a mod" : "Activating a mod");
@@ -2196,6 +2249,15 @@
    */
   async function setActiveForMods(list: ModEntry[], on: boolean) {
     const archive = archiveMove.archive;
+    // Folder mods can't be parked: say so instead of reporting them parked.
+    if (!on) {
+      const fixed = list.filter((m) => activeSet.has(m.techName) && isUnparkable(m));
+      if (fixed.length > 0) {
+        toast({ message: fixedOnText(fixed.map((m) => m.title ?? m.techName)), tone: "warn" });
+        list = list.filter((m) => !fixed.includes(m));
+        if (list.length === 0) return;
+      }
+    }
     await runBulkSwitch(list, on, {
       active: () => activeSet,
       isLoose: isFileable,
