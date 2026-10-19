@@ -16,6 +16,7 @@ import ToastRegion from "../ui/ToastRegion.svelte";
 import { dismissToast, toasts } from "../ui/toasts.svelte";
 import type { UpdateRow } from "../types";
 import NoticeArea from "./NoticeArea.svelte";
+import ActivityButton from "./ActivityButton.svelte";
 import LockHarness from "./__tests__/LockHarness.svelte";
 
 afterEach(() => {
@@ -147,5 +148,20 @@ describe("error toast body", () => {
     });
     expect(screen.getByText("Something went wrong while saving the loadout.")).toBeInTheDocument();
     expect(screen.queryByText(/os error/)).toBeNull();
+  });
+});
+
+describe("Activity popover focus", () => {
+  it("Esc from inside the panel hands focus back to the bell, not <body>", async () => {
+    const user = userEvent.setup();
+    render(ActivityButton);
+    const bell = screen.getByRole("button", { name: /^Activity/ });
+    await user.click(bell);
+    const panel = await screen.findByRole("dialog", { name: "Activity" });
+    panel.focus();
+    expect(panel).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "Activity" })).toBeNull();
+    expect(bell).toHaveFocus();
   });
 });
