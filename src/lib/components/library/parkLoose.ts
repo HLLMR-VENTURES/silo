@@ -42,7 +42,9 @@ export function parkLooseOptions(
       checkbox: { label: "Don't explain this again" },
     };
   }
-  const where = category ? ` (archive${sep}${category})` : "";
+  // The category only: the archive may have been moved anywhere, so no path.
+  void sep;
+  const where = category ? ` (its ${category} folder)` : "";
   return {
     title: `Park ${name}?`,
     body:

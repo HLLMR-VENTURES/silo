@@ -98,6 +98,17 @@ export function lostCancelText(archivePath: string | null | undefined, homeDefau
   );
 }
 
+/**
+ * Whether a problem the move reports is only the lost-cancel explanation: nothing went wrong
+ * (the move finished first), so it's shown as information, not "Something went wrong…". A lost
+ * cancel joined with a real problem stays a problem.
+ * @param problem what the move reported
+ * @param lastLostCancel the last lostCancelText the move gave, if any
+ */
+export function isOnlyLostCancel(problem: unknown, lastLostCancel: string | null): problem is string {
+  return typeof problem === "string" && lastLostCancel !== null && problem === lastLostCancel;
+}
+
 /** After a settle: offer to file in loose mods only once the move is fully done and clean. */
 export function settleMayOfferAdopt(archive: ArchiveStatus | null, problem: string | null): boolean {
   return !archive?.moving && !archive?.running && !problem;

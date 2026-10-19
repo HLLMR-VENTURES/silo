@@ -13,12 +13,12 @@ describe("loose-mod park explanation", () => {
   it("names the mod and its archive folder, with the option", () => {
     const o = parkLooseOptions(1, "Courseplay", "Scripts & Tools");
     expect(o.title).toBe("Park Courseplay?");
-    expect(o.body).toContain("archive\\Scripts & Tools");
+    expect(o.body).toContain("(its Scripts & Tools folder)");
     expect(o.confirm).toBe("Park it");
     expect(o.checkbox).toEqual({ label: "Don't explain this again" });
-    expect(parkLooseOptions(1, "X", "Maps", "/").body).toContain("archive/Maps");
+    expect(parkLooseOptions(1, "X", "Maps", "/").body).not.toMatch(/archive[\\/]/); // no archive path (L23)
     expect(o.body).toBe(
-      "Silo moves it into your library archive (archive\\Scripts & Tools) so the game stops loading it. " +
+      "Silo moves it into your library archive (its Scripts & Tools folder) so the game stops loading it. " +
         "It stays in your library. Turn it on any time.",
     );
   });

@@ -4,6 +4,7 @@ import {
   cancelWasLost,
   capList,
   isArchiveMissing,
+  isOnlyLostCancel,
   isMoveCancelling,
   isMoveRunning,
   isMoveUnfinished,
@@ -150,5 +151,16 @@ describe("message helpers", () => {
     expect(capList(["a", "b"])).toBe("a, b");
     expect(capList(["a", "b", "c", "d", "e"])).toBe("a, b, c +2 more");
     expect(capList(["a", "b", "c", "d"], 3, "; ")).toBe("a; b; c +1 more");
+  });
+});
+
+describe("a cancel that lost the race (L3)", () => {
+  it("is information, not an error; joined with a real problem it stays a problem", () => {
+    const lost = lostCancelText("E:/Library", true);
+    expect(lost.startsWith("The move finished before it could be cancelled.")).toBe(true);
+    expect(isOnlyLostCancel(lost, lost)).toBe(true);
+    expect(isOnlyLostCancel(joinProblems("2 mods couldn't be moved.", lost), lost)).toBe(false);
+    expect(isOnlyLostCancel(lost, null)).toBe(false);
+    expect(isOnlyLostCancel(new Error(lost), lost)).toBe(false);
   });
 });

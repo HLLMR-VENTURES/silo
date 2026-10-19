@@ -5,6 +5,7 @@
   // bindings, so we surface them and let the player decide.
   import Icon from "../ui/Icon.svelte";
   import { inlineError } from "../state/notify.svelte";
+  import { describeError } from "../errorCopy";
   import { onMount } from "svelte";
   import { scanBindings } from "../api";
   import type { BindingReport } from "../types";
@@ -19,6 +20,8 @@
   let report = $state<BindingReport | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  /** FS25 hasn't written its controls file yet (never played): an empty state, not an error. */
+  let noFile = $state(false);
   let query = $state("");
 
   // Friendly device names for the common FS device ids.
@@ -35,8 +38,10 @@
       .map((tok) => tok.replace(/^KEY_/, "").replace(/^MOUSE_BUTTON_/, "Mouse ").replace(/^BUTTON_/, "Btn "))
       .join(" + ");
   }
+  // "AXIS_MOVE_SIDE_VEHICLE" -> "Axis move side vehicle": sentence case, like the rest of Silo.
   function prettyAction(s: string): string {
-    return s.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+    const t = s.replace(/_/g, " ").toLowerCase();
+    return t.charAt(0).toUpperCase() + t.slice(1);
   }
 
   function match(q: string, ...fields: string[]): boolean {
@@ -48,10 +53,12 @@
   async function load() {
     loading = true;
     error = null;
+    noFile = false;
     try {
       report = await scanBindings();
     } catch (e) {
-      error = inlineError(e, "Reading your key bindings");
+      if (describeError(e).code === "NO_LOG") noFile = true;
+      else error = inlineError(e, "Reading your key bindings");
       report = null;
     } finally {
       loading = false;
@@ -81,6 +88,8 @@
 
   {#if loading}
     <div class="empty">Reading your control settings…</div>
+  {:else if noFile}
+    <div class="empty">No controls file yet. Play once, then come back here.</div>
   {:else if error}
     <div class="err">{error}</div>
   {:else if report}

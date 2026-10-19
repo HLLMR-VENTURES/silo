@@ -30,7 +30,8 @@
     class: className = "",
   }: Props = $props();
 
-  let copied = $state(false);
+  /** What Copy details did: copied to the clipboard, or saved to a file when it couldn't. */
+  let copied = $state<false | "copied" | "saved">(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   async function copyDetails() {
@@ -38,7 +39,7 @@
     try {
       const out = await copyOrSave(details, "silo-error-details.txt", copyText, saveTextFile);
       if (out === "cancelled") return;
-      copied = true;
+      copied = out;
       clearTimeout(timer);
       timer = setTimeout(() => (copied = false), 2000);
     } catch {
@@ -58,9 +59,9 @@
       {@render actions?.()}
       {#if details}
         <Button variant="secondary" icon={copied ? "check" : "copy"} onclick={copyDetails}>
-          {copied ? "Copied" : "Copy details"}
+          {copied === "saved" ? "Saved to a file" : copied ? "Copied" : "Copy details"}
         </Button>
-        <span class="sr-only" role="status">{copied ? "Details copied" : ""}</span>
+        <span class="sr-only" role="status">{copied === "saved" ? "Details saved to a file" : copied ? "Details copied" : ""}</span>
       {/if}
     </div>
   {/if}
