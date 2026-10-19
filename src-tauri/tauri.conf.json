@@ -18,7 +18,8 @@
         "minWidth": 1080,
         "minHeight": 680,
         "backgroundColor": "#171A14",
-        "decorations": true
+        "decorations": true,
+        "generalAutofillEnabled": false
       }
     ],
     "security": {

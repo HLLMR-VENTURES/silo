@@ -7067,4 +7067,23 @@ mod tests {
             "make these async and run their work with off_main: {unexpected:?}"
         );
     }
+
+    /// WebView2's own autofill ("Saved info: …") pops up over Silo's text fields and offers
+    /// values typed elsewhere; it doesn't always honor `autocomplete="off"`, so every window
+    /// turns it off. Demo-profile windows are built from the same config (`build_profile_windows`).
+    #[test]
+    fn windows_turn_off_webview_autofill() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let windows = conf["app"]["windows"].as_array().unwrap();
+        assert!(!windows.is_empty());
+        for w in windows {
+            assert_eq!(
+                w["generalAutofillEnabled"],
+                serde_json::Value::Bool(false),
+                "window {:?} must set generalAutofillEnabled: false",
+                w["title"]
+            );
+        }
+    }
 }
