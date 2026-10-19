@@ -4,7 +4,6 @@
 
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
-use std::io::Read;
 use std::path::Path;
 
 /// Read the `<storeData><category>` of the first storeItem, if any.
@@ -27,19 +26,25 @@ fn is_mission_vehicle(store_file: &str) -> bool {
         .contains("missionvehicles/")
 }
 
+/// Largest storeItem XML read. Real ones are a few hundred KB; the cap keeps a zip-bombed or
+/// huge member from being read whole into memory during a scan.
+const MEMBER_LIMIT: u64 = 8 * 1024 * 1024;
+
 fn read_member(mod_path: &Path, kind: &str, member: &str) -> Option<String> {
     let member = member.replace('\\', "/");
-    match kind {
+    let bytes = match kind {
         "zip" => {
             let f = std::fs::File::open(mod_path).ok()?;
             let mut ar = zip::ZipArchive::new(f).ok()?;
-            let mut entry = ar.by_name(&member).ok()?;
-            let mut s = String::new();
-            entry.read_to_string(&mut s).ok()?;
-            Some(s)
+            let entry = ar.by_name(&member).ok()?;
+            crate::scan::read_capped(entry, MEMBER_LIMIT, &member).ok()?
         }
-        _ => std::fs::read_to_string(mod_path.join(&member)).ok(),
-    }
+        _ => {
+            let f = std::fs::File::open(mod_path.join(&member)).ok()?;
+            crate::scan::read_capped(f, MEMBER_LIMIT, &member).ok()?
+        }
+    };
+    String::from_utf8(bytes).ok()
 }
 
 /// Extract the text of `<category>` whose parent is `<storeData>`.
@@ -48,27 +53,34 @@ fn parse_store_category(xml: &str) -> Option<String> {
     let mut buf = Vec::new();
     let mut stack: Vec<String> = Vec::new();
 
+    // The category's text arrives split at any `&amp;` (#266): gather it and read it
+    // when `</category>` closes.
+    let mut run = crate::xmltext::TextRun::default();
+
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Eof) | Err(_) => break,
             Ok(Event::Start(e)) => {
+                run.take();
                 stack.push(String::from_utf8_lossy(e.local_name().as_ref()).into_owned());
             }
-            Ok(Event::End(_)) => {
-                stack.pop();
+            Ok(Event::Empty(_)) => {
+                run.take();
             }
-            Ok(Event::Text(t)) => {
+            Ok(Event::End(_)) => {
                 let last = stack.last().map(String::as_str).unwrap_or("");
                 let parent = stack.iter().rev().nth(1).map(String::as_str).unwrap_or("");
+                let txt = run.take();
                 if last == "category" && parent == "storeData" {
-                    if let Some(txt) = crate::xmltext::text(&t) {
-                        let v = txt.trim().to_string();
-                        if !v.is_empty() {
-                            return Some(v);
-                        }
+                    let v = txt.trim();
+                    if !v.is_empty() {
+                        return Some(v.to_string());
                     }
                 }
+                stack.pop();
             }
+            Ok(Event::Text(t)) => run.push_text(&t),
+            Ok(Event::GeneralRef(r)) => run.push_ref(&r),
             _ => {}
         }
         buf.clear();
@@ -84,6 +96,29 @@ mod tests {
     fn reads_category() {
         let xml = r#"<vehicle><storeData><name>X</name><category>tractorsM</category></storeData></vehicle>"#;
         assert_eq!(parse_store_category(xml).as_deref(), Some("tractorsM"));
+    }
+
+    /// A member over the cap isn't read (the scan falls back to the keyword heuristic).
+    #[test]
+    fn an_oversized_store_item_is_not_read() {
+        let dir = std::env::temp_dir().join(format!("silo_store_cap_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = "<vehicle><storeData><category>tractorsM</category></storeData></vehicle>";
+        std::fs::write(dir.join("ok.xml"), ok).unwrap();
+        let mut big = String::from(ok);
+        big.push_str(&" ".repeat(MEMBER_LIMIT as usize));
+        std::fs::write(dir.join("big.xml"), big).unwrap();
+        assert_eq!(read_member(&dir, "dir", "ok.xml").as_deref(), Some(ok));
+        assert_eq!(read_member(&dir, "dir", "big.xml"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #266: a category with an entity reference isn't cut at the `&`.
+    #[test]
+    fn reads_category_with_an_entity() {
+        let xml = r#"<vehicle><storeData><category>a&amp;b</category></storeData></vehicle>"#;
+        assert_eq!(parse_store_category(xml).as_deref(), Some("a&b"));
     }
 
     #[test]

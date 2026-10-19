@@ -137,7 +137,6 @@ pub fn guarded_xml_write(
 
     // Backup REQUIRED — abort before touching the original if we can't preserve a copy.
     back_up_config(dest)?;
-    let bak = backup_slot(dest, 1);
 
     // Write to a temp sibling, flush, then atomically replace (rename replaces on all OSes).
     let tmp = dest.with_extension("xml.silo-tmp");
@@ -149,10 +148,13 @@ pub fn guarded_xml_write(
         std::fs::rename(&tmp, dest).map_err(|e| e.to_string())
     })();
     if let Err(e) = write {
+        // The rename is the only step that touches `dest`, and it either replaces it whole or
+        // not at all, so the original is still as it was. (Copying the backup over it here
+        // would rewrite a good file in place, and could cut it short on a full disk.)
         let _ = std::fs::remove_file(&tmp);
-        // Restore the original from the backup so a failed swap can't corrupt it.
-        let _ = std::fs::copy(&bak, dest);
-        return Err(format!("config write failed and was rolled back: {e}"));
+        return Err(format!(
+            "config write failed, so the file was left as it was: {e}"
+        ));
     }
     crate::fslog::changed("write-config", dest);
     Ok(())
@@ -292,6 +294,32 @@ pub fn safe_inbound(path: &Path, allowed_ext: &[&str]) -> Result<(), String> {
     } else {
         Err("file not found".to_string())
     }
+}
+
+/// The largest shared file Silo reads (a `.silo` set, a `.silomp` Multiplayer check file, or a
+/// collection `.json`). Real ones are a few hundred KB at most; this keeps a huge or hostile file
+/// from being read into memory whole.
+pub const SHARED_FILE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Read a user-picked text file (checked by [`safe_inbound`]) of at most `max_bytes`. Reads one
+/// byte past the limit instead of trusting the file's size, which can change between the check
+/// and the read.
+pub fn read_inbound_text(
+    path: &Path,
+    allowed_ext: &[&str],
+    max_bytes: u64,
+) -> Result<String, String> {
+    use std::io::Read;
+    safe_inbound(path, allowed_ext)?;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut text = String::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_string(&mut text)
+        .map_err(|e| e.to_string())?;
+    if text.len() as u64 > max_bytes {
+        return Err("That file is too large to be a Silo file.".to_string());
+    }
+    Ok(text)
 }
 
 /// Read an FS25 config/settings XML confined to the game user dir — the read-side mirror of
@@ -508,6 +536,23 @@ mod tests {
         assert!(require_ext(Path::new("a.json"), &["silo", "json"]).is_ok());
         assert!(require_ext(Path::new("a.exe"), &["silo", "json"]).is_err());
         assert!(require_ext(Path::new("noext"), &["silo"]).is_err());
+    }
+
+    #[test]
+    fn inbound_text_is_read_only_up_to_its_limit() {
+        let root = std::env::temp_dir().join(format!("silo_in_limit_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let f = root.join("set.silo");
+        std::fs::write(&f, "0123456789").unwrap();
+
+        assert_eq!(read_inbound_text(&f, &["silo"], 10).unwrap(), "0123456789");
+        let big = read_inbound_text(&f, &["silo"], 9).unwrap_err();
+        assert!(big.contains("too large"), "{big}");
+        assert!(read_inbound_text(&f, &["json"], 10).is_err(), "wrong type");
+        assert!(read_inbound_text(&root.join("missing.silo"), &["silo"], 10).is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
