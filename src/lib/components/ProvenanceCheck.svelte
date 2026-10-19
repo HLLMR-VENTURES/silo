@@ -4,7 +4,7 @@
   import { inlineError } from "../state/notify.svelte";
   import type { ModEntry, VerifyResult } from "../types";
   import { verifyMod } from "../api";
-  import { getVerdict, provKey, setVerdict } from "../provenanceCache.svelte";
+  import { getVerdict, isVerifying, provKey, setVerdict, setVerifying } from "../provenanceCache.svelte";
 
   let { mod }: { mod: ModEntry } = $props();
 
@@ -12,15 +12,24 @@
   let phase = $state<Phase>("idle");
   let result = $state<VerifyResult | null>(null);
   let err = $state("");
+  /** The file the shown error belongs to. */
+  let errFor = $state<string | null>(null);
 
-  // Remember the verdict across drawer switches: if this exact file was verified this
-  // session, show its result instead of resetting to the button.
+  // The panel follows the file shown, across drawer switches: a check still running for it
+  // (started before a switch away and back), its verdict from this session, its error, or the
+  // button.
   $effect(() => {
+    const key = provKey(mod);
     const cached = getVerdict(mod);
-    if (cached) {
+    if (isVerifying(mod)) {
+      phase = "running";
+      err = "";
+    } else if (cached) {
       result = cached;
       phase = "done";
       err = "";
+    } else if (errFor === key) {
+      phase = "error";
     } else {
       phase = "idle";
       result = null;
@@ -32,21 +41,21 @@
 
   async function run() {
     // The verdict belongs to the file that was hashed: the drawer may show another mod by the
-    // time it lands (this panel is reused across mods).
+    // time it lands (this panel is reused across mods). The effect above shows the outcome.
     const m = mod;
     const key = provKey(m);
-    phase = "running";
-    err = "";
+    if (isVerifying(m)) return;
+    errFor = null;
+    setVerifying(m, true);
     try {
-      const r = await verifyMod(m.techName, m.version, m.path);
-      setVerdict(m, r);
-      if (provKey(mod) !== key) return;
-      result = r;
-      phase = "done";
+      setVerdict(m, await verifyMod(m.techName, m.version, m.path));
     } catch (e) {
-      if (provKey(mod) !== key) return;
-      err = inlineError(e, "Checking the mod's integrity");
-      phase = "error";
+      if (provKey(mod) === key) {
+        err = inlineError(e, "Checking the mod's integrity");
+        errFor = key;
+      }
+    } finally {
+      setVerifying(m, false);
     }
   }
 

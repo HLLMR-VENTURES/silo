@@ -3,7 +3,7 @@
 // its last verdict and the library rows can badge verified/modified mods at a glance.
 // In-memory for the session; a DB-backed cache + auto-verify-all sweep are follow-ups.
 
-import { SvelteMap } from "svelte/reactivity";
+import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import type { ModEntry, VerifyResult } from "./types";
 
 const cache = new SvelteMap<string, VerifyResult>();
@@ -18,4 +18,23 @@ export function getVerdict(m: ModEntry): VerifyResult | undefined {
 
 export function setVerdict(m: ModEntry, r: VerifyResult): void {
   cache.set(provKey(m), r);
+}
+
+/** Files being verified now (by provKey): the drawer shows the run, and doesn't start another,
+ *  when it comes back to a mod mid-run. */
+const verifying = new SvelteSet<string>();
+
+/** Is this file's integrity check running? Reactive. */
+export function isVerifying(m: ModEntry): boolean {
+  return verifying.has(provKey(m));
+}
+
+/**
+ * Mark this file's check as running or finished.
+ * @param m the mod being hashed
+ * @param on true when the check starts, false when it ends (either way)
+ */
+export function setVerifying(m: ModEntry, on: boolean): void {
+  if (on) verifying.add(provKey(m));
+  else verifying.delete(provKey(m));
 }
