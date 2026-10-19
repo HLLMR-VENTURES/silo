@@ -157,6 +157,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Farming Simulator 25 loads only the map your savegame uses and leaves the others unloaded, so
   Silo no longer counts it as a problem or asks about it before Play. (#260)
 
+- **Two mods using the same vehicle, building or tool type name are no longer a conflict.**
+  The game files each mod's types and features under the mod's own name, so both load. Silo
+  used to call this a critical conflict for common names like "myTractor".
+
 - **Problems tab.** Library health is now Diagnose → Problems, with an action on each row:
   **Find it in Browse** for a missing required mod, **Show file** and **Park** for one that can't
   be read, **Show file** for a name the game skips, and **Use this version** / **Keep Silo's**
@@ -345,6 +349,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (nanoid, postcss and source-map-js updated). Nothing in the shipped app changes. (#234)
 
 ### Fixed
+- A mod's title or author with an `&` in it was cut short ("Elm & Ash" showed as "Elm"), and a
+  savegame or map name with one lost its first half. Silo now reads the whole name, and
+  re-reads mods it had already scanned once after the update. (#266)
+
 - **Find the problem mod** showed "Round 1 of about NaN", and a finished run couldn't name the
   mod it found: Silo sent the step's fields in the wrong case. (#263)
 
