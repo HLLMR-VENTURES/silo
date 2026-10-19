@@ -318,7 +318,7 @@
       <TextField
         id="shared-link"
         type="url"
-        placeholder="https://silo.hllmr.com/c/… or a GitHub gist link"
+        placeholder="https://silo.hllmr.com/c/… or a link from GitHub"
         bind:value={linkText}
         onkeydown={(e: KeyboardEvent) => {
           if (e.key === "Enter") void openLink();
@@ -411,7 +411,7 @@
             <div class="mod">
               <span class="mn">{label(m.techName)}</span>
               <span class="rt">
-                {#if kind === "drift"}yours {m.installedVersion ? displayVersion(m.installedVersion) : "?"}, set {m.version ? displayVersion(m.version) : "?"}
+                {#if kind === "drift"}yours {m.installedVersion ? displayVersion(m.installedVersion) : "unknown"}, set {m.version ? displayVersion(m.version) : "unknown"}
                 {:else}{m.version ? displayVersion(m.version) : ""}{m.source ? ` · ${m.source === "modhub" ? "ModHub" : m.source === "github" ? "GitHub" : m.source}` : ""}{/if}
               </span>
               {#if kind === "missing"}
@@ -435,7 +435,7 @@
             <div class="mod"><span class="mn"><Icon name="problem" size={13} /> {c.name}</span><span class="rt">{c.mods.join(", ")}</span></div>
           {/each}
           {#each preflightDeps as d (d.mod)}
-            <div class="mod"><span class="mn">{d.mod}</span><span class="rt">needs {d.missing.join(", ")}, which isn't in the set or your library</span></div>
+            <div class="mod"><span class="mn">{d.mod}</span><span class="rt">needs {d.missing.join(", ")}, which {d.missing.length === 1 ? "isn't" : "aren't"} in the set or your library</span></div>
           {/each}
           <p class="muted">Checked against the mods you already have. Silo checks again after downloading.</p>
         </div>
@@ -456,7 +456,7 @@
         <div class="actions">
           {#if p.willInstall.length > 0}
             <Button variant="primary" icon="download" loading={applying} disabled={applying || saving} onclick={download}
-              >Download {formatCount(p.willInstall.length)} and save as a set</Button
+              >Download {count(p.willInstall.length)} and save as a set</Button
             >
             <Button variant="ghost" disabled={applying || saving} onclick={saveOnly}>Save as a set without downloading</Button>
           {:else}

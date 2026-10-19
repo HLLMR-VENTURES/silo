@@ -20,7 +20,7 @@
 
 <div class="groups">
   {#each groups as g (g.category)}
-    <section class="grp" aria-label="{g.category}, {g.moves.length} files">
+    <section class="grp" aria-label="{g.category}, {g.moves.length} {g.moves.length === 1 ? 'file' : 'files'}">
       <div class="grp-head">
         <span class="grp-name">{g.category}</span>
         <span class="grp-count tnum">{formatCount(g.moves.length)}</span>

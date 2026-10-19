@@ -71,6 +71,7 @@ export function conflictCounts(list: Pick<Conflict, "severity">[]): ConflictCoun
  * notes" when they show). Notes are left out when there are none.
  */
 export function conflictHeadline(c: ConflictCounts, notesShown: boolean): string[] {
+  if (c.problems + c.review + c.notes === 0) return ["No conflicts"];
   const parts = [
     `${formatCount(c.problems)} ${plural(c.problems, { one: "problem", other: "problems" })}`,
     `${formatCount(c.review)} to review`,

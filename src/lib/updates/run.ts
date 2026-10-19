@@ -7,6 +7,7 @@
 
 import type { CatalogUpdate, UpdateInfo, UpdateOutcome, UpdateRow } from "../types";
 import { plural } from "../plural";
+import { displayVersion } from "../format";
 
 /** What the check reads from a library mod. */
 export interface CheckMod {
@@ -69,6 +70,8 @@ async function checkLinked(
       latest: info.release.tag,
       hasUpdate: info.hasUpdate,
       assetUrl: info.release.assetUrl,
+      // No .zip on the release: its page is where the user gets it (not the catalog's ModHub page).
+      pageUrl: info.release.assetUrl ? row.pageUrl : (info.release.htmlUrl ?? row.pageUrl),
       source: "github",
       error: undefined,
       errorDetail: undefined,
@@ -243,7 +246,7 @@ export function updateAllSummary(res: UpdateAllResult, why: (e: unknown) => stri
   if (bad === 0) {
     const message =
       ok === 1
-        ? `Updated ${res.updated[0].row.title}${res.updated[0].row.latest ? ` to ${res.updated[0].row.latest}` : ""}. The previous version is in backups.`
+        ? `Updated ${res.updated[0].row.title}${res.updated[0].row.latest ? ` to ${displayVersion(res.updated[0].row.latest)}` : ""}. The previous version is in backups.`
         : `Updated ${mods(ok)}. The previous versions are in backups.`;
     return problems.length
       ? { tone: "warn", message, body: problems.join(" ") }

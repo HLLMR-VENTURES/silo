@@ -7,8 +7,15 @@ export function conflictKindLabel(kind: string): string {
     fillType: "Fill type",
     script: "Script",
     map: "Map",
-    specialization: "Specialization",
+    specialization: "Feature",
+    placeableSpecialization: "Building feature",
+    handToolSpecialization: "Hand tool feature",
     vehicleType: "Vehicle type",
+    placeableType: "Building type",
+    handToolType: "Hand tool type",
+    action: "Control action",
+    brand: "Brand",
+    storeCategory: "Shop category",
   };
   return words[kind] ?? kind;
 }

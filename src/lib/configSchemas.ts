@@ -27,6 +27,7 @@ export const GAME_GRAPHICS_FIELDS: CfgField[] = [
     label: "Performance class",
     kind: "select",
     options: ["minimal", "low", "medium", "high", "veryHigh"],
+    optionLabels: { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", veryHigh: "Very high" },
   },
   {
     path: `${G}textureFiltering`,
@@ -85,6 +86,7 @@ export const SAVEGAME_FIELDS: CfgField[] = [
     label: "Economic difficulty",
     kind: "select",
     options: ["EASY", "NORMAL", "HARD"],
+    optionLabels: { EASY: "Easy", NORMAL: "Normal", HARD: "Hard" },
   },
   {
     path: `${S}growthMode`,

@@ -99,6 +99,7 @@ describe("conflict copy", () => {
     expect(conflictHeadline(c, false)).toEqual(["0 problems", "2 to review", "2 notes hidden"]);
     expect(conflictHeadline(c, true)).toEqual(["0 problems", "2 to review", "2 notes"]);
     expect(conflictHeadline({ problems: 1, review: 0, notes: 0 }, false)).toEqual(["1 problem", "0 to review"]);
+    expect(conflictHeadline({ problems: 0, review: 0, notes: 0 }, false)).toEqual(["No conflicts"]);
   });
 });
 

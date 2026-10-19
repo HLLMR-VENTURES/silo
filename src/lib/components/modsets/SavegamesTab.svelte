@@ -51,7 +51,7 @@
         {#if libraryRead}
           <p class="mods" class:warn={st.missing.length > 0}>
             {#if st.missing.length > 0}<Icon name="problem" size={14} />{/if}
-            {saveModsLine(st)}{#if st.missing.length > 0}. {formatCount(st.missing.length)} missing{/if}
+            {saveModsLine(st)}{#if st.missing.length > 0}. {formatCount(st.missing.length)} missing.{/if}
           </p>
         {:else}
           <p class="mods">{st.total === 0 ? "Uses no mods" : `Uses ${formatCount(st.total)} ${st.total === 1 ? "mod" : "mods"}`}</p>

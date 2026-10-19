@@ -9,13 +9,14 @@ export function fmtSize(b: number): string {
 }
 
 /**
- * A version as Silo shows it: catalogs and GitHub tags may carry "v", "V" or "V." in front
- * ("V.1.6.4.0"); scan entries don't. Silo shows the bare number everywhere and never adds a "v".
+ * A version as Silo shows it: catalogs and GitHub tags may carry "v", "V", "V." or "Ver" in front
+ * ("V.1.6.4.0", "Ver 2.1"); scan entries don't. Silo shows the bare number everywhere and never
+ * adds a "v". Updates compares versions in this form too (normVersion), so shown and compared agree.
  *   displayVersion("V.1.6.4.0") -> "1.6.4.0"
  * @param v the version as stored or received ("" when there is none)
  */
 export function displayVersion(v: string | null | undefined): string {
-  return (v ?? "").trim().replace(/^v\.?\s*(?=\d)/i, "");
+  return (v ?? "").trim().replace(/^(v|ver|version)\.?\s*(?=\d)/i, "");
 }
 
 /**

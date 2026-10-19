@@ -36,12 +36,12 @@ export async function switchBlockReason(
   s: SwitchState,
   hasBisectSnapshot: () => Promise<boolean>,
 ): Promise<string | null> {
-  if (s.moveUnfinished) return "Finish or cancel the archive move first.";
+  if (s.moveUnfinished) return "Finish or cancel the library move first.";
   if (s.scanning) return "Wait for the scan to finish.";
   if (s.busy) return `Wait for “${s.busy}” to finish.`;
   if (s.blocked) return null;
   if (await hasBisectSnapshot())
-    return "Finish or cancel the guided bisection first. It belongs to this folder.";
+    return "Finish or cancel Find the problem mod first. It belongs to this folder.";
   return null;
 }
 
@@ -125,7 +125,7 @@ export function modsFolderNotices(
       key: MODS_FOLDER_KEY,
       level: "warning",
       icon: "info",
-      title: "Farming Simulator hasn't created its mods folder yet.",
+      title: "Farming Simulator 25 hasn't created its mods folder yet.",
       actions: [
         { label: "Create it", run: a.createFolder, primary: true },
         { label: "Choose a folder", run: a.chooseAnother },
@@ -136,13 +136,13 @@ export function modsFolderNotices(
     out.override = {
       key: OVERRIDE_KEY,
       level: "warning",
-      title: `FS25 is reading a different mods folder${st.gameReads ? ` (${st.gameReads})` : ""}.`,
-      body: "Mods you activate here won't load in-game.",
+      title: `Farming Simulator 25 is reading a different mods folder${st.gameReads ? ` (${st.gameReads})` : ""}.`,
+      body: "Mods you turn on here won't load in-game.",
       actions: [
         ...(st.canWriteGameSetting
           ? [{ label: "Point FS25 here", run: a.pointGameHere, primary: true }]
           : []),
-        { label: "Switch Silo to the game's folder", run: a.useGameFolder },
+        { label: "Use the game's folder", run: a.useGameFolder },
       ],
       dismissible: false,
     };

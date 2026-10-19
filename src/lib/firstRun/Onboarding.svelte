@@ -277,7 +277,7 @@
           <Button disabled={acting || !!busy} onclick={() => act(onChooseModsFolder)}>Choose another…</Button>
         </div>
       {:else if variant === "missing"}
-        <h2 bind:this={heading} tabindex="-1">Farming Simulator hasn't made its mods folder yet</h2>
+        <h2 bind:this={heading} tabindex="-1">Farming Simulator 25 hasn't made its mods folder yet</h2>
         <p>Silo can create it at <code>{path}</code>, or you can choose another folder.</p>
         <div class="actions">
           <Button variant="primary" disabled={acting || !!busy} onclick={() => act(onCreateModsFolder)}>Create it</Button>
@@ -293,7 +293,7 @@
       {:else}
         <h2 bind:this={heading} tabindex="-1">Silo found your mods folder</h2>
         {#if variant === "override"}
-          <p>Farming Simulator is set to read <code>{path}</code>. Silo will use that folder too.</p>
+          <p>Farming Simulator 25 is set to read <code>{path}</code>. Silo will use that folder too.</p>
         {:else}
           <p><code>{path}</code> <span class="muted">· Farming Simulator 25 reads this folder</span></p>
         {/if}
@@ -301,8 +301,8 @@
           <p class="warn" role="note">
             <Icon name="problem" size={16} />
             <span>
-              Farming Simulator reads a different folder{modsStatus?.gameReads ? ` (${modsStatus.gameReads})` : ""}, so mods
-              you switch on here won't load in the game.
+              Farming Simulator 25 reads a different folder{modsStatus?.gameReads ? ` (${modsStatus.gameReads})` : ""}, so mods
+              you turn on here won't load in the game.
             </span>
           </p>
         {/if}
@@ -310,8 +310,8 @@
           <p class="note" role="note">
             <Icon name="cloud" size={16} />
             <span>
-              This folder is synced by a cloud service, so Silo will copy active mods instead of linking them. It
-              works; it uses more disk.
+              This folder is synced by a cloud service, so Silo will copy active mods instead of linking them. That
+              works, but uses more disk space.
             </span>
           </p>
         {/if}
@@ -380,7 +380,7 @@
       </div>
     {:else if failures !== null}
       {#if failures.length === 0}
-        <h2 bind:this={heading} tabindex="-1">Your library is organized.</h2>
+        <h2 bind:this={heading} tabindex="-1">Your library is organized</h2>
         <p>
           {nMods(filed)} filed, {formatCount(activeCount)} active, nothing deleted.
         </p>

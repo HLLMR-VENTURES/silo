@@ -18,7 +18,7 @@
   let { statsTab, controlsTab, bridgeTab, graphicsTab }: Props = $props();
 
   const TABS: TabItem<ToolsTab>[] = [
-    { id: "stats", label: "Library stats" },
+    { id: "stats", label: "Library statistics" },
     { id: "controls", label: "Controls map" },
     { id: "bridge", label: "Fill type bridge" },
     { id: "graphics", label: "Graphics settings" },

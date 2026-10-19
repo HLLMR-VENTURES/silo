@@ -67,6 +67,6 @@ describe("ask() without a dialog host", () => {
     await expect(askText({ title: "Rename", label: "Name", confirm: "Rename" })).resolves.toBeNull();
     expect(currentDialog()).toBeUndefined();
     expect(toasts).toHaveLength(1);
-    expect(toasts[0]).toMatchObject({ tone: "danger", sticky: true, message: 'Silo couldn\'t open the "Rename" dialog.' });
+    expect(toasts[0]).toMatchObject({ tone: "danger", sticky: true, message: "Silo couldn't open the “Rename” dialog." });
   });
 });

@@ -13,6 +13,7 @@ vi.mock("../api", async (importOriginal) => ({
 import { ghDevicePoll, ghDeviceStart, ghStatus, openExternal } from "../api";
 import type { PollResult } from "../types";
 import { dismissToast, toasts } from "../ui/toasts.svelte";
+import { activity, clearActivity } from "./activity.svelte";
 import {
   attachGithubView,
   cancelDeviceFlow,
@@ -44,6 +45,17 @@ afterEach(() => {
 });
 
 describe("githubAuth device flow", () => {
+  it("an error answer shows a plain line; GitHub's reason goes to Copy details", async () => {
+    clearActivity();
+    const detach = attachGithubView();
+    vi.mocked(ghDevicePoll).mockResolvedValue(answer("error", "device_flow_disabled"));
+    await startDeviceFlow();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(githubAuth.message).toBe("GitHub sign-in didn't finish. Try connecting again.");
+    expect(activity.some((a) => a.level === "error" && (a.detail ?? "").includes("device_flow_disabled"))).toBe(true);
+    detach();
+  });
+
   it("shows the code, opens the page and polls on the device code's interval", async () => {
     vi.mocked(ghDevicePoll).mockResolvedValue(answer("pending"));
     await startDeviceFlow();
@@ -159,9 +171,9 @@ describe("githubAuth device flow", () => {
     await startDeviceFlow();
     await vi.advanceTimersByTimeAsync(5_000);
     expect(githubAuth.flow).toBeNull();
-    expect(githubAuth.message).toBe("Authorization was denied.");
+    expect(githubAuth.message).toBe("You didn't approve Silo on GitHub. Try connecting again when you're ready.");
     expect(pollArmed()).toBe(false);
-    expect(toasts.map((t) => t.message)).toContain("Authorization was denied.");
+    expect(toasts.map((t) => t.message)).toContain("You didn't approve Silo on GitHub. Try connecting again when you're ready.");
 
     const detach = attachGithubView();
     vi.mocked(ghDevicePoll).mockResolvedValue(answer("expired"));

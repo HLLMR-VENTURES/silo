@@ -16,7 +16,7 @@ describe("BridgeTool", () => {
   it("a fill type typed twice (any case) is one chip and is sent once", async () => {
     const user = userEvent.setup();
     render(BridgeTool, { onGenerated: vi.fn(), onClose: vi.fn() });
-    await user.type(screen.getByLabelText("Fill type name(s)"), "sugarbeet SUGARBEET, beetpulp");
+    await user.type(screen.getByLabelText("Fill type names"), "sugarbeet SUGARBEET, beetpulp");
     expect(screen.getAllByText("SUGARBEET")).toHaveLength(1);
     await user.click(screen.getByRole("button", { name: /Generate/ }));
     expect(api.generateBridge).toHaveBeenCalledWith(expect.objectContaining({ fillTypes: ["SUGARBEET", "BEETPULP"] }));

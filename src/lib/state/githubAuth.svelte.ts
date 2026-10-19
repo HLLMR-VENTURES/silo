@@ -11,7 +11,7 @@
 import { ghDevicePoll, ghDeviceStart, ghStatus, openExternal } from "../api";
 import type { GhStatus } from "../types";
 import { toast } from "../ui/toasts.svelte";
-import { inlineError, success } from "./notify.svelte";
+import { inlineError, reportError, success } from "./notify.svelte";
 
 export interface DeviceFlowView {
   userCode: string;
@@ -117,11 +117,14 @@ async function poll(gen: number, deviceCode: string, seconds: number): Promise<v
       return;
     }
     case "denied":
-      return fail(gen, "Authorization was denied.");
+      return fail(gen, "You didn't approve Silo on GitHub. Try connecting again when you're ready.");
     case "expired":
       return fail(gen, "The code expired. Try again.");
     case "error":
-      return fail(gen, `Auth error: ${r.error ?? "unknown"}`);
+      // The friendly line is the headline; GitHub's own reason goes to the activity list, where
+      // Copy details has it.
+      reportError(`GitHub sign-in error: ${r.error ?? "unknown"}`, "Connecting GitHub", { quiet: true });
+      return fail(gen, "GitHub sign-in didn't finish. Try connecting again.");
     case "slow_down":
       return arm(gen, deviceCode, seconds + SLOW_DOWN_SECONDS);
     default:

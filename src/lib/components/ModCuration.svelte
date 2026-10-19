@@ -94,7 +94,7 @@
     <input
       class="d-tag-input"
       aria-label="Add a tag"
-      placeholder="add tag…"
+      placeholder="Add a tag…"
       bind:value={newTag}
       onkeydown={(e) => e.key === "Enter" && addTag()}
       onblur={addTag}

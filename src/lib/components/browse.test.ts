@@ -314,7 +314,7 @@ describe("GitHub sign-in after the view unmounts", () => {
     await vi.advanceTimersByTimeAsync(5000);
     expect(ghDevicePoll).toHaveBeenCalledTimes(1);
     // No view is mounted, so the outcome is a toast, and no timer is left behind.
-    expect(toasts.some((t) => t.message === "Authorization was denied.")).toBe(true);
+    expect(toasts.some((t) => t.message === "You didn't approve Silo on GitHub. Try connecting again when you're ready.")).toBe(true);
     expect(pollArmed()).toBe(false);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(ghDevicePoll).toHaveBeenCalledTimes(1);

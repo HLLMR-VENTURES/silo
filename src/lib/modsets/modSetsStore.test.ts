@@ -294,7 +294,7 @@ describe("switchSummary", () => {
     const on = Array.from({ length: 60 }, (_, i) => `M${i}`);
     const s = switchSummary(activeSetDiff([], on), (t) => `T${t}`);
     expect(s.list).toHaveLength(51);
-    expect(s.list[0]).toBe("On: TM0");
+    expect(s.list[0]).toBe("Turn on: TM0");
     expect(s.list.at(-1)).toBe("…and 10 more");
     expect(s.facts.map((f) => f.label)).toEqual(["Turn on", "Park"]);
   });

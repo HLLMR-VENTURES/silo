@@ -146,7 +146,7 @@
         <span>{label}</span>
         <span aria-hidden="true">·</span>
         <span class="tnum">{formatCount(count)}</span>
-        <span class="vh">mods</span>
+        <span class="vh">{count === 1 ? "mod" : "mods"}</span>
       </span>
       {#if loading}<span class="spinner" aria-hidden="true"></span>{/if}
     </button>

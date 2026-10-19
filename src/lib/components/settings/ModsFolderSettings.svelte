@@ -7,6 +7,7 @@
   import type { ModsRootStatus } from "../../api";
   import type { GameInfo } from "../../types";
   import SettingsCard from "./SettingsCard.svelte";
+  import { nMods } from "../../firstRun/firstRun";
   import { folderOpener } from "./folders.svelte";
   import { settingsLock } from "./lock";
 
@@ -44,8 +45,8 @@
     return s === "user"
       ? "Chosen in Silo"
       : s === "gameOverride"
-        ? "Following FS25's setting"
-        : "FS25 default";
+        ? "Following the game's setting"
+        : "The game's default";
   }
 </script>
 
@@ -71,8 +72,8 @@
   {/if}
   {#if modsStatus?.unresolvedOverride}
     <p class="hint">
-      FS25's override points at <span class="tnum">{modsStatus.unresolvedOverride}</span>, which
-      Silo can't map to a folder on this computer. Choose the folder with Change….
+      Farming Simulator 25 is set to load mods from <span class="tnum">{modsStatus.unresolvedOverride}</span>,
+      which Silo can't find on this computer. Choose the folder with Change….
     </p>
   {/if}
   {#if modsStatus?.gameSettingProblem}
@@ -97,7 +98,7 @@
       {#each others as k (k.path)}
         <li>
           <span class="known-path">{k.path}</span>
-          <span class="hint tnum">{k.modCount} mods</span>
+          <span class="hint tnum">{nMods(k.modCount)}</span>
           <Button
             size="sm"
             disabled={lock.locked}
