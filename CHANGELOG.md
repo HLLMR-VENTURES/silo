@@ -420,6 +420,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it no longer waits up to 30 seconds on the library archive before opening links or offering to
   restore an unfinished guided bisection. (#222)
 
+### Security
+
+- **A mistyped GitHub token can't end up in the log.** A pasted token with a line break or an
+  invisible character in it is refused with a plain message before it's sent. Before, the
+  request failed with an error that quoted the token, and that error went into Silo's log and
+  so into Copy diagnostics. As a backstop, anything shaped like a GitHub token or a `Bearer`
+  credential is masked in the log and in diagnostics.
+
 ## [0.11.0] - 2026-10-17
 
 ### Added
