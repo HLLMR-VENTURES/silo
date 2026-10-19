@@ -172,7 +172,7 @@
       onclick={toggleDir}
       use:tooltip={dirEnabled
         ? `Sort ${sortDir === "desc" ? "descending" : "ascending"}`
-        : "Sort direction is coming with a catalog update (silo-api)."}
+        : "This sort has one fixed order for now."}
       aria-label="Sort direction: {sortDir === 'desc' ? 'descending' : 'ascending'}"
     >
       <Icon name={sortDir === "desc" ? "arrowDown" : "arrowUp"} size={14} />

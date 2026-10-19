@@ -177,7 +177,12 @@ export function compareSet(
   if (on + off === 0) return { text: "Same", label: "Same as your active mods", same: true, diff };
   return {
     text: `+${formatCount(on)} / −${formatCount(off)}`,
-    label: `${formatCount(on)} ${plural(on, { one: "turns", other: "turn" })} on and ${formatCount(off)} ${plural(off, { one: "is", other: "are" })} parked`,
+    label: [
+      on > 0 ? `${formatCount(on)} ${plural(on, { one: "turns", other: "turn" })} on` : "",
+      off > 0 ? `${formatCount(off)} ${plural(off, { one: "is", other: "are" })} parked` : "",
+    ]
+      .filter(Boolean)
+      .join(" and "),
     same: false,
     diff,
   };

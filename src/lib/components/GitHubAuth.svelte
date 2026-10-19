@@ -85,9 +85,9 @@
         <div class="gha-connected"><Icon name="ok" size={14} /> Connected as {status.user}</div>
         <div class="gha-hint">
           {#if status.canWrite}
-            Star &amp; Watch actions enabled · 5,000 req/hr.
+            You can star and watch mods on GitHub. Update checks run faster.
           {:else}
-            Read-only (update checks · 5,000 req/hr).
+            Used for faster update checks.
           {/if}
           {#if status.canGist}
             · Sharing links on.
@@ -105,22 +105,22 @@
       {#if !status.canWrite}
         <div class="gha-row">
           <div class="gha-hint">
-            Enable Star / Watch on mod pages. This grants the <code>public_repo</code>
-            scope so actions land on your GitHub account.
+            Star and watch mods' GitHub pages from Silo. GitHub asks you to allow access to your
+            public repositories.
           </div>
           <button class="gha-btn primary" onclick={() => connect(true, status.canGist)}>
-            Enable actions
+            Allow starring and watching
           </button>
         </div>
       {/if}
       {#if !status.canGist}
         <div class="gha-row">
           <div class="gha-hint">
-            Share mod sets as links. This grants the <code>gist</code> scope so a shared set's
-            list is saved to your own GitHub as an unlisted page.
+            Share mod sets as links. GitHub asks you to let Silo save each shared list as an
+            unlisted link on your GitHub.
           </div>
           <button class="gha-btn primary" onclick={() => connect(status.canWrite, true)}>
-            Enable sharing links
+            Allow sharing links
           </button>
         </div>
       {/if}
@@ -130,9 +130,8 @@
   {:else if status.clientId}
     <div class="gha-row">
       <div class="gha-hint">
-        Connect your GitHub account for faster update checks (5,000 requests per hour). This
-        grants <code>read:user</code> only. Star / Watch (<code>public_repo</code>) and sharing mod
-        sets as links (<code>gist</code>) are separate, optional steps.
+        Connect your GitHub account for faster update checks. Silo only reads your public
+        profile. Starring mods and sharing mod sets as links are separate, optional steps.
       </div>
       <button class="gha-btn primary" onclick={() => connect()}>Connect GitHub</button>
     </div>
@@ -165,12 +164,12 @@
 
   {#if !status.user && !flow}
     <button class="gha-link" aria-expanded={showPat} onclick={() => (showPat = !showPat)}>
-      {showPat ? "Hide token option" : "Use a Personal Access Token instead…"}
+      {showPat ? "Hide token option" : "Use a personal access token instead…"}
     </button>
     {#if showPat}
       <div class="gha-hint">
-        A fine-grained PAT scoped to only <b>Starring</b> (read/write) is the most
-        minimal-permission path, narrower than the OAuth scope.
+        A fine-grained token with only <b>Starring</b> (read and write) access is the narrowest
+        option. Sharing links need a token that can create gists.
         <button
           class="gha-link"
           onclick={() => openExternal(GITHUB_NEW_PAT_URL)}

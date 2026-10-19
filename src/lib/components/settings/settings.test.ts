@@ -104,7 +104,7 @@ describe("LibrarySettings", () => {
       onChangeArchive: vi.fn(),
       onArchiveDefault: vi.fn(),
     });
-    expect(screen.getByRole("button", { name: "Organize 4" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Organize 4 mods" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Change…" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Use default" })).toBeDisabled();
     expect(screen.getAllByText(MOVE_UNFINISHED_REASON).length).toBeGreaterThanOrEqual(2);
@@ -142,7 +142,7 @@ describe("ModsFolderSettings", () => {
       onSwitchModsFolder: vi.fn(),
     });
     expect(screen.getByText("C:/mods")).toBeInTheDocument();
-    expect(screen.getByText("FS25 default")).toBeInTheDocument();
+    expect(screen.getByText("The game's default")).toBeInTheDocument();
     expect(screen.getByText(/install not found/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Change…" }));
     expect(onChangeModsFolder).toHaveBeenCalledOnce();

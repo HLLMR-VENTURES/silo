@@ -69,7 +69,7 @@ describe("archiveNotice", () => {
     );
     expect(n).toMatchObject({ key: ARCHIVE_MOVE_KEY, level: "warning", title: "Moving your library to E:/silo." });
     expect(n?.progress).toEqual({ done: 3, total: 12, label: "Mods moved" });
-    expect(n?.body).toMatch(/^3\/12 mods · .* Launch is blocked until it pauses or finishes\.$/);
+    expect(n?.body).toMatch(/^3 of 12 mods · .* You can't press Play until it pauses or finishes\.$/);
     expect(labels(n)).toEqual(["Pause", "Cancel move"]);
     void n?.actions?.[0].run();
     expect(a.pause).toHaveBeenCalled();
@@ -112,9 +112,9 @@ describe("archiveNotice", () => {
     );
     expect(n).toMatchObject({ key: ARCHIVE_MOVE_KEY, level: "blocking", title: "1 mod couldn't be moved." });
     expect(n?.body).toBe(
-      "FS25_A.zip is in use. FS25 started. The move is paused. Retry tries them again, or Cancel moves everything back.",
+      "FS25_A.zip is in use. FS25 started. The move is paused. Press Try again to move them, or Cancel move to move everything back.",
     );
-    expect(labels(n)).toEqual(["Retry", "Cancel move"]);
+    expect(labels(n)).toEqual(["Try again", "Cancel move"]);
     void n?.actions?.[0].run();
     expect(a.resume).toHaveBeenCalled();
   });
@@ -124,7 +124,7 @@ describe("archiveNotice", () => {
       { ...idle, archive: archive({ moving: marker({ paused: true }) }), unfinished: true },
       actions(),
     );
-    expect(n).toMatchObject({ level: "warning", title: "Archive move paused." });
+    expect(n).toMatchObject({ level: "warning", title: "Library move paused." });
     expect(labels(n)).toEqual(["Resume", "Cancel move"]);
   });
 

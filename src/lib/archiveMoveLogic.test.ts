@@ -122,11 +122,11 @@ describe("lost cancel", () => {
   it("explains where the library is and how to move it", () => {
     expect(lostCancelText("D:/archive", false)).toBe(
       "The move finished before it could be cancelled. Your library is now in D:/archive. " +
-        "Use Change… in Settings to move it again.",
+        "To move it again, open Settings → Library and choose Change….",
     );
     expect(lostCancelText(null, true)).toBe(
       "The move finished before it could be cancelled. Your library is now in its new folder. " +
-        "Use 'Use default' in Settings to move it back.",
+        "To move it back, open Settings → Library and choose Use default.",
     );
   });
 });

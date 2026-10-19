@@ -36,28 +36,28 @@ export type FilterFlag = Exclude<keyof LibraryFilters, "status" | "tag">;
 
 /** The Filters popover's checkboxes, in display order. */
 export const POPOVER_FLAGS: readonly { id: FilterFlag; label: string }[] = [
-  { id: "hidden", label: "Hidden" },
+  { id: "hidden", label: "Include hidden mods" },
   { id: "flagged", label: "Flagged" },
   { id: "conflicted", label: "In conflict" },
   { id: "hasSettings", label: "Has settings" },
   { id: "needsUpdate", label: "Needs update" },
   { id: "maps", label: "Maps" },
   { id: "scripts", label: "Script mods" },
-  { id: "unique", label: "Declares a uniqueType" },
+  { id: "unique", label: "Uses an exclusive slot" },
 ];
 
 /** Chip labels ("Remove filter: Maps"). */
 const FLAG_LABEL: Record<FilterFlag, string> = {
   favorites: "Favorites",
   attention: "Needs attention",
-  hidden: "Hidden",
+  hidden: "Including hidden",
   flagged: "Flagged",
   conflicted: "In conflict",
   hasSettings: "Has settings",
   needsUpdate: "Needs update",
   maps: "Maps",
   scripts: "Script mods",
-  unique: "uniqueType",
+  unique: "Exclusive slot",
 };
 
 export const NO_FILTERS: Readonly<LibraryFilters> = Object.freeze({
@@ -230,5 +230,5 @@ export function needsUpdateOutcome(o: {
   if (o.checking) return { filter: false, say: "Wait for the check to finish.", tone: "warn" };
   if (o.catalogError) return { filter: false, say: o.catalogError, tone: "warn" };
   if (!o.checked) return { filter: false, say: o.blocked || "Wait for the check to finish.", tone: "warn" };
-  return { filter: false, say: "All mods are up to date", tone: "success" };
+  return { filter: false, say: "Every mod Silo can check is up to date.", tone: "success" };
 }

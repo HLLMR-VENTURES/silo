@@ -204,8 +204,8 @@ export const confirmAction = ask;
 export async function askText(opts: PromptOptions): Promise<string | null> {
   if (hostLost()) {
     toast({
-      message: `Silo couldn't open the "${opts.title}" dialog.`,
-      body: "Reload it from the problem card, then try again.",
+      message: `Silo couldn't open the “${opts.title}” dialog.`,
+      body: "Press Reload this view on the error card, then try again.",
       tone: "danger",
       sticky: true,
     });
