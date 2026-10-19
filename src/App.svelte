@@ -232,6 +232,7 @@
   import WhatsNew from "./lib/firstRun/WhatsNew.svelte";
   import {
     fileInRuns,
+    relinkFiled,
     filingFailures,
     firstRunScreen,
     firstRunState,
@@ -1184,12 +1185,14 @@
       if (keepActive && out.changed > 0) {
         const next = new Set([...activeSet, ...techNames]);
         activeSet = next;
-        await applyActive([...next]); // reports its own problems
+        // Reports its own problems; a throw is kept so the dialog or setup flow can finish.
+        await relinkFiled(out, () => applyActive([...next]));
       }
     } finally {
       op.end();
     }
     await runScan(false);
+    if (out.relinkError !== undefined) reportError(out.relinkError, "Turning your filed mods back on");
     return out;
   }
 
@@ -1264,7 +1267,7 @@
     } else if (failures.length) {
       reportError(out.errors.join("\n"), "Filing mods into the library", { quiet: true });
     }
-    return { failures, filed: out.changed };
+    return { failures, filed: out.changed, relinkFailed: out.relinkError !== undefined };
   }
 
   // ── Organize dialog: the status strip's Review (and Settings → Library) ─────────
@@ -1350,7 +1353,9 @@
       return;
     }
     organizePreview = null;
-    success(`Filed ${modsCount(out.filed)} into your library. All active mods stay active.`);
+    // The filed mods couldn't be linked back: that problem was reported instead.
+    if (!out.relinkFailed)
+      success(`Filed ${modsCount(out.filed)} into your library. All active mods stay active.`);
   }
 
   // ── First run (#250): the setup flow for a new library, "What's new" for an upgrade ─────

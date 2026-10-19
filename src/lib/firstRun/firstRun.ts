@@ -81,7 +81,7 @@ export function filingFailures(errors: string[], plan: PlannedMove[]): FilingFai
 /** `message`: why nothing was filed, when it was tried and stopped (the game is running…). */
 export type OrganizeOutcome =
   | { refused: true; message?: string }
-  | { refused?: false; failures: FilingFailure[]; filed: number };
+  | { refused?: false; failures: FilingFailure[]; filed: number; relinkFailed?: boolean };
 /** What choosing another archive folder did: cancelled, a problem to show, or the new path. */
 export type ArchiveChoice = null | { problem: string } | { path: string };
 /** How the setup flow ended: Skip setup, Not now, or after organizing. */
@@ -102,6 +102,21 @@ export interface FilingRun {
   changed: number;
   /** Mods handed to apply_organize before it finished or threw. */
   done: number;
+  /** Linking the filed mods back into the mods folder threw (see `relinkFiled`). */
+  relinkError?: unknown;
+}
+
+/**
+ * After filing, link the filed mods back into the mods folder so they stay active. A throw (the
+ * archive drive went away, Silo is updating itself) is kept on `run` instead of escaping, so the
+ * Organize dialog or the setup flow that filed them can finish and say so.
+ */
+export async function relinkFiled(run: FilingRun, relink: () => Promise<unknown>): Promise<void> {
+  try {
+    await relink();
+  } catch (e) {
+    run.relinkError = e;
+  }
 }
 
 /**
