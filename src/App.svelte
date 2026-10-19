@@ -134,7 +134,7 @@
     tryStart,
     type OpToken,
   } from "./lib/state/ops.svelte";
-  import { focusRescanAllowed, rescanGate, waitWhile } from "./lib/state/rescanGate";
+  import { createScanSettler, focusRescanAllowed, rescanGate, waitWhile } from "./lib/state/rescanGate";
   import { describeError, formatDetail, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
   import {
     info,
@@ -401,6 +401,17 @@
   const SCAN_KEY = "scan";
   /** Why a switch or a filing waits: a running scan would land on top of it with the old state. */
   const SCAN_WAIT = "Wait for the scan to finish.";
+  /** How long a switch waits for a running scan (the focus rescan after alt-tabbing back is
+   *  quicker than this; a long scan still refuses rather than switch much later). */
+  const SCAN_SETTLE_MS = 3000;
+  const scanSettle = createScanSettler();
+  $effect(() => {
+    if (!scanning) untrack(() => scanSettle.ended());
+  });
+  /** Wait briefly for a running scan to end; true once none runs (a switch may go ahead). */
+  function settleScan(): Promise<boolean> {
+    return scanSettle.wait(scanning, SCAN_SETTLE_MS);
+  }
   /** What Silo did while starting (e.g. restored the database), until dismissed. */
   const STARTUP_KEY = "startup";
   // Mods folder is on a cloud-sync filesystem that can't do hardlinks → Silo uses copies.
@@ -1144,10 +1155,15 @@
   /** Turn one mod on or park it, then offer Undo (the switch toast). */
   async function toggleActive(techName: string) {
     // A scan running now read the active set before this switch: landing after it, it would put
-    // the switch back (and the next switch would re-apply that stale set). Wait for it.
+    // the switch back (and the next switch would re-apply that stale set). Wait for it, then
+    // switch from what the scan found (nothing to do when it already shows the mod as asked).
     if (scanning) {
-      refuse(SCAN_WAIT);
-      return;
+      const wantOn = !activeSet.has(techName);
+      if (!(await settleScan())) {
+        refuse(SCAN_WAIT);
+        return;
+      }
+      if (activeSet.has(techName) === wantOn) return;
     }
     const turningOff = activeSet.has(techName);
     const mod = effectiveMods.find((m) => m.techName === techName);
@@ -2317,6 +2333,11 @@
    * @param on true to turn them on, false to park them
    */
   async function setActiveForMods(list: ModEntry[], on: boolean) {
+    // As a single switch does: wait briefly for a running scan instead of refusing at once.
+    if (!(await settleScan())) {
+      refuse(SCAN_WAIT);
+      return;
+    }
     const archive = archiveMove.archive;
     // Folder mods can't be parked: say so instead of reporting them parked.
     if (!on) {
@@ -2337,7 +2358,7 @@
       ask,
       explain: (name, category) => explainParkLoose(name, category),
       fileLoose: async (techNames) => {
-        if (scanning) {
+        if (!(await settleScan())) {
           refuse(SCAN_WAIT);
           return null;
         }
@@ -2359,7 +2380,7 @@
         return effectiveMods.filter((m) => wanted.has(m.techName) && isFileable(m)).length;
       },
       applyProjected: async (techNames, turnOn) => {
-        if (scanning) {
+        if (!(await settleScan())) {
           refuse(SCAN_WAIT);
           return null;
         }

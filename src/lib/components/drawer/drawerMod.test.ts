@@ -34,6 +34,12 @@ describe("currentEntry (the drawer follows the library)", () => {
     expect(currentEntry(shown, now)?.path).toBe("/mods/b.zip");
   });
 
+  it("closes rather than guess when the path is gone and two entries share the tech name", () => {
+    const shown = entry("/modsA/a.zip", "a");
+    const now = [entry("/modsB/a.zip", "a"), entry("/archive/a.zip", "a")];
+    expect(currentEntry(shown, now)).toBeNull();
+  });
+
   it("is null when the mod is gone (the drawer closes)", () => {
     const shown = entry("/mods/a.zip", "a");
     expect(currentEntry(shown, [entry("/mods/z.zip", "z")])).toBeNull();

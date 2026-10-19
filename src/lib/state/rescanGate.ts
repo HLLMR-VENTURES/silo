@@ -81,3 +81,39 @@ export function focusRescanAllowed(s: {
 export async function waitWhile(busy: () => boolean, stepMs = 50): Promise<void> {
   while (busy()) await new Promise((r) => setTimeout(r, stepMs));
 }
+
+/** Waiting for a running scan to end, briefly (a switch made right after alt-tabbing back). */
+export interface ScanSettler {
+  /**
+   * @param busy a scan is running now
+   * @param ms how long to wait at most
+   * @returns true once no scan runs (at once when none does), false when it still ran after `ms`
+   */
+  wait(busy: boolean, ms: number): Promise<boolean>;
+  /** The scan ended: everyone waiting goes ahead. */
+  ended(): void;
+}
+
+/** One per scan owner (App): `ended()` from an effect that sees `scanning` go false. */
+export function createScanSettler(): ScanSettler {
+  let waiters: ((ok: boolean) => void)[] = [];
+  return {
+    wait(busy, ms) {
+      if (!busy) return Promise.resolve(true);
+      return new Promise((resolve) => {
+        const finish = (ok: boolean) => {
+          clearTimeout(timer);
+          waiters = waiters.filter((w) => w !== finish);
+          resolve(ok);
+        };
+        const timer = setTimeout(() => finish(false), ms);
+        waiters.push(finish);
+      });
+    },
+    ended() {
+      const now = waiters;
+      waiters = [];
+      for (const w of now) w(true);
+    },
+  };
+}

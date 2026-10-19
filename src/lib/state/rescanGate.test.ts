@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearActivity } from "./activity.svelte";
 import { resetIdleWaiters, running, start } from "./ops.svelte";
-import { rescanGate } from "./rescanGate";
+import { createScanSettler, rescanGate } from "./rescanGate";
 
 afterEach(() => {
   running.length = 0;
@@ -54,5 +54,37 @@ describe("rescanGate", () => {
     start("Clearing the scan cache", { exclusive: "library-write" });
     expect(gate.admit(false, true)).toBe(true);
     expect(gate.pending).toBe(false);
+  });
+});
+
+describe("scanSettler (a switch waits briefly for a running scan)", () => {
+  it("answers at once when no scan runs", async () => {
+    await expect(createScanSettler().wait(false, 3000)).resolves.toBe(true);
+  });
+
+  it("resolves true when the scan ends within the wait", async () => {
+    vi.useFakeTimers();
+    try {
+      const s = createScanSettler();
+      const p = s.wait(true, 3000);
+      vi.advanceTimersByTime(1000);
+      s.ended();
+      await expect(p).resolves.toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up (false) when the scan is still running after the wait", async () => {
+    vi.useFakeTimers();
+    try {
+      const s = createScanSettler();
+      const p = s.wait(true, 3000);
+      vi.advanceTimersByTime(3000);
+      await expect(p).resolves.toBe(false);
+      s.ended(); // late: nothing left to resolve
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
