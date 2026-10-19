@@ -49,7 +49,7 @@ export const NO_SECTIONS: UpdateSections = {
   notTracked: [],
 };
 
-/** A version as compared and shown: no leading "v" / "V.", no surrounding space (displayVersion). */
+/** A version as compared and shown: no leading "v", "V." or "Ver ", no surrounding space (displayVersion). */
 export function normVersion(v: string): string {
   return displayVersion(v);
 }

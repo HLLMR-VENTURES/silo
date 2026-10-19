@@ -14,6 +14,7 @@ import {
   newDroppedBuilds,
   droppedKey,
   isNewerVersion,
+  normVersion,
   sourceLabel,
   updatesBadge,
   versionChange,
@@ -181,6 +182,12 @@ describe("row words", () => {
   it("shows versions without a doubled v, and names the source", () => {
     expect(versionChange({ current: "v8.0.0.4", latest: "8.0.1.0" })).toBe("8.0.0.4 → 8.0.1.0");
     expect(versionChange({ latest: "2.0" })).toBe("2.0");
+    // Catalog versions as authors write them (coordinator smoke C2: "1.5.0.0 → V.1.6.4.0").
+    expect(versionChange({ current: "1.5.0.0", latest: "V.1.6.4.0" })).toBe("1.5.0.0 → 1.6.4.0");
+    expect(normVersion("Ver 2.1")).toBe("2.1");
+    expect(normVersion("version.3")).toBe("3");
+    expect(normVersion("vast")).toBe("vast");
+    expect(isNewerVersion("V.1.6.4.0", "1.5.0.0")).toBe(true);
     expect(sourceLabel({ source: "github" })).toBe("GitHub");
     expect(sourceLabel({ pageUrl: "https://www.farming-simulator.com/mod.php?mod_id=9" })).toBe("ModHub");
     expect(sourceLabel({})).toBeNull();
