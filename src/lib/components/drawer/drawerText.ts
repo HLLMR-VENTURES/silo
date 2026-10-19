@@ -13,11 +13,6 @@ export function conflictKindLabel(kind: string): string {
   return words[kind] ?? kind;
 }
 
-/** "1.2.0.0" or "v1.2.0.0" -> "v1.2.0.0" (never "vv…"). */
-export function versionLabel(v: string): string {
-  return "v" + v.trim().replace(/^v/i, "");
-}
-
 /** Bytes as a short size: 1536 -> "2 KB", 5.2e9 -> "4.8 GB". */
 export function formatSize(b: number): string {
   if (b >= 1024 ** 3) return (b / 1024 ** 3).toFixed(1) + " GB";

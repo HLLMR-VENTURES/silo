@@ -1,5 +1,7 @@
 # Base Save generator — scope
 
+> **Status: not built.** A post-1.0 idea; nothing here ships in Silo 1.0.
+
 Create ready-to-play FS25 savegames **outside the game**, by cloning a real base save
 and rewriting the parameters we understand. Not by mimicking the engine's init — that's
 off the table (see "Why not from scratch").

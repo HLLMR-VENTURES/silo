@@ -7,7 +7,7 @@
   import { copyText } from "../../api";
   import type { LogModHealth, ModEntry } from "../../types";
   import { plural, formatCount } from "../../plural";
-  import { formatSize } from "./drawerText";
+  import { modSizeLabel } from "../../format";
 
   interface Props {
     mod: ModEntry;
@@ -52,7 +52,7 @@
   <h3 id="{uid}-details" class="h">Details</h3>
   <dl class="kv">
     <div><dt>Category</dt><dd>{mod.category}{mod.subcategory ? ` · ${mod.subcategory}` : ""}</dd></div>
-    <div><dt>Size</dt><dd class="tnum">{formatSize(mod.size)}</dd></div>
+    {#if modSizeLabel(mod)}<div><dt>Size</dt><dd class="tnum">{modSizeLabel(mod)}</dd></div>{/if}
     <div><dt>Type</dt><dd>{type}</dd></div>
     {#if mod.storeItemCount > 0}<div><dt>Shop items</dt><dd class="tnum">{mod.storeItemCount}</dd></div>{/if}
     {#if mod.scriptCount > 0}<div><dt>Scripts</dt><dd class="tnum">{mod.scriptCount}</dd></div>{/if}

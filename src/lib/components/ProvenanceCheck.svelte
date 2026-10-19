@@ -1,9 +1,10 @@
 <script lang="ts">
   import Icon from "../ui/Icon.svelte";
+  import { displayVersion } from "../format";
   import { inlineError } from "../state/notify.svelte";
   import type { ModEntry, VerifyResult } from "../types";
   import { verifyMod } from "../api";
-  import { getVerdict, setVerdict } from "../provenanceCache.svelte";
+  import { getVerdict, provKey, setVerdict } from "../provenanceCache.svelte";
 
   let { mod }: { mod: ModEntry } = $props();
 
@@ -30,22 +31,26 @@
   const canVerify = $derived(mod.kind === "zip");
 
   async function run() {
+    // The verdict belongs to the file that was hashed: the drawer may show another mod by the
+    // time it lands (this panel is reused across mods).
+    const m = mod;
+    const key = provKey(m);
     phase = "running";
     err = "";
     try {
-      const r = await verifyMod(mod.techName, mod.version, mod.path);
+      const r = await verifyMod(m.techName, m.version, m.path);
+      setVerdict(m, r);
+      if (provKey(mod) !== key) return;
       result = r;
-      setVerdict(mod, r);
       phase = "done";
     } catch (e) {
+      if (provKey(mod) !== key) return;
       err = inlineError(e, "Checking the mod's integrity");
       phase = "error";
     }
   }
 
-  // Normalize the version label so we never render a doubled "v" (matchedVersion may or
-  // may not already carry one).
-  const ver = (v: string) => "v" + v.replace(/^v/i, "");
+  const ver = displayVersion;
 
   const howLabel = (how: string | null) =>
     how === "exact"

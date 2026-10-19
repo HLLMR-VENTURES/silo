@@ -15,6 +15,7 @@
   import type { UpdateRow } from "../../types";
   import { checkedDate, type CheckYourselfRow } from "../../sources";
   import { formatCount, plural } from "../../plural";
+  import { displayVersion } from "../../format";
   import {
     droppedBuildFor,
     normVersion,
@@ -220,7 +221,7 @@
                 <div class="detail tnum">{versionChange(r)}</div>
                 {#if dropped}
                   <p class="found">
-                    <Icon name="check" size={14} /> Found {dropped.flatVersion} in your mods folder.
+                    <Icon name="check" size={14} /> Found {displayVersion(dropped.flatVersion)} in your mods folder.
                   </p>
                 {/if}
               </div>

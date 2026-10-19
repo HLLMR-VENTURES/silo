@@ -879,9 +879,12 @@ pub fn app_settings_with_prefix(
 
 /// Rewrite the database file, reclaiming free pages. SQLite leaves deleted row bytes in
 /// free pages until this runs — so after scrubbing a legacy plaintext secret we VACUUM to
-/// ensure the old token can't be carved out of the file. Best-effort; never fatal.
+/// ensure the old token can't be carved out of the file. In WAL mode the old pages also sit
+/// in `silo.db-wal` until a checkpoint, so it checkpoints and truncates the WAL too.
+/// Best-effort; never fatal (a checkpoint another connection blocks just runs later).
 pub fn vacuum(conn: &Connection) {
     let _ = conn.execute_batch("VACUUM");
+    let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
 }
 
 /// Load all mod→repo links.

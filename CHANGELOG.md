@@ -157,6 +157,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Farming Simulator 25 loads only the map your savegame uses and leaves the others unloaded, so
   Silo no longer counts it as a problem or asks about it before Play. (#260)
 
+- **Two mods using the same vehicle, building or tool type name are no longer a conflict.**
+  The game files each mod's types and features under the mod's own name, so both load. Silo
+  used to call this a critical conflict for common names like "myTractor".
+
 - **Problems tab.** Library health is now Diagnose → Problems, with an action on each row:
   **Find it in Browse** for a missing required mod, **Show file** and **Park** for one that can't
   be read, **Show file** for a name the game skips, and **Use this version** / **Keep Silo's**
@@ -345,8 +349,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (nanoid, postcss and source-map-js updated). Nothing in the shipped app changes. (#234)
 
 ### Fixed
+- A mod's title or author with an `&` in it was cut short ("Elm & Ash" showed as "Elm"), and a
+  savegame or map name with one lost its first half. Silo now reads the whole name, and
+  re-reads mods it had already scanned once after the update. (#266)
+
 - **Find the problem mod** showed "Round 1 of about NaN", and a finished run couldn't name the
   mod it found: Silo sent the step's fields in the wrong case. (#263)
+
+- Organizing, parking or flattening a mod the game (or an antivirus or sync client) had open
+  could leave two copies of it, or a half-deleted mod folder in the mods folder: when Silo
+  couldn't move it in one step it copied it and then failed to delete the original. Silo now
+  copies only when the mod is going to another drive, and takes its copy back out if the
+  original can't be removed. A failed game-settings write also no longer rewrites the original
+  file from its backup.
 
 - **Faster sorting.** Sorting the Library by version, and grouping a large Updates check, no
   longer slow down on big libraries (version sort on 2,500 mods went from about 60 ms to 3 ms).
@@ -355,6 +370,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - After switching mod sets, the status chip and Conflicts could show the previous set's result
   (for example "All good" while the new set had a conflict open). Silo now waits for the switch
   to finish and keeps only the newest check. (#260)
+- Installing from Browse or a shared set stopped at 500 MB, so a large map could be updated
+  but not installed. Every download now allows up to 4 GB.
+- Previewing a shared set while Silo's catalog couldn't be reached listed every mod as "not in
+  the catalog"; it now says it couldn't look them up and changes nothing.
+- The Multiplayer check reads each mod in small pieces instead of loading whole files, so a set
+  with several large maps no longer needs gigabytes of memory.
+- Silo's outbound-address check also refuses IPv4 addresses written as IPv6
+  (`::ffff:10.0.0.1`), `0.x.x.x`, and other spellings of localhost.
 - A link that isn't a Silo set link now just says so, without "Something went wrong" in front. (#256)
 - Checking for updates works again on libraries with more than 500 mods; Silo now asks its catalog in batches. When the catalog refuses a check, Silo says so instead of claiming it's offline, and keeps the last good "Last checked" time. (#252)
 
@@ -396,6 +419,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Faster start when there's nothing to scan.** When Silo can't read your mods folder at startup,
   it no longer waits up to 30 seconds on the library archive before opening links or offering to
   restore an unfinished guided bisection. (#222)
+
+- Smaller fixes: **Save raw XML** in mod settings refuses text that isn't valid XML instead of
+  saving it and saying "Saved"; checking a mod with no version shows Unverified instead of an
+  error; a mod's shop-item file is read with a size limit; disconnecting GitHub no longer leaves
+  an old fallback token readable in Silo's database file; and a filltype bridge that fails to
+  write no longer leaves a half-written mod in the mods folder.
+
+### Security
+
+- **Shared sets have a size limit.** A shared set (a link, gist, repo or `.silo` file) may list
+  up to 5,000 mods, and a shared file may be up to 8 MB. A bigger one is refused before Silo looks
+  anything up, so a hostile link can't make Silo send hundreds of catalog requests.
+
+- **A blank mod name no longer hides a set's catalog matches.** Catalog lookups skip blank and
+  repeated names. Before, one blank entry made the catalog refuse the whole batch, so every mod in
+  the set showed as "not in the catalog".
+
+- **A mistyped GitHub token can't end up in the log.** A pasted token with a line break or an
+  invisible character in it is refused with a plain message before it's sent. Before, the
+  request failed with an error that quoted the token, and that error went into Silo's log and
+  so into Copy diagnostics. As a backstop, anything shaped like a GitHub token or a `Bearer`
+  credential is masked in the log and in diagnostics.
 
 ## [0.11.0] - 2026-10-17
 

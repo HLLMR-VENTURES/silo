@@ -134,7 +134,7 @@
     tryStart,
     type OpToken,
   } from "./lib/state/ops.svelte";
-  import { rescanGate } from "./lib/state/rescanGate";
+  import { focusRescanAllowed, rescanGate, waitWhile } from "./lib/state/rescanGate";
   import { describeError, formatDetail, MOVE_UNFINISHED_COPY } from "./lib/errorCopy";
   import {
     info,
@@ -181,10 +181,12 @@
     type LibraryViewMode,
   } from "./lib/components/library/viewPref";
   import {
+    conflictedTechNames,
     filterChips,
     filterMods,
     NO_FILTERS,
     needsAttention,
+    needsUpdateOutcome,
     withoutFilter,
     type FilterContext,
     type LibraryFilters,
@@ -202,6 +204,7 @@
   import ModSettings from "./lib/components/ModSettings.svelte";
   import ModDetail from "./lib/components/ModDetail.svelte";
   import { returnFocusOnDrawerClose } from "./lib/components/drawer/drawerFocus.svelte";
+  import { currentEntry } from "./lib/components/drawer/drawerMod";
   import ConfigEditor from "./lib/components/ConfigEditor.svelte";
   import ModBrowser from "./lib/components/ModBrowser.svelte";
   import LogTriage from "./lib/components/LogTriage.svelte";
@@ -279,7 +282,7 @@
   } from "./lib/views/libraryStatus";
   import { back, go, nav, searchPlaceholderFor, searchTargetFor } from "./lib/state/nav.svelte";
   import type { MenuItem } from "./lib/ui/overlayTypes";
-  import { fmtSize } from "./lib/format";
+  import { displayVersion, fmtSize } from "./lib/format";
   import {
     MODS_FOLDER_KEY,
     OVERRIDE_FOLLOWED_KEY,
@@ -393,6 +396,8 @@
   }
   /** The scan's own notice (it failed, or recovery left problems). A scan touches no other key. */
   const SCAN_KEY = "scan";
+  /** Why a switch or a filing waits: a running scan would land on top of it with the old state. */
+  const SCAN_WAIT = "Wait for the scan to finish.";
   /** What Silo did while starting (e.g. restored the database), until dismissed. */
   const STARTUP_KEY = "startup";
   // Mods folder is on a cloud-sync filesystem that can't do hardlinks → Silo uses copies.
@@ -764,16 +769,9 @@
     conflicts.filter((c) => c.severity === "critical").length,
   );
 
-  // Every mod named in a non-info conflict, for the "In conflict" library filter.
-  // Conflict.mods carries tech names (and sometimes titles), so we match on both.
-  const conflictedSet = $derived.by(() => {
-    const s = new Set<string>();
-    for (const c of conflicts) {
-      if (c.severity === "info") continue;
-      for (const name of c.mods) s.add(name);
-    }
-    return s;
-  });
+  // Every mod (by tech name) in a non-info conflict: the Conflict badge, the "In conflict"
+  // library filter and its count.
+  const conflictedSet = $derived(conflictedTechNames(conflicts));
 
   // Only the newest check's answer lands: a slow check of an earlier active set must not
   // overwrite the check of the set that's active now (#260: after a mod set switch the chip
@@ -1059,6 +1057,12 @@
 
   /** Turn one mod on or park it, then offer Undo (the switch toast). */
   async function toggleActive(techName: string) {
+    // A scan running now read the active set before this switch: landing after it, it would put
+    // the switch back (and the next switch would re-apply that stale set). Wait for it.
+    if (scanning) {
+      refuse(SCAN_WAIT);
+      return;
+    }
     const turningOff = activeSet.has(techName);
     const mod = effectiveMods.find((m) => m.techName === techName);
     const name = mod?.title ?? techName;
@@ -1462,7 +1466,9 @@
   }
 
   async function rebuildLibrary() {
-    const op = beginWrite("Clearing the scan cache");
+    // A paused archive move doesn't stop it (it only re-reads, as Settings says); a running one
+    // holds the library, and beginWrite says so.
+    const op = beginWrite("Clearing the scan cache", false, { duringMove: !archiveMove.running });
     if (!op) return;
     // The write is held through the rescan, so nothing changes the library until it has been
     // read again. The status line names it: it re-reads every mod, so it takes a while.
@@ -1666,6 +1672,13 @@
   // Tags: techName -> string[]
   let tagMap = $state<Record<string, string[]>>({});
   let detailMod = $state<ModEntry | null>(null);
+  // The drawer's mod as the library has it now (a rescan, a category change or filing replaces
+  // the entry it was opened with); the drawer closes when the mod is gone.
+  let drawerPrev: ModEntry | null = null;
+  const drawerMod = $derived.by(() => (drawerPrev = currentEntry(detailMod, effectiveMods, drawerPrev)));
+  $effect(() => {
+    if (detailMod && !drawerMod) untrack(() => (detailMod = null));
+  });
 
   const allTags = $derived.by(() => {
     const s = new Set<string>();
@@ -1762,11 +1775,16 @@
       return;
     }
     if (updateResults.length === 0 && !updateChecking) await checkAllUpdates(true);
-    if (availableUpdates.length > 0) {
-      libFilters = { ...libFilters, needsUpdate: true };
-    } else {
-      success("All mods are up to date");
-    }
+    const out = needsUpdateOutcome({
+      available: availableUpdates.length,
+      checking: updateChecking,
+      checked: updateCheckedAt != null,
+      catalogError: updateCatalogError?.message ?? null,
+      blocked: updateCheckBlocked,
+    });
+    if (out.filter) libFilters = { ...libFilters, needsUpdate: true };
+    else if (out.tone === "warn") refuse(out.say);
+    else success(out.say);
   }
 
   /** A failure as Updates shows it in a row: logged, worded, and the "Copy details" text. */
@@ -1931,7 +1949,7 @@
     for (const { row, file } of arrivals) {
       announcedDrops.add(droppedKey(file));
       toast({
-        message: `Found a newer ${row.title} (${file.flatVersion}).`,
+        message: `Found a newer ${row.title} (${displayVersion(file.flatVersion)}).`,
         duration: 15_000,
         action: {
           label: "Use this version",
@@ -1998,7 +2016,7 @@
   const filterCtx: FilterContext = {
     curation: (t) => cur(t),
     active: (t) => activeSet.has(t),
-    conflicted: (m) => conflictedSet.has(m.techName) || conflictedSet.has(m.title ?? ""),
+    conflicted: (m) => conflictedSet.has(m.techName),
     hasUpdate: (t) => updatesSet.has(t),
     tags: (t) => tagsOf(t),
     verdict: (m) => getVerdict(m as ModEntry)?.status,
@@ -2138,6 +2156,13 @@
       detailMod = null;
     }
   }
+  // The list goes when filters (or a switch under the Active / Parked segment) empty it: if a row
+  // had focus, it goes to the empty state's first button, else the main area.
+  returnFocusWhenHidden(
+    () => scanning || filtered.length > 0,
+    () => listBodyEl,
+    () => (listBodyEl?.querySelector<HTMLElement>("button") ?? document.getElementById("main"))?.focus(),
+  );
   // The BulkBar goes when the selection clears (Clear, Esc, a filter pruning it): if it had focus,
   // focus goes to the list's row, else the toolbar's first control.
   returnFocusWhenHidden(
@@ -2155,7 +2180,8 @@
   function writeRefusal(): string | null {
     if (archiveMove.unfinished && !archiveMove.running) return MOVE_UNFINISHED_COPY;
     const b = blocked("library-write");
-    return b.blocked ? `${b.reason} Try again when it's done.` : null;
+    if (b.blocked) return `${b.reason} Try again when it's done.`;
+    return scanning ? SCAN_WAIT : null;
   }
 
   /**
@@ -2177,6 +2203,10 @@
       ask,
       explain: (name, category) => explainParkLoose(name, category),
       fileLoose: async (techNames) => {
+        if (scanning) {
+          refuse(SCAN_WAIT);
+          return null;
+        }
         // Built from the scan as it is now (as Try again does): mods filed meanwhile are skipped.
         const wanted = new Set(techNames);
         const fresh = looseInputs();
@@ -2195,6 +2225,10 @@
         return effectiveMods.filter((m) => wanted.has(m.techName) && isFileable(m)).length;
       },
       applyProjected: async (techNames, turnOn) => {
+        if (scanning) {
+          refuse(SCAN_WAIT);
+          return null;
+        }
         const op = beginWrite(turnOn ? "Activating mods" : "Deactivating mods");
         if (!op) return null;
         switchUndo.dismiss();
@@ -2406,6 +2440,9 @@
     await archiveMove.refresh(); // the archive belongs to the mods folder
     roots = rootsFor(st);
     if ((roots[0] ?? null) === prev) return;
+    // A scan already running reads the old folder: let it land, then start over on the new one
+    // (runScan skips while one runs, which would leave the old folder's mods up).
+    await waitWhile(() => scanning);
     result = null;
     mods = [];
     libraryScanned = false;
@@ -2421,7 +2458,22 @@
     await loadSavegames();
   }
 
-  async function switchModsFolder(path: string) {
+  /** Mods-folder switches under way (the picker, its dialogs, the rescan): no focus rescan. */
+  let folderSwitches = 0;
+  async function whileSwitchingFolder<T>(fn: () => Promise<T>): Promise<T> {
+    folderSwitches++;
+    try {
+      return await fn();
+    } finally {
+      folderSwitches--;
+    }
+  }
+
+  function switchModsFolder(path: string) {
+    return whileSwitchingFolder(() => switchModsFolderNow(path));
+  }
+
+  async function switchModsFolderNow(path: string) {
     const why = await switchBlockReason();
     if (why) {
       refuse(why);
@@ -2475,8 +2527,10 @@
       refuse(why);
       return;
     }
-    const path = await pickFolderFor("modsFolder");
-    if (path) await switchModsFolder(path);
+    await whileSwitchingFolder(async () => {
+      const path = await pickFolderFor("modsFolder");
+      if (path) await switchModsFolder(path);
+    });
   }
 
   async function useGameFolder() {
@@ -2485,11 +2539,13 @@
       refuse(why);
       return;
     }
-    try {
-      await applyModsStatus(await clearModsRoot());
-    } catch (e) {
-      reportError(e, "Switching to the game's mods folder");
-    }
+    await whileSwitchingFolder(async () => {
+      try {
+        await applyModsStatus(await clearModsRoot());
+      } catch (e) {
+        reportError(e, "Switching to the game's mods folder");
+      }
+    });
   }
 
   async function pointGameHere() {
@@ -3017,12 +3073,15 @@
           if (focused) void crashWatch.check();
           if (
             focused &&
-            !scanning &&
-            !writeLock.blocked &&
-            !archiveMove.running &&
-            !bisecting &&
-            roots.length &&
-            Date.now() - lastScanAt > 4000
+            focusRescanAllowed({
+              scanning,
+              writeBlocked: writeLock.blocked,
+              moveRunning: archiveMove.running,
+              bisecting,
+              switchingFolder: folderSwitches > 0,
+              hasRoots: roots.length > 0,
+              sinceLastScanMs: Date.now() - lastScanAt,
+            })
           ) {
             void runScan(true);
           }
@@ -3241,7 +3300,7 @@
   /** Why the old "Organize N" button was off: a library write, a scan, or an unfinished move. */
   const organizeOffReason = $derived(
     fgLock.reason ||
-      (scanning ? "Wait for the scan to finish." : "") ||
+      (scanning ? SCAN_WAIT : "") ||
       (archiveMove.unfinished ? "Finish or cancel the archive move first" : ""),
   );
   const libraryStripItems = $derived.by((): StatusStripItem[] => {
@@ -3335,8 +3394,8 @@
   // The mod drawer hands focus back when it closes: to the row of the mod it showed, else to what
   // had focus in the main area when it opened, else to the main area (drawer/drawerFocus).
   returnFocusOnDrawerClose({
-    open: () => !!detailMod && nav.view === "library",
-    key: () => (detailMod ? modKey(detailMod) : null), // follows the shown mod (Find in Library can swap it)
+    open: () => !!drawerMod && nav.view === "library",
+    key: () => (drawerMod ? modKey(drawerMod) : null), // follows the shown mod (Find in Library can swap it)
     focusKey: (k) => libList?.focusKey(k) ?? false,
     keepOpener: (el) => regionOf(el) === "main",
     fallback: () => document.getElementById("main"),
@@ -3344,8 +3403,8 @@
 </script>
 
 {#snippet modDrawer()}
-  {#if detailMod}
-    {@const dm = detailMod}
+  {#if drawerMod}
+    {@const dm = drawerMod}
     {@const fgn = foreignFiles.find((f) => f.techName === dm.techName) ?? null}
     <ViewBoundary name="the mod details" onClose={() => (detailMod = null)}>
       <ModDetail
@@ -3375,7 +3434,7 @@
         onOpenSettings={() =>
           (settingsMod = { techName: dm.techName, title: dm.title ?? dm.techName })}
         onFindInBrowse={() => openInBrowse(dm)}
-        onCurationChange={(row) => (curationMap = { ...curationMap, [dm.techName]: row })}
+        onCurationChange={(row) => (curationMap = { ...curationMap, [row.techName]: row })}
         onTagsChange={(t) => (tagMap = { ...tagMap, [dm.techName]: t })}
         onFilterTag={(t) => {
           libFilters = { ...libFilters, tag: t };
@@ -3403,8 +3462,8 @@
   badges={{ updates: updatesBadge(updateSections, updateCheckedAt != null), diagnose: bisecting ? BISECT_BADGE : undefined }}
   fill={nav.view === "library" || nav.view === "browse"}
   wide={nav.view === "library" || nav.view === "browse"}
-  drawer={detailMod && nav.view === "library" ? modDrawer : undefined}
-  drawerLabel={detailMod ? `Mod details: ${detailMod.title ?? detailMod.techName}` : "Mod details"}
+  drawer={drawerMod && nav.view === "library" ? modDrawer : undefined}
+  drawerLabel={drawerMod ? `Mod details: ${drawerMod.title ?? drawerMod.techName}` : "Mod details"}
 >
   {#snippet header()}
     <AppHeader

@@ -72,34 +72,45 @@ fn parse(xml: &str, index: u32, folder: &str) -> Savegame {
         local
     };
 
+    // Element text arrives split at every `&amp;` (#266): gather it, then read it when
+    // the next tag arrives, while `stack` still names the element it belongs to.
+    let mut run = crate::xmltext::TextRun::default();
+    let mut take_text = |stack: &[String], run: &mut crate::xmltext::TextRun| {
+        if run.is_empty() {
+            return;
+        }
+        let txt = run.take();
+        let txt = txt.trim();
+        let last = stack.last().map(String::as_str).unwrap_or("");
+        let parent = stack.iter().rev().nth(1).map(String::as_str).unwrap_or("");
+        if parent == "settings" && last == "savegameName" {
+            name = txt.to_string();
+        } else if parent == "settings" && last == "mapTitle" {
+            map_title = Some(txt.to_string());
+        } else if parent == "settings" && last == "saveDate" && !txt.is_empty() {
+            save_date = Some(txt.to_string());
+        }
+    };
+
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Eof) | Err(_) => break,
             Ok(Event::Start(e)) => {
+                take_text(&stack, &mut run);
                 let local = handle_open(&e, &mut mods);
                 stack.push(local); // real elements have a matching End
             }
             Ok(Event::Empty(e)) => {
                 // Self-closing (e.g. <mod .../>): handle attrs, don't push.
+                take_text(&stack, &mut run);
                 handle_open(&e, &mut mods);
             }
             Ok(Event::End(_)) => {
+                take_text(&stack, &mut run);
                 stack.pop();
             }
-            Ok(Event::Text(t)) => {
-                let last = stack.last().map(String::as_str).unwrap_or("");
-                let parent = stack.iter().rev().nth(1).map(String::as_str).unwrap_or("");
-                if let Some(txt) = crate::xmltext::text(&t) {
-                    let txt = txt.trim();
-                    if parent == "settings" && last == "savegameName" {
-                        name = txt.to_string();
-                    } else if parent == "settings" && last == "mapTitle" {
-                        map_title = Some(txt.to_string());
-                    } else if parent == "settings" && last == "saveDate" && !txt.is_empty() {
-                        save_date = Some(txt.to_string());
-                    }
-                }
-            }
+            Ok(Event::Text(t)) => run.push_text(&t),
+            Ok(Event::GeneralRef(r)) => run.push_ref(&r),
             _ => {}
         }
         buf.clear();
@@ -240,6 +251,21 @@ mod tests {
             .find(|m| m.mod_name == "pdlc_vredoPack")
             .unwrap();
         assert!(dlc.is_dlc && !dlc.required);
+    }
+
+    /// #266: a save or map name with `&amp;` keeps both halves (the old parser kept
+    /// only the last text run, so "Elm & Ash Farm" showed as "Ash Farm").
+    #[test]
+    fn keeps_names_with_an_escaped_ampersand() {
+        let xml = r#"<careerSavegame><settings>
+            <savegameName>Elm &amp; Ash Farm</savegameName>
+            <mapTitle>Hills &amp; Dales</mapTitle>
+            <saveDate>2026-08-02</saveDate>
+        </settings></careerSavegame>"#;
+        let s = parse(xml, 2, "savegame2");
+        assert_eq!(s.name, "Elm & Ash Farm");
+        assert_eq!(s.map_title.as_deref(), Some("Hills & Dales"));
+        assert_eq!(s.save_date.as_deref(), Some("2026-08-02"));
     }
 
     #[test]

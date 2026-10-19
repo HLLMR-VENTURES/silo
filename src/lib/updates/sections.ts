@@ -9,6 +9,7 @@
 import type { ForeignFile } from "../api";
 import type { CheckYourselfRow } from "../sources";
 import type { UpdateRow } from "../types";
+import { displayVersion } from "../format";
 
 /** What the grouping reads from a library mod. */
 export interface LibraryModLike {
@@ -48,9 +49,9 @@ export const NO_SECTIONS: UpdateSections = {
   notTracked: [],
 };
 
-/** A version as compared and shown: no leading "v", no surrounding space. */
+/** A version as compared and shown: no leading "v" / "V.", no surrounding space (displayVersion). */
 export function normVersion(v: string): string {
-  return v.trim().replace(/^v(?=\d)/i, "");
+  return displayVersion(v);
 }
 
 /**

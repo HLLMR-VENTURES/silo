@@ -6,6 +6,7 @@
   import Icon from "../../ui/Icon.svelte";
   import type { CatalogModDetail } from "../../types";
   import { label as sourceLabel, loadCatalogImage } from "../../browse";
+  import { displayVersion } from "../../format";
   import { openExternal } from "../../api";
 
   let { catalog, title }: { catalog: CatalogModDetail | null; title: string } = $props();
@@ -44,7 +45,7 @@
         <span class="src-label">Available on</span>
         {#each catalog.sources as s (s.source + s.sourceUrl)}
           <button class="src" onclick={() => openExternal(s.sourceUrl)}>
-            {sourceLabel(s.source)}{s.version ? ` · ${s.version}` : ""}
+            {sourceLabel(s.source)}{s.version ? ` · ${displayVersion(s.version)}` : ""}
             <Icon name="external" size={12} />
             <span class="vh">(opens in your browser)</span>
           </button>

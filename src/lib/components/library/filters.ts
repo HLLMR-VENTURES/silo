@@ -192,3 +192,43 @@ export function popoverCount(f: LibraryFilters): number {
 export function noFilters(f: LibraryFilters): boolean {
   return filterChips(f).length === 0;
 }
+
+/**
+ * The tech names of every mod in a conflict that isn't just a note: what the Conflict badge, the
+ * In conflict filter and its count all read. (Conflict.mods holds display titles, which two mods
+ * can share; techNames is in step with it.)
+ * @param conflicts the conflict check's findings
+ */
+export function conflictedTechNames<C extends { severity: string; techNames?: readonly string[] }>(
+  conflicts: readonly C[],
+): Set<string> {
+  const s = new Set<string>();
+  for (const c of conflicts) {
+    if (c.severity === "info") continue;
+    for (const t of c.techNames ?? []) s.add(t);
+  }
+  return s;
+}
+
+export type NeedsUpdateOutcome = { filter: true } | { filter: false; say: string; tone: "success" | "warn" };
+
+/**
+ * What switching "Needs update" on does once the on-demand check is over: filter to the mods with
+ * an update, or say why not. Only a check that reached the catalog can say everything is current.
+ * @param o `available`: mods with an update; `checking`: a check is still running; `checked`: a
+ *   check reached the catalog; `catalogError`: the last check's catalog failure, worded;
+ *   `blocked`: why a check couldn't start ("" when it could)
+ */
+export function needsUpdateOutcome(o: {
+  available: number;
+  checking: boolean;
+  checked: boolean;
+  catalogError: string | null;
+  blocked: string;
+}): NeedsUpdateOutcome {
+  if (o.available > 0) return { filter: true };
+  if (o.checking) return { filter: false, say: "Wait for the check to finish.", tone: "warn" };
+  if (o.catalogError) return { filter: false, say: o.catalogError, tone: "warn" };
+  if (!o.checked) return { filter: false, say: o.blocked || "Wait for the check to finish.", tone: "warn" };
+  return { filter: false, say: "All mods are up to date", tone: "success" };
+}
