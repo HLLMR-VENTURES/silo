@@ -158,7 +158,7 @@ describe("polling after a launch", () => {
   });
 
   it("gives up when the game never shows up", async () => {
-    const { deps, watch, advance } = clocked([status({ gameRunning: false })]);
+    const { deps, watch, advance } = clocked([status({ gameRunning: false, modifiedMs: NOW - 5000 })]);
     watch.afterLaunch();
     await advance(LAUNCH_GRACE_MS + POLL_MS);
     expect(watch.polling).toBe(false);
@@ -166,6 +166,38 @@ describe("polling after a launch", () => {
     await advance(POLL_MS * 3);
     expect(deps.status.mock.calls.length).toBe(calls);
     expect(deps.scan).not.toHaveBeenCalled();
+  });
+
+  it("a game that came and went between looks is still read when the wait ends", async () => {
+    const { deps, watch, advance } = clocked([status({ gameRunning: false, modifiedMs: NOW + 60_000 })]);
+    watch.afterLaunch();
+    await advance(LAUNCH_GRACE_MS + POLL_MS);
+    expect(watch.polling).toBe(false);
+    expect(deps.scan).toHaveBeenCalledTimes(1);
+    expect(deps.onRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("one failed look during a long game doesn't stop the wait for its exit", async () => {
+    const states: (LogStatus | "fail")[] = [
+      status({ gameRunning: true }),
+      ...Array(40).fill(status({ gameRunning: true })),
+      "fail",
+      status({ gameRunning: false, modifiedMs: NOW + 300_000 }),
+    ];
+    let t = NOW;
+    let i = 0;
+    const s = setup({ now: () => t }, () => {
+      const v = states[Math.min(i++, states.length - 1)];
+      if (v === "fail") throw new Error("log_status failed");
+      return v;
+    });
+    s.watch.afterLaunch();
+    for (let k = 0; k < 43; k++) {
+      t += POLL_MS;
+      await vi.advanceTimersByTimeAsync(POLL_MS);
+    }
+    expect(s.deps.scan).toHaveBeenCalledTimes(1);
+    expect(s.watch.polling).toBe(false);
   });
 
   it("stop() ends polling, even mid-look", async () => {
