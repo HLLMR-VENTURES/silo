@@ -91,7 +91,7 @@ stop**.
 - [ ] **Standard Windows user, no elevation.** (Installer is code-signed — confirm the publisher
       reads "David Hellmer," not "Unknown publisher"; SmartScreen may still prompt on a fresh build.)
 - [ ] Fresh app-data state (no prior `silo.db`).
-- [ ] **Existing v0.1.0 app-data state** (upgrade — see Phase 2F).
+- [ ] **Existing app-data state from the previous release** (upgrade — see Phase 2F).
 - [ ] Real FS25 library (read-only workflows only).
 - [ ] **Sacrificial cloned** FS25 library (all destructive workflows).
 - [ ] Paths containing **spaces and non-ASCII** characters (e.g. `C:\Über Mods (test)\`).
@@ -107,8 +107,8 @@ effort on **state transitions and hostile conditions** (below), not clicking eac
 ### A. Kill it mid-operation (crash recovery)
 
 Force-close Silo (End Task) at **different stages** of each op, relaunch, verify recovery:
-Organize · Flatten · Activate · Deactivate · Loadout apply · Mod update · Direct install ·
-Guided bisection · Savegame backup · Config save.
+Organize · Undo organizing · Activate · Park · Mod set switch · Mod update · Update all ·
+Direct install · Find the problem mod · Library archive move · Savegame backup · Config save.
 
 The organizer has explicit protection for interrupted operations (manifest-first, archive-must-
 exist-before-removal, `.part`/`.bak`/temp handling). Prove it with real filesystem state. After
@@ -146,7 +146,7 @@ archive validity — so confirm that path degrades to the validity check, not a 
 
 1. Organize a mod → deactivate it (parked).
 2. Drop a **different** ZIP at the same filename in the flat `mods/` folder.
-3. Activate → deactivate → flatten → rebuild categories → apply a loadout.
+3. Activate → park → Undo organizing → Re-read every mod → switch mod sets.
 4. **Silo must refuse to delete the user replacement** (reports "isn't the one Silo projected").
 
 Repeat across every identity branch the code checks:
@@ -167,11 +167,14 @@ destabilizes the app or corrupts state.
 ### F. Fresh install AND upgrade/migration
 
 Do **not** test only a clean profile — early adopters are the ones upgrading.
-- Clean 0.2.0 install · upgrade from installed v0.1.0 · existing v0.1.0 SQLite DB · **plaintext
-  credentials migrating to the keychain** (then not readable in `silo.db`) · existing organized
-  library · existing loadouts + curation · existing `.bak` / `.part` / archive / `.silo-projection`
-  files · uninstall→reinstall **without deleting user data** · manual app-data wipe then first
-  launch.
+- Clean install of the RC · **in-app update from the previous release** (its updater, then
+  Restart to update) · the previous release's SQLite DB (a schema bump keeps
+  `db-snapshots/silo-before-v<N>.db` and passes `PRAGMA integrity_check`) · existing organized
+  library · existing mod sets + curation · existing `.bak` / `.part` / archive /
+  `.silo-projection` files · uninstall→reinstall **without deleting user data** · manual
+  app-data wipe then first launch. For 1.0.0 specifically: from 0.11.0, DB `user_version` 1 →
+  2, every mod set kept as a user set, *What's new in Silo 1.0* shown once, and the first-run
+  setup never shown to the upgraded library.
 
 Migration bugs are first-impression assassins.
 
@@ -190,7 +193,7 @@ credentials, migration, install/update, or crash recovery):
 - Credentials appear in logs or `silo.db`.
 - Update/install writes **outside** authorized roots.
 - Packaged build behaves differently from dev.
-- Existing v0.1.0 data becomes unreadable.
+- The previous release's data becomes unreadable.
 - A critical workflow reports **success despite partial failure**.
 - A reproducible uncaught frontend exception.
 - Any CI security or test gate fails.
@@ -208,17 +211,18 @@ back; fixes are a separate pass that produces a new RC.
 
 ## Release mechanics — only after the RC survives the abuse
 
-Version is still `0.1.0` everywhere; hardened work sits under `[Unreleased]`. Bump **all** of
-these together so they never drift:
-- `package.json` · `package-lock.json`
-- `src-tauri/Cargo.toml` · `src-tauri/Cargo.lock`
+On a `release/X.Y.Z` branch, bump **all** of these together so they never drift:
+- `package.json` · `package-lock.json` (both `silo` entries)
+- `src-tauri/Cargo.toml` · the `silo` entry in `src-tauri/Cargo.lock`
 - `src-tauri/tauri.conf.json`
-- `CHANGELOG.md`: `[Unreleased]` → `[0.2.0] - <date>`, then start a fresh empty `[Unreleased]`.
+- `CHANGELOG.md`: `[Unreleased]` → `[X.Y.Z] - <date>`, then start a fresh empty `[Unreleased]`.
 
-Then, against the **exact release commit**, all must be green:
+Then, against the **exact release commit**, all must be green (cargo commands from
+`src-tauri/`; `cargo audit` also runs in CI):
 
 ```bash
 npm ci
+npm test
 npm run build
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
@@ -227,22 +231,24 @@ cargo audit
 npm run tauri:build
 ```
 
-The tagged release workflow builds the platform targets and creates a **draft prerelease**, but
+Open the PR, merge it on green CI, then tag `vX.Y.Z` on that `main` commit. The tagged release
+workflow builds and signs the platform targets into a **draft, non-prerelease** release, but
 does **not** independently run the full test/audit battery first — so **only tag a commit whose
-CI is already green.**
+CI is already green.** Publishing the draft makes it *Latest*, and the in-app updater offers it
+to every user straight away, so finish every check below first.
 
 Before publishing the draft:
 - [ ] Download **every** generated artifact.
-- [ ] Verify filenames and the **embedded version** (0.2.0, not 0.1.0).
+- [ ] Verify filenames and the **embedded version** (X.Y.Z everywhere, including `latest.json`).
 - [ ] Install the Windows artifact on a clean machine/VM; launch; scan a small fixture library;
       verify uninstall leaves user data intact.
-- [ ] Generate and attach **SHA-256 checksums**.
-- [ ] Release notes state: **beta, Windows code-signed / macOS-Linux OS-unsigned, known
+- [ ] `SHA256SUMS.txt` lists every asset (including `latest.json` and `silo-sbom.cdx.json`) and
+      matches the downloads; `gh attestation verify <file> --repo HLLMR/silo` passes.
+- [ ] Release notes state: **Windows code-signed / macOS-Linux OS-unsigned, known
       limitations, upgrade guidance.**
-- [ ] Confirm the website's download links resolve to **v0.2.0** (and the corrected landing is
-      deployed + cache-purged).
-- [ ] Mark v0.1.0 superseded.
+- [ ] After publishing: the website's download links resolve to **vX.Y.Z**, and
+      `releases/latest/download/latest.json` serves X.Y.Z.
 
 **Bottom line:** freeze the RC, test the packaged artifact, preserve evidence, forbid silent
 repairs, and make filesystem integrity the supreme court. If it survives the abuse above, ship
-0.2.0 beta.
+it.

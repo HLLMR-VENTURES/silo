@@ -71,7 +71,7 @@ Revisit self-hosting or hosting-as-a-feature only if real demand appears **post-
 - [ ] Curate the mod set in Silo (conflict-free, Verified-where-possible); load it on the server.
 - [ ] Export the `mpsync` manifest; publish it (Discord pin + a link).
 - [ ] Discord: announce + a "server" role/channel; the bot can post the manifest link.
-- [ ] Content: a short "how to join with Silo" clip (uses the crash-clip / short-form skill).
+- [ ] Content: a short "how to join with Silo" clip.
 - [ ] Monitor players + `mpsync` usage; iterate the set.
 
 ## Costs & risks

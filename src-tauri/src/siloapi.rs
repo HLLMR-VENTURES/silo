@@ -526,7 +526,8 @@ fn urlencode(s: &str) -> String {
 }
 
 /// Download a resolved .zip to the temp file `part`, streaming so the caller can report
-/// progress. Validates PK magic, caps at 500 MB, and checks the whole archive (central
+/// progress. Validates PK magic, caps at `update::MAX_BYTES` (4 GiB, the same as updates), and
+/// checks the whole archive (central
 /// directory, `modDesc.xml`, and the catalog's SHA-256 when known). On any failure `part` is
 /// removed, so a failed download never leaves a half-written file; on success the caller
 /// places `part` (it needs no library lock until then). `on_progress` is called with
@@ -551,7 +552,7 @@ fn fetch_and_validate(
     expected_sha256: Option<&str>,
     on_progress: &dyn Fn(u64, Option<u64>),
 ) -> Result<(), String> {
-    const CAP: u64 = 500 * 1024 * 1024;
+    const CAP: u64 = crate::update::MAX_BYTES;
     // SSRF guard: the URL is catalog/frontend-influenced. Downloads must be public https —
     // never a private/loopback host (no dev localhost exception for a mod download).
     crate::net::validate_outbound_url(url, false)?;
@@ -589,7 +590,7 @@ fn fetch_and_validate(
         }
         done += n as u64;
         if done > CAP {
-            return Err("Download exceeds the 500 MB safety cap".to_string());
+            return Err("Download exceeds the 4 GB safety cap".to_string());
         }
         file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         // Throttle progress events to ~1 MB steps to avoid flooding the UI.

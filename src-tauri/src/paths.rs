@@ -137,7 +137,6 @@ pub fn guarded_xml_write(
 
     // Backup REQUIRED — abort before touching the original if we can't preserve a copy.
     back_up_config(dest)?;
-    let bak = backup_slot(dest, 1);
 
     // Write to a temp sibling, flush, then atomically replace (rename replaces on all OSes).
     let tmp = dest.with_extension("xml.silo-tmp");
@@ -149,10 +148,13 @@ pub fn guarded_xml_write(
         std::fs::rename(&tmp, dest).map_err(|e| e.to_string())
     })();
     if let Err(e) = write {
+        // The rename is the only step that touches `dest`, and it either replaces it whole or
+        // not at all, so the original is still as it was. (Copying the backup over it here
+        // would rewrite a good file in place, and could cut it short on a full disk.)
         let _ = std::fs::remove_file(&tmp);
-        // Restore the original from the backup so a failed swap can't corrupt it.
-        let _ = std::fs::copy(&bak, dest);
-        return Err(format!("config write failed and was rolled back: {e}"));
+        return Err(format!(
+            "config write failed, so the file was left as it was: {e}"
+        ));
     }
     crate::fslog::changed("write-config", dest);
     Ok(())

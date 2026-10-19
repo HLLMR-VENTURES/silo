@@ -76,9 +76,9 @@ pub fn validate_outbound_url(raw: &str, allow_localhost: bool) -> Result<Url, St
     let host = url.host().ok_or_else(|| "URL has no host".to_string())?;
 
     let is_loopback_host = match &host {
-        Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+        Host::Domain(d) => is_localhost_name(d),
         Host::Ipv4(ip) => ip.is_loopback(),
-        Host::Ipv6(ip) => ip.is_loopback(),
+        Host::Ipv6(ip) => IpAddr::V6(*ip).to_canonical().is_loopback(),
     };
 
     match url.scheme() {
@@ -91,7 +91,7 @@ pub fn validate_outbound_url(raw: &str, allow_localhost: bool) -> Result<Url, St
         Host::Ipv4(ip) => reject_bad_ip(IpAddr::V4(ip), allow_localhost)?,
         Host::Ipv6(ip) => reject_bad_ip(IpAddr::V6(ip), allow_localhost)?,
         Host::Domain(d) => {
-            if d.eq_ignore_ascii_case("localhost") && !allow_localhost {
+            if is_localhost_name(d) && !allow_localhost {
                 return Err("refusing a localhost URL".to_string());
             }
         }
@@ -99,7 +99,17 @@ pub fn validate_outbound_url(raw: &str, allow_localhost: bool) -> Result<Url, St
     Ok(url)
 }
 
+/// `localhost`, with or without the root dot, and any name under it (`api.localhost`), which
+/// resolvers answer with loopback (RFC 6761).
+fn is_localhost_name(d: &str) -> bool {
+    let d = d.trim_end_matches('.').to_ascii_lowercase();
+    d == "localhost" || d.ends_with(".localhost")
+}
+
 fn reject_bad_ip(ip: IpAddr, allow_localhost: bool) -> Result<(), String> {
+    // An IPv4-mapped IPv6 address (`::ffff:10.0.0.1`) connects to its IPv4 address on a
+    // dual-stack socket, so it's judged as that address.
+    let ip = ip.to_canonical();
     if ip.is_loopback() {
         return if allow_localhost {
             Ok(())
@@ -112,6 +122,8 @@ fn reject_bad_ip(ip: IpAddr, allow_localhost: bool) -> Result<(), String> {
             v4.is_private()
                 || v4.is_link_local()
                 || v4.is_unspecified()
+                // 0.0.0.0/8 "this network": 0.x.x.x reaches the local host on Linux and macOS
+                || v4.octets()[0] == 0
                 || v4.is_broadcast()
                 // 100.64.0.0/10 carrier-grade NAT
                 || { let o = v4.octets(); o[0] == 100 && (o[1] & 0xc0) == 0x40 }
@@ -162,6 +174,15 @@ mod tests {
             "https://[::1]/x",
             "https://[fc00::1]/x",
             "https://localhost/x",
+            // IPv4-mapped IPv6 reaches the IPv4 address on a dual-stack socket.
+            "https://[::ffff:169.254.169.254]/x",
+            "https://[::ffff:127.0.0.1]/x",
+            "https://[::ffff:10.0.0.1]/x",
+            "https://0.1.2.3/x",
+            // Other spellings of localhost.
+            "https://localhost./x",
+            "https://api.localhost/x",
+            "https://LOCALHOST/x",
             "ftp://example.com/x",
             "not a url",
         ];
@@ -176,6 +197,9 @@ mod tests {
         assert!(validate_outbound_url("http://localhost:8787/mods", true).is_ok());
         assert!(validate_outbound_url("http://127.0.0.1:8787/mods", true).is_ok());
         assert!(validate_outbound_url("https://localhost:8787/mods", true).is_ok());
+        assert!(validate_outbound_url("http://[::ffff:127.0.0.1]:8787/mods", true).is_ok());
+        // A public IPv4 address written IPv4-mapped is still public.
+        assert!(validate_outbound_url("https://[::ffff:140.82.112.3]/x", false).is_ok());
         // non-loopback private is still blocked even in dev mode
         assert!(validate_outbound_url("http://10.0.0.5/x", true).is_err());
         assert!(validate_outbound_url("https://192.168.0.2/x", true).is_err());
