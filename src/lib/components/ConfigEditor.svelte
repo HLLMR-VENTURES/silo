@@ -7,7 +7,7 @@
   import Switch from "../ui/Switch.svelte";
   import { inlineError } from "../state/notify.svelte";
   import { getConfig, setConfig } from "../api";
-  import type { CfgField, CfgPreset } from "../configSchemas";
+  import { isNumberText, type CfgField, type CfgPreset } from "../configSchemas";
 
   interface Props {
     title: string;
@@ -22,7 +22,10 @@
   let orig = $state<Record<string, string>>({});
   let vals = $state<Record<string, string>>({});
   let loading = $state(true);
+  /** The file couldn't be read: there's no form to show. */
   let error = $state<string | null>(null);
+  /** The last save failed (the game is running…): shown above the form, which stays. */
+  let saveError = $state<string | null>(null);
   let saved = $state(false);
   let open = $state(true);
   const uid = $props.id();
@@ -44,7 +47,10 @@
   }
   load();
 
-  const dirty = $derived(fields.some((f) => (vals[f.path] ?? "") !== (orig[f.path] ?? "")));
+  const changed = (f: CfgField) => (vals[f.path] ?? "") !== (orig[f.path] ?? "");
+  const dirty = $derived(fields.some(changed));
+  /** A changed number field that isn't a number (emptied): Save waits for a real value. */
+  const badNumber = $derived(fields.some((f) => f.kind === "number" && changed(f) && !isNumberText(vals[f.path] ?? "")));
 
   function applyPreset(p: CfgPreset) {
     vals = { ...vals, ...p.values };
@@ -54,14 +60,15 @@
     const edits = fields
       .filter((f) => (vals[f.path] ?? "") !== (orig[f.path] ?? ""))
       .map((f) => ({ path: f.path, value: vals[f.path] ?? "" }));
-    if (edits.length === 0) return;
+    if (edits.length === 0 || badNumber) return;
+    saveError = null;
     try {
       await setConfig(path, edits);
       orig = { ...vals };
       saved = true;
       setTimeout(() => (saved = false), 1800);
     } catch (e) {
-      error = inlineError(e, "Saving the settings file");
+      saveError = inlineError(e, "Saving the settings file");
     }
   }
 </script>
@@ -72,6 +79,7 @@
   {:else if error}
     <p class="ms-error" role="alert">{error}</p>
   {:else}
+    {#if saveError}<p class="ms-error" role="alert">{saveError}</p>{/if}
     {#if presets.length > 0}
       <div class="ce-presets" role="group" aria-label="Presets">
         <span class="ce-presets-label" aria-hidden="true">Presets:</span>
@@ -101,7 +109,14 @@
             {/each}
           </select>
         {:else if f.kind === "number"}
-          <input id={fieldId(i)} class="ce-input tnum" type="number" bind:value={vals[f.path]} />
+          <!-- Not bind:value: on a number input that holds a JS number, and Rust takes strings. -->
+          <input
+            id={fieldId(i)}
+            class="ce-input tnum"
+            type="number"
+            value={vals[f.path] ?? ""}
+            oninput={(e) => (vals[f.path] = e.currentTarget.value)}
+          />
         {:else}
           <input id={fieldId(i)} class="ce-input" type="text" bind:value={vals[f.path]} />
         {/if}
@@ -113,7 +128,7 @@
   {#snippet footer()}
     <span class="ms-saved" role="status">{#if saved}Saved <Icon name="check" size={13} />{/if}</span>
     <Button onclick={() => (open = false)}>Close</Button>
-    <Button variant="primary" onclick={save} disabled={loading || !!error || !dirty}>Save changes</Button>
+    <Button variant="primary" onclick={save} disabled={loading || !!error || !dirty || badNumber}>Save changes</Button>
   {/snippet}
 </Dialog>
 

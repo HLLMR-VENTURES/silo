@@ -187,3 +187,13 @@ export const GAME_GRAPHICS_PRESETS: CfgPreset[] = [
     },
   },
 ];
+
+/**
+ * Whether a number field's text is a number the settings file can take: digits with an optional
+ * sign and decimals ("6", "-1", "0.75"), not empty.
+ * @param text what the input holds (a number input reads "" while it's empty or not a number)
+ * @param whole only whole numbers
+ */
+export function isNumberText(text: string, whole = false): boolean {
+  return (whole ? /^-?\d+$/ : /^-?(\d+(\.\d*)?|\.\d+)$/).test(text.trim());
+}
