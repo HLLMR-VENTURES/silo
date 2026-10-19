@@ -7,440 +7,204 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-19
+
+Silo 1.0 is a redesign from end to end: a new layout, plainer words, and every page rebuilt
+around what you do next. Your library, tags, notes and saved loadouts (now **mod sets**) carry
+over. The library database moves to version 2 (one added column); Silo keeps a copy of the old
+one in `db-snapshots/silo-before-v1.db` before upgrading. Silo 0.11 won't open a version 2
+database; that copy is kept in case you need to go back.
+
 ### Added
 
-- **Accessibility and performance checks in CI.** Every UI building block, the main pages and
-  Silo's dialogs are checked with axe on each build; a contrast check fails the build if a
-  colour change drops any text, control edge or focus ring below WCAG AA in either theme; a
-  2,500-mod test keeps Library search and sorting fast. (#258)
+- **A new layout.** A sidebar takes you to Library, Browse, Mod sets, Diagnose and Updates, with
+  Tools, Settings and Help below. The header holds the search (your mods, or the catalog on
+  Browse), a status chip that opens Diagnose, an activity bell, and Play with a menu for the game
+  folder and your mod sets. A mod's details sit beside the list, so you can keep clicking through
+  mods. Silo reopens the page you were on last, except Browse: a launch never contacts the
+  catalog unasked. (#230)
 
-- **Crash notice.** When your last game ended unexpectedly, Silo says so as soon as you come
-  back: it checks when its window regains focus, and every 5 seconds while a game it launched is
-  running (it stops when the game exits). The notice names the most likely mod with **Park it**,
-  or, when the log names none, offers **Find the problem mod**. A crash is announced once, and
-  counts as one problem in the status chip until a clean run or Dismiss. (#260)
+- **Mod sets.** Loadouts, Collections, Multiplayer sync and Savegames are one page with **My
+  sets**, **Open a shared set** and **Savegames**. Each set is compared with your active mods
+  ("Same" or "+31 / −77"). Switching shows what changes, saves your current mods as an automatic
+  "Before …" set first (the newest five are kept) and offers Undo. After you change mods, the
+  Library and Play menu say "Custom (3 changes since Harvest 2026)" with **Update the set** and
+  **Save as new**. (#226, #251)
 
-- **Last run with actions.** Diagnose → Last run ranks the most likely causes by errors, with
-  the library title, the first log line (click to see it whole) and **Park**, **Show in library**
-  and **Copy details** on each mod, then what's worth a look, cosmetic-only mods tucked away, and
-  findings no mod is tied to with **Open log.txt**. (#260)
-
-- **Find the problem mod, finished.** The guided search now shows "Round 2 of about 8", the
-  header shows "Finding the problem mod · round 2" with **Open** while you move around Silo, and
-  Play says "Launch test round". When it names a mod, **Put my mods back and park it** restores
-  your set without that mod. (#260)
-
-- **First run.** A new library opens a short setup: Silo shows the mods folder it found (and
-  sorts out a missing, unavailable or different folder right there), explains active and parked
-  mods and where parked mods live, then shows exactly what organizing would do before anything
-  moves. **Skip setup** or **Not now** goes straight to the Library with nothing moved. A library
-  that's already organized, or has favorites, hidden or flagged mods, doesn't see it. (#250)
-
-- **What's new in Silo 1.0.** Upgrading users with an organized library get a one-time card about the new layout, Mod
-  sets, Undo, keyboard shortcuts and plain-English errors; Help → What's new shows it again. (#250)
-
-- **Help.** Help topics you can search (an old name like "loadouts" finds Mod sets), What's new,
-  Keyboard shortcuts, **Report a problem** (copies Silo's diagnostics, then opens the GitHub bug
-  form), and About with Silo's license and the third-party licenses (the fonts' OFL texts,
-  Lucide's ISC license and the bundled packages). (#250)
-
-- **Mod sets.** Loadouts, Collections, Multiplayer sync and Savegames are now one page, **Mod
-  sets**, with **My sets**, **Open a shared set** and **Savegames**. My sets compares every set
-  with your active mods ("Same" or "+31 / −77"). Switching shows what changes, saves your current
-  mods as an automatic "Before …" set first (Silo keeps the newest five) and offers Undo. (#251)
-
-- **Custom since a set.** After you change mods, the Library strip and the Play menu say
-  "Custom (3 changes since Harvest 2026)" instead of forgetting the set, with **Update the set**
-  and **Save as new**. (#251)
-
-- **One Share dialog.** Share a set (or your active mods) as an unlisted link on your GitHub, a
-  `.silo` file, or a Multiplayer check file. Links need GitHub; files need no account. (#251)
-
-- **Open a shared set.** Paste a link or choose a `.silo` / `.silomp` file. Silo shows a preview
-  first; nothing downloads, saves or switches until you click. A Multiplayer check file is
-  checked against your active mods, with Turn on, Park and Find in Browse on each mismatch. (#251)
+- **One Share dialog.** Share a set, or your active mods, as an unlisted link on your GitHub, a
+  `.silo` file, or a Multiplayer check file (`.silomp`). Links need GitHub; files need no
+  account. **Open a shared set** takes a link or a file and shows a preview first: nothing
+  downloads, saves or switches until you click. A Multiplayer check file is checked against your
+  active mods, with Turn on, Park and Find in Browse on each mismatch. (#251)
 
 - **Savegame cards.** Each save shows its map, when it was last played and how many of its mods
-  you have. **Use this save's mods** goes through the same switch dialog, and missing mods can be
-  looked up in Browse. (#251)
+  you have; **Use this save's mods** goes through the same switch dialog. (#251)
 
-- **Updates, in sections.** Updates now lists **Ready to install**, **Download from ModHub**,
-  **Check these yourself**, **Couldn't check** (with the reason, Try again and Copy details), and
-  collapsed **Up to date** and **Not tracked** lists, with when you last checked. **Update all**
-  updates every mod Silo can install in place, one at a time with progress, and ends with one
-  summary ("3 updated, 1 failed"); it stops early if Farming Simulator 25 is running. Each update
-  keeps the previous version in backups. (#244)
+- **Crash notice.** When your last game ended unexpectedly, Silo says so as soon as you come back
+  and names the most likely mod with **Park it**, or offers **Find the problem mod** when the log
+  names none. (#260)
 
-- **ModHub updates: open, then use.** **Open on ModHub** opens the mod's page; save the new zip
-  into your mods folder and Silo offers **Use this version** for it. (#244)
+- **Diagnose.** **Last run** ranks the likely causes with the first log line and **Park**, **Show
+  in library** and **Copy details** on each mod. **Conflicts** leads with "0 problems · 12 to
+  review", labels each one Problem, Review or Note in plain words, and adds **Park one…**.
+  **Problems** (formerly library health) has an action on every row. (#260)
 
-- **Check for mod updates when Silo starts.** Off by default. Silo offers it once, the first time
-  you open Updates, and it's in Settings → General. It only checks; nothing installs until you
-  press Update. Checking sends the names of your installed mods to Silo's catalog. (#244)
+- **Find the problem mod**, the guided search formerly called bisection, shows "Round 2 of about
+  8", keeps running while you use the rest of Silo, and ends with **Put my mods back and park
+  it**. (#230, #260)
 
-- **Browse badges.** Catalog mods whose build Silo's catalog hashed show **Verified build**
-  (green shield). Mods an author has claimed will show **Verified author** (sky-blue badge) once
-  Silo's author program goes live; the two never look alike. (#246)
+- **Updates, in sections:** Ready to install, Download from ModHub, Check these yourself,
+  Couldn't check (with the reason and Try again), and collapsed Up to date and Not tracked lists.
+  **Update all** installs one at a time with progress and one summary at the end, and stops if
+  Farming Simulator 25 is running. ModHub mods: **Open on ModHub**, save the zip into your mods
+  folder, then **Use this version**. An optional check when Silo starts is in Settings → General
+  (off by default; it only checks). (#244)
 
-- **Verdicts at the top of a mod's details.** The header shows Verified build or Modified (with
-  how many files differ), Update available, and Problem when the mod is in a critical conflict or
-  logged errors in a game that crashed. (#245)
+- **Library.** Filters you can see (All / Active / Parked, Favorites, Needs attention, and more
+  under **Filters**, each shown as a removable chip). Select several mods with checkboxes,
+  Shift+click or Ctrl+click and turn them on, park, favorite or hide them together. Turning mods on
+  or off offers **Undo** for 10 seconds. List view is the default, with a Comfortable or Compact
+  density in Settings → General. (#242)
 
-- **Library filters you can see.** Show All, Active or Parked mods; Favorites and Needs attention
-  (mods that can't load, conflict, were modified, are flagged or have an update) are one click;
-  the rest (Hidden, Flagged, In conflict, Has settings, Needs update, Maps, Script mods, uniqueType
-  and a tag) are under **Filters**. Each filter in effect shows as a chip you can remove, with
-  Clear filters. Silo remembers All / Active / Parked. (#242)
+- **Browse.** Sources spelled out with their own versions ("GitHub 1.0.6.0", "ModHub 1.0.5.0"),
+  one button per card that follows the mod (Install, progress, Show in library, See update, Open
+  on ModHub), a **Verified build** badge for catalog-hashed builds, and clear loading, offline
+  and no-results states. (#246)
 
-- **Select several mods at once.** Tick a mod's checkbox, Shift+click for a range, Ctrl+click to
-  add one (or Shift+↑/↓ and Ctrl+Space from the keyboard), then Turn on, Park, Favorite or Hide
-  them together, or Select all shown. Esc clears the selection. Changing more than 25 mods at
-  once asks first. (#242)
+- **Mod details, reordered.** Verdicts first (Verified build or Modified, Update available,
+  Problem), then the Active switch, Settings and a ⋯ menu, then whatever needs your attention.
+  (#245)
 
-- **Undo after switching mods.** Turning a mod on or parking it (one, or several at once) shows a
-  toast with Undo for 10 seconds. Undo refuses if your active mods changed since. (#242)
+- **First run.** A new library opens a short setup that shows the mods folder Silo found,
+  explains active and parked mods, and shows exactly what organizing would do before anything
+  moves. **Skip setup** moves nothing. Upgrading users get a one-time **What's new in Silo 1.0**
+  card instead. (#250)
 
-- **List density.** Settings → General → List density: Comfortable or Compact. (#242)
+- **Help.** Searchable help topics (an old name like "loadouts" finds Mod sets), What's new,
+  Keyboard shortcuts, **Report a problem** (copies Silo's diagnostics and opens the GitHub bug
+  form), and About with Silo's license and the third-party licenses. (#230, #250)
 
-- **Keyboard navigation in the Library.** The mod list is one Tab stop: ↑/↓, Home, End and
-  PageUp/PageDown move between mods, Enter opens a mod's details, Space turns it on or off and
-  Shift+F10 (or the Menu key) opens its menu. In card view ←/→ move between cards. Closing the
-  details puts focus back on that mod's row. (#242)
+- **Keyboard shortcuts.** Ctrl+K or / searches, F5 or Ctrl+R rescans, Alt+1 to Alt+5 switch
+  pages, Ctrl+, opens Settings, F6 moves between regions; press ? for the full list. The Library
+  list and Browse grid are one Tab stop each, with arrow keys inside. (#230, #242, #246)
 
-- **Open log folder.** Settings → Diagnostics opens the folder that holds Silo's log
-  (`silo.log`), for when a bug report asks for it. (#238)
+- **An activity list.** The bell lists what Silo is doing now and what it said recently, each
+  error with **Copy details**. (#228)
 
-- **Keyboard shortcuts.** Ctrl+K or / jumps to search, F5 rescans your library, Alt+1 to Alt+5
-  open Library, Browse, Mod sets, Diagnose and Updates, Ctrl+, opens Settings and Alt+← goes back.
-  F6 and Shift+F6 move between the sidebar, header, notices, page and mod details. Press ? (or
-  Help → Keyboard shortcuts) for the list. Letters and numbers you type in a field are never
-  taken as shortcuts. (#230)
+- **UI size** (90% to 125%) in Settings → General, Silo's own fonts bundled with the app, and
+  the silo mark at the top of the sidebar. (#224)
 
-- **Help page.** Help in the sidebar links to GitHub Discussions and the Discord, and Report a
-  problem copies Silo's diagnostics and opens a new issue. (#230)
-
-- **An activity list.** The bell in the header lists what Silo is doing right now and what it
-  said recently: results, warnings and errors, each error with Copy details. A dot on the bell
-  shows when something is running or an error came in. (#228)
-
-- **UI size setting.** Settings → Appearance lets you make text and icons smaller or larger
-  (90%, 100%, 110% or 125%). (#224)
-
-- **The silo mark.** Silo's own logo, a grain silo with the sun rising behind it, now sits at the
-  top of the sidebar. (#224)
-
-- **Undo for loadout switches, replacements and deletes.** After you switch to a loadout, use a
-  savegame's mods, replace a loadout's mods with your current ones or delete a loadout, a notice
-  offers Undo, which puts your previous active mods, the loadout's old mods or the deleted loadout
-  back. The notice waits while you're in another window or pointing at it. Undo after a switch
-  refuses, and says why, if your active mods changed since or a diagnosis or library move is
-  running. (#226)
+- **Open log folder** in Settings → Diagnostics. (#238)
 
 ### Changed
 
-- **Keyboard and screen readers.** The settings editors (game.xml, savegame settings, a mod's
-  settings) and Browse's full description are proper dialogs now: focus moves in, stays in, Esc
-  closes and focus goes back; every field is announced by its label. **Change category…** is a
-  real menu with arrow keys and type-ahead. A rescan is announced once when it starts and once
-  when it ends. (#258)
+- **Fewer false conflicts.** More than one active map is a Note (only the map your savegame uses
+  loads), and two mods using the same vehicle, building or tool type name are no longer a
+  conflict: the game files each mod's types under the mod's own name, so both load. (#260, #275)
 
-- **Colours.** Input borders, info text and warning text are a touch darker so they meet
-  contrast on every surface, including for colour-blind users (protanopia and deuteranopia
-  checked). (#258)
+- **"Loadouts" and "Collections" are now "mod sets" and "shared sets"**, and guided bisection
+  is **Find the problem mod**, everywhere in the app. A `silo://collection` link and a
+  `silo.hllmr.com/c/…` link both open in Mod sets → Open a shared set. (#251)
 
-- **Conflicts in plain words.** Diagnose → Conflicts leads with "0 problems · 12 to review ·
-  19 notes hidden", labels each conflict Problem, Review or Note, gives it a plain title ("Two
-  mods claim the same exclusive slot"), makes the mods links to their details, and adds **Park
-  one…**. Notes stay hidden until **Show notes**. (#260)
+- **Settings is a page with tabs:** General, Mods folder, Library, Accounts, Diagnostics,
+  Maintenance and About. Renamed: **Rebuild categories** is **Re-read every mod**, **Optimize
+  links** is **Reclaim disk space**, and **Restore vanilla layout** is **Undo organizing**
+  (Settings → Maintenance). (#230, #236)
+
+- **Tools** holds Library stats, the Controls map, the Fill type bridge and Graphics settings
+  (game.xml). (#230)
+
+- **The Organize dialog** shows a summary first, every file behind **See every file**, progress
+  while filing, and any mod that couldn't be moved with **Copy details**. **File new mods
+  automatically from now on** replaces "Don't preview next time". (#250)
+
+- **Plain-English messages.** Errors say what happened and what to do, with Try again where it
+  helps and the technical text behind **Copy details**. Confirmations open inside Silo and name
+  the action ("Delete", "Switch"). Warnings share one notice strip under the header instead of
+  stacked banners. Buttons that are off say why. (#226, #228, #238, #250)
 
 - **More than one active map is a Note, not a critical conflict.** An in-game test showed
-  Farming Simulator 25 loads only the map your savegame uses and leaves the others unloaded, so
-  Silo no longer counts it as a problem or asks about it before Play. (#260)
+  Farming Simulator 25 loads only the map your savegame uses. (#260)
 
-- **Two mods using the same vehicle, building or tool type name are no longer a conflict.**
-  The game files each mod's types and features under the mod's own name, so both load. Silo
-  used to call this a critical conflict for common names like "myTractor".
+- **Easier to read.** Higher contrast in both themes (including for colour-blind users), nothing
+  smaller than 12 px, a visible focus outline, one consistent icon set, and dialogs that work
+  with a keyboard and screen readers. (#224, #258)
 
-- **Problems tab.** Library health is now Diagnose → Problems, with an action on each row:
-  **Find it in Browse** for a missing required mod, **Show file** and **Park** for one that can't
-  be read, **Show file** for a name the game skips, and **Use this version** / **Keep Silo's**
-  for a different build in your mods folder. (#260)
+- **Wider Library and Browse on large screens** (up to 1920px). (#238)
 
-- **The Organize dialog.** Review (in the Library's status strip) and Settings → Library →
-  Organize open a standard dialog: a summary first, the files grouped by category behind **See
-  every file**, and **File new mods automatically from now on**, which replaces "Don't preview
-  next time". Progress shows in the dialog while filing, a success toast confirms it, and mods
-  that couldn't be moved are listed in place with **Copy details**. (#250)
-
-- **Plainer messages.** Silo's own messages (errors, conflict descriptions, archive-move and
-  organize problems) no longer use dash asides. (#250)
-
-- **"Loadouts" and "Collections" are now "mod sets" and "shared sets"** everywhere in the app.
-  Your saved loadouts carry over as mod sets. The library database moves to version 2 (one
-  added column); Silo keeps a copy of the old one in `db-snapshots/` before upgrading. (#251)
-
-- **A `silo://collection` link opens a preview** in Mod sets → Open a shared set, and Silo
-  listens for it before anything else at startup. (#251)
-
-- **A share link pasted back into Silo opens.** The `silo.hllmr.com/c/…` link Silo gives you
-  now works in Open a shared set, not only the raw gist link. (#251)
-
-- **Updates' badge counts what you can act on.** The rail badge counts Ready to install plus
-  Download from ModHub, appears only after a check, and drops as you update. A failed install
-  stays in its row with the reason instead of a pop-up. The header button is now **Check now**.
-  (#244)
-
-- **Browse cards, rebuilt.** The catalog grid only draws the cards on screen, so paging deep
-  into the catalog stays smooth; it's one Tab stop (arrows move, Enter opens a mod, Esc returns
-  to its card). Sources are spelled out with their own versions ("GitHub 1.0.6.0", "ModHub
-  1.0.5.0"). Each card has one button that follows the mod: **Install**, "Installing… 42%",
-  **Show in library**, **See update**, or **Open on ModHub** for ModHub-only mods. Mods you
-  already have are no longer faded; they say **In your library**. A finished install says so in a
-  toast with **Show in library**. (#246)
-- **Browse states.** Skeleton cards while the catalog loads; "Silo can't reach its catalog right
-  now. Your library still works." with **Try again** when it can't be reached; "No mods match
-  “x”." with **Clear search** when a search finds nothing. Install and loading errors use Silo's
-  usual messages instead of raw text. (#246)
-
-- **Mod details, reordered.** The Active switch, Settings and a ⋯ menu (Favorite, Flag, Hide,
-  Change category, Show file, Find in Browse) replace the row of seven buttons. What needs
-  your attention comes next: a different build in your mods folder (Use this version or keep
-  Silo's), errors from your last game (See in Diagnose) and conflicts with active mods (See
-  conflicts). Then About, Details (with the Mod ID and a copy button, Exclusive slot and
-  dependencies), Integrity, Source and updates, My notes and Category. Opening a mod's details
-  moves focus to its name; Esc closes them and puts focus back on the mod's row. (#245)
-
-- **Parking a loose mod explains itself.** The first time you park a mod Silo hasn't filed yet, it
-  says it moves the mod into your library folder (it stays in your library) and asks, with
-  "Don't explain this again". (#242)
-
-- **Parking several mods that include loose ones always says it moves files.** Park from the
-  selection bar with mods Silo hasn't filed yet among them, and one dialog says how many are filed
-  into your library folder (each into its category folder in archive), lists them, and notes when
-  the library folder is on another drive; it asks every time ("Don't explain this again" only
-  covers parking one mod) and replaces the separate "more than 25" question. The loose mods are
-  filed first; if Silo is busy, nothing changes. If some couldn't be filed, the toast says so
-  ("Parked 5 mods, but 2 couldn't be filed.") and Undo still puts them back. (#242)
-
-- **Focus stays put in the Library.** When the mod you were on is filtered out, focus moves to the
-  mod now in its place; clearing the selection puts focus back on your row; removing the last
-  filter chip moves it to Filters; switching between list and cards keeps your place. The
-  selection bar is one Tab stop, with ←/→ between its buttons, and each row is named with its
-  state ("Courseplay, active"). Favorite / Hide on many mods only shows what was saved, and says
-  how many couldn't be. (#242)
-
-- **Library toolbar.** The row of six filter buttons and the "Active" select-all checkbox are
-  replaced by the filters above and the selection bar; empty states now offer what to do next
-  (Clear filters, or Browse mods / Open mods folder / Choose another folder). (#242)
-
-- **The Library opens as a list.** List view is now the default for every library size; card
-  view is still in the toolbar, and Silo remembers which one you picked. Rows were rebuilt: icon,
-  name, then author, version, category and size; up to three badges (problems first, then status,
-  then info) and "+n" for the rest; an **Active** switch with the word Active or Parked beside it;
-  and an always-visible **⋯** that opens the same menu as right-click. Favorite, Hide, Flag,
-  Change category, Edit settings and Find in Browse moved into that menu. Parked mods show a grey
-  icon and "Parked" instead of fading the whole row, so their text stays readable. Cards follow
-  the same rules. (#242)
-
-- **Wider Library and Browse on large screens.** On a wide window the Library and Browse grow to
-  1920px instead of 1280px: the Library shows three cards across and Browse more cards per row,
-  instead of wide empty margins. Other pages keep their width. (#238)
-
-- **Clearer status text.** Messages, hints and tooltips read as plain sentences ("Links are
-  already optimized. Nothing to reclaim."), and what Silo says it's doing matches the Settings
-  names: "Reclaiming disk space…" and "Undoing organizing". (#238)
-
-- **Settings is organized into tabs, like Tools:** General, Mods folder, Library, Accounts,
-  Diagnostics, Maintenance and About. Each group of settings sits in its own card, folder paths
-  show in a read-only field with **Open folder** and **Change…** beside them, and a button that's
-  off says why in text under it. About also links to the website, source code, changelog, Discord
-  and GitHub Discussions. Renamed: **Rebuild categories** is now **Re-read every mod**, **Optimize
-  links** is now **Reclaim disk space**, and **Restore vanilla layout** / **Restore flat folder**
-  is now **Undo organizing**. (#236)
-
-- **Ctrl+R and F5 rescan instead of reloading the window.** Reloading dropped whatever Silo was in
-  the middle of; now these keys rescan your library (and do nothing while a dialog is open). (#230)
-
-- **A new layout.** A sidebar takes you to Library, Browse, Mod sets, Diagnose and Updates, with
-  Tools, Settings and Help below. The header holds the search (it searches your mods, or the
-  catalog on Browse), a status chip that says whether anything needs a look and opens Diagnose,
-  the activity bell, and Play with a menu for the game folder and your mod sets. Loadouts,
-  collections, multiplayer sync and savegames live together under Mod sets; crash triage,
-  conflicts and library health under Diagnose. A mod's details now sit beside the list, so you
-  can keep clicking through mods. Silo reopens the page you were on last, except Browse: a
-  launch never contacts the catalog unasked, so it starts on the Library instead. The Updates
-  page doesn't check on its own when you open it; use **Check for updates** there. (#230)
-
-- **The status chip only says "All good" once your library has been read.** Until then it says
-  "Checking…" or "Not read yet", and "Couldn't read library" when the scan failed. A mod that
-  can't load counts as a problem only when it's active; an inactive one is something to review.
-  The Library's "Ready to play" line likewise shows only when Play would work (the game was
-  found, nothing is blocking Play and there's no critical conflict). (#230)
-
-- **A guided diagnosis keeps running when you switch pages.** You can look at Conflicts or
-  another page mid-run and come back to the same round; Diagnose in the sidebar shows a dot
-  while it runs. (#230)
-
-- **GitHub sign-in keeps waiting when you leave Settings.** Start connecting GitHub, go to another
-  page, and finish on github.com: Silo says "Connected to GitHub as …" when it's done. Connecting
-  from Browse opens Settings at the GitHub account section, and the code shown there can be
-  cancelled. (#230)
-
-- **Loadouts wait for a running library change.** While Silo is changing your library, Save
-  current, Replace, Delete and Import on Mod sets → My sets are off and say what Silo is busy
-  with (a library move doesn't stop them). (#230)
-
-- **Settings → Graphics & performance opens the game.xml editor directly** (it's also in Tools →
-  Graphics settings), and a ready Silo update's notice is always shown, never folded under
-  "+N more". (#230)
-
-- **Settings is a full page,** with an About section for the version, the last scan time and a
-  ready Silo update. A ready update also shows as a notice with Restart to update. (#230)
-
-- **Library statistics, the controls map, the fill type bridge and the graphics settings
-  (game.xml) moved to Tools.** The library's map, script mod, uniqueType and active counts are
-  now quick filters above the list, and Rescan is in the Library's More menu. (#230)
-
-- **One notice area instead of stacked banners.** Warnings like "your mods folder isn't
-  available", a library move in progress or an interrupted diagnosis now share one strip under
-  the header, most important first, with "+N more" for the rest (red warnings and anything
-  with a progress bar always show). Results and one-off problems appear as short notices in the
-  corner instead of a coloured line; errors never push an Undo notice out of view. Messages from
-  startup, such as "your library database was restored", stay until you close them. (#228)
-
-- **Plain-English error messages.** When something fails, Silo says what went wrong and what to
-  do about it ("another program is using FS25_X.zip, close it and try again") instead of the raw
-  system error, offers Try again where that helps, and keeps the technical text behind Copy
-  details for bug reports. (#228)
-
-- **Controls say why they're unavailable.** While Silo is changing your library, the buttons that
-  would start another change are off and, when you point at them, say what Silo is busy with. A
-  second change started some other way is refused with the same reason instead of overlapping
-  the first. A library move only blocks other changes: Settings, Savegames (including Back up),
-  Loadouts, Collections, Multiplayer, Updates and Rescan stay usable while it runs, and a paused
-  move says "Finish or cancel the library move first" when you try a change. (#228)
-
-- **Sharper text and better contrast.** Secondary text, warnings, links and buttons are easier to
-  read in both the light and dark themes, and nothing is smaller than 12 px. (#224)
-
-- **Silo's fonts ship with the app.** Headings and text use Silo's own fonts on every computer,
-  with no download needed. (#224)
-
-- **A visible focus outline.** When you move around with the keyboard, the control you are on is
-  always outlined, in both themes. (#224)
-
-- **Consistent icons.** Icons throughout the app now come from one set, the same icon always
-  means the same thing, and buttons that show only an icon have a name for screen readers. (#224)
-
-- **Confirmations appear inside Silo.** Questions like "Delete this loadout?" or "Move your
-  library?" now open in Silo's own window, say what will happen and how to undo it, and have
-  buttons that name the action ("Delete", "Move library", "Switch") instead of OK. The question
-  Silo asks when you quit while it's still changing files stays a Windows dialog. (#226)
-
-- **Saving a loadout uses a proper name box.** "Save current active set as a loadout" opens a
-  dialog inside Silo instead of a browser-style text box, and tells you right there if the name
-  is empty. (#226)
-
-- **Switching loadouts shows what will change.** Before Silo switches to a loadout, or to a
-  savegame's mods, it shows how many mods turn on, how many are parked and how many aren't in
-  your library, with the list of mods. Cancel changes nothing. (#226)
-
-- **Dev tooling only:** the test runner moves to Vitest 5 and `npm audit` is clean again
-  (nanoid, postcss and source-map-js updated). Nothing in the shipped app changes. (#234)
+- **Ctrl+R and F5 rescan instead of reloading the window,** which dropped whatever Silo was
+  doing. (#230)
 
 ### Fixed
+
+- Checking for updates works again on libraries with more than 500 mods, and a refused check no
+  longer claims you're offline. (#252)
+- After switching mod sets, the status chip and Conflicts could show the previous set's result.
+  (#260)
+- Saving a set under a name you already use offers to replace it (asking first, with what
+  changes) instead of creating a duplicate; using a savegame's mods switches to exactly the mods
+  it showed you. (#226)
+- When some mods couldn't be filed, the ones that were filed stay active, and the filing error
+  stays on screen after the rescan. (#222, #250)
+- A rescan no longer hides a warning that's still true. (#228)
+- Sorting the Library by version is much faster on big libraries. (#258)
+- Faster start when the mods folder can't be read. (#222)
+- Tooltips no longer linger after their button disappears; flagged mods are "Flagged"
+  everywhere. (#238)
+- Browse no longer leaks a listener on every visit. (#246)
+- **Find the problem mod parks every mod it tests.** Mods you hadn't filed into the library yet
+  were never actually parked, so the newest mod (usually the culprit) could never be found. Silo
+  now offers to file them first (they stay active), keeps unzipped folder mods on every round,
+  stops a round if a mod it meant to park is still in the mods folder, checks that the game has
+  really closed before asking how the round went, and keeps the round when a launch or a step
+  fails. Stopping asks first. The Library and Play show the round's real mods. (#283, #291)
+- **Number fields in the settings editors save again.** Editing a number in Graphics settings,
+  a savegame's settings or a mod's settings failed on save. A failed save also keeps your edits,
+  and Performance class shows the game's own value. (#278)
+- **A mod's details stay with that mod.** An integrity verdict, a GitHub update check or a note
+  you were typing could land on the next mod you clicked; a check for one mod could offer to
+  install onto another. The details also follow the mod after a rescan, filing or category
+  change. (#270, #276, #297)
 - A mod's title or author with an `&` in it was cut short ("Elm & Ash" showed as "Elm"), and a
-  savegame or map name with one lost its first half. Silo now reads the whole name, and
-  re-reads mods it had already scanned once after the update. (#266)
-
-- **Find the problem mod** showed "Round 1 of about NaN", and a finished run couldn't name the
-  mod it found: Silo sent the step's fields in the wrong case. (#263)
-
-- Organizing, parking or flattening a mod the game (or an antivirus or sync client) had open
-  could leave two copies of it, or a half-deleted mod folder in the mods folder: when Silo
-  couldn't move it in one step it copied it and then failed to delete the original. Silo now
-  copies only when the mod is going to another drive, and takes its copy back out if the
-  original can't be removed. A failed game-settings write also no longer rewrites the original
-  file from its backup.
-
-- **Faster sorting.** Sorting the Library by version, and grouping a large Updates check, no
-  longer slow down on big libraries (version sort on 2,500 mods went from about 60 ms to 3 ms).
-  (#258)
-
-- After switching mod sets, the status chip and Conflicts could show the previous set's result
-  (for example "All good" while the new set had a conflict open). Silo now waits for the switch
-  to finish and keeps only the newest check. (#260)
-- Installing from Browse or a shared set stopped at 500 MB, so a large map could be updated
-  but not installed. Every download now allows up to 4 GB.
-- Previewing a shared set while Silo's catalog couldn't be reached listed every mod as "not in
-  the catalog"; it now says it couldn't look them up and changes nothing.
-- The Multiplayer check reads each mod in small pieces instead of loading whole files, so a set
-  with several large maps no longer needs gigabytes of memory.
-- Silo's outbound-address check also refuses IPv4 addresses written as IPv6
-  (`::ffff:10.0.0.1`), `0.x.x.x`, and other spellings of localhost.
-- A link that isn't a Silo set link now just says so, without "Something went wrong" in front. (#256)
-- Checking for updates works again on libraries with more than 500 mods; Silo now asks its catalog in batches. When the catalog refuses a check, Silo says so instead of claiming it's offline, and keeps the last good "Last checked" time. (#252)
-
-- **Filing after a partial failure.** When some mods couldn't be filed, the ones that were filed
-  are linked back into the mods folder, so they stay active as promised. (#250)
-
-- **Browse no longer leaks a listener.** Leaving Browse before its install-progress listener
-  was ready left it registered, one more per visit. (#246)
-
-- **Tooltips no longer linger after their button disappears.** Pointing at a loadout's Delete
-  button and then deleting it could leave "Delete loadout" floating on screen. Icon buttons now
-  use Silo's own tooltips, which go away with the button, or as soon as it turns off. (#238)
-
-- **One name for flagged mods.** The mod details said "Broken" and the row menu "Mark broken",
-  while the Library filter says "Flagged". It's **Flag** / **Flagged** everywhere now. (#238)
-
-- **A parked mod's card says "parked" once.** Library cards showed a second "parked" pill under
-  the switch that already says Parked. (#238)
-
-- **A rescan no longer hides a warning.** Rescanning (including the automatic rescan when you
-  come back to Silo) used to clear whatever problem was showing, such as a mods folder FS25
-  doesn't read or a failed install. Each warning now stays until its cause is fixed. (#228)
-
-- **Overwriting a loadout asks first.** Saving your current mods over an existing loadout now
-  says how many mods it had and how many are added and removed, and waits for you to choose
-  Replace. Before, it replaced the loadout straight away. (#226)
-
-- **No more duplicate loadouts.** Saving a loadout under a name you already use now offers to
-  replace that loadout instead of quietly creating a second one with the same name. (#226)
-
-- **Using a savegame's mods switches to the right loadout.** When you already had a loadout with
-  the same name as the save, "→ Loadout" could switch to that older loadout instead of the one it
-  had just made. It now switches to exactly the mods it showed you. (#226)
-
-- **Filing errors stay on screen.** When filing loose mods into the library failed (Organize,
-  auto-file, or turning off a loose mod), the rescan that followed cleared the error, so it never
-  showed. It now appears after the rescan. (#222)
-
-- **Faster start when there's nothing to scan.** When Silo can't read your mods folder at startup,
-  it no longer waits up to 30 seconds on the library archive before opening links or offering to
-  restore an unfinished guided bisection. (#222)
-
-- Smaller fixes: **Save raw XML** in mod settings refuses text that isn't valid XML instead of
-  saving it and saying "Saved"; checking a mod with no version shows Unverified instead of an
-  error; a mod's shop-item file is read with a size limit; disconnecting GitHub no longer leaves
-  an old fallback token readable in Silo's database file; and a filltype bridge that fails to
-  write no longer leaves a half-written mod in the mods folder.
+  savegame or map name with one lost its first half. Silo reads the whole name, and re-reads mods
+  it had already scanned once after the update. (#266, #268)
+- Organizing, parking or flattening a mod the game (or an antivirus or sync client) had open could
+  leave two copies of it, or a half-deleted mod folder. Silo copies only when the mod is going to
+  another drive, and takes its copy back out if the original can't be removed. (#279)
+- Installing from Browse or a shared set stopped at 500 MB; every download now allows up to
+  4 GB. Previewing a shared set while the catalog couldn't be reached no longer lists every mod as
+  "not in the catalog". The Multiplayer check reads mods in small pieces instead of whole files.
+  (#282)
+- **Updates.** A failed first check says so (with Try again) instead of starting over; a release
+  you already have under another spelling ("v1.2.0" vs "1.2.0.0") or an older one is no longer
+  offered; a GitHub release with no zip opens its page; results from another mods folder are
+  cleared when you switch. Versions show the same way everywhere ("1.6.4.0", never "V.1.6.4.0").
+  (#273, #294)
+- An earlier Silo's user who never organized but had sets, tags or notes gets What's new, not the
+  first-run setup. (#289)
+- The Library's In conflict badge and filter match the right mods; "Needs update" no longer says
+  everything is current when Silo couldn't check; switching a mod during a scan no longer bounces
+  back. (#284, #297)
+- Smaller fixes: each page opens at the top; Ctrl+A selects every shown mod; no stray
+  horizontal scrollbar in dialogs; a cleared notice no longer turns the bell red; the Organize
+  dialog can't get stuck when re-linking fails; a duplicate fill type no longer crashes the
+  bridge tool; Save raw XML refuses text that isn't valid XML; a mod with no version shows
+  Unverified; an unfinished bridge write leaves nothing behind; "No game log yet" is a calm empty
+  state, not an error. (#271, #280, #285, #292, #293, #295, #296, #299, #300)
+- Plainer words across the app: the 1.0 names everywhere, real plurals, one Check now, and error
+  messages that say what to do. (#286, #287, #288, #290, #298)
 
 ### Security
 
-- **Shared sets have a size limit.** A shared set (a link, gist, repo or `.silo` file) may list
-  up to 5,000 mods, and a shared file may be up to 8 MB. A bigger one is refused before Silo looks
-  anything up, so a hostile link can't make Silo send hundreds of catalog requests.
-
-- **A blank mod name no longer hides a set's catalog matches.** Catalog lookups skip blank and
-  repeated names. Before, one blank entry made the catalog refuse the whole batch, so every mod in
-  the set showed as "not in the catalog".
-
+- **Shared sets have a size limit.** A shared set (a link, gist, repo or `.silo` file) may list up
+  to 5,000 mods, and a shared file may be up to 8 MB, so a hostile link can't make Silo send
+  hundreds of catalog requests. Catalog lookups also skip blank and repeated names. (#277)
 - **A mistyped GitHub token can't end up in the log.** A pasted token with a line break or an
-  invisible character in it is refused with a plain message before it's sent. Before, the
-  request failed with an error that quoted the token, and that error went into Silo's log and
-  so into Copy diagnostics. As a backstop, anything shaped like a GitHub token or a `Bearer`
-  credential is masked in the log and in diagnostics.
+  invisible character is refused before it's sent, and anything shaped like a GitHub token or a
+  `Bearer` credential is masked in the log and in diagnostics. Disconnecting GitHub no longer
+  leaves an old fallback token readable in Silo's database file. (#281, #293)
+- Silo's outbound-address check also refuses IPv4 addresses written as IPv6, `0.x.x.x`, and
+  other spellings of localhost. (#282)
 
 ## [0.11.0] - 2026-10-17
 
