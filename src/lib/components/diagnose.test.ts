@@ -209,54 +209,6 @@ describe("Last run", () => {
   });
 });
 
-describe("Find the problem mod: the finish", () => {
-  it("Put my mods back and park X restores the saved set without the culprit", async () => {
-    const user = userEvent.setup();
-    const saved = ["MAP", "FS25_A", "FS25_Mulcher", "FS25_C"];
-    let snapshot: string[] | null = null;
-    vi.mocked(bisectSnapshotGet).mockImplementation(async () => snapshot);
-    vi.mocked(bisectSnapshotSave).mockImplementation(async (s: string[]) => void (snapshot = s));
-    vi.mocked(bisectSnapshotClear).mockImplementation(async () => void (snapshot = null));
-    vi.mocked(bisectPlan).mockResolvedValue({ kind: "culprit", modName: "FS25_Mulcher" });
-    const onApply = vi.fn(() => Promise.resolve());
-    const onBisecting = vi.fn();
-    const onFinished = vi.fn();
-    render(BisectFlow, {
-      pool: ["FS25_A", "FS25_Mulcher", "FS25_C"],
-      alwaysOn: ["MAP"],
-      onApply,
-      onBisecting,
-      onExit: vi.fn(),
-      onFinished,
-      titleOf: (t: string) => (t === "FS25_Mulcher" ? "Field Mulcher Extended" : t),
-    });
-    await user.click(screen.getByRole("button", { name: "Start" }));
-    expect(await screen.findByText(/Most likely:/)).toHaveTextContent("Most likely: Field Mulcher Extended");
-    expect(snapshot).toEqual(saved);
-    await user.click(screen.getByRole("button", { name: "Put my mods back and park Field Mulcher Extended" }));
-    await waitFor(() => expect(onFinished).toHaveBeenCalledWith("FS25_Mulcher"));
-    expect(onApply).toHaveBeenLastCalledWith(["MAP", "FS25_A", "FS25_C"]);
-    expect(snapshot).toBeNull();
-    expect(onBisecting).toHaveBeenLastCalledWith(false);
-  });
-
-  it("Put my mods back restores everything", async () => {
-    const user = userEvent.setup();
-    let snapshot: string[] | null = null;
-    vi.mocked(bisectSnapshotGet).mockImplementation(async () => snapshot);
-    vi.mocked(bisectSnapshotSave).mockImplementation(async (s: string[]) => void (snapshot = s));
-    vi.mocked(bisectSnapshotClear).mockImplementation(async () => void (snapshot = null));
-    vi.mocked(bisectPlan).mockResolvedValue({ kind: "culprit", modName: "FS25_C" });
-    const onApply = vi.fn(() => Promise.resolve());
-    const onFinished = vi.fn();
-    render(BisectFlow, { pool: ["FS25_A", "FS25_C"], alwaysOn: [], onApply, onBisecting: vi.fn(), onExit: vi.fn(), onFinished });
-    await user.click(screen.getByRole("button", { name: "Start" }));
-    await user.click(await screen.findByRole("button", { name: "Put my mods back" }));
-    await waitFor(() => expect(onFinished).toHaveBeenCalledWith(null));
-    expect(onApply).toHaveBeenLastCalledWith(["FS25_A", "FS25_C"]);
-  });
-});
-
 describe("Find the problem mod: mods Silo can't park yet", () => {
   beforeEach(() => {
     vi.mocked(bisectSnapshotGet).mockReset().mockResolvedValue(null);
@@ -302,5 +254,53 @@ describe("Find the problem mod: mods Silo can't park yet", () => {
     await user.click(screen.getByRole("button", { name: "Start" }));
     await waitFor(() => expect(bisectPlan).toHaveBeenCalledWith(["FS25_A", "FS25_B"]));
     expect(bisectSnapshotSave).toHaveBeenCalledWith(["MAP", "FS25_Folder", "FS25_A", "FS25_B"]);
+  });
+});
+
+describe("Find the problem mod: the finish", () => {
+  it("Put my mods back and park X restores the saved set without the culprit", async () => {
+    const user = userEvent.setup();
+    const saved = ["MAP", "FS25_A", "FS25_Mulcher", "FS25_C"];
+    let snapshot: string[] | null = null;
+    vi.mocked(bisectSnapshotGet).mockImplementation(async () => snapshot);
+    vi.mocked(bisectSnapshotSave).mockImplementation(async (s: string[]) => void (snapshot = s));
+    vi.mocked(bisectSnapshotClear).mockImplementation(async () => void (snapshot = null));
+    vi.mocked(bisectPlan).mockResolvedValue({ kind: "culprit", modName: "FS25_Mulcher" });
+    const onApply = vi.fn(() => Promise.resolve());
+    const onBisecting = vi.fn();
+    const onFinished = vi.fn();
+    render(BisectFlow, {
+      pool: ["FS25_A", "FS25_Mulcher", "FS25_C"],
+      alwaysOn: ["MAP"],
+      onApply,
+      onBisecting,
+      onExit: vi.fn(),
+      onFinished,
+      titleOf: (t: string) => (t === "FS25_Mulcher" ? "Field Mulcher Extended" : t),
+    });
+    await user.click(screen.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText(/Most likely:/)).toHaveTextContent("Most likely: Field Mulcher Extended");
+    expect(snapshot).toEqual(saved);
+    await user.click(screen.getByRole("button", { name: "Put my mods back and park Field Mulcher Extended" }));
+    await waitFor(() => expect(onFinished).toHaveBeenCalledWith("FS25_Mulcher"));
+    expect(onApply).toHaveBeenLastCalledWith(["MAP", "FS25_A", "FS25_C"]);
+    expect(snapshot).toBeNull();
+    expect(onBisecting).toHaveBeenLastCalledWith(false);
+  });
+
+  it("Put my mods back restores everything", async () => {
+    const user = userEvent.setup();
+    let snapshot: string[] | null = null;
+    vi.mocked(bisectSnapshotGet).mockImplementation(async () => snapshot);
+    vi.mocked(bisectSnapshotSave).mockImplementation(async (s: string[]) => void (snapshot = s));
+    vi.mocked(bisectSnapshotClear).mockImplementation(async () => void (snapshot = null));
+    vi.mocked(bisectPlan).mockResolvedValue({ kind: "culprit", modName: "FS25_C" });
+    const onApply = vi.fn(() => Promise.resolve());
+    const onFinished = vi.fn();
+    render(BisectFlow, { pool: ["FS25_A", "FS25_C"], alwaysOn: [], onApply, onBisecting: vi.fn(), onExit: vi.fn(), onFinished });
+    await user.click(screen.getByRole("button", { name: "Start" }));
+    await user.click(await screen.findByRole("button", { name: "Put my mods back" }));
+    await waitFor(() => expect(onFinished).toHaveBeenCalledWith(null));
+    expect(onApply).toHaveBeenLastCalledWith(["FS25_A", "FS25_C"]);
   });
 });
