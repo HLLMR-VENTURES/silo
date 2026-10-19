@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows, typing in a text field no longer pops up the system's "Saved info" suggestions over
+  Silo. (#303)
+
 ## [1.0.0] - 2026-10-19
 
 Silo 1.0 is a redesign from end to end: a new layout, plainer words, and every page rebuilt
