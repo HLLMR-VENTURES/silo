@@ -43,7 +43,7 @@ stay anonymous).
     sharing mod sets as links (secret gists). The token stays on the user's machine; no server of ours holds
     or proxies it.
   - The full list is the table in the
-    [privacy policy](docs/legal/privacy-policy.md#every-connection-silo-makes).
+    [privacy policy](https://silo.hllmr.com/legal/privacy-policy.html#every-connection-silo-makes).
 
 **Generally out of scope:**
 

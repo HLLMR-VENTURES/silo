@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="landing/og.png" alt="Silo. More farming. Less fixing." width="720" />
+  <img src="https://silo.hllmr.com/og.png" alt="Silo. More farming. Less fixing." width="720" />
 </p>
 
 <h1 align="center">Silo</h1>
@@ -117,7 +117,7 @@ npm run tauri:build   # produce an installer in src-tauri/target/release/bundle/
   request carries what it needs (search terms, or the tech names of the mods being checked,
   plus the version for an integrity check). It also checks GitHub for its own app updates at
   launch, which sends no library data. Your saves, mod files and notes are never uploaded.
-  The [privacy policy](docs/legal/privacy-policy.md) lists every connection.
+  The [privacy policy](https://silo.hllmr.com/legal/privacy-policy.html) lists every connection.
 - **Undoable, and it owns what it touches** — it files your mods into a local archive and
   links the active set into the game. Organize shows every move before it touches a file;
   *Undo organizing* puts every mod back in your mods folder. It only ever removes files
@@ -131,6 +131,10 @@ npm run tauri:build   # produce an installer in src-tauri/target/release/bundle/
 Tauri v2 (Rust core, all heavy work off the UI thread) + Svelte 5 + TypeScript, SQLite
 cache (path + mtime + size), quick-xml parsing. See [`docs/`](docs/) —
 `ARCHITECTURE.md`, `DESIGN.md`, and per-feature notes.
+
+The website at [silo.hllmr.com](https://silo.hllmr.com), including the help pages and the legal
+pages (privacy policy, terms, disclaimer, takedown), lives in its own repository,
+[HLLMR/web](https://github.com/HLLMR/web).
 
 ## Community
 
