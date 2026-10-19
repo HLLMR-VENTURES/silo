@@ -3677,7 +3677,10 @@ async fn launch_game() -> Result<(), error::AppError> {
         );
     }
     if relocate::is_running() {
-        return Err("Silo is moving your library archive. Pause the move to play.".into());
+        return Err(error::AppError::new(
+            error::code::MOVE_RUNNING,
+            "Silo is moving your library archive. Pause the move to play.",
+        ));
     }
     tauri::async_runtime::spawn_blocking(gamelaunch::launch)
         .await
@@ -4703,23 +4706,25 @@ fn verdict_against_pin(zip: &std::path::Path, pinned: Option<&str>) -> String {
 /// Parse the FS25 log.txt and report which mods are throwing errors/warnings, whether
 /// the last run crashed, and the culprit ranking. Read-only; touches nothing.
 #[tauri::command]
-async fn scan_log() -> Result<logscan::LogReport, String> {
+async fn scan_log() -> Result<logscan::LogReport, error::AppError> {
     let path = fsgame::user_dir()
         .map(|d| d.join("log.txt"))
         .ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || -> Result<logscan::LogReport, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<logscan::LogReport, error::AppError> {
         if !path.exists() {
-            return Err(
-                "No game log yet. Play Farming Simulator 25 once, then come back here.".to_string(),
-            );
+            // The game hasn't been played yet: an empty state, not a failure.
+            return Err(error::AppError::new(
+                error::code::NO_LOG,
+                "No game log yet. Play Farming Simulator 25 once, then come back here.",
+            ));
         }
         // Logs are read as lossy UTF-8; FS writes mostly ASCII but paths can carry stray bytes.
-        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let bytes = std::fs::read(&path)?;
         let text = String::from_utf8_lossy(&bytes);
         Ok(logscan::parse(&text))
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| error::AppError::from(e.to_string()))?
 }
 
 /// Crash detection's cheap check (Diagnose, #260): where log.txt is, when it last changed,
@@ -4762,22 +4767,25 @@ async fn mark_log_seen(app: tauri::AppHandle, modified_ms: i64) -> Result<(), St
 
 /// Parse inputBinding.xml into a per-device binding map (read-only).
 #[tauri::command]
-async fn scan_bindings() -> Result<bindings::BindingReport, String> {
+async fn scan_bindings() -> Result<bindings::BindingReport, error::AppError> {
     let path = fsgame::user_dir()
         .map(|d| d.join("inputBinding.xml"))
         .ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || -> Result<bindings::BindingReport, String> {
-        if !path.exists() {
-            return Err(
-                "No control settings yet. Play Farming Simulator 25 once, then come back here."
-                    .to_string(),
-            );
-        }
-        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-        Ok(bindings::parse(&String::from_utf8_lossy(&bytes)))
-    })
+    tauri::async_runtime::spawn_blocking(
+        move || -> Result<bindings::BindingReport, error::AppError> {
+            if !path.exists() {
+                // The game writes it on first launch: an empty state, not a failure.
+                return Err(error::AppError::new(
+                    error::code::NO_LOG,
+                    "No control settings yet. Play Farming Simulator 25 once, then come back here.",
+                ));
+            }
+            let bytes = std::fs::read(&path)?;
+            Ok(bindings::parse(&String::from_utf8_lossy(&bytes)))
+        },
+    )
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| error::AppError::from(e.to_string()))?
 }
 
 // ── Guided bisection ──

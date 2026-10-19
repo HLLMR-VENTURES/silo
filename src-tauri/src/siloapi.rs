@@ -444,6 +444,15 @@ pub struct ResolvedDownload {
     pub expected_sha256: Option<String>,
 }
 
+/// A catalog source id as people read it ("modhub" -> "ModHub").
+fn source_label(id: &str) -> String {
+    match id.to_ascii_lowercase().as_str() {
+        "modhub" => "ModHub".to_string(),
+        "github" => "GitHub".to_string(),
+        _ => id.to_string(),
+    }
+}
+
 pub fn resolve_download(
     base: &str,
     id: &str,
@@ -458,13 +467,14 @@ pub fn resolve_download(
                 .sources
                 .iter()
                 .find(|s| s.source == name)
-                .ok_or_else(|| format!("{name} doesn't list this mod"))
+                .ok_or_else(|| format!("{} doesn't list this mod", source_label(name)))
                 .and_then(|s| {
                     if usable(&s) {
                         Ok(s)
                     } else {
                         Err(format!(
-                            "{name} doesn't allow direct downloads. Open its page instead."
+                            "{} doesn't allow direct downloads. Open its page instead.",
+                            source_label(name)
                         ))
                     }
                 })?,
@@ -690,6 +700,13 @@ pub fn fetch_image(url: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_ids_read_as_names() {
+        assert_eq!(super::source_label("modhub"), "ModHub");
+        assert_eq!(super::source_label("GitHub"), "GitHub");
+        assert_eq!(super::source_label("example.com"), "example.com");
+    }
+
     use super::*;
 
     #[test]

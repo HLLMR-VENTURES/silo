@@ -113,9 +113,11 @@ pub fn latest_release(owner: &str, repo: &str, token: Option<&str>) -> Result<Re
             "This mod's GitHub page has no releases yet, so Silo can't check it for updates."
                 .to_string()
         }
-        ureq::Error::Status(403, _) => {
-            "GitHub rate limit hit (60/hr unauthenticated). Try again later.".to_string()
-        }
+        ureq::Error::Status(403, r) => forbidden_text(
+            r.header("x-ratelimit-remaining"),
+            r.header("retry-after").is_some(),
+            token.is_some(),
+        ),
         other => transport_text(other),
     })?;
     let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
@@ -432,6 +434,22 @@ fn gh_get(url: &str, token: Option<&str>) -> Result<serde_json::Value, String> {
         .map_err(gh_err)?
         .into_json()
         .map_err(|e| e.to_string())
+}
+
+/// A 403 from the releases API: a rate limit only when GitHub says so (no requests left, or a
+/// Retry-After), with the "connect" hint only for a user who isn't connected; otherwise GitHub
+/// refused this repo (blocked, or the token can't see it).
+fn forbidden_text(remaining: Option<&str>, retry_after: bool, has_token: bool) -> String {
+    if remaining == Some("0") || retry_after {
+        if has_token {
+            "GitHub rate limit hit. Try again in a while.".to_string()
+        } else {
+            "GitHub rate limit hit (60 an hour without a connected account). Try again later."
+                .to_string()
+        }
+    } else {
+        "GitHub refused access to this repo's releases.".to_string()
+    }
 }
 
 /// Map a ureq error to a friendly string, calling out the scope case so the UI can
@@ -920,6 +938,23 @@ pub fn find_repo_in_text(text: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_403_is_a_rate_limit_only_when_github_says_so() {
+        // No requests left: a rate limit; the connect hint only without a token.
+        let anon = super::forbidden_text(Some("0"), false, false);
+        assert!(anon.contains("rate limit") && anon.contains("without a connected account"));
+        let connected = super::forbidden_text(Some("0"), false, true);
+        assert!(connected.contains("rate limit") && !connected.contains("connected account"));
+        assert!(super::forbidden_text(None, true, true).contains("rate limit"));
+        // Requests left: GitHub refused the repo, which isn't a rate limit.
+        let refused = super::forbidden_text(Some("4999"), false, true);
+        assert!(!refused.to_lowercase().contains("rate limit"));
+        assert_eq!(
+            crate::error::classify(&refused),
+            crate::error::code::UNKNOWN
+        );
+    }
+
     use super::*;
 
     #[test]
