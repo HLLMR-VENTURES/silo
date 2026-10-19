@@ -8,7 +8,7 @@
   import { tick, untrack, type Snippet } from "svelte";
   import type { HTMLAttributes } from "svelte/elements";
   import { portal } from "./portal";
-  import { portalTarget, pushLayer } from "./overlayStack";
+  import { focusableIn, portalTarget, pushLayer } from "./overlayStack";
   import type { Placement, PopoverCloseReason } from "./overlayTypes";
 
   interface Props extends Omit<HTMLAttributes<HTMLDivElement>, "class" | "children" | "onclose"> {
@@ -82,7 +82,10 @@
     open = false;
     onclose?.(reason);
     if (reason === "escape") {
-      const back = anchor ?? opener;
+      // An anchor that can't take focus (a wrapper around the button) hands it to its first
+      // focusable element, else to what had focus when the popover opened.
+      const takesFocus = !anchor || anchor.tabIndex >= 0 || anchor.hasAttribute("tabindex");
+      const back = takesFocus ? (anchor ?? opener) : (focusableIn(anchor)[0] ?? opener);
       if (back?.isConnected) back.focus();
     }
   }
