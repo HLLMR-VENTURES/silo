@@ -61,3 +61,6 @@ Thumbs.db
 # Internal-only docs — strategy, competitive analysis, launch/ops prep. Kept locally
 # for the maintainer + Cowork; never published to the public repo.
 docs/internal/
+
+# Showcase screenshots (scripts/showcase/capture.mjs)
+showcase-out/

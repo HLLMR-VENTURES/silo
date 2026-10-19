@@ -90,8 +90,14 @@ fn linux_candidates(
         .collect()
 }
 
-/// Locate the FS25 user data dir for this OS.
+/// Locate the FS25 user data dir for this OS (a demo profile's own, when one is active).
 pub fn locate() -> Option<GameLocation> {
+    if let Some(p) = crate::profile::dir() {
+        return Some(GameLocation {
+            user_dir: crate::profile::fs25_user_dir(p),
+            prefix: None,
+        });
+    }
     #[cfg(target_os = "windows")]
     {
         let user_dir = dirs::document_dir()?
