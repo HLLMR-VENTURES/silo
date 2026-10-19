@@ -16,11 +16,9 @@ can't do.
 Launch for testing: from `Silo/`, `npm run tauri:dev` (leave the terminal open — closing it
 closes the app). A packaged build is `npm run tauri:build`.
 
-> **Revised for v0.1.1.** The entire frontend was refactored into focused
-> components/panels — so **re-run every section**: a change that compiles and builds can
-> still have a runtime wiring regression. Two earlier bugs should now pass on re-check:
-> §6 Browse thumbnails (were blank — CSP fix) and §10 Bindings map (stuck on "Reading…" —
-> dedup fix). Plus the new **§14 Security & reliability** checks below.
+> **Revised for v1.0.** The P2 overhaul (#225–#267) rebuilt every page, so **re-run every
+> section**: a change that compiles and builds can still have a runtime wiring regression.
+> §16 onward cover the new UI; earlier sections were reworded to match it.
 
 ---
 
@@ -30,12 +28,12 @@ closes the app). A packaged build is `npm run tauri:build`.
 - [x] `[app]` Resize the window — no horizontal scroll, panels stay centered.
 
 ## 1. Library scan & organize  _(auto-verified: scan/organize/moddesc engines)_
-- [x] `[app]` Initial scan lists the full library; counts (the status strip's "N of M active", the toolbar's maps / script mods) look right; Settings → About shows the last scan time ("scanned in N ms").
+- [x] `[app]` Initial scan lists the full library; counts (the status strip's "N of M active", the toolbar's "N shown") look right; Settings → About shows the last scan time ("scanned in N ms").
 - [x] `[app]` Library → **⋯** → Rescan re-reads without error; warm scan is fast.
 - [x] `[app]` Organize moves loose zips into `mods/archive/<Category>/`; dev **folder** mods are left untouched (zip-only).
 - [ ] `[app]` **Organize dialog**: the Library status strip's **N new mods aren't filed → Review** (auto-file OFF; Settings → Library → Library layout → **Organize** works too) opens the Organize dialog with a summary of the dry run and the planned moves grouped by category under **See every file**, **before** anything moves; **Cancel** touches nothing; **File N mods** applies it (see §25 for the auto-file box, progress and partial failures).
 - [x] `[app]` Category rail filters; search filters by title/author/tech name; Favorites/Hidden toggles work.
-- [x] `[app]` Select-all checkbox activates/deactivates the filtered set.
+- [x] `[app]` Tick a row's checkbox → **Select all N shown** → Turn on / Park acts on the filtered set (see §20).
 
 ## 1b. Mods folder selection  _(auto-verified: modsroot resolve/override/path-map, per-folder DB isolation, migration)_
 - [ ] `[app]` First launch after upgrading: the library looks exactly as before (same active set, no "foreign file" errors); Settings → Mods folder shows **FS25 default**.
@@ -78,7 +76,7 @@ shipping; macOS and Linux are experimental platforms, verified by testers as the
 - [ ] `[app]` **Integrity verification**: in a mod's detail drawer, **Verify integrity** returns one of **Verified** (a GitHub-source mod SiloAPI has hashed, e.g. `FS25_CabView`), **Modified** (edit a file inside a verified mod's zip → expect the changed file listed), or **Unverified** (a ModHub-only-latest or unknown mod — correct, not a bug). Folder mods show "can't be verified". No red console errors.
 - [ ] `[app]` **Last run** section shows this mod's log health (see §8) — errors/cosmetic/clean.
 - [ ] `[net]` **Catalog** section shows latest version / "update available (source)" / "not in catalog".
-- [ ] `[app]` Reveal opens the file in Explorer; activate/deactivate toggles the active dot.
+- [ ] `[app]` Details ⋯ → **Show file** opens the folder with the file selected; the **Active** switch turns the mod on or parks it.
 
 ## 3. Mod sets & savegames  _(auto-verified: mod set/savegame parse)_
 - [ ] `[app]` Save your current mods as a set; switch / update / delete it (Mod sets → My sets); the set's name shows in the Library status strip and at the top of the Play menu ("…, unchanged"). Full checklist in §24.
@@ -98,7 +96,7 @@ shipping; macOS and Linux are experimental platforms, verified by testers as the
 ## 6. Browse (catalog)  _(auto-verified: adapters, /mods shape)_
 - [ ] `[net]` Browse loads the catalog; header shows total; **scroll works** (regression-fixed).
 - [ ] `[net]` Search filters; category dropdown filters; "Load more" pages to the end ("That's all N").
-- [ ] `[net]` Per-source buttons render with versions: GitHub = ⬇ (install), ModHub = ↗ (open page). "In library" badge on owned mods.
+- [ ] `[net]` Sources are spelled out with versions ("GitHub 1.0.6.0", "ModHub 1.0.5.0"); the card's one button is **Install** (GitHub) or **Open on ModHub**; owned mods say **In your library** (see §23).
 - [ ] `[net][game]` Install a GitHub mod → progress bar advances (MB), lands in the library on rescan, then loads in-game.
 - [ ] `[net]` Details opens the drawer: cover image, facts, full source list with per-source versions + open-page links.
 
@@ -111,11 +109,11 @@ shipping; macOS and Linux are experimental platforms, verified by testers as the
 - [ ] `[app]` Culprit mods ranked; cosmetic-only mods behind the "safe to ignore" disclosure; unattributed count + Open log.txt.
 - [ ] `[app]` Re-read log after a new FS25 run updates the report.
 
-## 9. Guided bisection  _(auto-verified: stepper convergence 1..64)_
-- [ ] `[app]` From Diagnose → Last run (crash, no culprit) or the footer link → intro shows suspect count + ~launches.
+## 9. Find the problem mod  _(auto-verified: stepper convergence 1..64)_
+- [ ] `[app]` From Diagnose → Last run (crash, no culprit) → **Not named here? Find the problem mod**, or the crash notice's **Find the problem mod** → intro shows suspect count + ~launches.
 - [ ] `[game]` Full loop: Start → Silo applies half → Launch FS25 → reproduce → quit → "still broken?" (crash auto-detected) → narrows → repeats → names a culprit (or "interaction").
 - [ ] `[app]` Finish/cancel restores your original active set exactly.
-- [ ] `[app]` **Crash-safety**: start a bisection, force-quit Silo mid-run, relaunch → the interrupted-diagnosis notice offers to restore your set; Restore my mod set works.
+- [ ] `[app]` **Crash-safety**: start Find the problem mod, force-quit Silo mid-run, relaunch → the interrupted-diagnosis notice offers to restore your set; Restore my mod set works.
 
 ## 10. Bindings map  _(auto-verified: parser on real inputBinding.xml)_
 - [ ] `[app]` Tools → Controls map lists devices; every action↔key shown; search filters; "inputs bound to more than one action" section highlights reuse (as review, not error).
@@ -131,7 +129,7 @@ shipping; macOS and Linux are experimental platforms, verified by testers as the
 
 ## 13. Config editors & diagnostics  _(auto-verified: xmlconfig/settings_form)_
 - [ ] `[game]` Tools → Graphics settings → **Edit game.xml**: apply a preset, relaunch → setting took; `.bak` written.
-- [ ] `[game]` Savegame config editor (Mod sets → Savegames → Configure): change difficulty/growth etc., load save → applied; `.bak` written.
+- [ ] `[game]` Savegame config editor (Mod sets → Savegames → **Game settings…**): change difficulty/growth etc., load save → applied; `.bak` written.
 - [ ] `[app]` Per-mod settings form (for a mod that has settings) edits + saves with `.bak`; raw-XML fallback works.
 - [ ] `[app]` Diagnostics report exports a markdown summary (Settings → Diagnostics → **Export report**).
 
@@ -139,7 +137,7 @@ shipping; macOS and Linux are experimental platforms, verified by testers as the
 
 ## 14. Security & reliability (v0.1.1 hardening)
 - [ ] `[app]` **Token in the OS keychain.** Connect GitHub (Settings → Accounts). Then check the OS credential store — Windows: `Credential Manager → Windows Credentials`, look for `com.hllmr.silo`; macOS: Keychain Access, search "Silo". The token should appear there. It should NOT be readable in the app's `silo.db` (it lives in `app_data_dir`).
-- [ ] `[app]` **Token persists + still works.** Restart the app: still "Connected as …", and a source action (⭐ Star / 👍 Endorse) still works.
+- [ ] `[app]` **Token persists + still works.** Restart the app: still "Connected as …", and a source action (Star / Watch in a Browse mod's details) still works.
 - [ ] `[app]` **Disconnect clears it.** Disconnect GitHub → the `com.hllmr.silo`/`gh_token` entry is gone from the credential store.
 - [ ] `[net]` **Corrupt-update guard.** (If practical) point an update at a truncated/non-zip file → it errors ("isn't a valid .zip") and does NOT replace the existing mod; no `.silo-update.part` is left beside it.
 - [ ] `[net]` **Updates keep the old version.** Update a GitHub-linked mod (active and organized). The mod shows the new version, the game's mods folder entry loads it, and `mods/backups/` holds `<file>.<secs>.update.bak` with the old one. After four updates of the same mod only the newest three backups remain. With FS25 running, the update is refused ("Close Farming Simulator 25 first, then update.").
@@ -169,18 +167,18 @@ start below it).
 
 **Library status strip, toolbar and filters:**
 - [ ] `[app]` Tools → **Library stats** shows the stats; Diagnose → **Conflicts** and **Problems** list conflicts and health issues; Diagnose → **Last run** is the crash/log triage; Tools → **Controls map** and **Fill type bridge** open their tools.
-- [ ] `[app]` Filter toggles each flip and re-filter the list: **Favorites**, **Hidden**, **⚑ Flagged**, **⚠ In conflict** (disabled when 0). Combine two, then clear. The toolbar's **maps / script mods / uniqueType / active** counts scope the list one at a time (click again to clear).
+- [ ] `[app]` **Favorites** and **Needs attention** toggle and re-filter the list; **Filters** (Hidden, Flagged, In conflict, Has settings, Needs update, Maps, Script mods, uniqueType, a tag) re-filters too. Combine two, then **Clear filters** (see §20).
 - [ ] `[app]` The header **search** filters the Library live; clearing (Esc) restores the list.
 
 **Library toolbar + rail:**
 - [ ] `[app]` **Category rail**: click a category and a subcategory → list narrows; "All mods" resets.
 - [ ] `[app]` **Right-click a category** → context menu appears and dismisses.
 - [ ] `[app]` **Sort** dropdown cycles Name / Category / Size / Recently added / Version / **My rating**; the **↑/↓** direction button flips order.
-- [ ] `[app]` **Select-all** checkbox activates/deactivates the filtered set (indeterminate state renders when partial).
+- [ ] `[app]` **Select all N shown** (after ticking one row) then Turn on / Park acts on the filtered set.
 
 **Library detail drawer (click a mod row) — every sub-section:**
 - [ ] `[app]` Header (icon/title/author/version/tech name) + **✕ closes** (Esc too); **drag the left edge to resize** (persists); the drawer docks beside the list, which stays clickable (clicking another mod switches the drawer).
-- [ ] `[app]` Action buttons all respond: **Active/Parked**, **Favorite**, **Flag** (reads **Flagged** when on), **Hidden**, **Reveal**, and **Settings** (only when the mod has settings).
+- [ ] `[app]` The primary row responds: the **Active** switch, **Settings** (only when the mod has settings) and **⋯** (Favorite, Flag, Hide, Change category…, Show file, Find in Browse).
 - [ ] `[app]` **Category editor**: change the dropdown/subcategory → **Save** enables; **Reset to auto** shows for an overridden mod.
 - [ ] `[app]` **Last run** + **Catalog** status render (the `ModStatus` component).
 - [ ] `[app]` **Rating / tags / notes** (the `ModCuration` component): set a star, add + remove a tag, type a note (saves on blur).
@@ -214,7 +212,7 @@ start below it).
 - [ ] `[app]` **Both themes readable.** In light and in dark, secondary (muted) text, warning text and links are easy to read on their backgrounds; gold is never used for text in the light theme.
 - [ ] `[app]` **Silo mark.** The sidebar shows the silo mark (green tile, cream silo, gold sun) and it looks the same in both themes.
 
-## 17. Dialogs, menus and loadout safety (#226)  _(auto-verified: dialog/menu/toast component tests, loadout name check + switch diff, confirm build guard)_
+## 17. Dialogs, menus and mod set safety (#226)  _(auto-verified: dialog/menu/toast component tests, loadout name check + switch diff, confirm build guard)_
 **Keyboard, in every in-app dialog:**
 - [ ] `[app]` **Focus starts in the right place.** A destructive confirm (Delete a mod set, Stop sharing a link, Forget the interrupted diagnosis) opens with focus on **Cancel**; any other confirm (Switch, Move library, Undo organizing) opens with focus on the action button; a name dialog (My sets → Save current mods as a set) opens with focus in the text field.
 - [ ] `[app]` **Tab stays inside.** Tab and Shift+Tab cycle through the dialog's controls only; nothing behind the dialog can be reached or clicked.
