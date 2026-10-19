@@ -3585,9 +3585,11 @@ async fn delete_loadout(app: tauri::AppHandle, id: i64) -> Result<(), error::App
 #[tauri::command]
 async fn shared_file_kind(path: String) -> Result<String, String> {
     off_main(move || {
-        let p = std::path::Path::new(&path);
-        paths::safe_inbound(p, &["silo", "silomp", "json"])?;
-        let text = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
+        let text = paths::read_inbound_text(
+            std::path::Path::new(&path),
+            &["silo", "silomp", "json"],
+            paths::SHARED_FILE_MAX_BYTES,
+        )?;
         let kind = if mpsync::is_manifest(&text) {
             "multiplayer"
         } else {
@@ -3787,8 +3789,11 @@ async fn mp_verify_file(
     local: Vec<mpsync::ModRef>,
 ) -> Result<mpsync::VerifyReport, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<mpsync::VerifyReport, String> {
-        paths::safe_inbound(std::path::Path::new(&path), &["silomp", "json"])?;
-        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let text = paths::read_inbound_text(
+            std::path::Path::new(&path),
+            &["silomp", "json"],
+            paths::SHARED_FILE_MAX_BYTES,
+        )?;
         let manifest: mpsync::Manifest = serde_json::from_str(&text)
             .map_err(|_| "That file isn't a Silo Multiplayer check file".to_string())?;
         let local_hashed = mpsync::hash_mods(&local);
@@ -4060,9 +4065,11 @@ fn read_set_source(
     let Some(path) = file else {
         return read_collection_raw(url_or_id, token);
     };
-    let path = std::path::Path::new(path);
-    paths::safe_inbound(path, &["silo", "json"])?;
-    let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let json = paths::read_inbound_text(
+        std::path::Path::new(path),
+        &["silo", "json"],
+        paths::SHARED_FILE_MAX_BYTES,
+    )?;
     Ok((collection::parse_set_file(&json)?, json))
 }
 

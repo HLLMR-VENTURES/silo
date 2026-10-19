@@ -397,6 +397,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it no longer waits up to 30 seconds on the library archive before opening links or offering to
   restore an unfinished guided bisection. (#222)
 
+### Security
+
+- **Shared sets have a size limit.** A shared set (a link, gist, repo or `.silo` file) may list
+  up to 5,000 mods, and a shared file may be up to 8 MB. A bigger one is refused before Silo looks
+  anything up, so a hostile link can't make Silo send hundreds of catalog requests.
+
+- **A blank mod name no longer hides a set's catalog matches.** Catalog lookups skip blank and
+  repeated names. Before, one blank entry made the catalog refuse the whole batch, so every mod in
+  the set showed as "not in the catalog".
+
 ## [0.11.0] - 2026-10-17
 
 ### Added
