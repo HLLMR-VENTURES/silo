@@ -19,6 +19,11 @@ pub mod code {
     /// A library archive move is paused or unfinished (or already under way): it must be
     /// resumed or cancelled before this can run.
     pub const MOVE_UNFINISHED: &str = "MOVE_UNFINISHED";
+    /// A library archive move is running right now (it can be paused): e.g. launching the game.
+    pub const MOVE_RUNNING: &str = "MOVE_RUNNING";
+    /// The game hasn't written this file yet (log.txt, inputBinding.xml): FS25 was never played
+    /// with this user folder. Not a failure; the UI shows an empty state.
+    pub const NO_LOG: &str = "NO_LOG";
     pub const GAME_RUNNING: &str = "GAME_RUNNING";
     /// Text pasted into "Open a shared set" isn't a Silo set link or a GitHub gist.
     pub const NOT_A_SET_LINK: &str = "NOT_A_SET_LINK";
@@ -36,6 +41,8 @@ pub mod code {
     pub const GITHUB_RATE_LIMIT: &str = "GITHUB_RATE_LIMIT";
     /// The file isn't a Farming Simulator mod (no modDesc.xml, or not a readable .zip).
     pub const NOT_A_MOD: &str = "NOT_A_MOD";
+    /// A download arrived cut off or damaged (not a readable .zip): trying again can help.
+    pub const DOWNLOAD_BROKEN: &str = "DOWNLOAD_BROKEN";
     /// A collection changed between its preview and the apply.
     pub const CHANGED_SINCE_PREVIEW: &str = "CHANGED_SINCE_PREVIEW";
     /// The library database was written by a newer Silo.
@@ -160,7 +167,7 @@ fn known_phrase(lower: &str) -> Option<&'static str> {
             code::MOVE_UNFINISHED,
         ),
         // Before the plain "moving" phrase: launching while a move runs.
-        ("pause the move to play", code::MOVE_UNFINISHED),
+        ("pause the move to play", code::MOVE_RUNNING),
         ("silo is moving your library archive", code::LIBRARY_BUSY),
         ("close farming simulator 25 first", code::GAME_RUNNING),
         ("reconnect its drive", code::ARCHIVE_UNAVAILABLE),
@@ -171,6 +178,11 @@ fn known_phrase(lower: &str) -> Option<&'static str> {
         ("saved by a newer version of silo", code::DB_NEWER),
         ("isn't a farming simulator mod", code::NOT_A_MOD),
         ("doesn't look like a silo set link", code::NOT_A_SET_LINK),
+        // A download that isn't a readable .zip was cut off or damaged (retry), before the
+        // general "not a valid .zip" (a local file that isn't a mod).
+        ("download isn't a valid .zip", code::DOWNLOAD_BROKEN),
+        ("downloaded file is not a valid .zip", code::DOWNLOAD_BROKEN),
+        ("downloaded file isn't a valid .zip", code::DOWNLOAD_BROKEN),
         ("not a valid .zip", code::NOT_A_MOD),
         ("isn't a valid .zip", code::NOT_A_MOD),
         ("invalid zip archive", code::NOT_A_MOD),
@@ -649,7 +661,7 @@ mod tests {
             (
                 "Silo is moving your library archive. Pause the move to play.",
                 UNIX,
-                code::MOVE_UNFINISHED,
+                code::MOVE_RUNNING,
             ),
             (
                 "Silo is moving your library archive.",
@@ -703,12 +715,18 @@ mod tests {
                 WIN,
                 code::NOT_A_MOD,
             ),
-            ("Downloaded file is not a valid .zip", UNIX, code::NOT_A_MOD),
+            ("Downloaded file is not a valid .zip", UNIX, code::DOWNLOAD_BROKEN),
+            (
+                "Downloaded file isn't a valid .zip (corrupt or truncated)",
+                WIN,
+                code::DOWNLOAD_BROKEN,
+            ),
             (
                 "The download isn't a valid .zip (it may be corrupt or cut off). Try again.",
                 WIN,
-                code::NOT_A_MOD,
+                code::DOWNLOAD_BROKEN,
             ),
+            ("FS25_X.zip is not a valid .zip", WIN, code::NOT_A_MOD),
             ("invalid Zip archive: Could not find EOCD", UNIX, code::NOT_A_MOD),
             // Not matched
             ("", WIN, code::UNKNOWN),
