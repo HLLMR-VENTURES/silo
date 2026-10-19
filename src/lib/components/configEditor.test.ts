@@ -21,7 +21,7 @@ vi.mock("../api", async (importOriginal) => ({
 
 import ConfigEditor from "./ConfigEditor.svelte";
 import ModSettings from "./ModSettings.svelte";
-import { isNumberText, type CfgField } from "../configSchemas";
+import { isNumberText, matchOptionCase, type CfgField } from "../configSchemas";
 
 const FIELDS: CfgField[] = [
   { path: "a.n", label: "Max lights", kind: "number" },
@@ -67,6 +67,22 @@ describe("ConfigEditor", () => {
     await user.click(save);
     await waitFor(() => expect(api.setConfig).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+describe("ConfigEditor: the game's casing", () => {
+  beforeEach(() => {
+    api.getConfig.mockReset().mockResolvedValue({ "a.n": "4", "a.s": "High" });
+    api.setConfig.mockReset().mockResolvedValue(undefined);
+  });
+
+  it("shows 'High' as the high option, and doesn't write it back unchanged", async () => {
+    open();
+    const sel = (await screen.findByLabelText(/Quality/)) as HTMLSelectElement;
+    expect(sel.value).toBe("high");
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    expect(matchOptionCase(FIELDS, { "a.s": "Medium" })).toEqual({ "a.s": "Medium" });
+    expect(matchOptionCase(FIELDS, { "a.s": "LOW" })).toEqual({ "a.s": "low" });
   });
 });
 

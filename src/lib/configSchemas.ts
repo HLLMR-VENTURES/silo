@@ -197,3 +197,20 @@ export const GAME_GRAPHICS_PRESETS: CfgPreset[] = [
 export function isNumberText(text: string, whole = false): boolean {
   return (whole ? /^-?\d+$/ : /^-?(\d+(\.\d*)?|\.\d+)$/).test(text.trim());
 }
+
+/**
+ * File values as the form shows them: a select's value that matches one of its options in
+ * another case ("Medium" for "medium") becomes that option, so the select isn't blank.
+ * @param fields the form's fields
+ * @param values the file's values by path
+ */
+export function matchOptionCase(fields: CfgField[], values: Record<string, string>): Record<string, string> {
+  const out = { ...values };
+  for (const f of fields) {
+    const v = out[f.path];
+    if (f.kind !== "select" || v === undefined || f.options?.includes(v)) continue;
+    const hit = f.options?.find((o) => o.toLowerCase() === v.trim().toLowerCase());
+    if (hit) out[f.path] = hit;
+  }
+  return out;
+}

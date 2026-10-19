@@ -7,7 +7,7 @@
   import Switch from "../ui/Switch.svelte";
   import { inlineError } from "../state/notify.svelte";
   import { getConfig, setConfig } from "../api";
-  import { isNumberText, type CfgField, type CfgPreset } from "../configSchemas";
+  import { isNumberText, matchOptionCase, type CfgField, type CfgPreset } from "../configSchemas";
 
   interface Props {
     title: string;
@@ -38,8 +38,11 @@
         path,
         fields.map((f) => f.path),
       );
-      orig = got;
-      vals = { ...got };
+      // The game may write a choice in another case ("Medium" for "medium"): show it as that
+      // option. Unchanged, it isn't written back.
+      const shown = matchOptionCase(fields, got);
+      orig = shown;
+      vals = { ...shown };
     } catch (e) {
       error = inlineError(e, "Reading the settings file");
     }
