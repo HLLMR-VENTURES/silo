@@ -48,27 +48,34 @@ fn parse_store_category(xml: &str) -> Option<String> {
     let mut buf = Vec::new();
     let mut stack: Vec<String> = Vec::new();
 
+    // The category's text arrives split at any `&amp;` (#266): gather it and read it
+    // when `</category>` closes.
+    let mut run = crate::xmltext::TextRun::default();
+
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Eof) | Err(_) => break,
             Ok(Event::Start(e)) => {
+                run.take();
                 stack.push(String::from_utf8_lossy(e.local_name().as_ref()).into_owned());
             }
-            Ok(Event::End(_)) => {
-                stack.pop();
+            Ok(Event::Empty(_)) => {
+                run.take();
             }
-            Ok(Event::Text(t)) => {
+            Ok(Event::End(_)) => {
                 let last = stack.last().map(String::as_str).unwrap_or("");
                 let parent = stack.iter().rev().nth(1).map(String::as_str).unwrap_or("");
+                let txt = run.take();
                 if last == "category" && parent == "storeData" {
-                    if let Some(txt) = crate::xmltext::text(&t) {
-                        let v = txt.trim().to_string();
-                        if !v.is_empty() {
-                            return Some(v);
-                        }
+                    let v = txt.trim();
+                    if !v.is_empty() {
+                        return Some(v.to_string());
                     }
                 }
+                stack.pop();
             }
+            Ok(Event::Text(t)) => run.push_text(&t),
+            Ok(Event::GeneralRef(r)) => run.push_ref(&r),
             _ => {}
         }
         buf.clear();
@@ -84,6 +91,13 @@ mod tests {
     fn reads_category() {
         let xml = r#"<vehicle><storeData><name>X</name><category>tractorsM</category></storeData></vehicle>"#;
         assert_eq!(parse_store_category(xml).as_deref(), Some("tractorsM"));
+    }
+
+    /// #266: a category with an entity reference isn't cut at the `&`.
+    #[test]
+    fn reads_category_with_an_entity() {
+        let xml = r#"<vehicle><storeData><category>a&amp;b</category></storeData></vehicle>"#;
+        assert_eq!(parse_store_category(xml).as_deref(), Some("a&b"));
     }
 
     #[test]

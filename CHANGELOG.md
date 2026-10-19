@@ -349,6 +349,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (nanoid, postcss and source-map-js updated). Nothing in the shipped app changes. (#234)
 
 ### Fixed
+- A mod's title or author with an `&` in it was cut short ("Elm & Ash" showed as "Elm"), and a
+  savegame or map name with one lost its first half. Silo now reads the whole name, and
+  re-reads mods it had already scanned once after the update. (#266)
+
 - **Find the problem mod** showed "Round 1 of about NaN", and a finished run couldn't name the
   mod it found: Silo sent the step's fields in the wrong case. (#263)
 
