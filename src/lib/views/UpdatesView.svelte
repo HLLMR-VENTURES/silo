@@ -65,14 +65,15 @@
   );
 </script>
 
+{#snippet checkNow()}
+  <span use:tooltip={checkDisabled && checkDisabledReason ? checkDisabledReason : null}>
+    <Button icon="update" loading={checking} disabled={checkDisabled} onclick={oncheck}>
+      Check now
+    </Button>
+  </span>
+{/snippet}
+
 <ViewBoundary name="Updates">
-  {#snippet checkNow()}
-    <span use:tooltip={checkDisabled && checkDisabledReason ? checkDisabledReason : null}>
-      <Button icon="update" loading={checking} disabled={checkDisabled} onclick={oncheck}>
-        Check now
-      </Button>
-    </span>
-  {/snippet}
   <ViewHeader title="Updates" {description} actions={neverChecked ? undefined : checkNow} />
   {#if !neverChecked}<p class="privacy">{UPDATE_PRIVACY_LINE}</p>{/if}
 
