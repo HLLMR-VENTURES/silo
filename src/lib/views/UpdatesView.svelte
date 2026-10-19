@@ -55,6 +55,9 @@
         ? `Mod updates · Last checked ${lastCheckedText(checkedAt, now)}`
         : "Mod updates · Not checked yet",
   );
+  // Before the first check the panel's empty state carries the privacy line and Check now, so the
+  // header doesn't repeat them.
+  const neverChecked = $derived(!checking && checkedAt == null);
   const progressLabel = $derived(
     progress && progress.total > 0
       ? `Checked ${progress.done} of ${progress.total} linked GitHub mods`
@@ -63,16 +66,15 @@
 </script>
 
 <ViewBoundary name="Updates">
-  <ViewHeader title="Updates" {description}>
-    {#snippet actions()}
-      <span use:tooltip={checkDisabled && checkDisabledReason ? checkDisabledReason : null}>
-        <Button icon="update" loading={checking} disabled={checkDisabled} onclick={oncheck}>
-          Check now
-        </Button>
-      </span>
-    {/snippet}
-  </ViewHeader>
-  <p class="privacy">{UPDATE_PRIVACY_LINE}</p>
+  {#snippet checkNow()}
+    <span use:tooltip={checkDisabled && checkDisabledReason ? checkDisabledReason : null}>
+      <Button icon="update" loading={checking} disabled={checkDisabled} onclick={oncheck}>
+        Check now
+      </Button>
+    </span>
+  {/snippet}
+  <ViewHeader title="Updates" {description} actions={neverChecked ? undefined : checkNow} />
+  {#if !neverChecked}<p class="privacy">{UPDATE_PRIVACY_LINE}</p>{/if}
 
   {#if autoCheckOffer.open}
     <section class="offer" aria-labelledby="auto-check-offer">
