@@ -213,8 +213,12 @@ export class ArchiveMove {
     return { problem, lost };
   }
 
+  /** The last lost-cancel explanation given: App shows it as information, not an error. */
+  lastLostCancel: string | null = null;
+
   #lostCancelMessage(): string {
-    return lostCancelText(this.archive?.path, this.#cancelHomeDefault);
+    this.lastLostCancel = lostCancelText(this.archive?.path, this.#cancelHomeDefault);
+    return this.lastLostCancel;
   }
 
   /** Run a move-ish invoke (pending until the move finishes or pauses), then settle. */

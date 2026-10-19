@@ -17,14 +17,8 @@ function modsWord(n: number): string {
   return n === 2 ? "Two mods" : `${formatCount(n)} mods`;
 }
 
-/** What each kind of clash is, in words ("add the same feature name"). */
+/** What each kind of clash is, in words ("add the same control action"). */
 const WHAT: Record<string, string> = {
-  specialization: "add the same feature name",
-  placeableSpecialization: "add the same feature name",
-  handToolSpecialization: "add the same feature name",
-  vehicleType: "add the same vehicle type",
-  placeableType: "add the same building type",
-  handToolType: "add the same hand tool type",
   action: "add the same control action",
   brand: "add the same brand",
   storeCategory: "add the same shop category",

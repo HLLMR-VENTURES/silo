@@ -206,10 +206,10 @@ pub fn add_known(json: Option<&str>, path: &str) -> String {
 /// A folder Silo may manage: it exists and Silo can write to it.
 pub fn validate_folder(p: &Path) -> Result<(), String> {
     if !p.is_dir() {
-        return Err("That folder doesn't exist".into());
+        return Err("That folder doesn't exist.".into());
     }
     let probe = p.join(".silo-write-probe");
-    std::fs::write(&probe, b"silo").map_err(|_| "Silo can't write to that folder".to_string())?;
+    std::fs::write(&probe, b"silo").map_err(|_| "Silo can't write to that folder.".to_string())?;
     let _ = std::fs::remove_file(&probe);
     Ok(())
 }
@@ -246,7 +246,7 @@ pub fn read_override(xml: &str) -> Option<Override> {
 pub fn write_override(xml: &str, game_path: &str) -> Result<String, String> {
     let v = xmlconfig::get_values(xml, &override_paths());
     if !v.contains_key(OV_ACTIVE) || !v.contains_key(OV_DIR) {
-        return Err("gameSettings.xml has no modsDirectoryOverride setting to update".into());
+        return Err("The game's settings don't have a mods folder entry to update yet.".into());
     }
     xmlconfig::set_values(
         xml,
@@ -303,9 +303,9 @@ pub fn real_folder(p: &Path) -> Result<PathBuf, String> {
     if !p.is_absolute() {
         return Err(format!("Choose a folder by its full path: {}", p.display()));
     }
-    let c = std::fs::canonicalize(p).map_err(|_| "That folder doesn't exist".to_string())?;
+    let c = std::fs::canonicalize(p).map_err(|_| "That folder doesn't exist.".to_string())?;
     if !c.is_dir() {
-        return Err("That's a file, not a folder".into());
+        return Err("That's a file, not a folder.".into());
     }
     Ok(PathBuf::from(strip_verbatim(
         &c.to_string_lossy(),

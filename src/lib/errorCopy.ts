@@ -39,6 +39,7 @@ export const ERROR_CODES = [
   "STILL_LOADING",
   "LIBRARY_BUSY",
   "MOVE_UNFINISHED",
+  "MOVE_RUNNING",
   "GAME_RUNNING",
   "NOT_A_SET_LINK",
   "UNKNOWN",
@@ -52,6 +53,8 @@ export const ERROR_CODES = [
   "GITHUB_AUTH",
   "GITHUB_RATE_LIMIT",
   "NOT_A_MOD",
+  "DOWNLOAD_BROKEN",
+  "NO_LOG",
   "CHANGED_SINCE_PREVIEW",
   "DB_NEWER",
 ] as const;
@@ -67,6 +70,7 @@ const RETRYABLE: ReadonlySet<string> = new Set([
   "NET_TIMEOUT",
   "ARCHIVE_UNAVAILABLE",
   "DISK_FULL",
+  "DOWNLOAD_BROKEN",
   "UNKNOWN",
 ]);
 
@@ -101,13 +105,13 @@ export function classifyMessage(msg: string): ErrorCode {
     const code = OS_ERRORS[Number(os[1])];
     if (code) return code;
   }
-  if (
-    /finish or cancel the (?:archive|library) move first|archive move is already|already unfinished|pause the move to play/i.test(
-      msg,
-    )
-  ) {
+  // Launching while a move runs: pause it (MOVE_RUNNING), not finish or cancel it.
+  if (/pause the move to play/i.test(msg)) return "MOVE_RUNNING";
+  if (/finish or cancel the (?:archive|library) move first|archive move is already|already unfinished/i.test(msg)) {
     return "MOVE_UNFINISHED";
   }
+  if (/no game log yet|no control settings yet|no log\.txt found|no inputbinding\.xml found/i.test(msg)) return "NO_LOG";
+  if (/download(?:ed file)? (?:isn't|is not) a valid \.zip/i.test(msg)) return "DOWNLOAD_BROKEN";
   if (/doesn't look like a silo set link/i.test(msg)) return "NOT_A_SET_LINK";
   if (/rate limit/i.test(msg)) return "GITHUB_RATE_LIMIT";
   if (/bad credentials/i.test(msg) || (/\b401\b/.test(msg) && /github/i.test(msg))) {
@@ -163,6 +167,8 @@ function copyFor(code: ErrorCode, message: string, op: string): string {
       return "Silo is finishing another change to your library. Try again in a moment.";
     case "MOVE_UNFINISHED":
       return MOVE_UNFINISHED_COPY;
+    case "MOVE_RUNNING":
+      return "Silo is moving your library archive. Pause the move to play, or wait for it to finish.";
     case "ARCHIVE_UNAVAILABLE":
       return "Your library archive isn't available. Connect the drive, or choose another folder.";
     case "PERMISSION_DENIED":
@@ -180,9 +186,15 @@ function copyFor(code: ErrorCode, message: string, op: string): string {
     case "GITHUB_AUTH":
       return "GitHub needs you to sign in again.";
     case "GITHUB_RATE_LIMIT":
-      return "GitHub is limiting requests for a while. Connecting your GitHub account raises the limit.";
+      return githubConnected
+        ? "GitHub is limiting requests for a while. Try again in a few minutes."
+        : "GitHub is limiting requests for a while. Connecting your GitHub account raises the limit.";
     case "NOT_A_MOD":
       return "That file isn't a Farming Simulator mod.";
+    case "DOWNLOAD_BROKEN":
+      return "The download was cut off or damaged. Try again.";
+    case "NO_LOG":
+      return NO_LOG_COPY;
     case "CHANGED_SINCE_PREVIEW":
       return "This set changed after you opened it. Preview it again.";
     case "DB_NEWER":
@@ -192,6 +204,17 @@ function copyFor(code: ErrorCode, message: string, op: string): string {
     case "UNKNOWN":
       return `Something went wrong while ${op ? lowerFirst(op) : "doing that"}.`;
   }
+}
+
+/** No game log (or controls file) yet: FS25 hasn't been played. An empty state, not a failure. */
+export const NO_LOG_COPY = "No game log yet. Play Farming Simulator 25 once, then come back here.";
+
+let githubConnected = false;
+
+/** Whether a GitHub account is connected (githubAuth sets it): the rate-limit copy only suggests
+ *  connecting when it isn't. */
+export function setGithubConnected(connected: boolean): void {
+  githubConnected = connected;
 }
 
 /** What Silo says when a library write is refused because an archive move is paused/unfinished. */

@@ -21,6 +21,7 @@
   import type { LibraryLookup } from "../diagnose/crashNotice";
   import { formatCount, plural } from "../plural";
   import { latestOnly } from "../diagnose/latest";
+  import { describeError, NO_LOG_COPY } from "../errorCopy";
 
   interface Props {
     /** Current active tech names, and which of them are maps (kept on during bisection). */
@@ -84,12 +85,15 @@
   let logTime = $state<string | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  /** The game hasn't written a log yet (never played): an empty state, not an error. */
+  let noLog = $state(false);
 
   // Reads can overlap (a new log read elsewhere while "Read the log again" runs): the newest wins.
   const reads = latestOnly<{ r: LogReport; ms: number | null }>();
   async function scan() {
     loading = true;
     error = null;
+    noLog = false;
     try {
       const applied = await reads.run(
         async () => {
@@ -104,7 +108,9 @@
       );
       if (!applied) return; // a newer read owns `loading`
     } catch (e) {
-      error = inlineError(e, "Reading the game log");
+      // By code, or by the older backend's text ("No log.txt found…").
+      if (describeError(e).code === "NO_LOG") noLog = true;
+      else error = inlineError(e, "Reading the game log");
       report = null;
     }
     loading = false;
@@ -203,7 +209,9 @@
     <div role="status" aria-live="polite" class="live">
       {#if loading && !report}<div class="empty">Reading log.txt…</div>{/if}
     </div>
-    {#if error}
+    {#if noLog}
+      <div class="empty">{NO_LOG_COPY}</div>
+    {:else if error}
       <div class="verdict bad" role="alert">{error}</div>
     {:else if report && verdict}
       {@const r = report}
@@ -302,7 +310,7 @@
       class="sample"
       class:open
       aria-expanded={open}
-      aria-label={`${open ? "Collapse" : "Expand"} the log line for ${title}`}
+      aria-label={`line ${m.sampleLine}, the log line for ${title}`}
       onclick={() => toggleLine(m.modName)}
     >
       <span class="line-no tnum">line {m.sampleLine}</span>

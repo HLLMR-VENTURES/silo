@@ -43,7 +43,8 @@
     };
   });
 
-  let copied = $state(false);
+  /** What Copy details did: copied to the clipboard, or saved to a file when it couldn't. */
+  let copied = $state<false | "copied" | "saved">(false);
   let copiedTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => () => clearTimeout(copiedTimer));
 
@@ -52,7 +53,7 @@
     try {
       const out = await copyOrSave(item.detail, "silo-error-details.txt", copyText, saveTextFile);
       if (out === "cancelled") return;
-      copied = true;
+      copied = out;
       clearTimeout(copiedTimer);
       copiedTimer = setTimeout(() => (copied = false), 2000);
     } catch {
@@ -102,7 +103,7 @@
   </div>
   <span class="controls" use:inertWhen={$modalOpen}>
     {#if item.detail}
-      <Button size="sm" variant="ghost" onclick={copyDetails}>{copied ? "Copied" : "Copy details"}</Button>
+      <Button size="sm" variant="ghost" onclick={copyDetails}>{copied === "saved" ? "Saved to a file" : copied ? "Copied" : "Copy details"}</Button>
     {/if}
     {#if item.action}
       <Button size="sm" variant="ghost" aria-label={actionName} onclick={runAction}>

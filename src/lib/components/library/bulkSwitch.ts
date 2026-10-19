@@ -111,13 +111,12 @@ export function bulkParkLooseConfirm(
   loose: readonly BulkMod[],
   opts: { otherDrive?: boolean; cloudSynced?: boolean; sep?: string } = {},
 ): ConfirmOptions {
-  const sep = opts.sep ?? "\\";
   const n = modsCount(count);
   const l = loose.length;
   const categories = new Set(loose.map((m) => m.category));
   const where =
     categories.size === 1
-      ? `(archive${sep}${[...categories][0]})`
+      ? `(its ${[...categories][0]} folder)` // the category only: the archive may be anywhere
       : l === 1
         ? "(its category folder in your library archive)"
         : "(each into its category folder in your library archive)";

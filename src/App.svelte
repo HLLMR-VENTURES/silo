@@ -79,7 +79,7 @@
     openKnownFolder,
   } from "./lib/api";
   import { ArchiveMove } from "./lib/archiveMove.svelte";
-  import { capList, modsCount, problemLines, unDot } from "./lib/archiveMoveLogic";
+  import { capList, isOnlyLostCancel, modsCount, problemLines, unDot } from "./lib/archiveMoveLogic";
   import { sameMods } from "./lib/loadoutSafety";
   import { onOpenUrl, getCurrent } from "@tauri-apps/plugin-deep-link";
   import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -2041,6 +2041,7 @@
     "GAME_RUNNING",
     "LIBRARY_BUSY",
     "MOVE_UNFINISHED",
+    "MOVE_RUNNING",
     "ARCHIVE_UNAVAILABLE",
     "DISK_FULL",
     "NET_OFFLINE",
@@ -2741,7 +2742,11 @@
   // The move's state, poll and drive/settle cycle live in archiveMove.svelte.ts; App supplies
   // the side effects that reach beyond the move.
   const archiveMove = new ArchiveMove({
-    setError: (msg) => reportError(msg, "Moving your library"),
+    // A cancel that lost the race to a finished move isn't a failure: say what happened.
+    setError: (msg) =>
+      isOnlyLostCancel(msg, archiveMove.lastLostCancel)
+        ? info(msg, { duration: 12_000 })
+        : reportError(msg, "Moving your library"),
     refreshModsStatus: async () => {
       modsStatus = await modsRootStatus().catch(() => modsStatus);
     },
@@ -3986,6 +3991,7 @@
         checkDisabledReason={fgLock.reason ||
           updateCheckBlocked ||
           (mods.length === 0 ? "No mods to check yet." : "")}
+        catalogError={!!updateCatalogError}
         oncheck={() => checkAllUpdates()}
       >
         <UpdatesPanel

@@ -12,6 +12,7 @@ import { ghDevicePoll, ghDeviceStart, ghStatus, openExternal } from "../api";
 import type { GhStatus } from "../types";
 import { toast } from "../ui/toasts.svelte";
 import { inlineError, reportError, success } from "./notify.svelte";
+import { setGithubConnected } from "../errorCopy";
 
 export interface DeviceFlowView {
   userCode: string;
@@ -67,6 +68,7 @@ export function deviceFlowActive(): boolean {
 export async function refreshGithub(): Promise<void> {
   try {
     githubAuth.status = await ghStatus();
+    setGithubConnected(!!githubAuth.status.user);
   } catch (e) {
     githubAuth.message = inlineError(e, "Checking your GitHub connection");
   }
@@ -167,6 +169,7 @@ export function resetGithubAuth(): void {
   cancelDeviceFlow();
   views = 0;
   githubAuth.status = emptyStatus();
+  setGithubConnected(false);
   githubAuth.message = null;
 }
 

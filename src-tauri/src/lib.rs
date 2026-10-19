@@ -575,7 +575,7 @@ async fn gh_set_pat(app: tauri::AppHandle, pat: String) -> Result<String, String
         let pat = github::clean_pat(&pat)?;
         let (user, scopes) = github::whoami_scoped(&pat)?;
         if user.is_empty() {
-            return Err("GitHub did not recognize that token".into());
+            return Err("GitHub didn't accept that token. Check it and paste it again.".into());
         }
         let conn = db::open(&db)?;
         secrets::set(&conn, "gh_token", Some(&pat))?;
@@ -621,7 +621,7 @@ async fn gh_star(
     tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token")
-            .ok_or_else(|| "Connect your GitHub account first".to_string())?;
+            .ok_or_else(|| "Connect your GitHub account first.".to_string())?;
         github::set_star(&owner, &repo, &token, on)
     })
     .await
@@ -640,7 +640,7 @@ async fn gh_watch(
     tauri::async_runtime::spawn_blocking(move || -> Result<bool, String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token")
-            .ok_or_else(|| "Connect your GitHub account first".to_string())?;
+            .ok_or_else(|| "Connect your GitHub account first.".to_string())?;
         github::set_watch(&owner, &repo, &token, on)
     })
     .await
@@ -1371,7 +1371,7 @@ async fn verify_mod(
             .find(|r| r.tech_name.as_deref() == Some(tech_name.as_str()))
         else {
             return Ok(provenance::VerifyResult::unverified(
-                "This mod isn't in the catalog yet. No trusted build to compare against.",
+                "This mod isn't in Silo's catalog yet, so there's nothing to compare it with.",
             ));
         };
 
@@ -1401,7 +1401,7 @@ async fn verify_mod(
                 Ok(r)
             }
             None => Ok(provenance::VerifyResult::unverified(
-                "No hashed build for this version yet. Coverage is GitHub-first and growing.",
+                "Silo's catalog has no published build of this version to compare with yet.",
             )),
         }
     })
@@ -1828,7 +1828,7 @@ fn primary_root(root: Option<String>) -> Result<PathBuf, String> {
         Some(r) if !r.is_empty() => {
             let want = PathBuf::from(&r)
                 .canonicalize()
-                .map_err(|_| "That mods folder doesn't exist".to_string())?;
+                .map_err(|_| "That mods folder isn't there anymore.".to_string())?;
             allowed
                 .into_iter()
                 .find(|a| a.canonicalize().map(|ac| ac == want).unwrap_or(false))
@@ -2104,7 +2104,7 @@ fn resolve_layout(
         if matches!(mods_folder_check(conn, mods, &known(false)), Ok(None)) {
             return Err(blocked(
                 format!(
-                    "Farming Simulator 25's mods folder setting points at {}, which shares files with this folder. Point FS25 at this folder, or choose another one.",
+                    "Farming Simulator 25's mods folder setting points at {}, which shares files with this folder. Point Farming Simulator 25 at this folder, or choose another one.",
                     g.display()
                 ),
                 modsroot::BlockCause::GameSetting,
@@ -2344,7 +2344,7 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
 /// original (`gameSettings.xml.silo-original.bak`) and the last three versions (`.bak`,
 /// `.bak.2`, `.bak.3`), then swaps the new file in atomically.
 fn point_game_at(folder: &std::path::Path) -> Result<(), String> {
-    let loc = fsgame::locate().ok_or_else(|| "FS25 user folder not found".to_string())?;
+    let loc = fsgame::locate().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
     let gs = loc.user_dir.join("gameSettings.xml");
     let roots = [loc.user_dir.clone()];
     let xml = paths::guarded_xml_read(&roots, &gs)?;
@@ -2469,7 +2469,7 @@ async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus
 async fn create_mods_folder(app: tauri::AppHandle) -> Result<ModsRootStatus, error::AppError> {
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<ModsRootStatus, String> {
-        let loc = fsgame::locate().ok_or_else(|| "FS25 user folder not found".to_string())?;
+        let loc = fsgame::locate().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         std::fs::create_dir_all(loc.user_dir.join("mods")).map_err(|e| e.to_string())?;
         let conn = db::open(&db)?;
         Ok(compute_mods_root_status(&conn))
@@ -3677,7 +3677,10 @@ async fn launch_game() -> Result<(), error::AppError> {
         );
     }
     if relocate::is_running() {
-        return Err("Silo is moving your library archive. Pause the move to play.".into());
+        return Err(error::AppError::new(
+            error::code::MOVE_RUNNING,
+            "Silo is moving your library archive. Pause the move to play.",
+        ));
     }
     tauri::async_runtime::spawn_blocking(gamelaunch::launch)
         .await
@@ -3811,7 +3814,7 @@ async fn mp_verify_file(
             paths::SHARED_FILE_MAX_BYTES,
         )?;
         let manifest: mpsync::Manifest = serde_json::from_str(&text)
-            .map_err(|_| "That file isn't a Silo Multiplayer check file".to_string())?;
+            .map_err(|_| "That file isn't a multiplayer check file.".to_string())?;
         let local_hashed = mpsync::hash_mods(&local);
         Ok(mpsync::diff(&manifest.mods, &local_hashed))
     })
@@ -3897,11 +3900,11 @@ async fn collection_export(
     tauri::async_runtime::spawn_blocking(move || -> Result<ExportResult, String> {
         let name = name.trim().to_string();
         if name.is_empty() {
-            return Err("Give the set a name".into());
+            return Err("Give the set a name.".into());
         }
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token")
-            .ok_or_else(|| "Connect your GitHub account first".to_string())?;
+            .ok_or_else(|| "Connect your GitHub account first.".to_string())?;
         let author = db::get_app_setting(&conn, "gh_user");
 
         // Pin the packaged mods (dev/unpacked ones can't be byte-pinned — reported as omitted).
@@ -3930,7 +3933,11 @@ async fn collection_export(
             let repo = github::create_public_repo(
                 &token,
                 &collection::repo_slug(&name),
-                &format!("A Silo FS25 mod set ({} mods)", coll.mods.len()),
+                &format!(
+                    "A Silo mod set for Farming Simulator 25 ({} {})",
+                    coll.mods.len(),
+                    if coll.mods.len() == 1 { "mod" } else { "mods" }
+                ),
             )?;
             let (owner, rname) = repo
                 .full_name
@@ -3996,16 +4003,16 @@ async fn collection_update(
     tauri::async_runtime::spawn_blocking(move || -> Result<ExportResult, String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token")
-            .ok_or_else(|| "Connect your GitHub account first".to_string())?;
+            .ok_or_else(|| "Connect your GitHub account first.".to_string())?;
         let where_ = collection::parse_collection_ref(&reference)
-            .ok_or_else(|| "That shared link isn't valid".to_string())?;
+            .ok_or_else(|| "That shared link isn't valid.".to_string())?;
 
         // Preserve the collection's identity (name/description/author/date); re-pin the mods.
         let existing = read_collection_json(&reference, Some(&token))?;
         let (entries, omitted) = build_collection_entries(&base, mods);
         if entries.is_empty() {
             return Err(
-                "Nothing to update with — the active set has no packaged (.zip) mods".into(),
+                "Nothing to update. Your active mods include no packaged (.zip) mods.".into(),
             );
         }
         let coll = collection::Collection {
@@ -4180,7 +4187,7 @@ async fn collections_list(app: tauri::AppHandle) -> Result<Vec<CollectionSummary
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<CollectionSummary>, String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token")
-            .ok_or_else(|| "Connect your GitHub account first".to_string())?;
+            .ok_or_else(|| "Connect your GitHub account first.".to_string())?;
         let mut out: Vec<CollectionSummary> = Vec::new();
 
         if let Ok(gists) = github::list_user_gists(&token) {
@@ -4256,11 +4263,11 @@ async fn collection_delete(
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token")
-            .ok_or_else(|| "Connect your GitHub account first".to_string())?;
+            .ok_or_else(|| "Connect your GitHub account first.".to_string())?;
         match kind.as_str() {
             "gist" => github::delete_gist(&token, &reference),
             _ => Err(
-                "Silo can delete gist collections here. For a public repo, delete it on GitHub."
+                "Silo can delete unlisted links here. For a public repository, delete it on GitHub."
                     .into(),
             ),
         }
@@ -4491,7 +4498,7 @@ async fn collection_apply(
                     filename: None,
                     status: "skipped".into(),
                     verdict: None,
-                    detail: Some("Not in the catalog. Find it manually.".into()),
+                    detail: Some("Not in Silo's catalog. Find it on its own page.".into()),
                 });
                 continue;
             };
@@ -4678,7 +4685,7 @@ fn gated_row(tech_name: &str) -> ApplyRow {
         filename: None,
         status: "skipped".into(),
         verdict: None,
-        detail: Some("Download-gated. Get it from its page.".into()),
+        detail: Some("This site doesn't allow direct downloads. Get it from its page.".into()),
     }
 }
 
@@ -4699,21 +4706,25 @@ fn verdict_against_pin(zip: &std::path::Path, pinned: Option<&str>) -> String {
 /// Parse the FS25 log.txt and report which mods are throwing errors/warnings, whether
 /// the last run crashed, and the culprit ranking. Read-only; touches nothing.
 #[tauri::command]
-async fn scan_log() -> Result<logscan::LogReport, String> {
+async fn scan_log() -> Result<logscan::LogReport, error::AppError> {
     let path = fsgame::user_dir()
         .map(|d| d.join("log.txt"))
-        .ok_or_else(|| "Could not locate the FS25 user directory".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || -> Result<logscan::LogReport, String> {
+        .ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<logscan::LogReport, error::AppError> {
         if !path.exists() {
-            return Err("No log.txt found. Launch FS25 at least once first.".to_string());
+            // The game hasn't been played yet: an empty state, not a failure.
+            return Err(error::AppError::new(
+                error::code::NO_LOG,
+                "No game log yet. Play Farming Simulator 25 once, then come back here.",
+            ));
         }
         // Logs are read as lossy UTF-8; FS writes mostly ASCII but paths can carry stray bytes.
-        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let bytes = std::fs::read(&path)?;
         let text = String::from_utf8_lossy(&bytes);
         Ok(logscan::parse(&text))
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| error::AppError::from(e.to_string()))?
 }
 
 /// Crash detection's cheap check (Diagnose, #260): where log.txt is, when it last changed,
@@ -4756,19 +4767,25 @@ async fn mark_log_seen(app: tauri::AppHandle, modified_ms: i64) -> Result<(), St
 
 /// Parse inputBinding.xml into a per-device binding map (read-only).
 #[tauri::command]
-async fn scan_bindings() -> Result<bindings::BindingReport, String> {
+async fn scan_bindings() -> Result<bindings::BindingReport, error::AppError> {
     let path = fsgame::user_dir()
         .map(|d| d.join("inputBinding.xml"))
-        .ok_or_else(|| "Could not locate the FS25 user directory".to_string())?;
-    tauri::async_runtime::spawn_blocking(move || -> Result<bindings::BindingReport, String> {
-        if !path.exists() {
-            return Err("No inputBinding.xml found. Launch FS25 at least once first.".to_string());
-        }
-        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-        Ok(bindings::parse(&String::from_utf8_lossy(&bytes)))
-    })
+        .ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
+    tauri::async_runtime::spawn_blocking(
+        move || -> Result<bindings::BindingReport, error::AppError> {
+            if !path.exists() {
+                // The game writes it on first launch: an empty state, not a failure.
+                return Err(error::AppError::new(
+                    error::code::NO_LOG,
+                    "No control settings yet. Play Farming Simulator 25 once, then come back here.",
+                ));
+            }
+            let bytes = std::fs::read(&path)?;
+            Ok(bindings::parse(&String::from_utf8_lossy(&bytes)))
+        },
+    )
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| error::AppError::from(e.to_string()))?
 }
 
 // ── Guided bisection ──
@@ -4829,7 +4846,7 @@ async fn get_config(
     paths: Vec<String>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
     off_main(move || {
-        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let user = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let xml = crate::paths::guarded_xml_read(&[user], std::path::Path::new(&path))?;
         Ok(xmlconfig::get_values(&xml, &paths))
     })
@@ -4843,7 +4860,7 @@ async fn get_config(
 async fn set_config(path: String, edits: Vec<xmlconfig::Edit>) -> Result<(), String> {
     off_main(move || {
         config_write_refusal(gamelaunch::fs25_running())?;
-        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let user = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let roots = [user];
         let p = std::path::Path::new(&path);
         let xml = paths::guarded_xml_read(&roots, p)?;
@@ -4868,7 +4885,7 @@ async fn mods_with_settings() -> Result<Vec<String>, String> {
 #[tauri::command]
 async fn get_mod_settings(mod_name: String) -> Result<Vec<settings_form::SettingsFile>, String> {
     off_main(move || {
-        let dir = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let dir = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let mut files = Vec::new();
         for path in settings_form::find_files(&dir, &mod_name) {
             files.push(settings_form::load_file(&path)?);
@@ -4882,7 +4899,7 @@ async fn get_mod_settings(mod_name: String) -> Result<Vec<settings_form::Setting
 async fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Result<(), String> {
     off_main(move || {
         config_write_refusal(gamelaunch::fs25_running())?;
-        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let user = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let roots = [user];
         let p = std::path::Path::new(&path);
         let raw = paths::guarded_xml_read(&roots, p)?;
@@ -4898,7 +4915,7 @@ async fn save_mod_settings_raw(path: String, content: String) -> Result<(), Stri
     off_main(move || {
         ensure_well_formed(&content)?;
         config_write_refusal(gamelaunch::fs25_running())?;
-        let user = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let user = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let p = std::path::Path::new(&path);
         ensure_override_kept(&user, p, None, &content)?;
         paths::guarded_xml_write(&[user], p, &content)
@@ -4965,7 +4982,7 @@ async fn get_savegames() -> Result<Vec<savegame::Savegame>, String> {
 #[tauri::command]
 async fn backup_savegame(folder: String) -> Result<String, String> {
     off_main(move || {
-        let dir = fsgame::user_dir().ok_or_else(|| "No FS25 user dir".to_string())?;
+        let dir = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         savegame::backup(&dir, &folder)
     })
     .await
