@@ -279,7 +279,7 @@
   } from "./lib/views/libraryStatus";
   import { back, go, nav, searchPlaceholderFor, searchTargetFor } from "./lib/state/nav.svelte";
   import type { MenuItem } from "./lib/ui/overlayTypes";
-  import { fmtSize } from "./lib/format";
+  import { displayVersion, fmtSize } from "./lib/format";
   import {
     MODS_FOLDER_KEY,
     OVERRIDE_FOLLOWED_KEY,
@@ -1931,7 +1931,7 @@
     for (const { row, file } of arrivals) {
       announcedDrops.add(droppedKey(file));
       toast({
-        message: `Found a newer ${row.title} (${file.flatVersion}).`,
+        message: `Found a newer ${row.title} (${displayVersion(file.flatVersion)}).`,
         duration: 15_000,
         action: {
           label: "Use this version",

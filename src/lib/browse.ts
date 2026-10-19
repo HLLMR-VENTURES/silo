@@ -3,6 +3,7 @@
 import type { BrowseMod, CatalogModDetail, ModSourceOption } from "./types";
 import type { BadgeSpec } from "./components/library/rowBadges";
 import { catalogImage } from "./api";
+import { displayVersion } from "./format";
 import { describeError, formatDetail } from "./errorCopy";
 
 // GIANTS' ModHub CDN refuses requests that don't come from its own site. Silo respects
@@ -44,7 +45,7 @@ export const label = (s: string): string => SOURCE_LABEL[s] ?? s;
  */
 export function sourceChip(s: Pick<ModSourceOption, "source" | "version">): string {
   const v = s.version?.trim();
-  return v ? `${label(s.source)} ${v}` : label(s.source);
+  return v ? `${label(s.source)} ${displayVersion(v)}` : label(s.source);
 }
 
 /** Why a source can't be installed directly — shown on hover and in the drawer. */
