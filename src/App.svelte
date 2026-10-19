@@ -1807,17 +1807,24 @@
   };
 
   // The last check's rows stay up (and the badge with them) until the new check is done.
+  /** Bumped when the mods folder changes: a check of the old folder still running mustn't land. */
+  let updateFolderGen = 0;
+
   async function checkAllUpdates(quiet = false) {
     if (!quiet) go("updates");
     if (updateChecking || updateCheckBlocked) return;
     updateChecking = true;
     updateProgress = null;
     const asked = new Set(mods.map((m) => m.techName));
+    const gen = updateFolderGen;
     try {
       const res = await runUpdateCheck(mods, repoMap, {
         ...updateCheckDeps,
-        onProgress: (done, total) => (updateProgress = { done, total }),
+        onProgress: (done, total) => {
+          if (gen === updateFolderGen) updateProgress = { done, total };
+        },
       });
+      if (gen !== updateFolderGen) return; // the other folder's files: dropped
       updateResults = res.rows;
       updateRowStates = {};
       updateCatalogError = res.catalogError;
@@ -1836,8 +1843,10 @@
     const r = repoMap[row.techName];
     if (!m || !r || updateChecking || updateRowStates[row.techName]) return;
     setRowState(row.techName, { phase: "checking" });
+    const gen = updateFolderGen;
     try {
       const next = await recheckRow(row, m, r, updateCheckDeps);
+      if (gen !== updateFolderGen) return; // the folder changed meanwhile
       updateResults = updateResults.map((x) => (x.techName === row.techName ? next : x));
     } finally {
       setRowState(row.techName, null);
@@ -2454,7 +2463,8 @@
     scanFailed = false;
     activeSet = new Set();
     foreignFiles = [];
-    // The last update check was of the other folder's files.
+    // The last update check was of the other folder's files (and one still running is too).
+    updateFolderGen++;
     updateResults = [];
     updateCheckedAt = null;
     updateCatalogError = null;
