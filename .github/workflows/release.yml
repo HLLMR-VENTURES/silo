@@ -5,6 +5,13 @@ name: Release
 # release, so you review before publishing. All bundles are signed for the in-app updater
 # (minisign). Windows installers are additionally Authenticode-signed via Azure Trusted
 # Signing (no SmartScreen "unknown publisher"); macOS/Linux remain OS-unsigned.
+#
+# Signing is gated twice before any key is reachable:
+#   1. `guard` refuses anything but a v* tag whose commit is already on main with every CI
+#      check green, so an unreviewed branch commit can't be built and signed even if it is
+#      tagged or this workflow is dispatched from a branch.
+#   2. `build` runs in the `release` environment, which holds the signing secrets, admits
+#      only v* tags, and waits for the owner's approval in the Actions UI.
 on:
   push:
     tags: ['v*']
@@ -14,8 +21,68 @@ permissions:
   contents: read
 
 jobs:
+  guard:
+    name: Release guard (tag on main, CI green)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read # read the CI check runs on the tagged commit
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require a v* tag on main with green CI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_TYPE: ${{ github.ref_type }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          # Every job in ci.yml, by check name. Keep in sync with ci.yml.
+          REQUIRED_CHECKS: |
+            Frontend (svelte-check + build)
+            Rust (fmt + test)
+            Rust (macOS clippy + test)
+            Rust (Windows clippy + test)
+            Security audit (cargo-audit)
+            Secret scan (gitleaks)
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != "tag" ] || [[ "$TAG" != v* ]]; then
+            echo "::error::Releases run only from a v* tag (got $REF_TYPE '$TAG'). Run the workflow from the tag, not a branch."
+            exit 1
+          fi
+          git fetch --no-tags --quiet origin main
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::Tag $TAG points at $SHA, which is not on main. Tag a commit that has been merged to main."
+            exit 1
+          fi
+          # Latest run of each required check on the tagged commit (re-runs add new check
+          # runs, so take the most recently started one).
+          gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" --paginate --jq '.check_runs[]' > runs.jsonl
+          red=0
+          while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            result=$(jq -rs --arg n "$name" \
+              '[.[] | select(.name == $n)] | sort_by(.started_at) | last
+               | if . == null then "absent" else (.conclusion // .status) end' runs.jsonl)
+            echo "$name: $result"
+            [ "$result" = "success" ] || red=1
+          done <<< "$REQUIRED_CHECKS"
+          if [ "$red" -ne 0 ]; then
+            echo "::error::CI is not green on $SHA. Wait for main's CI run on that commit to finish green (re-run it if it was cancelled), then re-run this workflow."
+            exit 1
+          fi
+          echo "Release guard passed: $TAG -> $SHA is on main with green CI."
+
   build:
     # tauri-action creates the draft release and uploads the installers.
+    needs: guard
+    # The signing secrets live only in this environment. It admits v* tags only and pauses
+    # for the owner's approval, so nothing is signed without an explicit go.
+    environment: release
     permissions:
       contents: write
     strategy:
@@ -94,7 +161,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Updater signing — signs the bundles and emits latest.json so the in-app
-          # updater can verify and install. Keys live in repo secrets (never in the tree).
+          # updater can verify and install. Keys live in the `release` environment's secrets
+          # (never in the tree, never readable by branch or PR workflows).
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # Azure auth for trusted-signing-cli (endpoint/account/profile are flags, above).

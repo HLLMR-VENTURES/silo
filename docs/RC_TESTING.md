@@ -232,9 +232,12 @@ npm run tauri:build
 ```
 
 Open the PR, merge it on green CI, then tag `vX.Y.Z` on that `main` commit. The tagged release
-workflow builds and signs the platform targets into a **draft, non-prerelease** release, but
-does **not** independently run the full test/audit battery first — so **only tag a commit whose
-CI is already green.** Publishing the draft makes it *Latest*, and the in-app updater offers it
+workflow does **not** re-run the test/audit battery; instead its `guard` job refuses the release
+unless the tagged commit is on `main` and that commit's CI checks all passed, so **wait for main's
+CI to finish green before tagging** (if the guard fails because CI was still running, re-run it
+once CI is green). The build then pauses until the owner **approves the `release` environment**
+in the Actions tab; that environment holds the signing keys. It builds and signs the platform
+targets into a **draft, non-prerelease** release. Publishing the draft makes it *Latest*, and the in-app updater offers it
 to every user straight away, so finish every check below first.
 
 Before publishing the draft:
