@@ -1,0 +1,19 @@
+# Reviewed gitleaks false positives. Suppressing a finding is a security decision: each
+# entry needs a reason here and the owner's approval of the PR that adds it. Entries are
+# exact fingerprints (commit:file:rule:line), so any new or changed token-shaped string
+# still fails CI and gets reviewed.
+#
+# 2026-10-19, Claude (release-signing hardening): six hits on three test-fixture literals
+# inside #[cfg(test)] modules, written to exercise Silo's own token scrubbing:
+#   - src-tauri/src/github.rs, clean_pat and gh_err tests from #281 ("keep a malformed
+#     pasted PAT out of the log and diagnostics");
+#   - src-tauri/src/secrets.rs, the at-rest scrub test from #293.
+# Each literal was checked without printing it: all contain obvious placeholder runs
+# ("0123" / "abcd" style sequences), one embeds "Silo", and all are assertion inputs in
+# tests. The 93ef55c / 32cbdd0 entries are the pre-squash branch commits of the same tests.
+b76531437e74a8c8d776570bfccfdd62c309c617:src-tauri/src/github.rs:github-pat:918
+b76531437e74a8c8d776570bfccfdd62c309c617:src-tauri/src/github.rs:generic-api-key:942
+836164b8a65b51dc00200718ab39024b20e8cc90:src-tauri/src/secrets.rs:github-oauth:138
+93ef55ca2eb9e34f1673be36f9bac56d5b73408d:src-tauri/src/github.rs:github-pat:918
+93ef55ca2eb9e34f1673be36f9bac56d5b73408d:src-tauri/src/github.rs:generic-api-key:942
+32cbdd04549e74d9b2c9377bd5c1fbaffc349589:src-tauri/src/secrets.rs:github-oauth:138

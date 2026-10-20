@@ -165,8 +165,11 @@ maintainers and are gated on the hostile-QA protocol in
    (two places), `src-tauri/Cargo.toml`, the `silo` entry in `src-tauri/Cargo.lock`, and
    `src-tauri/tauri.conf.json`, and cut `## [Unreleased]` to `## [X.Y.Z] - <date>` in the
    changelog (leaving a fresh empty `[Unreleased]`). Open a PR; merge it on green CI.
-3. **Tag `vX.Y.Z`** on that `main` commit → the release workflow
-   (`.github/workflows/release.yml`) builds and signs the platform installers into a
+3. **Tag `vX.Y.Z`** on that `main` commit once its CI run is green → the release workflow
+   (`.github/workflows/release.yml`) first runs a guard that refuses any tag whose commit
+   isn't on `main` with every CI check green, then waits for the owner to **approve the
+   `release` environment** in the Actions tab (that environment holds the signing keys and
+   admits only `v*` tags). After approval it builds and signs the platform installers into a
    **draft, non-prerelease** release with `latest.json`, `SHA256SUMS.txt`, an SBOM and
    build-provenance attestations.
 4. **Verify the draft** (embedded version, checksums of the *CI-built* artifacts, a
