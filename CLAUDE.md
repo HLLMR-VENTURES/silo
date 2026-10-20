@@ -101,6 +101,10 @@ pure logic behind thin `#[tauri::command]` wrappers with unit tests (230+ Rust t
 - Small, testable Rust modules; keep the scan/library/projection/conflict
   engines as pure logic behind thin Tauri command wrappers so they unit-test
   without a running app.
+- **Worktrees live under one root, `F:\Worktrees\<repo>\<topic>`** (estate rule,
+  hllmr-infra AGENTS.md), never inside or beside a canonical checkout. Remove your
+  own worktree with `git worktree remove` once its PR merges or closes; a dirty
+  worktree is a stop-and-ask.
 
 ## Reference material
 
