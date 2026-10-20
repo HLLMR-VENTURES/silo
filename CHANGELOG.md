@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-20
+
 ### Fixed
 
 - On Windows, typing in a text field no longer pops up the system's "Saved info" suggestions over
