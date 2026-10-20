@@ -1,0 +1,135 @@
+# Silo's HLLMRD manifest: what release-check verifies for a release, and the review crew's scopes.
+# Copied from HLLMR/hllmrd@00104df fixtures/silo-v1.0.0/hllmrd.toml (the manifest that verified
+# v1.0.0, 9/9 PASS); review-scope paths updated to cover every file in the current tree.
+# Validate: uvx --from "git+https://github.com/HLLMR/hllmrd@00104df" hllmrd validate hllmrd.toml
+
+[project]
+id = "silo"
+owner = "HLLMR"
+repo = "github.com/HLLMR/silo"
+profiles = ["tauri-desktop"]
+hllmrd = "0.3.0"
+
+[release]
+mechanism = "github-release-draft"
+class = "desktop"
+tag = "v{version}"
+name = "Silo v{version}"
+main_branch = "main"
+ci_workflow = ".github/workflows/ci.yml"
+prerelease = false
+checksums = "SHA256SUMS.txt"
+sbom = "silo-sbom.cdx.json"
+expected_assets = [
+  "Silo_{version}_x64-setup.exe",
+  "Silo_{version}_x64-setup.exe.sig",
+  "Silo_{version}_x64_en-US.msi",
+  "Silo_{version}_x64_en-US.msi.sig",
+  "Silo_{version}_aarch64.dmg",
+  "Silo_{version}_x64.dmg",
+  "Silo_aarch64.app.tar.gz",
+  "Silo_aarch64.app.tar.gz.sig",
+  "Silo_x64.app.tar.gz",
+  "Silo_x64.app.tar.gz.sig",
+  "Silo_{version}_amd64.AppImage",
+  "Silo_{version}_amd64.AppImage.sig",
+  "Silo_{version}_amd64.deb",
+  "Silo_{version}_amd64.deb.sig",
+  "Silo-{version}-1.x86_64.rpm",
+  "Silo-{version}-1.x86_64.rpm.sig",
+  "latest.json",
+  "SHA256SUMS.txt",
+  "silo-sbom.cdx.json",
+]
+
+[release.updater]
+manifest = "latest.json"
+url_prefix = "https://github.com/HLLMR/silo/releases/download/v{version}/"
+platforms = [
+  "darwin-aarch64",
+  "darwin-aarch64-app",
+  "darwin-x86_64",
+  "darwin-x86_64-app",
+  "linux-x86_64",
+  "linux-x86_64-appimage",
+  "linux-x86_64-deb",
+  "linux-x86_64-rpm",
+  "windows-x86_64",
+  "windows-x86_64-msi",
+  "windows-x86_64-nsis",
+]
+# The pinned updater key (minisign key ID E878CC86A773BF25), as src-tauri/tauri.conf.json stores it.
+pubkey = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU4NzhDQzg2QTc3M0JGMjUKUldRbHYzT25oc3g0Nk9tR2RCZ3dmSStPZ05MSnpJbm9NQS81dVUyUmVHTWlpZ0lObTN0QXZ0QkcK"
+pubkey_conf = "src-tauri/tauri.conf.json#/plugins/updater/pubkey"
+# verify_signatures is left at its default: true, because a pubkey is pinned (GitHub mode downloads ~140 MiB).
+
+# tauri-action signs the macOS bundle as Silo.app.tar.gz, then uploads it under a per-arch name.
+[release.updater.signed_names]
+"Silo_x64.app.tar.gz" = "Silo.app.tar.gz"
+"Silo_aarch64.app.tar.gz" = "Silo.app.tar.gz"
+
+[release.attestation]
+# Always attest the checksums file: it binds every listed asset to the release workflow run.
+assets = ["SHA256SUMS.txt", "latest.json", "Silo_{version}_x64-setup.exe", "Silo_{version}_x64_en-US.msi"]
+signer_workflow = "HLLMR/silo/.github/workflows/release.yml"
+
+# The review crew: Silo 1.0's seven passes (fs25-modding/_release-checks/*.md), one per scope.
+[reviews]
+dir = "../_release-checks/{tag}"
+
+[[reviews.scopes]]
+name = "rust-backend"
+agent = "backend"
+paths = ["src-tauri/**"]
+
+[[reviews.scopes]]
+name = "security-api"
+agent = "security"
+paths = ["src-tauri/**", "package.json", "package-lock.json", ".github/**"]
+focus = "dependency audits (npm, cargo), Dependabot PRs, secrets in history, capabilities and CSP, the live SiloAPI contract"
+
+[[reviews.scopes]]
+name = "frontend-a"
+agent = "frontend"
+paths = ["src/App.svelte", "src/*.ts", "src/assets/**", "src/lib/*.ts", "src/lib/ui/**", "src/lib/state/**", "src/lib/styles/**",
+         "src/lib/components/shell/**", "src/lib/components/library/**", "src/lib/components/drawer/**", "src/lib/views/**",
+         "src/lib/components/__tests__/**", "src/lib/components/ModDetail.svelte", "src/lib/components/ModCuration.svelte",
+         "src/lib/components/ModRepoLink.svelte", "src/lib/components/ModSourceLink.svelte", "src/lib/components/ModStatus.svelte",
+         "src/lib/components/ProvenanceCheck.svelte", "src/lib/components/ModBrowser.svelte", "src/lib/components/BrowseDrawer.svelte",
+         "src/lib/components/DescModal.svelte", "src/lib/components/GithubCard.svelte", "src/lib/components/ModHubCard.svelte",
+         "src/lib/components/ModCard.svelte", "src/lib/components/FilterBar.svelte", "src/lib/components/ActivityButton.svelte",
+         "src/lib/components/ActivityPanel.svelte", "src/lib/components/NoticeArea.svelte", "src/lib/components/KeepMounted.svelte",
+         "src/lib/components/ViewBoundary.svelte", "src/lib/components/*.test.ts"]
+focus = "shell, state, UI primitives, Library, the mod detail drawer, Browse"
+
+[[reviews.scopes]]
+name = "frontend-b"
+agent = "frontend"
+paths = ["src/lib/diagnose/**", "src/lib/updates/**", "src/lib/modsets/**", "src/lib/components/modsets/**",
+         "src/lib/firstRun/**", "src/lib/help/**", "src/lib/components/settings/**", "src/lib/components/panels/**",
+         "src/lib/components/organize/**", "src/lib/components/BisectFlow.svelte", "src/lib/components/LogTriage.svelte",
+         "src/lib/components/BindingsView.svelte", "src/lib/components/BridgeTool.svelte", "src/lib/components/ConfigEditor.svelte",
+         "src/lib/components/ModSettings.svelte", "src/lib/components/GitHubAuth.svelte", "src/lib/components/OrganizePreview.svelte"]
+focus = "Diagnose, Find the problem mod, Updates, Mod sets, First run, Help, Settings, Tools"
+
+[[reviews.scopes]]
+name = "copy-polish"
+agent = "copy"
+paths = ["src/**", "src-tauri/src/error.rs"]
+
+[[reviews.scopes]]
+name = "release-eng"
+agent = "release-eng"
+paths = [".github/**", "src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "package.json", "CHANGELOG.md",
+         "README.md", "SECURITY.md", "CONTRIBUTING.md", "docs/**", "scripts/**"]
+
+[[reviews.scopes]]
+name = "coordinator-smoke"
+agent = "coordinator"
+enabled = true  # Silo runs the real-app smoke on the Owner's machine (it did for 1.0)
+paths = ["**"]
+focus = "real-app smoke on a throwaway profile; routes findings to the other scopes"
+
+[release.authenticode]
+assets = ["Silo_{version}_x64-setup.exe", "Silo_{version}_x64_en-US.msi"]
+subject = "CN=David Hellmer"
