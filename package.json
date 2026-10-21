@@ -6,7 +6,7 @@
   "homepage": "https://silo.hllmr.com",
   "repository": {
     "type": "git",
-    "url": "https://github.com/HLLMR/silo.git"
+    "url": "https://github.com/HLLMR-VENTURES/silo.git"
   },
   "type": "module",
   "scripts": {

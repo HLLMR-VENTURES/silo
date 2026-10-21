@@ -246,7 +246,7 @@ Before publishing the draft:
 - [ ] Install the Windows artifact on a clean machine/VM; launch; scan a small fixture library;
       verify uninstall leaves user data intact.
 - [ ] `SHA256SUMS.txt` lists every asset (including `latest.json` and `silo-sbom.cdx.json`) and
-      matches the downloads; `gh attestation verify <file> --repo HLLMR/silo` passes.
+      matches the downloads; `gh attestation verify <file> --repo HLLMR-VENTURES/silo` passes.
 - [ ] Release notes state: **Windows code-signed / macOS-Linux OS-unsigned, known
       limitations, upgrade guidance.**
 - [ ] After publishing: the website's download links resolve to **vX.Y.Z**, and

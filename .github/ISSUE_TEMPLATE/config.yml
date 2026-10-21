@@ -1,16 +1,16 @@
 blank_issues_enabled: false
 contact_links:
   - name: Ask a question or get help
-    url: https://github.com/HLLMR/silo/discussions/categories/help
+    url: https://github.com/HLLMR-VENTURES/silo/discussions/categories/help
     about: Not sure it's a bug? Ask in Discussions first — you'll usually get an answer faster.
   - name: Chat on Discord
     url: https://discord.gg/NpxcYdGHrW
     about: Quick questions, crash help and release news from other Silo players.
   - name: Suggest an idea
-    url: https://github.com/HLLMR/silo/discussions/categories/ideas
+    url: https://github.com/HLLMR-VENTURES/silo/discussions/categories/ideas
     about: Feature ideas are discussed and voted on before they become issues.
   - name: Report a security problem privately
-    url: https://github.com/HLLMR/silo/security/advisories/new
+    url: https://github.com/HLLMR-VENTURES/silo/security/advisories/new
     about: Please don't open a public issue for security vulnerabilities.
   - name: Help & user guide
     url: https://silo.hllmr.com/help/

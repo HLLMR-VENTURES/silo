@@ -59,7 +59,7 @@ Beyond the MVP management layer above:
   holds mods offers to adopt them via the Organize preview. Across drives, projection is
   hardlink → symlink → copy (`organize::LinkPolicy`).
 
-Backend: **SiloAPI** (separate repo `HLLMR/silo-api`, live at `https://silo-api.hllmr.com`).
+Backend: **SiloAPI** (separate repo `HLLMR-VENTURES/silo-api`, live at `https://silo-api.hllmr.com`).
 
 ## Stack & structure
 

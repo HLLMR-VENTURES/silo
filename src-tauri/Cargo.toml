@@ -4,7 +4,7 @@ version = "1.0.1"
 description = "Silo — Farming Simulator 25 mod library manager"
 authors = ["HLLMR Ventures LLC"]
 license = "MIT"
-repository = "https://github.com/HLLMR/silo"
+repository = "https://github.com/HLLMR-VENTURES/silo"
 edition = "2021"
 rust-version = "1.77"
 

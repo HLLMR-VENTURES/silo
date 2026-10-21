@@ -175,12 +175,12 @@ jobs:
           releaseName: 'Silo ${{ github.ref_name }}'
           releaseBody: |
             Download the installer for your OS below. What's new is in the
-            [changelog](https://github.com/HLLMR/silo/blob/main/CHANGELOG.md).
+            [changelog](https://github.com/HLLMR-VENTURES/silo/blob/main/CHANGELOG.md).
 
             Windows installers are code-signed. macOS/Linux builds are open source and
             OS-unsigned — Gatekeeper may warn on first launch; you can inspect or build
             from source at any time. To check a download, see
-            [Verify your download](https://github.com/HLLMR/silo/blob/main/docs/VERIFY_DOWNLOAD.md).
+            [Verify your download](https://github.com/HLLMR-VENTURES/silo/blob/main/docs/VERIFY_DOWNLOAD.md).
           releaseDraft: true
           # Stable "Latest" channel: publish as a full (non-prerelease) release so the
           # in-app updater's /releases/latest/ endpoint resolves to it. Still created as a
@@ -258,7 +258,7 @@ jobs:
             "https://uploads.github.com/repos/$repo/releases/$rel/assets?name=SHA256SUMS.txt"
 
       # Cryptographically tie every release artifact to this repo + commit + workflow.
-      # `gh attestation verify <file> --repo HLLMR/silo` then proves build provenance.
+      # `gh attestation verify <file> --repo HLLMR-VENTURES/silo` then proves build provenance.
       - name: Attest build provenance
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:

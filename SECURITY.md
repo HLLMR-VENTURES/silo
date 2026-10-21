@@ -10,11 +10,11 @@ could put users at risk.
 **Please do not open a public issue for a security vulnerability.**
 
 1. **Preferred:** use GitHub's
-   [private vulnerability reporting](https://github.com/HLLMR/silo/security/advisories/new)
-   on `HLLMR/silo` (Security → Report a vulnerability). This keeps the report
+   [private vulnerability reporting](https://github.com/HLLMR-VENTURES/silo/security/advisories/new)
+   on `HLLMR-VENTURES/silo` (Security → Report a vulnerability). This keeps the report
    private between you and the maintainers until a fix is out.
 2. **If you can't use that**, open a minimal public issue on
-   [HLLMR/silo](https://github.com/HLLMR/silo/issues) that says only that you've
+   [HLLMR-VENTURES/silo](https://github.com/HLLMR-VENTURES/silo/issues) that says only that you've
    found a security problem and asks for a private channel — **without** the
    details, proof-of-concept, or anything that would let others exploit it. A
    maintainer will get you somewhere private to share the specifics.
