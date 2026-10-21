@@ -135,7 +135,7 @@ straight to `main`.
 4. **Update the changelog** — add a line under `## [Unreleased]` in
    [`CHANGELOG.md`](CHANGELOG.md) for any user-facing change (see below).
 5. Run the checks above locally — they must pass.
-6. **Open a PR** against `HLLMR/silo` `main`. Reference the issue (`Fixes #123`) and
+6. **Open a PR** against `HLLMR-VENTURES/silo` `main`. Reference the issue (`Fixes #123`) and
    fill in the [pull request template](.github/pull_request_template.md): what and
    why, tests passing, off-thread/reversible where relevant, docs updated.
 7. CI runs the frontend and Rust jobs on every PR; a maintainer reviews against the
@@ -179,5 +179,5 @@ maintainers and are gated on the hostile-QA protocol in
 
 ## Questions
 
-Open an issue on [HLLMR/silo](https://github.com/HLLMR/silo/issues). For security
+Open an issue on [HLLMR-VENTURES/silo](https://github.com/HLLMR-VENTURES/silo/issues). For security
 concerns, follow [SECURITY.md](SECURITY.md) instead of a public issue.

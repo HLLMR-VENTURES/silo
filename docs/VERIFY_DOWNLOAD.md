@@ -67,7 +67,14 @@ Releases carry a GitHub build attestation tying the artifact to this repository,
 CI workflow. With the [GitHub CLI](https://cli.github.com):
 
 ```bash
-gh attestation verify <the-file-you-downloaded> --repo HLLMR/silo
+gh attestation verify <the-file-you-downloaded> --repo HLLMR-VENTURES/silo
+```
+
+Silo 1.0.1 and earlier were built while the repository was `HLLMR/silo`, and their attestations
+stayed with that account when the repository moved. For those downloads, use:
+
+```bash
+gh attestation verify <the-file-you-downloaded> --owner HLLMR --signer-repo HLLMR/silo
 ```
 
 A successful verification confirms the file was produced by Silo's public build pipeline. It

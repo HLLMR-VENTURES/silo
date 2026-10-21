@@ -48,6 +48,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU4NzhDQzg2QTc3M0JGMjUKUldRbHYzT25oc3g0Nk9tR2RCZ3dmSStPZ05MSnpJbm9NQS81dVUyUmVHTWlpZ0lObTN0QXZ0QkcK",
       "endpoints": [
+        "https://github.com/HLLMR-VENTURES/silo/releases/latest/download/latest.json",
         "https://github.com/HLLMR/silo/releases/latest/download/latest.json"
       ]
     }

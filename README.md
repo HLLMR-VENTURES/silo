@@ -7,8 +7,8 @@
 <p align="center"><em>More farming, less fixing. A mod manager for Farming Simulator 25.</em></p>
 
 <p align="center">
-  <a href="https://github.com/HLLMR/silo/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/HLLMR/silo?sort=semver&color=4a7330&label=release"></a>
-  <a href="https://github.com/HLLMR/silo/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/HLLMR/silo/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/HLLMR-VENTURES/silo/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/HLLMR-VENTURES/silo?sort=semver&color=4a7330&label=release"></a>
+  <a href="https://github.com/HLLMR-VENTURES/silo/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/HLLMR-VENTURES/silo/actions/workflows/ci.yml/badge.svg"></a>
   <a href="docs/VERIFY_DOWNLOAD.md"><img alt="Windows: code signed" src="https://img.shields.io/badge/Windows-code%20signed-4a7330"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4a7330"></a>
   <img alt="Platforms: Windows · macOS and Linux preview" src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20and%20Linux%20preview-4a7330">
@@ -21,8 +21,8 @@ edits inside one, and gives the game exactly the set you chose. **Free and open 
 Windows (tested) · macOS and Linux (preview).**
 
 <p align="center">
-  <b><a href="https://github.com/HLLMR/silo/releases/latest">⬇ Download for Windows</a></b>
-  &nbsp;·&nbsp; <a href="https://github.com/HLLMR/silo/releases/latest">macOS and Linux preview</a>
+  <b><a href="https://github.com/HLLMR-VENTURES/silo/releases/latest">⬇ Download for Windows</a></b>
+  &nbsp;·&nbsp; <a href="https://github.com/HLLMR-VENTURES/silo/releases/latest">macOS and Linux preview</a>
   &nbsp;·&nbsp; <a href="https://silo.hllmr.com">silo.hllmr.com</a>
   &nbsp;·&nbsp; <a href="#install">Build from source</a>
 </p>
@@ -93,7 +93,7 @@ and mod sets you can switch between playthroughs.
 ## Install
 
 **Download:** grab the installer for your OS from
-[Releases](https://github.com/HLLMR/silo/releases). Windows builds are code-signed — you can
+[Releases](https://github.com/HLLMR-VENTURES/silo/releases). Windows builds are code-signed — you can
 [verify the signature, checksum, and build provenance](docs/VERIFY_DOWNLOAD.md). macOS/Linux
 builds are OS-unsigned, so Gatekeeper may warn on first launch. On Windows, the setup `.exe`
 installs per user with no admin rights (recommended); the `.msi` installs for all users and
@@ -134,11 +134,11 @@ cache (path + mtime + size), quick-xml parsing. See [`docs/`](docs/) —
 
 The website at [silo.hllmr.com](https://silo.hllmr.com), including the help pages and the legal
 pages (privacy policy, terms, disclaimer, takedown), lives in its own repository,
-[HLLMR/web](https://github.com/HLLMR/web).
+[HLLMR-VENTURES/web](https://github.com/HLLMR-VENTURES/web).
 
 ## Community
 
-Questions and ideas go to [Discussions](https://github.com/HLLMR/silo/discussions). For quick
+Questions and ideas go to [Discussions](https://github.com/HLLMR-VENTURES/silo/discussions). For quick
 help and release news, join the [Silo Discord](https://discord.gg/NpxcYdGHrW).
 
 ## Contributing

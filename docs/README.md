@@ -42,5 +42,5 @@ Building, testing, releasing:
 
 The legal pages (privacy policy, terms, disclaimer, takedown) are on the website,
 [silo.hllmr.com/legal/](https://silo.hllmr.com/legal/privacy-policy.html), maintained in
-[HLLMR/web](https://github.com/HLLMR/web). Per-feature design
+[HLLMR-VENTURES/web](https://github.com/HLLMR-VENTURES/web). Per-feature design
 specs and plans live with each feature's issue and pull request.

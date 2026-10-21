@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Silo's source code now lives at
+  [github.com/HLLMR-VENTURES/silo](https://github.com/HLLMR-VENTURES/silo). Links in the app and
+  docs point there, and the updater checks the new address first. The old `HLLMR/silo` address
+  still redirects and stays as the updater's fallback, so existing installs keep updating.
+  Downloads of 1.0.1 and earlier verify with `--owner HLLMR`; see
+  [Verify your download](docs/VERIFY_DOWNLOAD.md).
+
+### Security
+
+- Updated the TLS certificate libraries (`rustls-webpki` 0.103.16, `webpki-roots` and
+  `webpki-root-certs` 1.0.10) so Silo's HTTPS connections no longer trust the distrusted emSign
+  intermediate certificates (RUSTSEC-2026-0381, -0382, -0383).
+
 ## [1.0.1] - 2026-10-20
 
 ### Fixed
@@ -902,5 +917,5 @@ First public beta.
   game-install discovery. Automatic mods-folder detection covers Windows and macOS;
   on Linux (Proton) the mods folder is set manually for now.
 
-[Unreleased]: https://github.com/HLLMR/silo/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/HLLMR/silo/releases/tag/v0.1.0
+[Unreleased]: https://github.com/HLLMR-VENTURES/silo/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/HLLMR-VENTURES/silo/releases/tag/v0.1.0
