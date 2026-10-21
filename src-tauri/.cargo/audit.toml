@@ -17,4 +17,9 @@ ignore = [
     "RUSTSEC-2026-0367",
     "RUSTSEC-2026-0368",
     "RUSTSEC-2026-0369",
+    # webpki-roots 0.26.11 distrusted-emSign roots (#315). Path: ureq 2.12.1 -> webpki-roots
+    # 0.26.11 -> webpki-roots 1.0.10. 0.26.11 is a shim whose lib.rs is only
+    # `pub use parent::TLS_SERVER_ROOTS;` (parent = webpki-roots 1), so the roots in use come from
+    # 1.0.10, which has the fix. REMOVE when `cargo tree -i webpki-roots@0.26.11` prints nothing.
+    "RUSTSEC-2026-0381",
 ]

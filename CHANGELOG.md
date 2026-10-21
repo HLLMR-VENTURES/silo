@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Downloads of 1.0.1 and earlier verify with `--owner HLLMR`; see
   [Verify your download](docs/VERIFY_DOWNLOAD.md).
 
+### Security
+
+- Updated the TLS certificate libraries (`rustls-webpki` 0.103.16, `webpki-roots` and
+  `webpki-root-certs` 1.0.10) so Silo's HTTPS connections no longer trust the distrusted emSign
+  intermediate certificates (RUSTSEC-2026-0381, -0382, -0383).
+
 ## [1.0.1] - 2026-10-20
 
 ### Fixed
