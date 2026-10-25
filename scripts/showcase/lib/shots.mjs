@@ -218,7 +218,8 @@ export const SHOTS = {
       await d.click("Undo organizing", { sel: "main button" });
       await d.waitText("Put every mod back in your mods folder?");
       await d.shot("help-undo-organizing");
-      await d.click("Cancel", { within: "[role=dialog]", sel: "button" });
+      // A danger confirm is an alertdialog.
+      await d.click("Cancel", { within: "[role=alertdialog]", sel: "button" });
     },
   },
 
@@ -253,7 +254,7 @@ export const SHOTS = {
       await toLibrary(d);
       await d.go("Tools");
       await d.click("Fill type bridge", { sel: "[role=tab], button" });
-      await d.waitText("Filltype compatibility bridge");
+      await d.waitText("Fill type compatibility bridge");
       await d.shot("help-filltype-bridge");
     },
   },
