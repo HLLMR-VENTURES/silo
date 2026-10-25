@@ -67,7 +67,7 @@ export const SHOTS = {
         await d.click("This is right");
         await d.click("Continue");
         await d.click("Organize", { timeout: 30_000 });
-        await d.waitText("Your library is organized.", 180_000);
+        await d.waitText("Your library is organized", 180_000);
         await d.click("Go to my library");
         const active = d.lib.mods.filter((m) => m.active).map((m) => m.techName);
         await d.invoke("set_active", { root: null, active });
@@ -104,7 +104,7 @@ export const SHOTS = {
       await d.search(title.split(" ")[1]); // "7R": a few tractors, the verified one among them
       await d.openMod(title);
       await d.click("Verify integrity");
-      await d.waitText("Contents match the published build");
+      await d.page.waitFor(`!!document.querySelector(".prov .verdict.ok")`, 20_000, "Verified build verdict");
       await scrollTop(d);
       await d.shot("verified-build");
       await closeDrawer(d);
@@ -119,7 +119,7 @@ export const SHOTS = {
       await d.search("Baler");
       await d.openMod(title);
       await d.click("Verify integrity");
-      await d.waitText("Modified from the published build");
+      await d.page.waitFor(`!!document.querySelector(".prov .verdict.warn")`, 20_000, "Modified build verdict");
       // Show the changed files themselves.
       await d.page.eval(`[...document.querySelectorAll("summary")].filter((e) => /^(Changed|Added)/.test(e.textContent.trim())).forEach((e) => e.click()); true`);
       await scrollTop(d);
