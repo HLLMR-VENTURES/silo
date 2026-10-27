@@ -26,9 +26,9 @@
   let focused = $state(false);
   const paused = $derived(hovered || focused || !windowActive);
   /** The action's accessible name says what it acts on: "Undo: Switched to Harvest." */
-  const actionName = $derived(
-    item.action ? (item.action.ariaLabel ?? `${item.action.label}: ${item.message}`) : undefined,
-  );
+  const nameOf = (a: ToastItem["action"]) => (a ? (a.ariaLabel ?? `${a.label}: ${item.message}`) : undefined);
+  const actionName = $derived(nameOf(item.action));
+  const secondaryName = $derived(nameOf(item.secondaryAction));
 
   // svelte-ignore state_referenced_locally
   let remaining = item.duration;
@@ -61,9 +61,8 @@
     }
   }
 
-  function runAction() {
+  function runAction(action = item.action) {
     if ($modalOpen) return; // inert already blocks it; this covers webviews without inert
-    const action = item.action;
     dismissToast(item.id);
     if (!action) return;
     Promise.resolve()
@@ -105,8 +104,13 @@
     {#if item.detail}
       <Button size="sm" variant="ghost" onclick={copyDetails}>{copied === "saved" ? "Saved to a file" : copied ? "Copied" : "Copy details"}</Button>
     {/if}
+    {#if item.secondaryAction}
+      <Button size="sm" variant="ghost" aria-label={secondaryName} onclick={() => runAction(item.secondaryAction)}>
+        {item.secondaryAction.label}
+      </Button>
+    {/if}
     {#if item.action}
-      <Button size="sm" variant="ghost" aria-label={actionName} onclick={runAction}>
+      <Button size="sm" variant="ghost" aria-label={actionName} onclick={() => runAction()}>
         {item.action.label}
       </Button>
     {/if}

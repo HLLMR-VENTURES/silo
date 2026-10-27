@@ -1043,6 +1043,27 @@ pub fn save_loadout(
     Ok(id)
 }
 
+/// Replace the mods of several saved sets in one transaction (the Library's "Mod sets…" dialog,
+/// #323): every set is written or none is. Names and kinds stay as they are. Fails, writing
+/// nothing, when one of the sets no longer exists.
+pub fn replace_loadout_mods(
+    conn: &mut Connection,
+    edits: &[(i64, Vec<String>)],
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for (id, mods) in edits {
+        let name: Option<String> = tx
+            .query_row("SELECT name FROM loadout WHERE id = ?1", [id], |r| r.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some(name) = name else {
+            return Err(format!("mod set {id} no longer exists"));
+        };
+        write_loadout(&tx, Some(*id), &name, mods, KIND_USER)?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
 /// Save an automatic "Before …" snapshot of the active mods, then drop all but the newest
 /// `AUTO_SNAPSHOTS_KEPT` automatic ones, in one transaction. User sets are never touched.
 pub fn save_auto_snapshot(
@@ -1756,6 +1777,53 @@ mod tests {
             .unwrap();
         assert_eq!(l.kind, KIND_AUTO);
         assert_eq!(l.mods, ["FS25_B"]);
+    }
+
+    #[test]
+    fn replacing_several_sets_mods_writes_them_all() {
+        let path = temp_db("replace_mods");
+        let mut c = open(&path).unwrap();
+        let a = save_loadout(&mut c, None, "Riverbend", &["FS25_A".to_string()]).unwrap();
+        let b = save_loadout(&mut c, None, "Hutan", &["FS25_B".to_string()]).unwrap();
+        replace_loadout_mods(
+            &mut c,
+            &[
+                (a, vec!["FS25_A".to_string(), "FS25_C".to_string()]),
+                (b, vec![]),
+            ],
+        )
+        .unwrap();
+        let sets = load_loadouts(&c);
+        let get = |id: i64| sets.iter().find(|l| l.id == id).unwrap();
+        let mut am = get(a).mods.clone();
+        am.sort();
+        assert_eq!(am, ["FS25_A", "FS25_C"]);
+        assert_eq!(get(a).name, "Riverbend", "names are kept");
+        assert!(get(b).mods.is_empty());
+        assert_eq!(get(b).kind, KIND_USER);
+    }
+
+    #[test]
+    fn replacing_sets_mods_writes_nothing_when_one_set_is_gone() {
+        let path = temp_db("replace_mods_gone");
+        let mut c = open(&path).unwrap();
+        let a = save_loadout(&mut c, None, "Riverbend", &["FS25_A".to_string()]).unwrap();
+        let err = replace_loadout_mods(
+            &mut c,
+            &[(a, vec!["FS25_Z".to_string()]), (a + 999, vec![])],
+        )
+        .unwrap_err();
+        assert!(err.contains("no longer exists"), "{err}");
+        let sets = load_loadouts(&c);
+        assert_eq!(sets[0].mods, ["FS25_A"], "the first edit was rolled back");
+        let orphans: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM loadout_mod WHERE loadout_id NOT IN (SELECT id FROM loadout)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0);
     }
 
     #[test]

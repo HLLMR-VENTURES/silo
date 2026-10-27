@@ -7,6 +7,7 @@ vi.mock("../api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api")>()),
   getLoadouts: vi.fn(() => Promise.resolve([])),
   saveLoadout: vi.fn(() => Promise.resolve(50)),
+  replaceLoadoutMods: vi.fn(() => Promise.resolve()),
   deleteLoadout: vi.fn(() => Promise.resolve()),
   saveAutoSnapshot: vi.fn(() => Promise.resolve(60)),
   logFrontendError: vi.fn(() => Promise.resolve()),
@@ -18,11 +19,12 @@ vi.mock("../ui", async (importOriginal) => ({
   toast: vi.fn(() => ({ id: 1, dismiss: vi.fn() })),
 }));
 
-import { deleteLoadout, getLoadouts, saveAutoSnapshot, saveLoadout } from "../api";
+import { deleteLoadout, getLoadouts, replaceLoadoutMods, saveAutoSnapshot, saveLoadout } from "../api";
 import { ask, askText, toast } from "../ui";
 import type { Loadout, Savegame } from "../types";
 import { createModSets, switchSummary } from "./modSetsStore.svelte";
 import { activeSetDiff } from "../loadoutSafety";
+import { membershipEdits, membershipRows, type Membership } from "./membership";
 
 const harvest: Loadout = { id: 1, name: "Harvest 2026", mods: ["A", "B"], kind: "user", createdAt: null };
 const forestry: Loadout = { id: 2, name: "Forestry weekend", mods: ["C", "D", "Z"], kind: "user", createdAt: null };
@@ -36,6 +38,8 @@ function setup(active: string[] = ["A", "B"], library = ["A", "B", "C", "D"]) {
   const undo = { offer: vi.fn(), dismiss: vi.fn() };
   const refuse = vi.fn();
   const editRefused = vi.fn(() => false);
+  const activeUndoBlocked = vi.fn((_expected: string[]) => null as string | null);
+  const park = vi.fn();
   const store = createModSets({
     active: () => current,
     library: () => new Set(library),
@@ -44,8 +48,10 @@ function setup(active: string[] = ["A", "B"], library = ["A", "B", "C", "D"]) {
     undo: undo as never,
     editRefused,
     refuse,
+    activeUndoBlocked,
+    park,
   });
-  return { store, setActiveSetTo, undo, refuse, editRefused, active: () => current };
+  return { store, setActiveSetTo, undo, refuse, editRefused, activeUndoBlocked, park, active: () => current };
 }
 
 beforeEach(() => {
@@ -300,5 +306,113 @@ describe("switchSummary", () => {
     expect(s.list[0]).toBe("Turn on: TM0");
     expect(s.list.at(-1)).toBe("…and 10 more");
     expect(s.facts.map((f) => f.label)).toEqual(["Turn on", "Park"]);
+  });
+});
+
+describe("applyMembership (the Library's Mod sets… dialog, #323)", () => {
+  // A tiny database, so reloads see what was written.
+  let db: Loadout[];
+  beforeEach(() => {
+    db = [harvest, forestry].map((l) => ({ ...l, mods: [...l.mods] }));
+    vi.mocked(getLoadouts).mockImplementation(async () => db.map((l) => ({ ...l, mods: [...l.mods] })));
+    vi.mocked(replaceLoadoutMods).mockImplementation(async (edits) => {
+      for (const e of edits) db.find((l) => l.id === e.id)!.mods = [...e.mods];
+    });
+  });
+  const editsFor = (t: ReturnType<typeof setup>, names: string[], chosen: [number, Membership][]) =>
+    membershipEdits(membershipRows(t.store.sets, names), names, new Map(chosen));
+  const lastToast = () => vi.mocked(toast).mock.calls.at(-1)![0];
+
+  it("writes every edited set in one call; a set you're not on leaves your mods alone", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    const edits = editsFor(t, ["A"], [[2, "all"]]);
+    expect(await t.store.applyMembership(["A"], edits)).toBe(true);
+    expect(replaceLoadoutMods).toHaveBeenCalledTimes(1);
+    expect(replaceLoadoutMods).toHaveBeenCalledWith([{ id: 2, mods: ["C", "D", "Z", "A"] }]);
+    expect(t.setActiveSetTo).not.toHaveBeenCalled();
+    expect(lastToast().message).toBe("Added Mod A to Forestry weekend.");
+    expect(lastToast().secondaryAction).toBeUndefined();
+  });
+
+  it("turns on what the set you're on gains first, so you stay on it", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    expect(t.store.state).toMatchObject({ kind: "set", id: 1 });
+    await t.store.applyMembership(["C"], editsFor(t, ["C"], [[1, "all"]]));
+    expect(t.setActiveSetTo).toHaveBeenCalledWith(["A", "B", "C"], "Turning on mods");
+    expect(t.undo.dismiss).toHaveBeenCalled();
+    expect(lastToast().message).toBe("Added Mod C to Harvest 2026. Turned on Mod C.");
+    expect(t.store.state).toMatchObject({ kind: "set", id: 1 });
+  });
+
+  it("saves nothing when the switch is refused or cancelled", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    t.setActiveSetTo.mockResolvedValueOnce(null);
+    expect(await t.store.applyMembership(["B"], editsFor(t, ["B"], [[1, "none"]]))).toBe(false);
+    expect(replaceLoadoutMods).not.toHaveBeenCalled();
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("saves nothing while a library change runs", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    t.editRefused.mockReturnValue(true);
+    expect(await t.store.applyMembership(["A"], editsFor(t, ["A"], [[2, "all"]]))).toBe(false);
+    expect(replaceLoadoutMods).not.toHaveBeenCalled();
+  });
+
+  it("offers Park them too while mods removed from sets are still on", async () => {
+    const t = setup(["A", "B", "C"]);
+    await t.store.load();
+    // Not on a set (A, B, C matches none): removing C from Forestry parks nothing by itself.
+    await t.store.applyMembership(["C"], editsFor(t, ["C"], [[2, "none"]]));
+    const opts = lastToast();
+    expect(opts.message).toBe("Removed Mod C from Forestry weekend.");
+    expect(opts.secondaryAction?.label).toBe("Park them too");
+    await opts.secondaryAction!.run();
+    expect(t.park).toHaveBeenCalledWith(["C"]);
+  });
+
+  it("Undo puts every set back and reverses the switch", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    await t.store.applyMembership(
+      ["B"],
+      editsFor(t, ["B"], [
+        [1, "none"],
+        [2, "all"],
+      ]),
+    );
+    expect(t.setActiveSetTo).toHaveBeenLastCalledWith(["A"], "Parking mods");
+    const opts = lastToast();
+    expect(opts.message).toBe("Added Mod B to Forestry weekend and removed it from Harvest 2026. Parked Mod B.");
+    // Parked by the save already: nothing left to park.
+    expect(opts.secondaryAction).toBeUndefined();
+    await opts.action!.run();
+    expect(t.activeUndoBlocked).toHaveBeenCalledWith(["A"]);
+    expect(t.setActiveSetTo).toHaveBeenLastCalledWith(["A", "B"], "Switching back");
+    expect(replaceLoadoutMods).toHaveBeenLastCalledWith([
+      { id: 1, mods: ["A", "B"] },
+      { id: 2, mods: ["C", "D", "Z"] },
+    ]);
+    expect(db.map((l) => l.mods)).toEqual([
+      ["A", "B"],
+      ["C", "D", "Z"],
+    ]);
+  });
+
+  it("Undo refuses once a set changed since", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    await t.store.applyMembership(["A"], editsFor(t, ["A"], [[2, "all"]]));
+    const undo = lastToast().action!;
+    db[1].mods = ["Q"];
+    await t.store.load();
+    vi.mocked(replaceLoadoutMods).mockClear();
+    await undo.run();
+    expect(lastToast()).toMatchObject({ message: "Can't undo: Forestry weekend changed since.", tone: "warn" });
+    expect(replaceLoadoutMods).not.toHaveBeenCalled();
   });
 });

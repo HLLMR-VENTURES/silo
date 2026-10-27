@@ -445,6 +445,13 @@ Use a copy of a real mods folder. For a crash, end FS25 from Task Manager (or `t
 - [ ] `[game]` **Finish.** Culprit found → "Most likely: <mod>. The crash followed this mod in every round." **Put my mods back and park <mod>** → every other mod is back as before and <mod> is parked (toast "Your mods are back, and <mod> stays parked. Play again to check."). **Put my mods back** restores everything. "No single mod is at fault." offers **Put my mods back**.
 - [ ] `[app]` **Stale status after a set switch.** Mod sets → switch to a set with a Problem conflict (two mods sharing an exclusive slot), then back, then to it again quickly → the chip and Conflicts tab always match the set that's active once the switch finishes (never "All good" with a Problem open).
 
+## 28. Mod sets… from the Library (#323)  _(auto-verified: membership is ticked / unticked / mixed per saved set, automatic snapshots aren't listed, a click cycles ticked ↔ unticked and back to mixed only for a set that opened mixed, Untick all, Save writes only the changed sets in one transaction (all or nothing, Rust), editing the set you're on turns the added mods on or parks the removed ones first and says so beside it, a refused or cancelled switch saves nothing and keeps the dialog open, the toast's wording, Park them too only while removed mods are still on, Undo putting every set back and reversing the switch, Undo refusing once a set changed since)_
+
+- [ ] `[app]` **From the selection bar.** Select three mods → **Mod sets…** → one box per set you saved (no "Before …" snapshots), ticked / unticked / mixed as each set holds them. Tick one set, untick another, **Save** → the toast "Added 3 mods to <set> and removed them from <set>." My sets shows both sets' new counts, the selection is cleared.
+- [ ] `[app]` **The set you're on.** On a set (Library strip names it), open **Mod sets…** from a parked mod's menu, tick that set → "also turns it on now" beside it; **Save** turns the mod on and the strip still names the set (not "Custom"). **Undo** parks it again and the set is as before.
+- [ ] `[app]` **Park them too.** Untick a set for a mod that's on (not the set you're on) → the toast offers **Park them too**, which parks it with the usual Park Undo.
+- [ ] `[app]` **Busy.** While a library change runs (Organize, Find the problem mod), **Save** is off with the reason as its tooltip.
+
 ## Sign-off
 - [ ] All `[app]` items pass.
 - [ ] All `[game]`/`[net]` items pass (or known-limitations noted below).

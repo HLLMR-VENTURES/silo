@@ -184,6 +184,7 @@ describe("BulkBar keys", () => {
     onpark: vi.fn(),
     onfavorite: vi.fn(),
     onhide: vi.fn(),
+    onmodsets: vi.fn(),
     onselectall: vi.fn(),
     onclear: vi.fn(),
   });
