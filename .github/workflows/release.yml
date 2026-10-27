@@ -4,7 +4,8 @@ name: Release
 # tauri-action builds native installers per-OS and attaches them to a DRAFT (non-prerelease)
 # release, so you review before publishing. All bundles are signed for the in-app updater
 # (minisign). Windows installers are additionally Authenticode-signed via Azure Trusted
-# Signing (no SmartScreen "unknown publisher"); macOS/Linux remain OS-unsigned.
+# Signing (no SmartScreen "unknown publisher"); macOS is Developer ID signed and notarized;
+# Linux is OS-unsigned.
 #
 # Signing is gated twice before any key is reachable:
 #   1. `guard` refuses anything but a v* tag whose commit is already on main with every CI
@@ -90,10 +91,10 @@ jobs:
       matrix:
         include:
           - platform: macos-latest # Apple Silicon
-            args: --target aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --config src-tauri/tauri.conf.macos-signing.json
             rust-target: aarch64-apple-darwin
           - platform: macos-latest # Intel
-            args: --target x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --config src-tauri/tauri.conf.macos-signing.json
             rust-target: x86_64-apple-darwin
           - platform: ubuntu-22.04
             args: ''
@@ -105,6 +106,13 @@ jobs:
             rust-target: ''
 
     runs-on: ${{ matrix.platform }}
+    env:
+      # Not secrets: Apple publishes the identity in every signed app, and the key id is useless
+      # without the private key (APPLE_API_PRIVATE_KEY, release environment only). The issuer
+      # id lives in the release environment too: gitleaks' generic rule reads it as a key.
+      APPLE_SIGNING_IDENTITY: 'Developer ID Application: David Hellmer (554574H76C)'
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY_ID: 6XAF48LXF6
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -140,8 +148,7 @@ jobs:
 
       # Windows Authenticode signing via Azure Trusted Signing. tauri-action invokes the
       # generated bundle sign command DURING the build (so the updater's minisign signature
-      # is computed over the already-signed binary — order matters). macOS gets an ad-hoc signature
-      # (tauri.conf.json bundle.macOS.signingIdentity "-"); Linux is unsigned.
+      # is computed over the already-signed binary — order matters). Linux is unsigned.
       - name: Set up Windows code signing
         if: matrix.platform == 'windows-latest'
         shell: pwsh
@@ -158,6 +165,23 @@ jobs:
           $cfg = @{ '$schema' = 'https://schema.tauri.app/config/2'; bundle = @{ windows = @{ signCommand = $cmd } } }
           $cfg | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 src-tauri/tauri.conf.signing.json
 
+      # macOS: Developer ID signing and notarization (#171). Local builds keep the ad-hoc identity
+      # ("-" in tauri.conf.json); CI merges the Developer ID identity over it, like the Windows
+      # signCommand above. The notarization key (App Store Connect API, Developer role) is written
+      # to a temp file only for this job. Tauri imports APPLE_CERTIFICATE into a temporary
+      # keychain, signs, notarizes and staples the app, then builds the DMG and updater archive.
+      - name: Set up macOS signing and notarization
+        if: startsWith(matrix.platform, 'macos')
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          key="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s\n' "$APPLE_API_PRIVATE_KEY" > "$key"
+          chmod 600 "$key"
+          echo "APPLE_API_KEY_PATH=$key" >> "$GITHUB_ENV"
+          printf '{"$schema":"https://schema.tauri.app/config/2","bundle":{"macOS":{"signingIdentity":"%s"}}}\n' \
+            "$APPLE_SIGNING_IDENTITY" > src-tauri/tauri.conf.macos-signing.json
+
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -171,6 +195,12 @@ jobs:
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          # macOS Developer ID signing (the .p12, base64, and its password) and notarization.
+          # Identity and key id aren't secret (job env above); the key file path comes
+          # from the setup step. Only the macOS jobs use these.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ env.APPLE_API_KEY_ID }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Silo ${{ github.ref_name }}'
@@ -178,9 +208,9 @@ jobs:
             Download the installer for your OS below. What's new is in the
             [changelog](https://github.com/HLLMR-VENTURES/silo/blob/main/CHANGELOG.md).
 
-            Windows installers are code-signed. macOS/Linux builds are open source and
-            OS-unsigned — Gatekeeper may warn on first launch; you can inspect or build
-            from source at any time. To check a download, see
+            Windows installers are code-signed. macOS builds are signed with Apple Developer ID
+            and notarized. Linux builds are open source and OS-unsigned; you can inspect or
+            build from source at any time. To check a download, see
             [Verify your download](https://github.com/HLLMR-VENTURES/silo/blob/main/docs/VERIFY_DOWNLOAD.md).
           releaseDraft: true
           # Stable "Latest" channel: publish as a full (non-prerelease) release so the
@@ -189,15 +219,23 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
 
-      # Apple Silicon refuses an app whose bundle isn't validly signed ("Silo is damaged", #322).
-      # The bundle is ad-hoc signed, not Developer ID signed (#171): prove the signature
-      # covers the whole bundle, so a broken one fails the release instead of shipping.
-      - name: Verify macOS ad-hoc signature
+      # Prove the Mac app is Developer ID signed over the whole bundle (#322), notarized and
+      # stapled (#171), so a missing or broken signature fails the release instead of shipping.
+      # Runs after tauri-action uploaded to the draft: a red job here means don't publish it.
+      - name: Verify macOS signature and notarization
         if: startsWith(matrix.platform, 'macos')
         run: |
           app="src-tauri/target/${{ matrix.rust-target }}/release/bundle/macos/Silo.app"
           codesign --verify --deep --strict --verbose=2 "$app"
-          codesign --display --verbose=2 "$app" 2>&1 | grep -E '^(Identifier|Signature|Sealed Resources)'
+          codesign --display --verbose=2 "$app" 2>&1 | tee "$RUNNER_TEMP/codesign.txt"
+          if ! grep -qF "Authority=$APPLE_SIGNING_IDENTITY" "$RUNNER_TEMP/codesign.txt"; then
+            echo "::error::Silo.app isn't signed by $APPLE_SIGNING_IDENTITY"; exit 1
+          fi
+          spctl --assess --type execute --verbose=2 "$app" 2>&1 | tee "$RUNNER_TEMP/spctl.txt"
+          if ! grep -q "source=Notarized Developer ID" "$RUNNER_TEMP/spctl.txt"; then
+            echo "::error::Gatekeeper doesn't accept Silo.app as notarized"; exit 1
+          fi
+          xcrun stapler validate "$app"
 
       # Prove the signing actually happened — a signCommand that exits 0 without signing
       # would otherwise ship an unsigned installer. Fail the release if any Windows bundle

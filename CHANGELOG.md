@@ -30,10 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - macOS: on Apple Silicon, the downloaded app no longer reports "Silo is damaged and can't be
-  opened". The whole app bundle now gets a valid ad-hoc signature, so macOS shows its usual
-  prompt for an unidentified developer instead (System Settings → Privacy & Security → Open
-  Anyway). The release build now fails if that signature doesn't verify. Apple Developer ID
-  signing is still tracked in #171. (#322)
+  opened". Mac builds are now signed with Apple Developer ID and notarized by Apple, so macOS
+  opens Silo normally, without the Privacy & Security "Open Anyway" step. The release build
+  fails if the signature or notarization doesn't verify. (#322, #171)
 - Setup no longer looks stuck on "Filing 194 of 194…" after the last mod is filed. Filing now
   keeps what Silo already read from each mod, so the library re-read that follows is quick
   instead of parsing every filed mod again. While that step runs, the setup screen and the
