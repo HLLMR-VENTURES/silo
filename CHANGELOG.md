@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prompt for an unidentified developer instead (System Settings → Privacy & Security → Open
   Anyway). The release build now fails if that signature doesn't verify. Apple Developer ID
   signing is still tracked in #171. (#322)
+- Setup no longer looks stuck on "Filing 194 of 194…" after the last mod is filed. Filing now
+  keeps what Silo already read from each mod, so the library re-read that follows is quick
+  instead of parsing every filed mod again. While that step runs, the setup screen and the
+  Organize dialog show "Reading your library" with its own count instead of a frozen bar. (#322)
 
 ### Security
 

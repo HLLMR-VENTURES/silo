@@ -5,6 +5,7 @@ import {
   failureDetails,
   fileInRuns,
   filingFailures,
+  filingProgress,
   firstRunScreen,
   folderUsable,
   folderVariant,
@@ -195,5 +196,35 @@ describe("helpers", () => {
   it("nMods", () => {
     expect(nMods(1)).toBe("1 mod");
     expect(nMods(1204)).toBe("1,204 mods");
+  });
+});
+
+describe("filingProgress (#322)", () => {
+  it("counts mods while filing", () => {
+    expect(filingProgress(25, 50)).toEqual({ value: 25, max: 50, label: "Filing 25 of 50…" });
+  });
+
+  it("names the steps after the last run instead of sitting on N of N", () => {
+    expect(filingProgress(194, 194)).toEqual({
+      value: undefined,
+      max: 1,
+      label: "Turning your mods back on and reading your library…",
+    });
+  });
+
+  it("shows the library read's own progress once it has counted the mods", () => {
+    expect(filingProgress(194, 194, { done: 40, total: 194 })).toEqual({
+      value: 40,
+      max: 194,
+      label: "Reading your library: 40 of 194 mods…",
+    });
+    // Not counted yet: the generic step.
+    expect(filingProgress(194, 194, { done: 0, total: 0 }).value).toBeUndefined();
+    // A read still running mid-filing doesn't take over the filing count.
+    expect(filingProgress(10, 194, { done: 40, total: 194 }).label).toBe("Filing 10 of 194…");
+  });
+
+  it("has no count before filing knows its total", () => {
+    expect(filingProgress(0, 0)).toEqual({ value: undefined, max: 1, label: "Filing…" });
   });
 });

@@ -297,7 +297,12 @@ pub fn apply_organize(
             continue;
         }
         match move_path(&from, &to) {
-            Ok(()) => rep.changed += 1,
+            Ok(()) => {
+                rep.changed += 1;
+                // Keep what the scan already knows about this mod, so the rescan after filing
+                // doesn't parse it again (#322). Best effort: a miss only costs a fresh parse.
+                let _ = db::move_cache_row(conn, &from.to_string_lossy(), &to.to_string_lossy());
+            }
             Err(e) => {
                 // Roll back the row we just wrote — nothing was moved.
                 let _ = db::delete_organized(conn, &key, &m.tech_name);
@@ -2510,6 +2515,75 @@ mod tests {
             db::load_organized(&conn, &key_a)[0].active,
             "A's state is untouched"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// #322: filing a mod carries its scan-cache row to the archived path, so the scan after
+    /// filing reuses it instead of parsing every filed mod again.
+    #[test]
+    fn filing_keeps_the_scan_cache_so_the_next_scan_reuses_it() {
+        let base = std::env::temp_dir().join(format!("silo_filecache_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        let arch = mods.join("archive");
+        std::fs::create_dir_all(&mods).unwrap();
+        let mut conn = db::open(&base.join("silo.db")).unwrap();
+        let layout = Layout {
+            mods: mods.clone(),
+            archive: arch.clone(),
+        };
+        std::fs::write(mods.join("FS25_Foo.zip"), b"PK foo").unwrap();
+
+        // First scan: parsed fresh, then cached the way scan_mods caches it.
+        let scan = |conn: &Connection| {
+            crate::scan::scan_layouts(
+                vec![(mods.clone(), vec![arch.clone()])],
+                &db::load_cache(conn),
+                |_, _| {},
+            )
+        };
+        let first = scan(&conn);
+        assert_eq!(first.fresh_paths.len(), 1, "parsed once");
+        let rows: Vec<(String, u64, u64, String)> = first
+            .result
+            .mods
+            .iter()
+            .map(|m| {
+                (
+                    m.path.clone(),
+                    m.mtime_ms,
+                    m.size,
+                    serde_json::to_string(m).unwrap(),
+                )
+            })
+            .collect();
+        db::upsert_many(&mut conn, &rows).unwrap();
+
+        let input = ModInput {
+            tech_name: "FS25_Foo".into(),
+            file_name: "FS25_Foo.zip".into(),
+            kind: "zip".into(),
+            category: "Vehicles".into(),
+            subcategory: None,
+        };
+        let rep = apply_organize(&conn, &layout, &mods, std::slice::from_ref(&input));
+        assert_eq!(rep.changed, 1);
+        let filed = arch.join("Vehicles").join("FS25_Foo.zip");
+        assert!(filed.exists());
+
+        // The scan after filing finds the mod at its new path without parsing it again.
+        let second = scan(&conn);
+        assert!(
+            second.fresh_paths.is_empty(),
+            "reused the cache, parsed: {:?}",
+            second.fresh_paths
+        );
+        let m = &second.result.mods[0];
+        assert_eq!(m.path, filed.to_string_lossy());
+        assert!(m.organized);
+        let cache = db::load_cache(&conn);
+        assert!(cache.contains_key(filed.to_string_lossy().as_ref()));
+        assert!(!cache.contains_key(mods.join("FS25_Foo.zip").to_string_lossy().as_ref()));
         let _ = std::fs::remove_dir_all(&base);
     }
 

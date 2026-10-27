@@ -3,7 +3,7 @@
 //! on path), not `LIKE 'mods_%'` key-value scans. Versioned, additive migrations
 //! (`SCHEMA_VERSION`); we never wipe the cache on version bumps.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1398,6 +1398,52 @@ pub fn upsert_many(
         }
     }
     tx.commit().map_err(|e| e.to_string())
+}
+
+/// Carry a mod's scan-cache row from `from` to `to` when Silo moves the file (filing it into the
+/// library). A rename keeps mtime and size, so the next scan reuses the row instead of parsing
+/// the mod again; without this, filing a whole library made the scan after it re-read every
+/// mod (#322). The row's own `path` field is rewritten too. Best effort: no row, or a row that
+/// can't be read, is left alone (the scan parses that mod fresh).
+/// @returns whether a row was carried over
+pub fn move_cache_row(conn: &Connection, from: &str, to: &str) -> Result<bool, String> {
+    let row = conn
+        .query_row(
+            "SELECT mtime_ms, size, json FROM mod_cache WHERE path = ?1",
+            [from],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((mtime, size, json)) = row else {
+        return Ok(false);
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&json) else {
+        return Ok(false);
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return Ok(false);
+    };
+    obj.insert("path".into(), serde_json::Value::String(to.to_string()));
+    let json = value.to_string();
+    conn.execute(
+        "INSERT INTO mod_cache(path, mtime_ms, size, json) VALUES(?1, ?2, ?3, ?4)
+         ON CONFLICT(path) DO UPDATE SET
+             mtime_ms = excluded.mtime_ms,
+             size     = excluded.size,
+             json     = excluded.json",
+        rusqlite::params![to, mtime, size, json],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM mod_cache WHERE path = ?1", [from])
+        .map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// Delete cache rows for mods that are no longer present on disk.

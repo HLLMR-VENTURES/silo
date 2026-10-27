@@ -20,6 +20,7 @@
   import { formatCount } from "../plural";
   import {
     failureDetails,
+    filingProgress,
     folderUsable,
     folderVariant,
     nMods,
@@ -442,11 +443,8 @@
         <div class="filelist"><OrganizeFiles {plan} failed={failedSet} /></div>
       {/if}
       {#if filing}
-        <ProgressBar
-          value={filing.total ? filing.done : undefined}
-          max={filing.total || 1}
-          label="Filing {formatCount(filing.done)} of {formatCount(filing.total)}…"
-        />
+        {@const bar = filingProgress(filing.done, filing.total, scanning ? progress : null)}
+        <ProgressBar value={bar.value} max={bar.max} label={bar.label} />
       {:else}
         {#if organizeProblem || organizeBlocked}
           <p class="warn" role={organizeProblem ? "alert" : "status"}>
