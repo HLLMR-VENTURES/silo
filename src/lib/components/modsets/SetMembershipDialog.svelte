@@ -50,6 +50,7 @@
   const stateOf = (r: MembershipRow) => chosen.get(r.set.id) ?? r.initial;
   const edits = $derived(membershipEdits(rows, techNames, chosen));
   const allUnticked = $derived(rows.every((r) => stateOf(r) === "none"));
+  const allTicked = $derived(rows.every((r) => stateOf(r) === "all"));
 
   const one = $derived(mods.length === 1 ? (mods[0].title ?? mods[0].techName) : null);
   const title = $derived(one ? `Mod sets for ${one}` : `Mod sets for ${formatCount(mods.length)} mods`);
@@ -65,6 +66,11 @@
 
   function untickAll() {
     chosen = new Map(rows.map((r) => [r.set.id, "none"]));
+  }
+
+  // Tick all (#331): every set, the mirror of Untick all.
+  function tickAll() {
+    chosen = new Map(rows.map((r) => [r.set.id, "all"]));
   }
 
   async function save() {
@@ -128,6 +134,7 @@
 
   {#snippet footer()}
     {#if rows.length > 0}
+      <Button variant="ghost" disabled={allTicked || saving} onclick={tickAll}>Tick all</Button>
       <Button variant="ghost" class="membership-untick" disabled={allUnticked || saving} onclick={untickAll}>Untick all</Button>
     {/if}
     <Button onclick={() => (open = false)}>Cancel</Button>
@@ -194,7 +201,7 @@
     color: var(--muted);
     font-size: var(--fs-xs);
   }
-  /* Untick all sits on the left, away from Save. */
+  /* Tick all and Untick all sit on the left, away from Save. */
   :global(.membership-untick) {
     margin-right: auto;
   }
