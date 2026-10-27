@@ -43,6 +43,26 @@ describe("toast", () => {
     expect(screen.queryByText("Moved 12 mods")).not.toBeInTheDocument();
   });
 
+  it("a second action shows before the first, and runs on its own", async () => {
+    const user = userEvent.setup();
+    const park = vi.fn();
+    const undo = vi.fn();
+    render(ToastRegion);
+    await act(() =>
+      toast({
+        message: "Removed 2 mods from 3 sets.",
+        secondaryAction: { label: "Park them too", run: park },
+        action: { label: "Undo", run: undo },
+      }),
+    );
+    const buttons = screen.getAllByRole("button").map((b) => b.textContent?.trim());
+    expect(buttons.indexOf("Park them too")).toBeLessThan(buttons.indexOf("Undo"));
+    await user.click(screen.getByRole("button", { name: "Park them too: Removed 2 mods from 3 sets." }));
+    await vi.waitFor(() => expect(park).toHaveBeenCalledTimes(1));
+    expect(undo).not.toHaveBeenCalled();
+    expect(screen.queryByText("Removed 2 mods from 3 sets.")).not.toBeInTheDocument();
+  });
+
   it("names the action after the toast, or uses its ariaLabel", async () => {
     render(ToastRegion);
     await act(() => {

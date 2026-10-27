@@ -218,10 +218,12 @@
   import MySetsTab from "./lib/components/modsets/MySetsTab.svelte";
   import SharedLinks from "./lib/components/modsets/SharedLinks.svelte";
   import ShareDialog from "./lib/components/modsets/ShareDialog.svelte";
+  import SetMembershipDialog from "./lib/components/modsets/SetMembershipDialog.svelte";
   import OpenSharedTab from "./lib/components/modsets/OpenSharedTab.svelte";
   import SavegamesTab from "./lib/components/modsets/SavegamesTab.svelte";
   import { createModSets } from "./lib/modsets/modSetsStore.svelte";
   import { activeSetLine, saveModStats, stripSetName } from "./lib/modsets/modSets";
+  import type { MembershipEdit } from "./lib/modsets/membership";
   import { listenForSharedSets } from "./lib/modsets/deepLink";
   import GeneralSettings from "./lib/components/settings/GeneralSettings.svelte";
   import ModsFolderSettings from "./lib/components/settings/ModsFolderSettings.svelte";
@@ -1007,6 +1009,39 @@
     undo: switchUndo,
     editRefused: loadoutEditRefused,
     refuse,
+    activeUndoBlocked,
+    // "Park them too" after mods were taken out of sets: the BulkBar's Park, as it is.
+    park: (techNames) => {
+      const wanted = new Set(techNames);
+      return setActiveForMods(
+        effectiveMods.filter((m) => wanted.has(m.techName)),
+        false,
+      );
+    },
+  });
+
+  /** The Library's "Mod sets…" dialog (#323): the mods it's for, and whether they're the selection
+   *  (cleared once it saved, as Turn on / Park do). */
+  let membership = $state<{ mods: ModEntry[]; fromSelection: boolean } | null>(null);
+  let membershipOpen = $state(false);
+  function openMembership(list: ModEntry[], fromSelection: boolean) {
+    if (list.length === 0) return;
+    membership = { mods: [...list], fromSelection };
+    membershipOpen = true;
+  }
+  async function saveMembership(edits: MembershipEdit[]): Promise<boolean> {
+    const m = membership;
+    if (!m) return false;
+    const ok = await setStore.applyMembership(
+      m.mods.map((x) => x.techName),
+      edits,
+    );
+    if (ok && m.fromSelection) selection.clear();
+    return ok;
+  }
+  // Forget the dialog's mods once it has closed.
+  $effect(() => {
+    if (!membershipOpen) untrack(() => (membership = null));
   });
 
   /** The Share dialog's set (a saved set, or the active mods). */
@@ -1692,6 +1727,7 @@
     const hasSettings = settingsModsSet.has(mod.techName);
     const items: MenuItem[] = [
       { id: "active", label: isActive ? "Park" : "Turn on", icon: isActive ? "circle" : "dot" },
+      { id: "sets", label: "Mod sets…", icon: "modSets" },
       { id: "details", label: "Open details", icon: "info" },
       { id: "browse", label: "Find in Browse", icon: "search" },
       { id: "category", label: "Change category…", icon: "tag", separatorBefore: true },
@@ -1706,6 +1742,8 @@
       switch (id) {
         case "active":
           return void toggleActive(mod.techName);
+        case "sets":
+          return openMembership([mod], false);
         case "details":
           detailMod = mod;
           return;
@@ -3736,6 +3774,7 @@
               onpark={() => setActiveForMods(selectedMods, false)}
               onfavorite={(on) => setCurationFor(selectedMods, "favorite", on)}
               onhide={(on) => setCurationFor(selectedMods, "hidden", on)}
+              onmodsets={() => openMembership(selectedMods, true)}
               onselectall={() => selection.selectAll(visibleKeys)}
               onclear={() => selection.clear()}
             />
@@ -4270,6 +4309,19 @@
       label="Category for {modTitle(ed.techName)}"
       onselect={(id) =>
         id === CATEGORY_RESET ? resetCategory(ed.techName) : setCategory(ed.techName, id)}
+    />
+  {/if}
+
+  {#if membership}
+    {@const st = setStore.state}
+    <SetMembershipDialog
+      bind:open={membershipOpen}
+      mods={membership.mods}
+      sets={setStore.sets}
+      currentId={st.kind === "none" ? null : st.id}
+      active={activeSet}
+      lockReason={fgLock.reason}
+      onsave={saveMembership}
     />
   {/if}
 

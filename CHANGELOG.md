@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Library: **Mod sets…** adds mods to, or removes them from, several of your saved sets at once.
+  It's in the selection bar and in a mod's menu. Each set has a box: ticked when every chosen mod
+  is in it, unticked when none is, mixed when some are. Click to change it, or **Untick all**,
+  then **Save** writes every set in one go. Automatic "Before …" snapshots aren't listed. Editing
+  the set you're on also turns the added mods on or parks the removed ones, so you stay on that
+  set; the dialog says so beside it. The toast after saving offers **Undo**, which puts every set
+  back and reverses that turn-on or park, and, when mods you took out of sets are still on,
+  **Park them too** (**Park it too** for one mod). (#323)
+
 ### Changed
 
 - Silo's source code now lives at

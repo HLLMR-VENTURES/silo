@@ -7,10 +7,10 @@
 //   await setStore.switchTo(set);
 import { ask, askText, toast, type ConfirmFact } from "../ui";
 import { reportError } from "../state/notify.svelte";
-import { deleteLoadout, getLoadouts, saveAutoSnapshot, saveLoadout } from "../api";
+import { deleteLoadout, getLoadouts, replaceLoadoutMods, saveAutoSnapshot, saveLoadout } from "../api";
 import { activeSetDiff, findLoadoutByName, loadoutNameCheck, sameMods, type ActiveSetDiff } from "../loadoutSafety";
 import { formatCount, plural } from "../plural";
-import type { SwitchUndo } from "../state/switchUndo";
+import { switchMessage, type SwitchUndo } from "../state/switchUndo";
 import type { Loadout, Savegame } from "../types";
 import {
   activeSetState,
@@ -23,6 +23,7 @@ import {
   type ActiveSetState,
   type LastApplied,
 } from "./modSets";
+import { activeChange, membershipMessage, type MembershipEdit } from "./membership";
 
 export interface ModSetsDeps {
   /** Tech names active now. */
@@ -41,6 +42,11 @@ export interface ModSetsDeps {
   editRefused: () => boolean;
   /** Say why something can't happen (a warn toast). */
   refuse: (why: string) => void;
+  /** Why an Undo that puts the active mods back can't run now (App's activeUndoBlocked), or null.
+   *  @param expected the active mods the change left */
+  activeUndoBlocked: (expected: string[]) => string | null;
+  /** Park these mods through the normal Park path (the "Mod sets…" toast's "Park them too"). */
+  park: (techNames: string[]) => unknown;
 }
 
 export interface ModSets {
@@ -63,6 +69,15 @@ export interface ModSets {
   useSave(save: Savegame): Promise<void>;
   /** Save a shared set's mods as a new set without downloading anything. Returns its id. */
   saveShared(name: string, mods: string[]): Promise<number | null>;
+  /**
+   * The Library's "Mod sets…" Save (#323): write every edited set at once. When the set you're on
+   * is edited, its added mods turn on (or its removed ones are parked) first, so you stay on it.
+   * The toast offers Undo, and "Park them too" when mods removed from sets are still on.
+   * @param techNames the chosen mods
+   * @param edits what to write (membership.ts)
+   * @returns false when nothing was saved (refused, cancelled or failed): the dialog stays open
+   */
+  applyMembership(techNames: string[], edits: MembershipEdit[]): Promise<boolean>;
 }
 
 /** "1 mod" / "1,204 mods". */
@@ -418,6 +433,91 @@ export function createModSets(deps: ModSetsDeps): ModSets {
     }
   }
 
+  async function applyMembership(techNames: string[], edits: MembershipEdit[]): Promise<boolean> {
+    if (edits.length === 0) return true;
+    if (deps.editRefused()) return false;
+    const st = currentState();
+    const change = activeChange(edits, st.kind === "none" ? null : st.id, deps.active());
+    const previous = [...deps.active()];
+    // null: the active mods didn't need to change; else whether that switch was clean.
+    let switched: boolean | null = null;
+    if (change.on.length + change.off.length > 0) {
+      const target = new Set(previous);
+      for (const t of change.on) target.add(t);
+      for (const t of change.off) target.delete(t);
+      deps.undo.dismiss();
+      const label = change.on.length > 0 ? "Turning on mods" : "Parking mods";
+      switched = await deps.setActiveSetTo([...target], label);
+      if (switched === null) return false; // refused or cancelled: nothing changed
+    }
+    const before = edits.map((e) => ({ id: e.set.id, name: e.set.name, mods: [...e.set.mods] }));
+    const written = new Map(edits.map((e) => [e.set.id, e.mods]));
+    try {
+      await replaceLoadoutMods(edits.map((e) => ({ id: e.set.id, mods: e.mods })));
+    } catch (e) {
+      reportError(e, "Saving your mod sets");
+      await reload();
+      // The mods were switched for a save that didn't happen: offer to put them back.
+      if (switched !== null)
+        deps.undo.offer({
+          message: "Your mod sets weren't saved, but your active mods changed.",
+          tone: "warn",
+          previous,
+          expected: [...deps.active()],
+        });
+      return false;
+    }
+    await reload();
+    const expected = [...deps.active()];
+    const names = techNames.map(deps.title);
+    let message = membershipMessage(names, edits);
+    if (switched !== null) {
+      const changed = [...change.on, ...change.off].map(deps.title);
+      message += ` ${switchMessage(changed, change.on.length > 0, switched)}`;
+    }
+    const removed = [...new Set(edits.flatMap((e) => e.removed))];
+    const offer = () => {
+      const stillOn = removed.filter((t) => deps.active().has(t));
+      toast({
+        message,
+        tone: switched === false ? "warn" : "neutral",
+        secondaryAction:
+          stillOn.length > 0
+            ? { label: stillOn.length === 1 ? "Park it too" : "Park them too", run: () => void deps.park(removed.filter((t) => deps.active().has(t))) }
+            : undefined,
+        action: { label: "Undo", run: undo },
+      });
+    };
+    const undo = async () => {
+      const stale = before.find((b) => {
+        const now = sets.find((l) => l.id === b.id);
+        return !now || !sameMods(now.mods, written.get(b.id) ?? []);
+      });
+      if (stale) {
+        toast({ message: `Can't undo: ${stale.name} changed since.`, tone: "warn" });
+        return;
+      }
+      if (deps.editRefused()) return;
+      if (switched !== null) {
+        const why = deps.activeUndoBlocked(expected);
+        if (why) {
+          toast({ message: why, tone: "warn" });
+          return;
+        }
+        // Refused (Silo is busy, and said so): offer the same Undo again.
+        if ((await deps.setActiveSetTo(previous, "Switching back")) === null) return offer();
+      }
+      try {
+        await replaceLoadoutMods(before.map((b) => ({ id: b.id, mods: b.mods })));
+        await reload();
+      } catch (e) {
+        reportError(e, "Undoing the change to your mod sets");
+      }
+    };
+    offer();
+    return true;
+  }
+
   return {
     get sets() {
       return sets;
@@ -439,5 +539,6 @@ export function createModSets(deps: ModSetsDeps): ModSets {
     remove,
     useSave,
     saveShared,
+    applyMembership,
   };
 }
