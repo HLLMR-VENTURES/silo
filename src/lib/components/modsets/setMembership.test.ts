@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// The Library's "Mod sets…" dialog (#323): tri-state boxes per saved set, the click cycle, Untick
-// all, the note beside the set you're on, and Save handing over only what changed.
+// The Library's "Mod sets…" dialog (#323): tri-state boxes per saved set, the click cycle, Tick all and
+// Untick all, the note beside the set you're on, and Save handing over only what changed.
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
@@ -87,6 +87,23 @@ describe("SetMembershipDialog", () => {
     expect(onsave.mock.calls[0][0].map((e) => e.set.name)).toEqual(["Riverbend", "Hutan", "Zielonka"]);
   });
 
+  it("Tick all ticks every set and saves only the sets that change (#331)", async () => {
+    const { box, user, onsave } = setup();
+    await user.click(screen.getByRole("button", { name: "Tick all" }));
+    expect(["Riverbend", "Hutan", "Zielonka"].map((n) => look(box(n)))).toEqual(["ticked", "ticked", "ticked"]);
+    expect(screen.getByRole("button", { name: "Tick all" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Untick all" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    // Riverbend already held both mods: only the mixed and the unticked sets are written.
+    expect(onsave.mock.calls[0][0].map((e) => e.set.name)).toEqual(["Hutan", "Zielonka"]);
+  });
+
+  it("Tick all on the set you're on says it also turns the mods on", async () => {
+    const { box, user } = setup({ currentId: 3, active: new Set(["X"]) });
+    await user.click(screen.getByRole("button", { name: "Tick all" }));
+    expect(box("Zielonka")).toHaveAccessibleDescription("also turns them on now");
+  });
+
   it("says beside the set you're on what saving also does to your active mods", async () => {
     const { box, user } = setup({ currentId: 3, active: new Set(["X"]) });
     expect(screen.getByText("Active")).toBeInTheDocument();
@@ -111,5 +128,6 @@ describe("SetMembershipDialog", () => {
     expect(screen.getByRole("dialog", { name: "Mod sets for Courseplay" })).toBeInTheDocument();
     expect(screen.getByText("No mod sets yet")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Untick all" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Tick all" })).not.toBeInTheDocument();
   });
 });
