@@ -1,6 +1,7 @@
 // Transient notices, rendered by <ToastRegion /> (mounted once in App.svelte):
 //   toast({ message: "Mod set saved", tone: "success" });
 //   const t = toast({ message: "Moved 12 mods", action: { label: "Undo", run: undo } });
+//   toast({ message: "Removed 2 mods from 3 sets.", secondaryAction: { label: "Park them too", run }, action: undoAction });
 //   t.dismiss();
 // Toasts never take focus, and their buttons are inert while a dialog is open. Their timer pauses
 // while hovered or focused and while the window is in the background, so nobody misses one by
@@ -27,6 +28,8 @@ export interface ToastOptions {
   body?: string;
   tone?: ToastTone;
   action?: ToastAction;
+  /** A second action, shown before `action` ("Park them too" beside "Undo"). */
+  secondaryAction?: ToastAction;
   /** Milliseconds on screen (time paused doesn't count). Default 6000, or 10000 with an action. */
   duration?: number;
   /** Stays until dismissed (errors). */
@@ -43,6 +46,7 @@ export interface ToastItem {
   body?: string;
   tone: ToastTone;
   action?: ToastAction;
+  secondaryAction?: ToastAction;
   duration: number;
   sticky: boolean;
   detail?: string;
@@ -120,7 +124,8 @@ export function toast(opts: ToastOptions): ToastHandle {
     body: opts.body,
     tone,
     action: opts.action,
-    duration: opts.duration ?? (opts.action ? 10_000 : 6_000),
+    secondaryAction: opts.secondaryAction,
+    duration: opts.duration ?? (opts.action || opts.secondaryAction ? 10_000 : 6_000),
     sticky: opts.sticky ?? false,
     detail: opts.detail,
     dedupeKey: opts.dedupeKey,

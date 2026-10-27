@@ -1,8 +1,8 @@
 <script lang="ts">
   // Takes the toolbar's place while any mod is selected:
-  //   12 selected · [Turn on] [Park] [Favorite] [Hide] · [Select all 140 shown] · Clear
+  //   12 selected · [Turn on] [Park] [Favorite] [Hide] [Mod sets…] · [Select all 140 shown] · Clear
   //   <BulkBar count={sel.size} shownCount={visible.length} onturnon={...} onpark={...}
-  //     onfavorite={...} onhide={...} onselectall={...} onclear={() => sel.clear()} />
+  //     onfavorite={...} onhide={...} onmodsets={...} onselectall={...} onclear={() => sel.clear()} />
   // Turn on / Park are off (with the reason as the tooltip) while another library change runs.
   // Favorite / Hide flip to Remove favorite / Unhide when every selected mod already is one.
   // A toolbar: one Tab stop, ←/→ (and Home/End) move between its buttons, skipping turned-off
@@ -29,6 +29,8 @@
     onpark: () => void;
     onfavorite: (on: boolean) => void;
     onhide: (on: boolean) => void;
+    /** Add the selected mods to, or remove them from, saved sets (the "Mod sets…" dialog). */
+    onmodsets: () => void;
     onselectall: () => void;
     onclear: () => void;
     /** The bar's element (bindable). */
@@ -47,6 +49,7 @@
     onpark,
     onfavorite,
     onhide,
+    onmodsets,
     onselectall,
     onclear,
     ref = $bindable(null),
@@ -115,6 +118,7 @@
   <Button size="sm" icon={allHidden ? "visible" : "hidden"} onclick={() => onhide(!allHidden)}>
     {allHidden ? "Unhide" : "Hide"}
   </Button>
+  <Button size="sm" icon="modSets" onclick={onmodsets}>Mod sets…</Button>
   <span class="sep" aria-hidden="true">·</span>
   <Button size="sm" variant="ghost" disabled={allShownSelected} onclick={onselectall}>
     Select all {shownCount} shown

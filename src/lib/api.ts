@@ -396,6 +396,12 @@ export function saveLoadout(
   return invoke<number>("save_loadout", { id, name, mods });
 }
 
+/** Replace several saved sets' mods in one go: all are written or none is (the Library's
+ *  "Mod sets…" dialog). Rejects when a set no longer exists. */
+export function replaceLoadoutMods(edits: { id: number; mods: string[] }[]): Promise<void> {
+  return invoke<void>("replace_loadout_mods", { edits });
+}
+
 export function deleteLoadout(id: number): Promise<void> {
   return invoke("delete_loadout", { id });
 }

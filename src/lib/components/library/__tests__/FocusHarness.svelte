@@ -30,6 +30,7 @@
     onpark={noop}
     onfavorite={noop}
     onhide={noop}
+    onmodsets={noop}
     onselectall={noop}
     onclear={noop}
   />

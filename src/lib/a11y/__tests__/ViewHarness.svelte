@@ -216,7 +216,7 @@
       {#snippet filters()}
         <FilterBar catTree={[{ name: "Tools", count: 3, children: [] }]} showSearch={false} sortOptions={[{ value: "name", label: "Name" }, { value: "added", label: "Recently added" }]} sort="added" dirEnabled showYear={false} showClear={false} />
         {#if which === "librarySelecting"}
-          <BulkBar count={2} shownCount={mods.length} onturnon={noop} onpark={noop} onfavorite={noop} onhide={noop} onselectall={noop} onclear={noop} />
+          <BulkBar count={2} shownCount={mods.length} onturnon={noop} onpark={noop} onfavorite={noop} onhide={noop} onmodsets={noop} onselectall={noop} onclear={noop} />
         {:else}
           <LibraryToolbar filters={{ ...NO_FILTERS }} onchange={noop} onneedsupdate={noop} tags={["harvest"]} counts={{ attention: 2 }} shownCount={mods.length} libView={which === "libraryCards" ? "cards" : "list"} />
         {/if}
