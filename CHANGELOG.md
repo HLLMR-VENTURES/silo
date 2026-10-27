@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the set you're on also turns the added mods on or parks the removed ones, so you stay on that
   set; the dialog says so beside it. The toast after saving offers **Undo**, which puts every set
   back and reverses that turn-on or park, and, when mods you took out of sets are still on,
-  **Park them too**. (#323)
+  **Park them too** (**Park it too** for one mod). (#323)
 
 ### Changed
 

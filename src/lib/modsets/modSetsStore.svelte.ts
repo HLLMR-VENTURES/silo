@@ -483,7 +483,7 @@ export function createModSets(deps: ModSetsDeps): ModSets {
         tone: switched === false ? "warn" : "neutral",
         secondaryAction:
           stillOn.length > 0
-            ? { label: "Park them too", run: () => void deps.park(removed.filter((t) => deps.active().has(t))) }
+            ? { label: stillOn.length === 1 ? "Park it too" : "Park them too", run: () => void deps.park(removed.filter((t) => deps.active().has(t))) }
             : undefined,
         action: { label: "Undo", run: undo },
       });

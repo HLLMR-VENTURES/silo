@@ -370,9 +370,16 @@ describe("applyMembership (the Library's Mod sets… dialog, #323)", () => {
     await t.store.applyMembership(["C"], editsFor(t, ["C"], [[2, "none"]]));
     const opts = lastToast();
     expect(opts.message).toBe("Removed Mod C from Forestry weekend.");
-    expect(opts.secondaryAction?.label).toBe("Park them too");
+    expect(opts.secondaryAction?.label).toBe("Park it too");
     await opts.secondaryAction!.run();
     expect(t.park).toHaveBeenCalledWith(["C"]);
+  });
+
+  it("says Park them too for more than one mod still on", async () => {
+    const t = setup(["A", "B", "C", "D"]);
+    await t.store.load();
+    await t.store.applyMembership(["C", "D"], editsFor(t, ["C", "D"], [[2, "none"]]));
+    expect(lastToast().secondaryAction?.label).toBe("Park them too");
   });
 
   it("Undo puts every set back and reverses the switch", async () => {

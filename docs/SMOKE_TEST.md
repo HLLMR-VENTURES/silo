@@ -449,7 +449,7 @@ Use a copy of a real mods folder. For a crash, end FS25 from Task Manager (or `t
 
 - [ ] `[app]` **From the selection bar.** Select three mods → **Mod sets…** → one box per set you saved (no "Before …" snapshots), ticked / unticked / mixed as each set holds them. Tick one set, untick another, **Save** → the toast "Added 3 mods to <set> and removed them from <set>." My sets shows both sets' new counts, the selection is cleared.
 - [ ] `[app]` **The set you're on.** On a set (Library strip names it), open **Mod sets…** from a parked mod's menu, tick that set → "also turns it on now" beside it; **Save** turns the mod on and the strip still names the set (not "Custom"). **Undo** parks it again and the set is as before.
-- [ ] `[app]` **Park them too.** Untick a set for a mod that's on (not the set you're on) → the toast offers **Park them too**, which parks it with the usual Park Undo.
+- [ ] `[app]` **Park them too.** Untick a set for a mod that's on (not the set you're on) → the toast offers **Park it too**, which parks it with the usual Park Undo.
 - [ ] `[app]` **Busy.** While a library change runs (Organize, Find the problem mod), **Save** is off with the reason as its tooltip.
 
 ## Sign-off
