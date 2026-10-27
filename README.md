@@ -29,9 +29,8 @@ Windows (tested) · macOS and Linux (preview).**
 
 > **Status: 1.0.** Windows installers are [code-signed](docs/VERIFY_DOWNLOAD.md) by
 > David Hellmer, Silo's developer. SmartScreen may still prompt on new releases while
-> reputation builds, but it shows the publisher instead of "unknown". macOS/Linux builds are
-> OS-unsigned, so macOS blocks the first launch until you click **Open Anyway** in System
-> Settings → Privacy & Security.
+> reputation builds, but it shows the publisher instead of "unknown". macOS builds are signed
+> with Apple Developer ID and notarized, so they open normally. Linux builds are OS-unsigned.
 >
 > **Platforms: Windows is the tested, supported platform.** macOS (Intel & Apple Silicon)
 > and Linux builds are **a preview and largely untested on real machines**. We'd love
@@ -94,8 +93,8 @@ and mod sets you can switch between playthroughs.
 
 **Download:** grab the installer for your OS from
 [Releases](https://github.com/HLLMR-VENTURES/silo/releases). Windows builds are code-signed — you can
-[verify the signature, checksum, and build provenance](docs/VERIFY_DOWNLOAD.md). macOS/Linux
-builds are OS-unsigned, so Gatekeeper may warn on first launch. On Windows, the setup `.exe`
+[verify the signature, checksum, and build provenance](docs/VERIFY_DOWNLOAD.md). macOS builds
+are signed with Apple Developer ID and notarized; Linux builds are OS-unsigned. On Windows, the setup `.exe`
 installs per user with no admin rights (recommended); the `.msi` installs for all users and
 needs admin rights. Linux ships as `.AppImage`, `.deb` and `.rpm`.
 

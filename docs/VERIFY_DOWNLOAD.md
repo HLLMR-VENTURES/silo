@@ -27,8 +27,15 @@ David Hellmer
 > reputation builds — but it will show the verified publisher above, **not** "unknown
 > publisher," and it eases as clean installs accumulate under the same identity.
 
-macOS and Linux builds are **not** OS-signed yet (Gatekeeper may warn); verify those by
-building from source or by the SHA-256 checksums below.
+From 1.0.2, **macOS** builds are signed with Apple Developer ID and notarized by Apple, so
+macOS opens them without a Gatekeeper warning. The signing identity is:
+
+```
+Developer ID Application: David Hellmer (554574H76C)
+```
+
+**Linux** builds are not OS-signed; verify those by building from source or by the SHA-256
+checksums below.
 
 ---
 
@@ -51,6 +58,22 @@ Expected:
 Status : Valid
 Publisher : CN=David Hellmer, O=David Hellmer, L=Grand Prairie, S=tx, C=US
 ```
+
+## Verify the signature (macOS)
+
+After installing, in Terminal:
+
+```sh
+codesign --verify --deep --strict --verbose=2 /Applications/Silo.app
+codesign --display --verbose=2 /Applications/Silo.app 2>&1 | grep Authority
+spctl --assess --type execute --verbose=2 /Applications/Silo.app
+```
+
+The first reports the app as valid on disk. The second's first line should read
+`Authority=Developer ID Application: David Hellmer (554574H76C)`. The third should end with
+`accepted` and `source=Notarized Developer ID`.
+
+---
 
 ## Verify the checksum (any OS)
 
