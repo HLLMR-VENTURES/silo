@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Downloads of 1.0.1 and earlier verify with `--owner HLLMR`; see
   [Verify your download](docs/VERIFY_DOWNLOAD.md).
 
+### Fixed
+
+- macOS: on Apple Silicon, the downloaded app no longer reports "Silo is damaged and can't be
+  opened". The whole app bundle now gets a valid ad-hoc signature, so macOS shows its usual
+  prompt for an unidentified developer instead (System Settings → Privacy & Security → Open
+  Anyway). The release build now fails if that signature doesn't verify. Apple Developer ID
+  signing is still tracked in #171. (#322)
+
 ### Security
 
 - Updated the TLS certificate libraries (`rustls-webpki` 0.103.16, `webpki-roots` and

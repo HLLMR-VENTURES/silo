@@ -140,7 +140,8 @@ jobs:
 
       # Windows Authenticode signing via Azure Trusted Signing. tauri-action invokes the
       # generated bundle sign command DURING the build (so the updater's minisign signature
-      # is computed over the already-signed binary — order matters). macOS/Linux are unsigned.
+      # is computed over the already-signed binary — order matters). macOS gets an ad-hoc signature
+      # (tauri.conf.json bundle.macOS.signingIdentity "-"); Linux is unsigned.
       - name: Set up Windows code signing
         if: matrix.platform == 'windows-latest'
         shell: pwsh
@@ -187,6 +188,16 @@ jobs:
           # draft for review; publishing it makes it Latest.
           prerelease: false
           args: ${{ matrix.args }}
+
+      # Apple Silicon refuses an app whose bundle isn't validly signed ("Silo is damaged", #322).
+      # The bundle is ad-hoc signed, not Developer ID signed (#171): prove the signature
+      # covers the whole bundle, so a broken one fails the release instead of shipping.
+      - name: Verify macOS ad-hoc signature
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          app="src-tauri/target/${{ matrix.rust-target }}/release/bundle/macos/Silo.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --display --verbose=2 "$app" 2>&1 | grep -E '^(Identifier|Signature|Sealed Resources)'
 
       # Prove the signing actually happened — a signCommand that exits 0 without signing
       # would otherwise ship an unsigned installer. Fail the release if any Windows bundle

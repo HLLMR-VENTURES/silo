@@ -31,6 +31,9 @@
     "copyright": "© 2026 HLLMR Ventures LLC",
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
