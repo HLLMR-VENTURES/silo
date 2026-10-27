@@ -3584,6 +3584,29 @@ async fn save_loadout(
     .map_err(error::AppError::from)
 }
 
+/// One set's new mod list in a `replace_loadout_mods` batch.
+#[derive(Debug, serde::Deserialize)]
+struct LoadoutModsEdit {
+    id: i64,
+    mods: Vec<String>,
+}
+
+/// Replace several saved sets' mods in one transaction (the Library's "Mod sets…" dialog).
+#[tauri::command]
+async fn replace_loadout_mods(
+    app: tauri::AppHandle,
+    edits: Vec<LoadoutModsEdit>,
+) -> Result<(), error::AppError> {
+    let db = db_path(&app)?;
+    off_main(move || {
+        let mut conn = db::open(&db)?;
+        let edits: Vec<(i64, Vec<String>)> = edits.into_iter().map(|e| (e.id, e.mods)).collect();
+        db::replace_loadout_mods(&mut conn, &edits)
+    })
+    .await
+    .map_err(error::AppError::from)
+}
+
 #[tauri::command]
 async fn delete_loadout(app: tauri::AppHandle, id: i64) -> Result<(), error::AppError> {
     let db = db_path(&app)?;
@@ -5173,6 +5196,7 @@ pub fn run() {
         archive_adopt_apply,
         get_loadouts,
         save_loadout,
+        replace_loadout_mods,
         delete_loadout,
         save_auto_snapshot,
         export_set_file,

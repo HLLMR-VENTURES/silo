@@ -49,6 +49,7 @@ describe("BulkBar", () => {
       onpark: vi.fn(),
       onfavorite: vi.fn(),
       onhide: vi.fn(),
+      onmodsets: vi.fn(),
       onselectall: vi.fn(),
       onclear: vi.fn(),
     };
@@ -88,12 +89,14 @@ describe("BulkBar", () => {
     await user.click(screen.getByRole("button", { name: "Park" }));
     await user.click(screen.getByRole("button", { name: "Favorite" }));
     await user.click(screen.getByRole("button", { name: "Hide" }));
+    await user.click(screen.getByRole("button", { name: "Mod sets…" }));
     await user.click(screen.getByRole("button", { name: "Select all 140 shown" }));
     await user.click(screen.getByRole("button", { name: "Clear" }));
     expect(h.onturnon).toHaveBeenCalledTimes(1);
     expect(h.onpark).toHaveBeenCalledTimes(1);
     expect(h.onfavorite).toHaveBeenCalledWith(true);
     expect(h.onhide).toHaveBeenCalledWith(true);
+    expect(h.onmodsets).toHaveBeenCalledTimes(1);
     expect(h.onselectall).toHaveBeenCalledTimes(1);
     expect(h.onclear).toHaveBeenCalledTimes(1);
   });

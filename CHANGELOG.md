@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Library: **Mod sets…** adds mods to, or removes them from, several of your saved sets at once.
+  It's in the selection bar and in a mod's menu. Each set has a box: ticked when every chosen mod
+  is in it, unticked when none is, mixed when some are. Click to change it, or **Untick all**,
+  then **Save** writes every set in one go. Automatic "Before …" snapshots aren't listed. Editing
+  the set you're on also turns the added mods on or parks the removed ones, so you stay on that
+  set; the dialog says so beside it. The toast after saving offers **Undo**, which puts every set
+  back and reverses that turn-on or park, and, when mods you took out of sets are still on,
+  **Park them too** (**Park it too** for one mod). (#323)
+
 ### Changed
 
 - Silo's source code now lives at
@@ -15,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still redirects and stays as the updater's fallback, so existing installs keep updating.
   Downloads of 1.0.1 and earlier verify with `--owner HLLMR`; see
   [Verify your download](docs/VERIFY_DOWNLOAD.md).
+
+### Fixed
+
+- macOS: on Apple Silicon, the downloaded app no longer reports "Silo is damaged and can't be
+  opened". Mac builds are now signed with Apple Developer ID and notarized by Apple, so macOS
+  opens Silo normally, without the Privacy & Security "Open Anyway" step. The release build
+  fails if the signature or notarization doesn't verify. (#322, #171)
+- Setup no longer looks stuck on "Filing 194 of 194…" after the last mod is filed. Filing now
+  keeps what Silo already read from each mod, so the library re-read that follows is quick
+  instead of parsing every filed mod again. While that step runs, the setup screen and the
+  Organize dialog show "Reading your library" with its own count instead of a frozen bar. (#322)
 
 ### Security
 

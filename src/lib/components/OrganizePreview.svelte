@@ -13,7 +13,7 @@
   import OrganizeSummary from "./organize/OrganizeSummary.svelte";
   import OrganizeFiles from "./organize/OrganizeFiles.svelte";
   import type { PlannedMove } from "../types";
-  import { failureDetails, nMods, type FilingFailure } from "../firstRun/firstRun";
+  import { failureDetails, filingProgress, nMods, type FilingFailure } from "../firstRun/firstRun";
   import { formatCount } from "../plural";
 
   let {
@@ -132,14 +132,8 @@
 
   {#snippet footer()}
     {#if applying}
-      <ProgressBar
-        class="foot-progress"
-        value={progress?.total ? progress.done : undefined}
-        max={progress?.total || 1}
-        label={progress?.total
-          ? `Filing ${formatCount(progress.done)} of ${formatCount(progress.total)}…`
-          : "Filing…"}
-      />
+      {@const bar = filingProgress(progress?.done ?? 0, progress?.total ?? 0)}
+      <ProgressBar class="foot-progress" value={bar.value} max={bar.max} label={bar.label} />
     {:else if failures.length > 0}
       <Button
         icon="copy"

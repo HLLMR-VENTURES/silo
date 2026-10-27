@@ -3,7 +3,7 @@
 //! on path), not `LIKE 'mods_%'` key-value scans. Versioned, additive migrations
 //! (`SCHEMA_VERSION`); we never wipe the cache on version bumps.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1043,6 +1043,27 @@ pub fn save_loadout(
     Ok(id)
 }
 
+/// Replace the mods of several saved sets in one transaction (the Library's "Mod sets…" dialog,
+/// #323): every set is written or none is. Names and kinds stay as they are. Fails, writing
+/// nothing, when one of the sets no longer exists.
+pub fn replace_loadout_mods(
+    conn: &mut Connection,
+    edits: &[(i64, Vec<String>)],
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for (id, mods) in edits {
+        let name: Option<String> = tx
+            .query_row("SELECT name FROM loadout WHERE id = ?1", [id], |r| r.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some(name) = name else {
+            return Err(format!("mod set {id} no longer exists"));
+        };
+        write_loadout(&tx, Some(*id), &name, mods, KIND_USER)?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
 /// Save an automatic "Before …" snapshot of the active mods, then drop all but the newest
 /// `AUTO_SNAPSHOTS_KEPT` automatic ones, in one transaction. User sets are never touched.
 pub fn save_auto_snapshot(
@@ -1400,6 +1421,52 @@ pub fn upsert_many(
     tx.commit().map_err(|e| e.to_string())
 }
 
+/// Carry a mod's scan-cache row from `from` to `to` when Silo moves the file (filing it into the
+/// library). A rename keeps mtime and size, so the next scan reuses the row instead of parsing
+/// the mod again; without this, filing a whole library made the scan after it re-read every
+/// mod (#322). The row's own `path` field is rewritten too. Best effort: no row, or a row that
+/// can't be read, is left alone (the scan parses that mod fresh).
+/// @returns whether a row was carried over
+pub fn move_cache_row(conn: &Connection, from: &str, to: &str) -> Result<bool, String> {
+    let row = conn
+        .query_row(
+            "SELECT mtime_ms, size, json FROM mod_cache WHERE path = ?1",
+            [from],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((mtime, size, json)) = row else {
+        return Ok(false);
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&json) else {
+        return Ok(false);
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return Ok(false);
+    };
+    obj.insert("path".into(), serde_json::Value::String(to.to_string()));
+    let json = value.to_string();
+    conn.execute(
+        "INSERT INTO mod_cache(path, mtime_ms, size, json) VALUES(?1, ?2, ?3, ?4)
+         ON CONFLICT(path) DO UPDATE SET
+             mtime_ms = excluded.mtime_ms,
+             size     = excluded.size,
+             json     = excluded.json",
+        rusqlite::params![to, mtime, size, json],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM mod_cache WHERE path = ?1", [from])
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 /// Delete cache rows for mods that are no longer present on disk.
 pub fn prune_missing(conn: &mut Connection, present: &HashSet<String>) -> Result<usize, String> {
     let existing: Vec<String> = {
@@ -1710,6 +1777,53 @@ mod tests {
             .unwrap();
         assert_eq!(l.kind, KIND_AUTO);
         assert_eq!(l.mods, ["FS25_B"]);
+    }
+
+    #[test]
+    fn replacing_several_sets_mods_writes_them_all() {
+        let path = temp_db("replace_mods");
+        let mut c = open(&path).unwrap();
+        let a = save_loadout(&mut c, None, "Riverbend", &["FS25_A".to_string()]).unwrap();
+        let b = save_loadout(&mut c, None, "Hutan", &["FS25_B".to_string()]).unwrap();
+        replace_loadout_mods(
+            &mut c,
+            &[
+                (a, vec!["FS25_A".to_string(), "FS25_C".to_string()]),
+                (b, vec![]),
+            ],
+        )
+        .unwrap();
+        let sets = load_loadouts(&c);
+        let get = |id: i64| sets.iter().find(|l| l.id == id).unwrap();
+        let mut am = get(a).mods.clone();
+        am.sort();
+        assert_eq!(am, ["FS25_A", "FS25_C"]);
+        assert_eq!(get(a).name, "Riverbend", "names are kept");
+        assert!(get(b).mods.is_empty());
+        assert_eq!(get(b).kind, KIND_USER);
+    }
+
+    #[test]
+    fn replacing_sets_mods_writes_nothing_when_one_set_is_gone() {
+        let path = temp_db("replace_mods_gone");
+        let mut c = open(&path).unwrap();
+        let a = save_loadout(&mut c, None, "Riverbend", &["FS25_A".to_string()]).unwrap();
+        let err = replace_loadout_mods(
+            &mut c,
+            &[(a, vec!["FS25_Z".to_string()]), (a + 999, vec![])],
+        )
+        .unwrap_err();
+        assert!(err.contains("no longer exists"), "{err}");
+        let sets = load_loadouts(&c);
+        assert_eq!(sets[0].mods, ["FS25_A"], "the first edit was rolled back");
+        let orphans: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM loadout_mod WHERE loadout_id NOT IN (SELECT id FROM loadout)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0);
     }
 
     #[test]

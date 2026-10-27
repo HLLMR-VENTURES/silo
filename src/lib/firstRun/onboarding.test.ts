@@ -299,6 +299,13 @@ describe("Organize dialog", () => {
     expect(screen.queryByRole("button", { name: /File 3 mods/ })).not.toBeInTheDocument();
   });
 
+  it("says what it's doing once every mod is filed (#322)", () => {
+    render(OrganizePreview, { ...base, applying: true, progress: { done: 50, total: 50 } });
+    expect(
+      screen.getByRole("progressbar", { name: "Turning your mods back on and reading your library…" }),
+    ).toBeInTheDocument();
+  });
+
   it("keeps a partial failure open with the rows marked and Copy details", async () => {
     const user = userEvent.setup();
     const onCopyDetails = vi.fn();

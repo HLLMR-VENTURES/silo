@@ -146,6 +146,29 @@ export async function fileInRuns<T>(
   return out;
 }
 
+/**
+ * The progress bar while filing: mods done of total, then, once the last run is filed, the steps
+ * that still follow (linking the mods back and reading the library again). Those can take a
+ * while on a large library, so the bar says so instead of sitting on "Filing 194 of 194…" (#322).
+ * `reading`: the library scan's progress, when one is running and has counted its mods.
+ * @returns the bar's value (undefined: indeterminate), max and label
+ */
+export function filingProgress(
+  done: number,
+  total: number,
+  reading?: { done: number; total: number } | null,
+): { value: number | undefined; max: number; label: string } {
+  if (!total) return { value: undefined, max: 1, label: "Filing…" };
+  if (done < total) return { value: done, max: total, label: `Filing ${formatCount(done)} of ${formatCount(total)}…` };
+  if (reading?.total)
+    return {
+      value: reading.done,
+      max: reading.total,
+      label: `Reading your library: ${formatCount(reading.done)} of ${nMods(reading.total)}…`,
+    };
+  return { value: undefined, max: 1, label: "Turning your mods back on and reading your library…" };
+}
+
 /** Split `items` into runs of `size` (the last one shorter), for filing with progress. */
 export function chunks<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];
