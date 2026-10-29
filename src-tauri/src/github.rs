@@ -109,10 +109,7 @@ pub fn latest_release(owner: &str, repo: &str, token: Option<&str>) -> Result<Re
         req = req.set("Authorization", &format!("Bearer {t}"));
     }
     let resp = req.call().map_err(|e| match e {
-        ureq::Error::Status(404, _) => {
-            "This mod's GitHub page has no releases yet, so Silo can't check it for updates."
-                .to_string()
-        }
+        ureq::Error::Status(404, _) => not_found_text(owner, repo, repo_exists(owner, repo, token)),
         ureq::Error::Status(403, r) => forbidden_text(
             r.header("x-ratelimit-remaining"),
             r.header("retry-after").is_some(),
@@ -434,6 +431,37 @@ fn gh_get(url: &str, token: Option<&str>) -> Result<serde_json::Value, String> {
         .map_err(gh_err)?
         .into_json()
         .map_err(|e| e.to_string())
+}
+
+/// A 404 from the releases API. GitHub answers "not found" both when a repo has no releases and
+/// when the repo itself is gone or private (#333); `exists` tells the two apart, and None (Silo
+/// couldn't ask) keeps the old wording.
+fn not_found_text(owner: &str, repo: &str, exists: Option<bool>) -> String {
+    if exists == Some(false) {
+        format!(
+            "The GitHub page {owner}/{repo} is gone or private, so Silo can't check it for updates.              Check the link under this mod's Source and updates."
+        )
+    } else {
+        "This mod's GitHub page has no releases yet, so Silo can't check it for updates."
+            .to_string()
+    }
+}
+
+/// Whether `owner/repo` is visible on GitHub: Some(false) on a 404, None when the question itself
+/// failed (offline, rate limit), so the caller doesn't claim a repo is gone when it isn't sure.
+fn repo_exists(owner: &str, repo: &str, token: Option<&str>) -> Option<bool> {
+    let url = api_url(&["repos", owner, repo]).ok()?;
+    let mut req = crate::net::api()
+        .get(url.as_str())
+        .set("Accept", "application/vnd.github+json");
+    if let Some(t) = token {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    match req.call() {
+        Ok(_) => Some(true),
+        Err(ureq::Error::Status(404, _)) => Some(false),
+        Err(_) => None,
+    }
 }
 
 /// A 403 from the releases API: a rate limit only when GitHub says so (no requests left, or a
@@ -938,6 +966,22 @@ pub fn find_repo_in_text(text: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_404_says_whether_the_repo_is_gone_or_just_has_no_releases() {
+        // #333: a deleted or private repo isn't "no releases yet".
+        let gone = super::not_found_text("someone", "FS25_YieldTracker", Some(false));
+        assert!(
+            gone.contains("someone/FS25_YieldTracker is gone or private"),
+            "{gone}"
+        );
+        assert!(gone.contains("Source and updates"));
+        let empty = super::not_found_text("someone", "FS25_YieldTracker", Some(true));
+        assert!(empty.contains("no releases yet"), "{empty}");
+        // Couldn't ask (offline, rate limit): don't claim it's gone.
+        let unsure = super::not_found_text("someone", "FS25_YieldTracker", None);
+        assert!(unsure.contains("no releases yet"), "{unsure}");
+    }
+
     #[test]
     fn a_403_is_a_rate_limit_only_when_github_says_so() {
         // No requests left: a rate limit; the connect hint only without a token.
