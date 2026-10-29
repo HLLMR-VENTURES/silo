@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-10-29
+
+The library database moves to version 3 (one added column, for the per-mod update switch). Silo
+keeps a copy of the old one in `db-snapshots/silo-before-v2.db` before upgrading. Silo 1.0.2
+won't open a version 3 database, so going back to 1.0.2 after updating isn't supported; that copy
+is kept in case you need to.
+
 ### Added
 
 - **Mod sets…**: a **Tick all** button next to **Untick all** adds the chosen mods to every set

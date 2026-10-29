@@ -17,7 +17,7 @@ Linux and reaches into that prefix.
 |----|------|
 | Windows | `%USERPROFILE%\Documents\My Games\FarmingSimulator2025\` |
 | macOS — Mac App Store | `~/Library/Containers/com.giants-software.fs25/Data/Library/Application Support/FarmingSimulator2025/` (sandboxed; verified from game logs, #171) |
-| macOS — Steam / GIANTS | `~/Library/Application Support/FarmingSimulator2025/` (community-consistent; confirm on a real Mac) |
+| macOS — Steam / GIANTS | `~/Library/Application Support/FarmingSimulator2025/` (Steam verified 2026-10-27 from a tester's `log.txt` "Mod Directory" line, Apple Silicon, macOS 26 Tahoe, #322; GIANTS-direct unconfirmed) |
 | Linux/Proton | `<prefix>/drive_c/users/steamuser/Documents/My Games/FarmingSimulator2025/`, `<prefix>` = `<steam library>/steamapps/compatdata/2300320/pfx` |
 
 `fsgame::locate()` tries every candidate: on Linux, each Steam library listed in
@@ -47,6 +47,10 @@ unverified (?)), else an FS25-named bundle in `/Applications` or `~/Applications
 (Mac App Store / GIANTS-direct), else Spotlight (`mdfind` on bundle id
 `com.giants-software.fs25`). Steam installs launch via `steam://rungameid/2300320`;
 the others launch with `open -a <bundle>`.
+
+When the game sits in a Steam library on a removable drive, macOS asks once whether Silo may
+access that drive (seen on Tahoe, #322); after the user allows it, Silo works normally. Silo
+should handle a refusal gracefully, the same as any unreadable folder.
 
 ## Store / launcher discovery (don't hardcode drives)
 
