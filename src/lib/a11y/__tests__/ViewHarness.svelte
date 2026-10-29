@@ -53,7 +53,7 @@
   const label = (m: ModEntry) => `${m.title ?? m.techName}, ${m.active ? "active" : "parked"}`;
   const badges = (m: ModEntry) => rowBadges(m, { hasUpdate: m.techName.endsWith("1"), flagged: m.techName.endsWith("2") });
   const drawerMod = $derived(mods[0] ?? modEntry(0));
-  const curation = (t: string): CurationRow => ({ techName: t, favorite: false, hidden: false, broken: false, rating: 0, note: null });
+  const curation = (t: string): CurationRow => ({ techName: t, favorite: false, hidden: false, broken: false, rating: 0, note: null, skipUpdates: false });
   const save: Savegame = {
     index: 1,
     folder: "savegame1",

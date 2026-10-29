@@ -26,6 +26,9 @@ pub struct CurationRow {
     #[serde(default)]
     pub rating: i64,
     pub note: Option<String>,
+    /// Leave this mod out of update checks and Update all (#333): the user changed it themselves.
+    #[serde(default)]
+    pub skip_updates: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +105,7 @@ pub const AUTO_SNAPSHOTS_KEPT: i64 = 5;
 ///
 /// Keep migrations additive where possible so an older Silo can still read the file; when one
 /// can't be, the version gate in `open` is what protects the user.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 fn newer_schema(found: i64) -> String {
     format!(
@@ -160,6 +163,7 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
         match v {
             0 => migrate_0_to_1(&tx)?,
             1 => migrate_1_to_2(&tx)?,
+            2 => migrate_2_to_3(&tx)?,
             other => return Err(format!("no migration from database version {other}")),
         }
         tx.pragma_update(None, "user_version", v + 1)
@@ -249,6 +253,19 @@ fn migrate_1_to_2(tx: &Connection) -> Result<(), String> {
     if !has_column(tx, "loadout", "created_at") {
         tx.execute("ALTER TABLE loadout ADD COLUMN created_at INTEGER", [])
             .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Version 3 = `curation.skip_updates` (#333): mods the user leaves out of update checks. Additive;
+/// every existing mod keeps being checked.
+fn migrate_2_to_3(tx: &Connection) -> Result<(), String> {
+    if !has_column(tx, "curation", "skip_updates") {
+        tx.execute(
+            "ALTER TABLE curation ADD COLUMN skip_updates INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -1263,9 +1280,9 @@ pub fn reconcile_organized(
 
 /// Load all curation rows.
 pub fn load_curation(conn: &Connection) -> Vec<CurationRow> {
-    let Ok(mut stmt) =
-        conn.prepare("SELECT tech_name, favorite, hidden, broken, note, rating FROM curation")
-    else {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT tech_name, favorite, hidden, broken, note, rating, skip_updates FROM curation",
+    ) else {
         return Vec::new();
     };
     let rows = stmt.query_map([], |r| {
@@ -1276,6 +1293,7 @@ pub fn load_curation(conn: &Connection) -> Vec<CurationRow> {
             broken: r.get::<_, i64>(3)? != 0,
             note: r.get(4)?,
             rating: r.get::<_, i64>(5).unwrap_or(0),
+            skip_updates: r.get::<_, i64>(6).unwrap_or(0) != 0,
         })
     });
     rows.map(|r| r.flatten().collect()).unwrap_or_default()
@@ -1287,6 +1305,7 @@ pub fn set_curation(conn: &Connection, row: &CurationRow) -> Result<(), String> 
         && !row.hidden
         && !row.broken
         && row.rating == 0
+        && !row.skip_updates
         && row.note.as_deref().unwrap_or("").is_empty();
     if empty {
         conn.execute(
@@ -1297,14 +1316,15 @@ pub fn set_curation(conn: &Connection, row: &CurationRow) -> Result<(), String> 
         return Ok(());
     }
     conn.execute(
-        "INSERT INTO curation(tech_name, favorite, hidden, broken, note, rating)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO curation(tech_name, favorite, hidden, broken, note, rating, skip_updates)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(tech_name) DO UPDATE SET
-             favorite = excluded.favorite,
-             hidden   = excluded.hidden,
-             broken   = excluded.broken,
-             note     = excluded.note,
-             rating   = excluded.rating",
+             favorite     = excluded.favorite,
+             hidden       = excluded.hidden,
+             broken       = excluded.broken,
+             note         = excluded.note,
+             rating       = excluded.rating,
+             skip_updates = excluded.skip_updates",
         rusqlite::params![
             row.tech_name,
             row.favorite as i64,
@@ -1312,6 +1332,7 @@ pub fn set_curation(conn: &Connection, row: &CurationRow) -> Result<(), String> 
             row.broken as i64,
             row.note,
             row.rating,
+            row.skip_updates as i64,
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -1703,11 +1724,60 @@ mod tests {
     }
 
     #[test]
+    fn migrating_to_v3_keeps_curation_and_checks_every_mod() {
+        // #333: a v2 library's flags survive, and nothing starts out skipped.
+        let path = temp_db("v2_to_v3");
+        v1_database(&path);
+        {
+            let conn = open(&path).unwrap(); // brings it to the current version
+            set_curation(
+                &conn,
+                &CurationRow {
+                    tech_name: "FS25_A".into(),
+                    favorite: true,
+                    hidden: false,
+                    broken: false,
+                    rating: 4,
+                    note: Some("mine".into()),
+                    skip_updates: false,
+                },
+            )
+            .unwrap();
+            // Wind it back to a v2 file: drop the column the way a 1.0.2 library lacks it.
+            conn.execute_batch(
+                "ALTER TABLE curation DROP COLUMN skip_updates; PRAGMA user_version = 2;",
+            )
+            .unwrap();
+        }
+        let conn = open(&path).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 3);
+        let rows = load_curation(&conn);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].favorite && rows[0].rating == 4 && !rows[0].skip_updates);
+        assert_eq!(rows[0].note.as_deref(), Some("mine"));
+        // The flag saves, and a row with only it set is kept (not treated as empty).
+        let mut r = rows[0].clone();
+        r.favorite = false;
+        r.rating = 0;
+        r.note = None;
+        r.skip_updates = true;
+        set_curation(&conn, &r).unwrap();
+        let rows = load_curation(&conn);
+        assert!(rows.len() == 1 && rows[0].skip_updates);
+        r.skip_updates = false;
+        set_curation(&conn, &r).unwrap();
+        assert!(
+            load_curation(&conn).is_empty(),
+            "back to defaults: the row goes"
+        );
+    }
+
+    #[test]
     fn migrating_to_v2_keeps_every_set_as_a_user_set() {
         let path = temp_db("v1_to_v2");
         v1_database(&path);
         let conn = open(&path).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 2);
+        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
         let sets = load_loadouts(&conn);
         assert_eq!(sets.len(), 1);
         assert_eq!(sets[0].id, 7);

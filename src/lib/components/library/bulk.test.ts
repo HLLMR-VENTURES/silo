@@ -101,6 +101,17 @@ describe("BulkBar", () => {
     expect(h.onclear).toHaveBeenCalledTimes(1);
   });
 
+  it("Skip updates switches update checks off, and back on when every selected mod is off (#333)", async () => {
+    const onskipupdates = vi.fn();
+    const first = setup({ onskipupdates });
+    await first.user.click(screen.getByRole("button", { name: "Skip updates" }));
+    expect(onskipupdates).toHaveBeenLastCalledWith(true);
+    document.body.innerHTML = "";
+    const second = setup({ onskipupdates, allSkipUpdates: true });
+    await second.user.click(screen.getByRole("button", { name: "Check updates" }));
+    expect(onskipupdates).toHaveBeenLastCalledWith(false);
+  });
+
   it("flips Favorite / Hide when every selected mod already is one, and turns off switching during a write", async () => {
     const { user, ...h } = setup({ allFavorite: true, allHidden: true, writeReason: "Silo is moving mods.", allShownSelected: true });
     await user.click(screen.getByRole("button", { name: "Remove favorite" }));

@@ -149,6 +149,17 @@ describe("UpdatesPanel", () => {
     expect(h.onRecheck).toHaveBeenCalledWith(c);
   });
 
+  it("Not checked lists mods with checks off, collapsed, and switches one back on (#333)", async () => {
+    const onCheckAgain = vi.fn();
+    const h = setup({ skipped: [{ techName: "M", title: "My edited tractor" }] }, { onCheckAgain });
+    const head = screen.getByRole("button", { name: /Not checked \(1\)/ });
+    expect(head).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText(/leaves it out of checks and Update all/)).toBeInTheDocument();
+    await h.user.click(head);
+    await h.user.click(screen.getByRole("button", { name: "Check for updates: My edited tractor" }));
+    expect(onCheckAgain).toHaveBeenCalledWith("M");
+  });
+
   it("Up to date and Not tracked start collapsed; Not tracked explains itself", async () => {
     const h = setup({
       upToDate: [row("D", { hasUpdate: false, current: "v1.2.0" })],

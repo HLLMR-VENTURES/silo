@@ -59,6 +59,8 @@
     onMarkChecked: (row: CheckYourselfRow) => void;
     onRecheck: (row: UpdateRow) => void;
     onCopyDetails: (text: string) => void;
+    /** Switch update checks back on for a mod under Not checked (#333). */
+    onCheckAgain?: (techName: string) => void;
   }
 
   let {
@@ -81,6 +83,7 @@
     onMarkChecked,
     onRecheck,
     onCopyDetails,
+    onCheckAgain,
   }: Props = $props();
 
   const s = $derived(sections);
@@ -93,6 +96,7 @@
   // Up to date and Not tracked start collapsed (this view visit).
   let openUpToDate = $state(false);
   let openNotTracked = $state(false);
+  let openSkipped = $state(false);
 </script>
 
 {#snippet sectionHead(id: string, title: string, count: number)}
@@ -330,6 +334,32 @@
           <ul class="rows compact" id="up-untracked-body">
             {#each s.notTracked as m (m.techName)}
               <li class="row"><span class="name">{m.title}</span></li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    {/if}
+
+    {#if s.skipped.length > 0}
+      <section class="sec fold">
+        {@render foldHead("up-skipped", "Not checked", s.skipped.length, openSkipped, () => (openSkipped = !openSkipped))}
+        <p class="help">
+          You switched update checks off for {plural(s.skipped.length, { one: "this mod", other: "these mods" })},
+          so Silo leaves {plural(s.skipped.length, { one: "it", other: "them" })} out of checks and Update all.
+        </p>
+        {#if openSkipped}
+          <ul class="rows compact" id="up-skipped-body">
+            {#each s.skipped as m (m.techName)}
+              <li class="row">
+                <span class="name">{m.title}</span>
+                {#if onCheckAgain}
+                  <div class="acts">
+                    <Button size="sm" variant="ghost" aria-label={`Check for updates: ${m.title}`} onclick={() => onCheckAgain(m.techName)}>
+                      Check for updates
+                    </Button>
+                  </div>
+                {/if}
+              </li>
             {/each}
           </ul>
         {/if}

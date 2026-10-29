@@ -125,6 +125,7 @@ describe("Notes when the drawer moves on without a blur", () => {
     broken: false,
     rating: 0,
     note,
+    skipUpdates: false,
   });
   const base = { tags: [], onTagsChange: vi.fn(), onFilterTag: vi.fn() };
 

@@ -8,7 +8,9 @@
   import { tick, untrack } from "svelte";
   import type { ModEntry, CurationRow, Conflict, CatalogModDetail, CatalogUpdate, LogReport, SourceRow } from "../types";
   import type { ForeignFile } from "../api";
-  import { revealInFolder, catalogDetailByTech, catalogCheckUpdates, scanLog } from "../api";
+  import { revealInFolder, catalogDetailByTech, catalogCheckUpdates, scanLog, setCuration } from "../api";
+  import { reportError } from "../state/notify.svelte";
+  import Switch from "../ui/Switch.svelte";
   import { resizable } from "../resize";
   import { getVerdict, provKey } from "../provenanceCache.svelte";
   import { go } from "../state/nav.svelte";
@@ -255,6 +257,21 @@
 
   <section class="sec" aria-labelledby="{uid}-source">
     <h3 id="{uid}-source" class="h">Source and updates</h3>
+    <!-- #333: a mod the user changed themselves can be left out of checks and Update all. -->
+    <div class="skip-updates">
+      <Switch
+        checked={!curation.skipUpdates}
+        label="Check for updates"
+        onchange={(on) => {
+          const next = { ...curation, skipUpdates: !on };
+          onCurationChange(next);
+          setCuration(next).catch((e) => reportError(e, "Saving your mod flags"));
+        }}
+      />
+      {#if curation.skipUpdates}
+        <p class="skip-note">Off: Silo leaves this mod out of update checks and Update all.</p>
+      {/if}
+    </div>
     <ModStatus {mod} catalog={catalogUpd} checked={catalogChecked} pageUrl={catalog?.pageUrl ?? null} />
     <ModSourceLink {mod} {source} {onSourceChange} {onRepoChange} />
     <ModRepoLink {mod} {repo} {onRepoChange} {onInstalled} />
@@ -288,5 +305,16 @@
     letter-spacing: 0.04em;
     color: var(--text-muted);
     font-weight: 700;
+  }
+  .skip-updates {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1);
+    margin-bottom: var(--sp-2);
+  }
+  .skip-note {
+    margin: 0;
+    color: var(--muted);
+    font-size: var(--fs-xs);
   }
 </style>

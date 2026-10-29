@@ -1736,6 +1736,7 @@
     items.push(
       { id: "favorite", label: c.favorite ? "Remove favorite" : "Favorite", icon: "favorite", separatorBefore: true },
       { id: "hidden", label: c.hidden ? "Unhide" : "Hide", icon: c.hidden ? "visible" : "hidden" },
+      { id: "skipUpdates", label: c.skipUpdates ? "Check for updates" : "Don't check for updates", icon: "update" },
       { id: "broken", label: c.broken ? "Remove flag" : "Flag", icon: "flagged", danger: !c.broken },
     );
     const run = (id: string) => {
@@ -1763,6 +1764,7 @@
         case "favorite":
         case "hidden":
         case "broken":
+        case "skipUpdates":
           return void toggleCuration(mod.techName, id);
       }
     };
@@ -1825,6 +1827,7 @@
         broken: false,
         rating: 0,
         note: null,
+        skipUpdates: false,
       }
     );
   }
@@ -1920,6 +1923,10 @@
   const linkedCount = $derived(Object.keys(repoMap).length);
   // The Updates view's sections. A mod updated since the check (by Silo, or a ModHub zip the user
   // used) drops out of the "newer version" sections, so the badge and filters stay accurate.
+  /** Mods the user switched update checks off for (#333). */
+  const skippedUpdates = $derived(
+    new Set(Object.values(curationMap).filter((c) => c.skipUpdates).map((c) => c.techName)),
+  );
   const updateSections = $derived(
     groupUpdates({
       mods,
@@ -1927,6 +1934,7 @@
       checkYourself,
       catalogReached: updateCheckedAt != null && !updateCatalogError,
       checkedTechs: updateCheckedTechs,
+      skipped: skippedUpdates,
     }),
   );
 
@@ -1975,10 +1983,12 @@
     if (updateChecking || updateCheckBlocked) return;
     updateChecking = true;
     updateProgress = null;
-    const asked = new Set(mods.map((m) => m.techName));
+    // Mods with update checks switched off (#333) aren't asked about at all.
+    const checkable = mods.filter((m) => !cur(m.techName).skipUpdates);
+    const asked = new Set(checkable.map((m) => m.techName));
     const gen = updateFolderGen;
     try {
-      const res = await runUpdateCheck(mods, repoMap, {
+      const res = await runUpdateCheck(checkable, repoMap, {
         ...updateCheckDeps,
         onProgress: (done, total) => {
           if (gen === updateFolderGen) updateProgress = { done, total };
@@ -2150,7 +2160,7 @@
 
   async function toggleCuration(
     techName: string,
-    flag: "favorite" | "hidden" | "broken",
+    flag: "favorite" | "hidden" | "broken" | "skipUpdates",
   ) {
     const c = cur(techName);
     const next: CurationRow = { ...c, [flag]: !c[flag] };
@@ -2464,7 +2474,7 @@
    * @param flag "favorite" or "hidden"
    * @param value the flag's new value
    */
-  async function setCurationFor(list: ModEntry[], flag: "favorite" | "hidden", value: boolean) {
+  async function setCurationFor(list: ModEntry[], flag: "favorite" | "hidden" | "skipUpdates", value: boolean) {
     const before = list.map((m) => cur(m.techName)).filter((c) => c[flag] !== value);
     if (before.length === 0) return;
     /** Save each row; only the saved ones show their new flag. */
@@ -2488,9 +2498,13 @@
         ? value
           ? `Added ${n} to favorites.`
           : `Removed ${n} from favorites.`
-        : value
-          ? `Hid ${n}.`
-          : `Unhid ${n}.`;
+        : flag === "skipUpdates"
+          ? value
+            ? `Silo won't check ${n} for updates.`
+            : `Silo will check ${n} for updates again.`
+          : value
+            ? `Hid ${n}.`
+            : `Unhid ${n}.`;
     if (res.failed.length) message += ` Couldn't update ${modsCount(res.failed.length)}.`;
     selection.clear();
     toast({
@@ -3769,11 +3783,13 @@
               activeCount={selectedMods.filter((m) => activeSet.has(m.techName)).length}
               allFavorite={selectedMods.every((m) => cur(m.techName).favorite)}
               allHidden={selectedMods.every((m) => cur(m.techName).hidden)}
+              allSkipUpdates={selectedMods.every((m) => cur(m.techName).skipUpdates)}
               writeReason={writeLock.reason}
               onturnon={() => setActiveForMods(selectedMods, true)}
               onpark={() => setActiveForMods(selectedMods, false)}
               onfavorite={(on) => setCurationFor(selectedMods, "favorite", on)}
               onhide={(on) => setCurationFor(selectedMods, "hidden", on)}
+              onskipupdates={(on) => setCurationFor(selectedMods, "skipUpdates", on)}
               onmodsets={() => openMembership(selectedMods, true)}
               onselectall={() => selection.selectAll(visibleKeys)}
               onclear={() => selection.clear()}
@@ -4055,6 +4071,7 @@
           onMarkChecked={markChecked}
           onRecheck={recheckUpdate}
           onCopyDetails={(t) => void copyDetailsText(t)}
+          onCheckAgain={(techName) => void toggleCuration(techName, "skipUpdates")}
         />
       </UpdatesView>
     {/snippet}
