@@ -6,6 +6,32 @@ gap between the RC protocol and visible proof it ran.
 
 ---
 
+## v1.0.3 — 2026-10-29 (database schema v3)
+
+Validated by hand (not an HLLMRD run). Published 2026-10-29 12:19:08Z on the owner's instruction.
+
+### Artifact identity
+| Field | Value |
+|---|---|
+| Version | 1.0.3 |
+| Source | Tag `v1.0.3` (annotated, pushed by the owner as HLLMR) on `d831a59`, the merge of #336; main's CI green on it |
+| Release run | [40869473660](https://github.com/HLLMR-VENTURES/silo/actions/runs/40869473660): guard passed, owner approved the `release` environment, all 4 builds + sbom + checksums green |
+| Release | draft id 427816742, prerelease=false, published as Latest; `/releases/latest` → v1.0.3 |
+| Assets | 19 (as 1.0.2) |
+| Installers | `SHA256SUMS.txt` SHA-256 `6af02270b76a23d2e4c3848447a65e9750fe20d0e6ed502f852fad26104414d3`; `Silo_1.0.3_x64-setup.exe` SHA-256 `d4769d13823908768b5fbb4bf53cc2526ed67f8e6f5991009da3898452ea5910`; `latest.json` SHA-256 `2bb4b68953ec8d2a64b2f4cc90f1894417b5e899b032d74323fed56b209cf2cf` |
+
+### Checks
+| Check | Result |
+|---|---|
+| macOS signing (both mac legs) | `Authority=Developer ID Application: David Hellmer (554574H76C)`; the release step "Verify macOS signature and notarization" passed |
+| macOS notarization | submissions `3b731640-7222-466c-86be-6f1fc55e4144` and `d10a50a7-acb3-4839-86ec-e2800a10c5c1`: **Accepted**; `spctl` accepted, source=Notarized Developer ID; ticket stapled |
+| Windows Authenticode | `Get-AuthenticodeSignature` on the setup `.exe`: Valid, `CN=David Hellmer, O=David Hellmer, L=Grand Prairie, S=tx, C=US` |
+| Updater manifest | `latest.json` version 1.0.3; 11/11 platform entries with signatures; URLs under `HLLMR-VENTURES/silo/releases/download/v1.0.3/`. After publish, both `HLLMR-VENTURES/silo` and the old `HLLMR/silo` `releases/latest/download/latest.json` serve 1.0.3 |
+| Checksums | the setup `.exe`'s SHA-256 is in `SHA256SUMS.txt` |
+| Provenance | `gh attestation verify --owner HLLMR-VENTURES` on the setup `.exe`: verified, signer `HLLMR-VENTURES/silo/.github/workflows/release.yml@refs/tags/v1.0.3` |
+| Upgrade over 1.0.2 | silent per-user install (`/S`, exit 0) over 1.0.2 on the owner's PC; launched, logged "Silo 1.0.3 starting on windows" and "kept a copy before upgrading: …\db-snapshots\silo-before-v2.db", closed cleanly; `mods/` size+mtime baseline (743 files, 761 entries): 0 differences; DB `integrity_check` ok, **`user_version` 3**, `curation.skip_updates` present, curation rows kept; `silo-before-v2.db` is `user_version` 2 with integrity ok. DB copy kept outside the repo before upgrading |
+| Not done | clean install; in-app update 1.0.2 → 1.0.3 (updater plugin 2.14) not yet observed; macOS install on a real Mac by us (the #322 tester confirmed 1.0.2 opens on Apple Silicon; asked to report the 1.0.3 self-update) |
+
 ## v1.0.2 — 2026-10-27 (first Developer ID signed and notarized macOS build)
 
 Validated by hand (not an HLLMRD run). Published 2026-10-27 18:23:57Z on the owner's instruction.
