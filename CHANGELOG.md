@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Mod sets…**: a **Tick all** button next to **Untick all** adds the chosen mods to every set
   in one click. (#331)
+- **Check for updates** can be switched off per mod, for mods you've changed yourself. It's in
+  the mod's **Source and updates**, the Library's selection bar (**Skip updates**) and a mod's
+  menu. Silo then leaves the mod out of update checks, **Update all** and the update badge, and
+  lists it under a collapsed **Not checked** group in Updates, where you can switch it back on.
+  (#333)
 
 ### Changed
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   // Takes the toolbar's place while any mod is selected:
-  //   12 selected · [Turn on] [Park] [Favorite] [Hide] [Mod sets…] · [Select all 140 shown] · Clear
+  //   12 selected · [Turn on] [Park] [Favorite] [Hide] [Skip updates] [Mod sets…] · [Select all 140 shown] · Clear
   //   <BulkBar count={sel.size} shownCount={visible.length} onturnon={...} onpark={...}
   //     onfavorite={...} onhide={...} onmodsets={...} onselectall={...} onclear={() => sel.clear()} />
   // Turn on / Park are off (with the reason as the tooltip) while another library change runs.
@@ -18,6 +18,8 @@
     allShownSelected?: boolean;
     /** Every selected mod is a favorite: the button removes the favorite instead. */
     allFavorite?: boolean;
+    /** Every selected mod has update checks off (#333): the button switches them back on. */
+    allSkipUpdates?: boolean;
     /** Every selected mod is hidden: the button unhides instead. */
     allHidden?: boolean;
     /** How many of the selected mods are active: Turn on is the primary action when none is,
@@ -29,6 +31,8 @@
     onpark: () => void;
     onfavorite: (on: boolean) => void;
     onhide: (on: boolean) => void;
+    /** Switch update checks off (true) or back on (false) for the selection. */
+    onskipupdates?: (on: boolean) => void;
     /** Add the selected mods to, or remove them from, saved sets (the "Mod sets…" dialog). */
     onmodsets: () => void;
     onselectall: () => void;
@@ -49,6 +53,8 @@
     onpark,
     onfavorite,
     onhide,
+    onskipupdates,
+    allSkipUpdates = false,
     onmodsets,
     onselectall,
     onclear,
@@ -118,6 +124,11 @@
   <Button size="sm" icon={allHidden ? "visible" : "hidden"} onclick={() => onhide(!allHidden)}>
     {allHidden ? "Unhide" : "Hide"}
   </Button>
+  {#if onskipupdates}
+    <Button size="sm" icon="update" onclick={() => onskipupdates(!allSkipUpdates)}>
+      {allSkipUpdates ? "Check updates" : "Skip updates"}
+    </Button>
+  {/if}
   <Button size="sm" icon="modSets" onclick={onmodsets}>Mod sets…</Button>
   <span class="sep" aria-hidden="true">·</span>
   <Button size="sm" variant="ghost" disabled={allShownSelected} onclick={onselectall}>

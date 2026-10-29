@@ -67,6 +67,8 @@ export interface CurationRow {
   broken: boolean;
   rating: number;
   note: string | null;
+  /** Left out of update checks and Update all (#333). */
+  skipUpdates: boolean;
 }
 
 export interface TagRow {

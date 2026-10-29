@@ -18,6 +18,7 @@
     broken: false,
     rating: 0,
     note: null,
+    skipUpdates: false,
   });
 
   returnFocusOnDrawerClose({

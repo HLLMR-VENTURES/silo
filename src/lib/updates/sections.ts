@@ -38,6 +38,8 @@ export interface UpdateSections {
   upToDate: UpdateRow[];
   /** Only filled when the catalog answered (otherwise Silo can't tell). */
   notTracked: UntrackedMod[];
+  /** Mods the user switched update checks off for (#333): never checked, never in Update all. */
+  skipped: UntrackedMod[];
 }
 
 export const NO_SECTIONS: UpdateSections = {
@@ -47,6 +49,7 @@ export const NO_SECTIONS: UpdateSections = {
   failed: [],
   upToDate: [],
   notTracked: [],
+  skipped: [],
 };
 
 /** A version as compared and shown: no leading "v", "V." or "Ver ", no surrounding space (displayVersion). */
@@ -110,15 +113,21 @@ export function groupUpdates(opts: {
   catalogReached: boolean;
   /** The mods the check asked about; one added since isn't called "not tracked". */
   checkedTechs?: ReadonlySet<string>;
+  /** Mods with update checks switched off: listed only under Not checked, whatever a check said. */
+  skipped?: ReadonlySet<string>;
 }): UpdateSections {
-  const byTech = new Map(opts.mods.map((m) => [m.techName, m]));
+  const skipped = opts.skipped ?? new Set<string>();
+  const byTech = new Map(opts.mods.filter((m) => !skipped.has(m.techName)).map((m) => [m.techName, m]));
   const out: UpdateSections = {
     ready: [],
     modhub: [],
-    checkYourself: [...opts.checkYourself],
+    checkYourself: opts.checkYourself.filter((r) => !skipped.has(r.techName)),
     failed: [],
     upToDate: [],
     notTracked: [],
+    skipped: opts.mods
+      .filter((m) => skipped.has(m.techName))
+      .map((m) => ({ techName: m.techName, title: m.title || m.techName })),
   };
   const answered = new Set<string>(opts.checkYourself.map((r) => r.techName));
   for (const checked of opts.rows) {
@@ -141,7 +150,7 @@ export function groupUpdates(opts: {
     else out.modhub.push(row);
   }
   if (opts.catalogReached) {
-    for (const m of opts.mods) {
+    for (const m of byTech.values()) {
       if (!answered.has(m.techName) && (!opts.checkedTechs || opts.checkedTechs.has(m.techName)))
         out.notTracked.push({ techName: m.techName, title: m.title || m.techName });
     }
@@ -151,6 +160,7 @@ export function groupUpdates(opts: {
   out.failed.sort(byTitle);
   out.upToDate.sort(byTitle);
   out.notTracked.sort(byTitle);
+  out.skipped.sort(byTitle);
   return out;
 }
 

@@ -96,6 +96,22 @@ describe("groupUpdates", () => {
     ]);
   });
 
+  it("lists mods with update checks off only under Not checked (#333)", () => {
+    const skipped = new Set(["A_Ready", "E_Page", "F_Unknown"]);
+    const s = groupUpdates({ mods, rows, checkYourself: yourself, catalogReached: true, skipped });
+    // A row from an earlier check doesn't put a skipped mod in Ready, and it's never "not tracked".
+    expect(s.ready).toEqual([]);
+    expect(s.checkYourself).toEqual([]);
+    expect(s.notTracked.map((m) => m.techName)).toEqual(["G_Unknown"]);
+    expect(s.skipped).toEqual([
+      { techName: "A_Ready", title: "A_Ready" },
+      { techName: "E_Page", title: "E_Page" },
+      { techName: "F_Unknown", title: "Zed" },
+    ]);
+    // The badge counts only what Silo would update: the ModHub row.
+    expect(updatesBadge(s, true)).toBe(1);
+  });
+
   it("calls nothing 'not tracked' when the catalog didn't answer", () => {
     const s = groupUpdates({ mods, rows, checkYourself: yourself, catalogReached: false });
     expect(s.notTracked).toEqual([]);

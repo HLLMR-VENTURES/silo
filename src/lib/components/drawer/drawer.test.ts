@@ -8,7 +8,7 @@ import { tick } from "svelte";
 import ModDetail from "../ModDetail.svelte";
 import DrawerHarness from "./__tests__/DrawerHarness.svelte";
 import { setVerdict } from "../../provenanceCache.svelte";
-import { catalogCheckUpdates, revealInFolder, scanLog } from "../../api";
+import { catalogCheckUpdates, revealInFolder, scanLog, setCuration } from "../../api";
 import type { Conflict, CurationRow, LogReport, ModEntry } from "../../types";
 
 vi.mock("../../api", async (importOriginal) => ({
@@ -19,6 +19,7 @@ vi.mock("../../api", async (importOriginal) => ({
   scanLog: vi.fn(() => Promise.reject(new Error("no log"))),
   guessRepo: vi.fn(() => Promise.resolve(null)),
   revealInFolder: vi.fn(() => Promise.resolve()),
+  setCuration: vi.fn(() => Promise.resolve()),
 }));
 
 beforeAll(() => {
@@ -69,7 +70,7 @@ function entry(i: number, over: Partial<ModEntry> = {}): ModEntry {
 }
 
 function props(mod: ModEntry, over: Record<string, unknown> = {}) {
-  const curation: CurationRow = { techName: mod.techName, favorite: false, hidden: false, broken: false, rating: 0, note: null };
+  const curation: CurationRow = { techName: mod.techName, favorite: false, hidden: false, broken: false, rating: 0, note: null, skipUpdates: false };
   return {
     mod,
     curation,
@@ -163,6 +164,23 @@ describe("drawer header badges", () => {
     expect(words).toEqual(["Problem", "Update available"]);
     expect(screen.getByText(/Logged 14 errors in your last game/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "See in Diagnose" })).toBeInTheDocument();
+  });
+});
+
+describe("drawer Check for updates switch (#333)", () => {
+  it("is on by default; switching it off saves skipUpdates and explains what that does", async () => {
+    const mod = entry(1);
+    const p = props(mod);
+    const { rerender } = render(ModDetail, p);
+    await settle();
+    const sw = screen.getByRole("switch", { name: "Check for updates" });
+    expect(sw).toHaveAttribute("aria-checked", "true");
+    await userEvent.setup().click(sw);
+    expect(p.onCurationChange).toHaveBeenCalledWith(expect.objectContaining({ skipUpdates: true }));
+    expect(vi.mocked(setCuration)).toHaveBeenCalledWith(expect.objectContaining({ skipUpdates: true }));
+    await rerender({ ...p, curation: { ...p.curation, skipUpdates: true } });
+    expect(screen.getByRole("switch", { name: "Check for updates" })).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByText(/leaves this mod out of update checks and Update all/)).toBeInTheDocument();
   });
 });
 
