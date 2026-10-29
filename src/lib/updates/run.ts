@@ -48,7 +48,9 @@ export interface CheckResult {
   catalogError: ExplainedError | null;
 }
 
-const CHECK_OP = "Checking for an update";
+/** The activity-log and "Copy details" line for one mod's check: names the mod (#333). */
+export const checkOp = (mod: Pick<CheckMod, "title" | "techName">) =>
+  `Checking ${mod.title || mod.techName} for an update`;
 
 /**
  * Check one linked repo and fold the answer into `row` (the repo is authoritative for the source
@@ -77,7 +79,7 @@ async function checkLinked(
       errorDetail: undefined,
     };
   } catch (e) {
-    const why = deps.explain(e, CHECK_OP);
+    const why = deps.explain(e, checkOp(mod));
     if (hadCatalogAnswer) return row;
     return { ...row, hasUpdate: undefined, error: why.message || "Silo couldn't check this mod.", errorDetail: why.detail };
   }

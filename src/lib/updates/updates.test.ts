@@ -315,6 +315,26 @@ describe("runUpdateCheck", () => {
     ]);
   });
 
+  it("names the mod in the failure it logs and copies (#333)", async () => {
+    const ops: string[] = [];
+    const res = await runUpdateCheck([{ ...mod("A"), title: "Yield Tracker" }, mod("B")], {
+      A: { owner: "o", repo: "a" },
+      B: { owner: "o", repo: "b" },
+    }, {
+      catalog: async () => [],
+      checkRepo: async () => {
+        throw "gone";
+      },
+      explain: (e, op) => {
+        ops.push(op);
+        return explain(e);
+      },
+    });
+    // A title when the mod has one, else its tech name.
+    expect(ops).toEqual(["Checking Yield Tracker for an update", "Checking B for an update"]);
+    expect(res.rows.map((r) => r.error)).toEqual(["why: gone", "why: gone"]);
+  });
+
   it("keeps going with linked repos when the catalog is unreachable", async () => {
     const res = await runUpdateCheck([mod("A")], { A: { owner: "o", repo: "a" } }, {
       catalog: async () => {

@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated Tauri (2.12.5) and its plugins (updater 2.14, dialog, opener, deep-link, single-instance)
   with their matching JavaScript packages, plus routine updates to the build and test tooling.
 
+### Fixed
+
+- An update check that fails now names the mod in the activity log and in "Copy details",
+  instead of just "Checking for an update". A linked GitHub page that's been deleted or made
+  private now says so, instead of "has no releases yet". (#333)
+
 ## [1.0.2] - 2026-10-27
 
 ### Added

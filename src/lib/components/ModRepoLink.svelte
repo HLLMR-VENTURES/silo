@@ -7,6 +7,7 @@
   import { githubRepoUrl } from "../links";
   import { ask } from "../ui";
   import { blocked, tryStart } from "../state/ops.svelte";
+  import { checkOp } from "../updates/run";
 
   let {
     mod,
@@ -69,7 +70,7 @@
       const u = await checkModUpdate(repo.owner, repo.repo, mod.version ?? "0");
       if (mod.path === path) update = u;
     } catch (e) {
-      if (mod.path === path) ghError = inlineError(e, "Checking for an update");
+      if (mod.path === path) ghError = inlineError(e, checkOp(mod));
     }
     // A dropped answer leaves the spinner to the check of the mod shown now.
     if (mod.path === path) checking = false;
