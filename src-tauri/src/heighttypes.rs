@@ -114,51 +114,67 @@ pub fn parse_list(xml: &[u8]) -> (Vec<String>, Option<u32>) {
 }
 
 /// The `name_attr` values of `<root><list><item>` entries, upper-cased and de-duplicated, and the
-/// list element's `numChannels`. `None` when the XML doesn't parse. Pure.
+/// list element's `numChannels`. `None` when the XML isn't a complete, well-formed document or
+/// an element on the way has a malformed attribute: the game can't load such a file. Pure.
 pub(crate) fn named_list(
     xml: &[u8],
     list: &[u8],
     item: &[u8],
     name_attr: &[u8],
 ) -> Option<(Vec<String>, Option<String>)> {
+    let (mut names, mut channels) = (Vec::new(), None);
+    walk(xml, |depth, parent, e| {
+        let name = e.name();
+        if depth == 1 && name.as_ref() == list && channels.is_none() {
+            channels = attr(e, b"numChannels")?;
+        }
+        if depth == 2 && parent == list && name.as_ref() == item {
+            if let Some(n) = attr(e, name_attr)? {
+                let n = n.trim().to_uppercase();
+                if !n.is_empty() && !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+        }
+        Some(())
+    })?;
+    Some((names, channels))
+}
+
+/// Visit every opening element of a whole document with its depth (0 for the root) and its
+/// parent's name. `None` if the document is malformed or incomplete, or `visit` says so.
+fn walk(
+    xml: &[u8],
+    mut visit: impl FnMut(usize, &[u8], &quick_xml::events::BytesStart) -> Option<()>,
+) -> Option<()> {
     use quick_xml::events::Event;
     use quick_xml::Reader;
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(true);
-    let (mut names, mut channels) = (Vec::new(), None);
     // Open elements from the root down; `Empty` elements never open.
     let mut stack: Vec<Vec<u8>> = Vec::new();
+    let mut roots = 0;
     let mut buf = Vec::new();
     loop {
-        let event = reader.read_event_into(&mut buf).ok()?;
-        match &event {
-            Event::Start(e) | Event::Empty(e) => {
-                let name = e.name().as_ref().to_vec();
-                if stack.len() == 1 && name == list && channels.is_none() {
-                    channels = attr(e, b"numChannels");
-                }
-                let in_list = stack.len() == 2 && stack[1] == list;
-                if in_list && name == item {
-                    if let Some(n) = attr(e, name_attr) {
-                        let n = n.trim().to_uppercase();
-                        if !n.is_empty() && !names.contains(&n) {
-                            names.push(n);
-                        }
-                    }
-                }
-                if matches!(event, Event::Start(_)) {
-                    stack.push(name);
-                }
+        match reader.read_event_into(&mut buf).ok()? {
+            Event::Start(e) => {
+                roots += usize::from(stack.is_empty());
+                visit(stack.len(), stack.last().map_or(&[][..], |p| p), &e)?;
+                stack.push(e.name().as_ref().to_vec());
+            }
+            Event::Empty(e) => {
+                roots += usize::from(stack.is_empty());
+                visit(stack.len(), stack.last().map_or(&[][..], |p| p), &e)?;
             }
             Event::End(_) => {
-                stack.pop();
+                stack.pop()?;
             }
             Event::Eof => break,
             _ => {}
         }
         buf.clear();
     }
-    Some((names, channels))
+    (stack.is_empty() && roots == 1).then_some(())
 }
 
 /// The map's own height-type file, from its `map.xml`: `Some` only when it points inside the
@@ -167,33 +183,35 @@ pub fn map_list_file(map_xml: &[u8]) -> Option<String> {
     map_own_file(map_xml, b"densityMapHeightTypes")
 }
 
-/// The file a map's `map.xml` names in its first `<tag filename>`, when it points inside the map
-/// rather than at the base game's `$data/...`. Pure.
+/// The file a map's `map.xml` names in `<root><tag filename>`, when it points inside the map
+/// rather than at the base game's `$data/...`. Only the root's own child counts, and only in a
+/// document that parses whole. Pure.
 pub fn map_own_file(map_xml: &[u8], tag: &[u8]) -> Option<String> {
-    use quick_xml::events::Event;
-    use quick_xml::Reader;
-    let mut reader = Reader::from_reader(map_xml);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == tag => {
-                let f = attr(&e, b"filename")?.trim().replace('\\', "/");
-                return (!f.is_empty() && !f.starts_with('$')).then_some(f);
-            }
-            Ok(Event::Eof) | Err(_) => return None,
-            _ => {}
+    let mut found: Option<Option<String>> = None;
+    walk(map_xml, |depth, _, e| {
+        if depth == 1 && e.name().as_ref() == tag && found.is_none() {
+            found = Some(attr(e, b"filename")?);
         }
-        buf.clear();
-    }
+        Some(())
+    })?;
+    let f = found??.trim().replace('\\', "/");
+    (!f.is_empty() && !f.starts_with('$')).then_some(f)
 }
 
-fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
-    e.attributes()
-        .flatten()
-        .find(|a| a.key.as_ref() == key)
-        .and_then(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok())
-        .map(|v| v.into_owned())
+/// An attribute's value: `Some(None)` when it's absent, `None` when the element's attributes
+/// are malformed (a broken or repeated attribute), which makes the whole file unreadable.
+fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<Option<String>> {
+    let mut out = None;
+    for a in e.attributes().with_checks(true) {
+        let a = a.ok()?;
+        if a.key.as_ref() == key {
+            let v = a
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .ok()?;
+            out = Some(v.into_owned());
+        }
+    }
+    Some(out)
 }
 
 /// The cap for a list with this many channels: `2^n - 1` (the height type is decoded as
@@ -210,7 +228,16 @@ pub struct GameData {
     /// The base crops' types. Only maps that grow those crops load them, so they're an estimate.
     pub foliage: Vec<String>,
     pub dlc: Vec<String>,
+    /// Installed DLCs that turn themselves off without their slots, by name.
+    pub at_risk: Vec<String>,
 }
+
+/// DLCs that turn themselves off and close the save when they can't get their slots (measured
+/// in-game, FS25 1.25), keyed by `pdlc/<stem>.dlc`.
+const AT_RISK: &[(&str, &str)] = &[
+    ("strawHarvestPack", "Straw Harvest"),
+    ("pumpsAndHosesPack", "Pumps n' Hoses"),
+];
 
 fn owned(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
@@ -266,6 +293,11 @@ impl GameData {
             base_channels: channels.unwrap_or(DEFAULT_CHANNELS),
             foliage,
             dlc: dlc_types(&stems),
+            at_risk: AT_RISK
+                .iter()
+                .filter(|(stem, _)| stems.iter().any(|s| s.eq_ignore_ascii_case(stem)))
+                .map(|(_, name)| name.to_string())
+                .collect(),
         }
     }
 
@@ -330,11 +362,19 @@ impl ModTypes {
         self.exact.iter().chain(&self.estimate).map(String::as_str)
     }
 
-    /// Drop entries for fill types that won't exist: the game rejects a height type whose fill
-    /// type isn't registered ("has invalid fill type"), so it takes no slot.
-    pub fn retain_known(&mut self, known: &std::collections::HashSet<String>) {
-        self.exact.retain(|t| known.contains(t));
-        self.estimate.retain(|t| known.contains(t));
+    /// Move declared entries whose fill type Silo can't find to the estimates. The game rejects a
+    /// height type whose fill type isn't registered ("has invalid fill type"), but a mod or map may
+    /// register the fill type somewhere Silo doesn't look (a script, a crop file), so not finding
+    /// it is no proof: the entry still counts, just not toward a Problem.
+    pub fn downgrade_unknown(&mut self, known: &std::collections::HashSet<String>) {
+        let (keep, unsure): (Vec<String>, Vec<String>) =
+            self.exact.drain(..).partition(|t| known.contains(t));
+        self.exact = keep;
+        for t in unsure {
+            if !self.estimate.contains(&t) {
+                self.estimate.push(t);
+            }
+        }
     }
 }
 
@@ -401,6 +441,8 @@ pub struct Budget {
     pub dlc: usize,
     /// Whether the base crops' types are in `base` (only some maps grow those crops).
     pub crops_estimated: bool,
+    /// Installed DLCs that turn themselves off without their slots.
+    pub at_risk: Vec<String>,
     /// Slots counted from the map list and modDesc-declared mod lists only.
     pub exact_total: usize,
     /// Every slot, estimates included.
@@ -412,6 +454,8 @@ pub struct Budget {
 /// Count one map's slots. Pure.
 pub fn evaluate(game: &GameData, map: Option<&MapTypes>, mods: &[ModTypes]) -> Budget {
     let (base, channels) = match map.and_then(|m| m.list.clone()) {
+        // A list that names no types only sets the channels; the base types stand.
+        Some((list, ch)) if list.is_empty() => (game.base.clone(), ch),
         Some((list, ch)) => (list, ch),
         None => (game.base.clone(), game.base_channels),
     };
@@ -457,6 +501,7 @@ pub fn evaluate(game: &GameData, map: Option<&MapTypes>, mods: &[ModTypes]) -> B
         base: base_set.len(),
         dlc,
         crops_estimated,
+        at_risk: game.at_risk.clone(),
         exact_total: exact.len(),
         total: all.len(),
         mods: per_mod,
@@ -514,14 +559,28 @@ pub fn explain(b: &Budget) -> String {
         "{on} room for {} ground-pile types, the materials you can tip onto the ground. The base game uses {}, your installed DLCs {}, and your active mods {} more: {} in all.",
         b.cap, b.base, b.dlc, mod_slots, b.total
     );
+    let risk = b.at_risk.join(" and ");
     if b.total > b.cap {
-        s.push_str(" If that's what loads, the game runs out. Mods take their slots first, so DLCs that need slots, like Straw Harvest and Pumps n' Hoses, turn themselves off and close the save.");
+        s.push_str(" If that's what loads, the game rejects the ones that don't fit");
+        match b.at_risk.len() {
+            0 => s.push_str(", and those materials can't lie on the ground as piles."),
+            n => s.push_str(&format!(
+                ". Mods register first, so {risk} may then turn {} off and close the save.",
+                if n == 1 { "itself" } else { "themselves" }
+            )),
+        }
     } else {
         let left = b.cap - b.total;
-        s.push_str(&format!(
-            " Only {left} {} left, so one more mod that adds piles could stop Straw Harvest or Pumps n' Hoses from loading.",
-            if left == 1 { "is" } else { "are" }
-        ));
+        let is = if left == 1 { "is" } else { "are" };
+        if b.at_risk.is_empty() {
+            s.push_str(&format!(
+                " Only {left} {is} left before the game starts rejecting them."
+            ));
+        } else {
+            s.push_str(&format!(
+                " Only {left} {is} left, so one more mod that adds piles could stop {risk} from loading."
+            ));
+        }
     }
     if !top.is_empty() {
         s.push_str(&format!(
@@ -561,6 +620,7 @@ mod tests {
             base_channels: 6,
             foliage: vec![],
             dlc: dlc.iter().map(|s| s.to_string()).collect(),
+            at_risk: vec![],
         }
     }
 
@@ -773,6 +833,23 @@ mod tests {
     }
 
     /// A Problem on one map outranks a bigger Review on another.
+    /// A map list that names nothing but sets 7 channels keeps the base types and a 127 cap.
+    #[test]
+    fn an_empty_map_list_still_sets_the_channels() {
+        let map = MapTypes {
+            label: "Wide".into(),
+            list: Some((vec![], 7)),
+            extra: None,
+        };
+        let b = evaluate(
+            &game(48, &[]),
+            Some(&map),
+            &[mm("Fills", many("F", 16), true)],
+        );
+        assert_eq!((b.base, b.cap, b.total), (48, 127, 64));
+        assert_eq!(severity(&b), None);
+    }
+
     #[test]
     fn worst_ranks_by_severity_first() {
         // Base maps: 48 exact + 5 DLC + 12 estimated = 65, a warning.
@@ -845,17 +922,23 @@ mod tests {
         assert!(!is_candidate("heighttypes/fillTypes.xml"));
     }
 
+    /// Not finding a fill type is no proof it won't exist, so the entry stays, as an estimate.
     #[test]
-    fn unknown_fill_types_take_no_slot() {
+    fn unknown_fill_types_become_estimates() {
         let mut t = mm("Fills", vec!["REAL".into(), "GHOST".into()], true);
-        t.estimate = vec!["MAYBE".into(), "GONE".into()];
+        t.estimate = vec!["MAYBE".into()];
         let known: std::collections::HashSet<String> =
-            ["REAL", "MAYBE"].iter().map(|s| s.to_string()).collect();
-        t.retain_known(&known);
-        assert_eq!(
-            (t.exact, t.estimate),
-            (vec!["REAL".to_string()], vec!["MAYBE".to_string()])
-        );
+            ["REAL"].iter().map(|s| s.to_string()).collect();
+        t.downgrade_unknown(&known);
+        assert_eq!(t.exact, ["REAL"]);
+        assert_eq!(t.estimate, ["MAYBE", "GHOST"]);
+        // So 48 + 14 declared + 2 unknown is a Review at most, never a Problem.
+        let mut t = mm("Big", many("B", 16), true);
+        let known: std::collections::HashSet<String> = many("B", 14).into_iter().collect();
+        t.downgrade_unknown(&known);
+        let b = evaluate(&game(48, &[]), None, &[t]);
+        assert_eq!((b.exact_total, b.total), (62, 64));
+        assert_eq!(severity(&b), Some("warning"));
     }
 
     #[test]
@@ -921,12 +1004,55 @@ mod tests {
         assert_eq!(g.base, ["WHEAT", "STRAW"]);
         assert_eq!(g.foliage, ["ONION"]);
         assert_eq!(g.dlc, ["HAY_PELLETS", "STRAW_PELLETS"]);
+        assert_eq!(g.at_risk, ["Straw Harvest"]);
         assert_eq!(g.base_channels, 6);
 
         // No install: the built-in 1.25 lists, 51 slots, and no DLCs.
         let none = GameData::load(None);
         assert_eq!(none.base.len() + none.foliage.len(), 51);
         assert!(none.dlc.is_empty());
+    }
+
+    /// The shutdown is only named for DLCs the player has installed.
+    #[test]
+    fn the_shutdown_is_named_only_for_installed_dlcs() {
+        let over = |at_risk: &[&str]| {
+            let mut g = game(48, &[]);
+            g.at_risk = at_risk.iter().map(|s| s.to_string()).collect();
+            explain(&evaluate(&g, None, &[mm("Fills", many("F", 20), true)]))
+        };
+        let none = over(&[]);
+        assert!(
+            none.contains("those materials can't lie on the ground as piles"),
+            "{none}"
+        );
+        assert!(!none.contains("Straw Harvest"), "{none}");
+        let one = over(&["Straw Harvest"]);
+        assert!(
+            one.contains("so Straw Harvest may then turn itself off and close the save"),
+            "{one}"
+        );
+        let two = over(&["Straw Harvest", "Pumps n' Hoses"]);
+        assert!(
+            two.contains("Straw Harvest and Pumps n' Hoses may then turn themselves off"),
+            "{two}"
+        );
+        let mut g = game(48, &[]);
+        g.at_risk = vec!["Pumps n' Hoses".into()];
+        let near = explain(&evaluate(&g, None, &[mm("Fills", many("F", 13), true)]));
+        assert!(
+            near.contains("could stop Pumps n' Hoses from loading"),
+            "{near}"
+        );
+        let near_none = explain(&evaluate(
+            &game(48, &[]),
+            None,
+            &[mm("Fills", many("F", 13), true)],
+        ));
+        assert!(
+            near_none.contains("left before the game starts rejecting them"),
+            "{near_none}"
+        );
     }
 
     #[test]

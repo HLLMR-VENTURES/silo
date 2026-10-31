@@ -346,7 +346,7 @@ pub fn explain(b: &Budget) -> String {
     );
     if b.total > CAP {
         s.push_str(&format!(
-            " If that's what loads, the game skips every one past {CAP}. The DLCs register before mods, so it's mods that lose theirs: about {} of their materials wouldn't exist, and what uses them may not work.",
+            " If that's what loads, the game skips every one past {CAP}. In testing the DLCs registered before mods, so expect about {} of the mods' materials to go missing, and what uses them may not work.",
             b.total - CAP
         ));
     } else {
@@ -518,7 +518,10 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(text.contains("about 10 of their materials"), "{text}");
+        assert!(
+            text.contains("expect about 10 of the mods' materials to go missing"),
+            "{text}"
+        );
         assert!(
             text.contains("SoilFertilizer (22), AdditionalFilltypes (13)"),
             "{text}"

@@ -55,8 +55,9 @@ pub struct ModDesc {
     /// `<densityMapHeightTypes filename>`: the ground-pile (height) types this mod adds. They
     /// share the map's fixed number of slots (#339).
     pub height_types_file: Option<String>,
-    /// The map's `<map configFilename>` (`map.xml`), for maps that bring their own height types.
-    pub map_config_file: Option<String>,
+    /// Each `<map configFilename>` (`map.xml`), for maps that bring their own height and fill
+    /// types. A mod can ship several maps.
+    pub map_config_files: Vec<String>,
 }
 
 /// Pick the best display title from a set of localized strings.
@@ -167,8 +168,8 @@ fn handle_open(md: &mut ModDesc, e: &quick_xml::events::BytesStart, name: &str, 
             if md.map_id.is_none() {
                 md.map_id = attr(e, b"id");
             }
-            if md.map_config_file.is_none() {
-                md.map_config_file = attr(e, b"configFilename").map(|f| f.replace('\\', "/"));
+            if let Some(f) = attr(e, b"configFilename") {
+                md.map_config_files.push(f.replace('\\', "/"));
             }
         }
         "sourceFile" if parent == "extraSourceFiles" => {
@@ -375,7 +376,7 @@ mod tests {
         let md = parse(xml);
         assert!(md.is_map);
         assert_eq!(md.map_id.as_deref(), Some("mapFoo"));
-        assert_eq!(md.map_config_file.as_deref(), Some("map/map.xml"));
+        assert_eq!(md.map_config_files, ["map/map.xml"]);
         assert_eq!(md.height_types_file.as_deref(), Some("xml/heightTypes.xml"));
         assert_eq!(md.map_title.as_deref(), Some("Foo Valley"));
         assert_eq!(md.unique_type.as_deref(), Some("fooUnique"));

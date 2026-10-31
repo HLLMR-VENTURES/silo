@@ -38,14 +38,14 @@ export function conflictTitle(c: Pick<Conflict, "kind" | "mods"> & Partial<Pick<
   if (c.kind === "fillTypeCap") {
     if (c.severity === "info") return "Material types are nearly full";
     return c.severity === "critical"
-      ? "Mods add more material types than the game supports"
-      : "Mods may add more material types than the game supports";
+      ? "More material types than the game supports"
+      : "Possibly more material types than the game supports";
   }
   if (c.kind === "heightTypes") {
     if (c.severity === "info") return "Ground-pile slots are nearly full";
     return c.severity === "critical"
-      ? "Mods need more ground-pile slots than the map has"
-      : "Mods may need more ground-pile slots than the map has";
+      ? "More ground-pile types than the map has room for"
+      : "Possibly more ground-pile types than the map has room for";
   }
   const n = Math.max(c.mods.length, 2);
   return `${modsWord(n)} ${WHAT[c.kind] ?? "clash"}`;
@@ -60,8 +60,8 @@ export function conflictTitle(c: Pick<Conflict, "kind" | "mods"> & Partial<Pick<
 export function groundPileCapNote(cap: number, disabled: string[]): { title: string; body: string } {
   const what =
     disabled.length > 0
-      ? `so ${disabled.join(" and ")} turned ${disabled.length === 1 ? "itself" : "themselves"} off and the save closed`
-      : "so some of them couldn't be added, and whatever needed them may not work";
+      ? `and ${disabled.join(" and ")} reported turning ${disabled.length === 1 ? "itself" : "themselves"} off and closing the save`
+      : "so it rejected the ones that didn't fit, and whatever needed them may not work";
   return {
     title: "The game ran out of ground-pile slots.",
     body: `The map has room for ${formatCount(cap)} ground-pile types (the materials you can tip onto the ground), and the game was asked for more, ${what}. Diagnose → Conflicts shows which mods use the most slots. Turn a few of those off.`,
