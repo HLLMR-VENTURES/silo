@@ -1,25 +1,31 @@
 //! Fill-type budget (#341). FS25 supports at most 255 fill types: `FillTypeManager.addFillType`
 //! refuses any past `2^SEND_NUM_BITS - 1` (`FillTypeManager.lua:316`) and logs
 //! "FillTypeManager.addFillType too many fill types. Only 255 fill types are supported. Ignoring
-//! 'X'." The game keeps loading, so the mod whose fill types were dropped breaks quietly. The
-//! base game and its DLCs load first, so it's the mods that lose (measured in-game on FS25 1.25,
+//! 'X'." The game keeps loading, so the mod whose fill types were dropped breaks quietly. In the
+//! measured runs the DLCs registered before the mods, so it was the mods that lost (FS25 1.25,
 //! 2026-10-31: the base game and Riverbend Springs 182, every DLC 230, and FS25_SoilFertilizer
 //! lost 10 of its fill types).
 //!
 //! What we can count:
 //! * the base list `data/maps/maps_fillTypes.xml`, plus the `UNKNOWN` type the game adds first:
-//!   exact;
-//! * the map: a mod map's own `<fillTypes filename>` (in `map.xml`, and in its modDesc), exact;
-//!   a base map adds the fill types of the crops it grows (`data/foliage/<crop>/*.xml`), and
-//!   which crops it grows is in the encrypted archives, so they're an estimate;
-//! * DLCs: encrypted, so their fill types come from [`DLC_FILL_TYPES`]: an estimate;
-//! * mods: their modDesc `<fillTypes filename>`, exact.
+//!   exact. Without a readable install there is no check at all: a guessed base list would make
+//!   every name a mod re-declares look new;
+//! * a mod map's own `<fillTypes filename>` (in `map.xml`, and in its modDesc): exact;
+//! * the base crops' fill types (`data/foliage/<crop>/*.xml`): only maps that grow those crops
+//!   load them, and which those are is in the encrypted archives, so they're an estimate;
+//! * DLCs: encrypted, so their fill types come from [`DLC_FILL_TYPES`]; a DLC can be off in a
+//!   save, so they're an estimate;
+//! * mods: their modDesc `<fillTypes filename>`, exact; other `*fillTypes*.xml` lists they ship
+//!   (RealisticLivestock, MoreRealistic, Corn Production Pack and others load theirs from a
+//!   script) are an estimate.
 //!
 //! A fill type that already exists is updated in place, never added again
 //! (`FillTypeManager:loadFillTypes`), so each name counts once.
 
-use crate::heighttypes::{dlc_names, foliage_names, installed_dlc, map_own_file};
-use std::collections::BTreeSet;
+use crate::heighttypes::{
+    dlc_names, foliage_names, installed_dlc, map_own_file, named_list, severity_rank,
+};
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -32,12 +38,8 @@ const NEARLY_FULL: usize = 5;
 /// The type the game registers before any list (`FillType.UNKNOWN`).
 const UNKNOWN: &str = "UNKNOWN";
 
-/// How many fill types `data/maps/maps_fillTypes.xml` declares in FS25 1.25, for when the
-/// install can't be read.
-const BASE_FALLBACK_COUNT: usize = 177;
-
-/// What a base map can add beyond the base list: the fill types the base crops declare in
-/// `data/foliage/<crop>/*.xml`, for when the install can't be read. Riverbend Springs grows these
+/// What the base crops add beyond the base list: the fill types they declare in
+/// `data/foliage/<crop>/*.xml`, for when those files can't be read. Riverbend Springs grows these
 /// crops (178 to 182); Zielonka and Hutan Pantai don't (178), measured in-game on FS25 1.25.
 const BASE_MAP_EXTRA: &[&str] = &["BANANA", "COFFEECHERRIES", "ONION", "ONION_DIRTY"];
 
@@ -105,32 +107,12 @@ const DLC_FILL_TYPES: &[(&str, &[&str])] = &[
 ];
 
 /// Declared `<fillType name>` values, upper-cased as the game keys them (`string.upper` in
-/// `FillTypeManager:loadFillTypes`) and de-duplicated. Pure.
+/// `FillTypeManager:loadFillTypes`) and de-duplicated. Only `<root><fillTypes><fillType>` counts,
+/// the path the game iterates; a file that doesn't parse counts as empty. Pure.
 pub fn fill_type_names(xml: &[u8]) -> Vec<String> {
-    use quick_xml::events::Event;
-    use quick_xml::Reader;
-    let mut reader = Reader::from_reader(xml);
-    reader.config_mut().trim_text(true);
-    let mut out = Vec::new();
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"fillType" => {
-                if let Some(a) = e.attributes().flatten().find(|a| a.key.as_ref() == b"name") {
-                    if let Ok(v) = a.normalized_value(quick_xml::XmlVersion::Implicit1_0) {
-                        let n = v.trim().to_uppercase();
-                        if !n.is_empty() && !out.contains(&n) {
-                            out.push(n);
-                        }
-                    }
-                }
-            }
-            Ok(Event::Eof) | Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    out
+    named_list(xml, b"fillTypes", b"fillType", b"name")
+        .map(|(names, _)| names)
+        .unwrap_or_default()
 }
 
 /// The map's own fill-type file, from its `map.xml`. Pure.
@@ -138,13 +120,20 @@ pub fn map_fill_file(map_xml: &[u8]) -> Option<String> {
     map_own_file(map_xml, b"fillTypes")
 }
 
-/// What the game itself brings: the base list, the base maps' additions and the DLCs'.
+/// Does this member's file name look like a fill-type list a script might load?
+pub fn is_candidate(member: &str) -> bool {
+    let base = member.rsplit('/').next().unwrap_or(member).to_lowercase();
+    base.contains("filltypes") && base.ends_with(".xml")
+}
+
+/// What the game itself brings: the base list, the base crops' additions and the DLCs'.
 #[derive(Debug, Clone, Default)]
 pub struct GameData {
     /// `UNKNOWN` and the base list.
     pub base: Vec<String>,
-    /// What a base map adds; replaced by a mod map's own list.
+    /// The base crops' fill types, loaded only on maps that grow them.
     pub map_extra: Vec<String>,
+    /// The installed DLCs' fill types.
     pub dlc: Vec<String>,
 }
 
@@ -153,48 +142,102 @@ fn owned(list: &[&str]) -> Vec<String> {
 }
 
 impl GameData {
-    /// Read the base list and the crops' fill types from the install (falling back to
-    /// [`BASE_FALLBACK_COUNT`] placeholder names and [`BASE_MAP_EXTRA`]) and look up the installed
-    /// DLCs.
-    pub fn load(install_dir: Option<&Path>) -> Self {
-        let read = install_dir
-            .and_then(|d| std::fs::read(d.join("data/maps/maps_fillTypes.xml")).ok())
+    /// Read the base list and the crops' fill types from the install and look up the installed
+    /// DLCs. `None` when the base list can't be read.
+    pub fn load(install_dir: Option<&Path>) -> Option<Self> {
+        let dir = install_dir?;
+        let read = std::fs::read(dir.join("data/maps/maps_fillTypes.xml"))
+            .ok()
             .map(|b| fill_type_names(&b))
-            .filter(|names| !names.is_empty())
-            .unwrap_or_else(|| {
-                (0..BASE_FALLBACK_COUNT)
-                    .map(|i| format!("#BASE{i}"))
-                    .collect()
-            });
+            .filter(|names| !names.is_empty())?;
         let mut base = vec![UNKNOWN.to_string()];
         base.extend(read.into_iter().filter(|n| n != UNKNOWN));
-        let stems = install_dir.map(installed_dlc).unwrap_or_default();
-        GameData {
+        Some(GameData {
             base,
-            map_extra: install_dir
-                .and_then(|d| foliage_names(d, fill_type_names))
+            map_extra: foliage_names(dir, fill_type_names)
                 .filter(|f| !f.is_empty())
                 .unwrap_or_else(|| owned(BASE_MAP_EXTRA)),
-            dlc: dlc_names(DLC_FILL_TYPES, &stems),
-        }
+            dlc: dlc_names(DLC_FILL_TYPES, &installed_dlc(dir)),
+        })
     }
 
     /// [`load`](Self::load) once per run, for the game Silo detects.
-    pub fn cached() -> &'static GameData {
-        static DATA: OnceLock<GameData> = OnceLock::new();
+    pub fn cached() -> Option<&'static GameData> {
+        static DATA: OnceLock<Option<GameData>> = OnceLock::new();
         DATA.get_or_init(|| {
             let dir = crate::gamelaunch::detect().map(|g| std::path::PathBuf::from(g.install_dir));
             GameData::load(dir.as_deref())
         })
+        .as_ref()
+    }
+
+    /// Every fill type that can exist with these mods: what a height type needs to take a slot.
+    pub fn known(&self, maps: &[MapFills], mods: &[ModFills]) -> HashSet<String> {
+        let mut out: HashSet<String> = self.base.iter().cloned().collect();
+        out.extend(self.map_extra.iter().cloned());
+        out.extend(self.dlc.iter().cloned());
+        for m in maps {
+            out.extend(m.types.iter().cloned());
+        }
+        for m in mods {
+            out.extend(m.exact.iter().cloned());
+            out.extend(m.estimate.iter().cloned());
+        }
+        out
     }
 }
 
 /// One active mod's fill types.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModFills {
     pub label: String,
     pub tech_name: String,
-    pub types: Vec<String>,
+    /// From its modDesc `<fillTypes filename>`: the game loads these.
+    pub exact: Vec<String>,
+    /// From other `*fillTypes*.xml` lists it ships: a script may load them.
+    pub estimate: Vec<String>,
+}
+
+impl ModFills {
+    fn all(&self) -> impl Iterator<Item = &str> {
+        self.exact.iter().chain(&self.estimate).map(String::as_str)
+    }
+}
+
+/// Read a mod's fill types: the modDesc-declared file exactly, plus (for non-maps) any other
+/// `*fillTypes*.xml` it ships as an estimate. `candidates` lists the members that pass
+/// [`is_candidate`].
+pub fn mod_fills(
+    label: &str,
+    tech_name: &str,
+    md: &crate::moddesc::ModDesc,
+    read: &dyn Fn(&str) -> Option<Vec<u8>>,
+    candidates: &dyn Fn() -> Vec<String>,
+) -> Option<ModFills> {
+    let declared = md.fill_types_file.as_deref();
+    let exact = declared
+        .and_then(read)
+        .map(|b| fill_type_names(&b))
+        .unwrap_or_default();
+    let mut estimate: Vec<String> = Vec::new();
+    if !md.is_map {
+        for m in candidates() {
+            if Some(m.as_str()) == declared {
+                continue;
+            }
+            for t in read(&m).map(|b| fill_type_names(&b)).unwrap_or_default() {
+                if !exact.contains(&t) && !estimate.contains(&t) {
+                    estimate.push(t);
+                }
+            }
+        }
+    }
+    (!exact.is_empty() || !estimate.is_empty()).then(|| ModFills {
+        label: label.into(),
+        tech_name: tech_name.into(),
+        exact,
+        estimate,
+    })
 }
 
 /// An active mod map's own fill types (its `map.xml` list and its modDesc list).
@@ -207,31 +250,32 @@ pub struct MapFills {
 /// The budget for one map.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Budget {
-    /// The mod map's name, or `None` for a base map.
+    /// The mod map's name, or `None` for the base-game maps.
     pub map: Option<String>,
-    /// The base list plus the map's own.
+    /// The base list, the map's own and the base crops'.
     pub base: usize,
-    /// Fill types the DLCs add beyond that.
+    /// Fill types the installed DLCs add beyond that.
     pub dlc: usize,
+    /// Whether the base crops' fill types are in `base`.
+    pub crops_estimated: bool,
     /// Counted from exactly-known sources only.
     pub exact_total: usize,
     /// Everything, estimates included.
     pub total: usize,
-    /// Mods adding new fill types, most first: (label, tech name, count).
-    pub mods: Vec<(String, String, usize)>,
+    /// Mods adding new fill types, most first: (label, tech name, count, all of them declared).
+    pub mods: Vec<(String, String, usize, bool)>,
 }
 
 /// Count one map's fill types. Pure.
 pub fn evaluate(game: &GameData, map: Option<&MapFills>, mods: &[ModFills]) -> Budget {
     let mut exact: BTreeSet<&str> = game.base.iter().map(String::as_str).collect();
-    let mut all = exact.clone();
-    match map {
-        Some(m) => {
-            exact.extend(m.types.iter().map(String::as_str));
-            all.extend(m.types.iter().map(String::as_str));
-        }
-        None => all.extend(game.map_extra.iter().map(String::as_str)),
+    if let Some(m) = map {
+        exact.extend(m.types.iter().map(String::as_str));
     }
+    // The base crops' fill types may load on any map, a mod map included.
+    let mut all = exact.clone();
+    all.extend(game.map_extra.iter().map(String::as_str));
+    let crops_estimated = all.len() > exact.len();
     let base = all.len();
     all.extend(game.dlc.iter().map(String::as_str));
     let dlc = all.len() - base;
@@ -239,15 +283,16 @@ pub fn evaluate(game: &GameData, map: Option<&MapFills>, mods: &[ModFills]) -> B
 
     let mut per_mod = Vec::new();
     for m in mods {
-        let new = m
-            .types
-            .iter()
-            .filter(|t| !fixed.contains(t.as_str()))
-            .count();
-        all.extend(m.types.iter().map(String::as_str));
-        exact.extend(m.types.iter().map(String::as_str));
+        let new = m.all().filter(|t| !fixed.contains(t)).count();
+        all.extend(m.all());
+        exact.extend(m.exact.iter().map(String::as_str));
         if new > 0 {
-            per_mod.push((m.label.clone(), m.tech_name.clone(), new));
+            per_mod.push((
+                m.label.clone(),
+                m.tech_name.clone(),
+                new,
+                m.estimate.is_empty(),
+            ));
         }
     }
     per_mod.sort_by(|a, b| {
@@ -258,22 +303,20 @@ pub fn evaluate(game: &GameData, map: Option<&MapFills>, mods: &[ModFills]) -> B
         map: map.map(|m| m.label.clone()),
         base,
         dlc,
+        crops_estimated,
         exact_total: exact.len(),
         total: all.len(),
         mods: per_mod,
     }
 }
 
-/// The fullest budget across the candidate maps: each active mod map, or a base map when none
-/// is active. Pure.
+/// The worst budget across the maps the save might use: the base-game maps and each active mod
+/// map. Most serious first, then fullest. Pure.
 pub fn worst(game: &GameData, maps: &[MapFills], mods: &[ModFills]) -> Budget {
-    if maps.is_empty() {
-        return evaluate(game, None, mods);
-    }
-    maps.iter()
-        .map(|m| evaluate(game, Some(m), mods))
-        .max_by_key(|b| b.total)
-        .expect("maps is non-empty")
+    std::iter::once(evaluate(game, None, mods))
+        .chain(maps.iter().map(|m| evaluate(game, Some(m), mods)))
+        .max_by_key(|b| (severity_rank(severity(b)), b.total))
+        .expect("the base-game maps are always a candidate")
 }
 
 /// Critical when the exactly-counted fill types alone run over, warning when the estimates push
@@ -294,16 +337,16 @@ pub fn severity(b: &Budget) -> Option<&'static str> {
 pub fn explain(b: &Budget) -> String {
     let on = match &b.map {
         Some(m) => format!("the base game and {m} use"),
-        None => "the base game and your map use".into(),
+        None => "the base game uses".into(),
     };
     let mod_count = b.total - b.base - b.dlc;
     let mut s = format!(
-        "The game supports {CAP} material types (crops, feed, fertilizers, products and the like). Here {on} {}, your DLCs {}, and your active mods {} more: {} in all.",
+        "The game supports {CAP} material types (crops, feed, fertilizers, products and the like). Here {on} {}, your installed DLCs {}, and your active mods {} more: {} in all.",
         b.base, b.dlc, mod_count, b.total
     );
     if b.total > CAP {
         s.push_str(&format!(
-            " The game skips every one past {CAP}. Mods load last, so they lose theirs: about {} of their materials won't exist, and the parts that use them won't work.",
+            " If that's what loads, the game skips every one past {CAP}. The DLCs register before mods, so it's mods that lose theirs: about {} of their materials wouldn't exist, and what uses them may not work.",
             b.total - CAP
         ));
     } else {
@@ -317,13 +360,26 @@ pub fn explain(b: &Budget) -> String {
         .mods
         .iter()
         .take(5)
-        .map(|(l, _, n)| format!("{l} ({n})"))
+        .map(|(l, _, n, _)| format!("{l} ({n})"))
         .collect();
     if !top.is_empty() {
-        s.push_str(&format!(" Most added: {}.", top.join(", ")));
+        s.push_str(&format!(
+            " New types per mod (some mods share them): {}.",
+            top.join(", ")
+        ));
     }
-    if b.dlc > 0 || (b.map.is_none() && b.total > b.exact_total) {
-        s.push_str(" DLC and base map counts are measured and can change with updates.");
+    let mut why: Vec<&str> = Vec::new();
+    if b.dlc > 0 {
+        why.push("a DLC that's off in your save adds none");
+    }
+    if b.crops_estimated {
+        why.push("a few belong to crops only some maps grow");
+    }
+    if b.mods.iter().any(|m| !m.3) {
+        why.push("mods that load theirs from a script may not use them all");
+    }
+    if !why.is_empty() {
+        s.push_str(&format!(" Some counts are estimates: {}.", why.join(", ")));
     }
     if b.total > CAP {
         s.push_str(&format!(" Turn off mods until you're at {CAP} or fewer."));
@@ -351,7 +407,8 @@ mod tests {
         ModFills {
             label: label.into(),
             tech_name: format!("FS25_{label}"),
-            types,
+            exact: types,
+            estimate: vec![],
         }
     }
 
@@ -365,6 +422,64 @@ mod tests {
         assert_eq!(fill_type_names(xml), ["LIMESTONE", "COMPOST"]);
         assert!(fill_type_names(b"<map></map>").is_empty());
         assert!(fill_type_names(b"not xml").is_empty());
+    }
+
+    /// Only `<root><fillTypes><fillType>` registers: a bale's list of fill types it accepts
+    /// doesn't, and comments don't (AdditionalFilltypes keeps three entries commented out).
+    #[test]
+    fn names_only_where_the_game_reads_them() {
+        let bale = br#"<bale><fillTypes><fillType name="GRASS_WINDROW"/></fillTypes></bale>"#;
+        assert_eq!(fill_type_names(bale), ["GRASS_WINDROW"]);
+        let nested =
+            br#"<bale><mounting><fillTypes><fillType name="GRASS"/></fillTypes></mounting></bale>"#;
+        assert!(fill_type_names(nested).is_empty());
+        let commented = br#"<map><fillTypes><!-- <fillType name="QUICKLIME"/> --><fillType name="UREA"/></fillTypes></map>"#;
+        assert_eq!(fill_type_names(commented), ["UREA"]);
+        let broken = br#"<map><fillTypes><fillType name="UREA"/></nope></map>"#;
+        assert!(fill_type_names(broken).is_empty());
+    }
+
+    #[test]
+    fn candidates_are_fill_type_xml_by_name() {
+        assert!(is_candidate("xml/fillTypes.xml"));
+        assert!(is_candidate("data/BSU_fillTypes.XML"));
+        assert!(!is_candidate("objects/bales/roundbale125/roundbale125.xml"));
+        assert!(!is_candidate("data/defaultSettings.xml"));
+    }
+
+    #[test]
+    fn mod_fills_counts_declared_and_shipped_lists() {
+        let declared_xml = br#"<map><fillTypes><fillType name="A"/></fillTypes></map>"#.to_vec();
+        let shipped =
+            br#"<map><fillTypes><fillType name="A"/><fillType name="B"/></fillTypes></map>"#
+                .to_vec();
+        let read = |name: &str| match name {
+            "fillTypes.xml" => Some(declared_xml.clone()),
+            "mod_support/v2/fillTypes.xml" => Some(shipped.clone()),
+            _ => None,
+        };
+        let candidates = || {
+            vec![
+                "fillTypes.xml".to_string(),
+                "mod_support/v2/fillTypes.xml".to_string(),
+            ]
+        };
+        let md = crate::moddesc::ModDesc {
+            fill_types_file: Some("fillTypes.xml".into()),
+            ..Default::default()
+        };
+        let f = mod_fills("M", "FS25_M", &md, &read, &candidates).unwrap();
+        assert_eq!(
+            (f.exact, f.estimate),
+            (vec!["A".to_string()], vec!["B".to_string()])
+        );
+        let script = mod_fills("M", "FS25_M", &Default::default(), &read, &candidates).unwrap();
+        assert_eq!(script.estimate, ["A", "B"]);
+        let map = crate::moddesc::ModDesc {
+            is_map: true,
+            ..Default::default()
+        };
+        assert!(mod_fills("M", "FS25_M", &map, &read, &candidates).is_none());
     }
 
     #[test]
@@ -393,17 +508,23 @@ mod tests {
             ],
         );
         assert_eq!((b.base, b.dlc, b.total), (182, 48, 265));
-        // Without the estimates (base map extras, DLCs) it's 213, under the cap.
+        // Without the estimates (crops, DLCs) it's 213, under the cap.
         assert_eq!(b.exact_total, 213);
         assert_eq!(severity(&b), Some("warning"));
         let text = explain(&b);
         assert!(
-            text.contains("use 182, your DLCs 48, and your active mods 35 more: 265 in all"),
+            text.contains(
+                "uses 182, your installed DLCs 48, and your active mods 35 more: 265 in all"
+            ),
             "{text}"
         );
         assert!(text.contains("about 10 of their materials"), "{text}");
         assert!(
             text.contains("SoilFertilizer (22), AdditionalFilltypes (13)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("a DLC that's off in your save adds none"),
             "{text}"
         );
         assert!(
@@ -423,6 +544,17 @@ mod tests {
             severity(&evaluate(&g, None, &[m("Small", many("S", 20))])),
             None
         );
+    }
+
+    #[test]
+    fn script_lists_are_an_estimate() {
+        let g = game(178, 0, 0);
+        let mut f = m("Livestock", vec![]);
+        f.estimate = many("L", 80);
+        let b = evaluate(&g, None, &[f]);
+        assert_eq!((b.exact_total, b.total), (178, 258));
+        assert_eq!(severity(&b), Some("warning"));
+        assert!(explain(&b).contains("from a script"), "{}", explain(&b));
     }
 
     #[test]
@@ -455,25 +587,25 @@ mod tests {
         assert_eq!(
             b.mods,
             [
-                ("A".into(), "FS25_A".into(), 1),
-                ("B".into(), "FS25_B".into(), 1)
+                ("A".into(), "FS25_A".into(), 1, true),
+                ("B".into(), "FS25_B".into(), 1, true)
             ]
         );
     }
 
     #[test]
-    fn a_mod_map_replaces_the_base_map_extras() {
+    fn a_mod_map_adds_its_own_and_may_grow_the_base_crops() {
         let g = game(178, 4, 0);
         let map = MapFills {
             label: "Big Valley".into(),
             types: vec!["BASE0".into(), "VALLEY_ROCK".into()],
         };
         let b = evaluate(&g, Some(&map), &[]);
-        assert_eq!((b.base, b.exact_total), (179, 179));
+        assert_eq!((b.base, b.exact_total), (183, 179));
         let w = worst(&g, std::slice::from_ref(&map), &[]);
         assert_eq!(w.map.as_deref(), Some("Big Valley"));
         assert!(
-            explain(&w).contains("the base game and Big Valley use 179"),
+            explain(&w).contains("the base game and Big Valley use 183"),
             "{}",
             explain(&w)
         );
@@ -481,30 +613,19 @@ mod tests {
     }
 
     #[test]
-    fn loads_the_base_list_with_unknown_first() {
-        let dir = std::env::temp_dir().join(format!("silo_ft_install_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("data/maps")).unwrap();
-        std::fs::create_dir_all(dir.join("data/foliage/banana")).unwrap();
-        std::fs::write(
-            dir.join("data/foliage/banana/banana.xml"),
-            r#"<foliageType><fillTypes><fillType name="BANANA"/></fillTypes><!-- <fillType name="OLD"/> --></foliageType>"#,
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("data/maps/maps_fillTypes.xml"),
-            r#"<map><fillTypes><fillType name="WHEAT"/><fillType name="unknown"/><fillType name="BARLEY"/></fillTypes></map>"#,
-        )
-        .unwrap();
-        let g = GameData::load(Some(&dir));
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(g.base, ["UNKNOWN", "WHEAT", "BARLEY"]);
-        // The crops' own fill types, with commented-out ones skipped.
-        assert_eq!(g.map_extra, ["BANANA"]);
-        // No install: UNKNOWN plus the 1.25 count, and the measured crop list.
-        let none = GameData::load(None);
-        assert_eq!(none.base.len(), 178);
-        assert_eq!(none.map_extra.len(), 4);
+    fn known_fill_types_cover_every_source() {
+        let g = game(2, 1, 1);
+        let maps = [MapFills {
+            label: "M".into(),
+            types: vec!["ROCK".into()],
+        }];
+        let mut f = m("A", vec!["NEW".into()]);
+        f.estimate = vec!["MAYBE".into()];
+        let known = g.known(&maps, &[f]);
+        for n in ["BASE0", "MAPX0", "DLC0", "ROCK", "NEW", "MAYBE"] {
+            assert!(known.contains(n), "{n}");
+        }
+        assert!(!known.contains("GHOST"));
     }
 
     /// The in-game counts (FS25 1.25): 178 base, 182 on Riverbend Springs, 230 with every DLC.
@@ -521,6 +642,32 @@ mod tests {
         };
         let b = evaluate(&g, None, &[]);
         assert_eq!((b.base, b.dlc, b.total), (182, 48, 230));
+    }
+
+    #[test]
+    fn loads_the_base_list_with_unknown_first() {
+        let dir = std::env::temp_dir().join(format!("silo_ft_install_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data/maps")).unwrap();
+        std::fs::create_dir_all(dir.join("data/foliage/banana")).unwrap();
+        std::fs::write(
+            dir.join("data/foliage/banana/banana.xml"),
+            r#"<foliageType><fillTypes><fillType name="BANANA"/><!-- <fillType name="OLD"/> --></fillTypes></foliageType>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("data/maps/maps_fillTypes.xml"),
+            r#"<map><fillTypes><fillType name="WHEAT"/><fillType name="unknown"/><fillType name="BARLEY"/></fillTypes></map>"#,
+        )
+        .unwrap();
+        let g = GameData::load(Some(&dir)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(g.base, ["UNKNOWN", "WHEAT", "BARLEY"]);
+        // The crops' own fill types, with commented-out ones skipped.
+        assert_eq!(g.map_extra, ["BANANA"]);
+        // No install: no check, rather than a guessed base list.
+        assert!(GameData::load(None).is_none());
+        assert!(GameData::load(Some(Path::new("Z:/no/such/install"))).is_none());
     }
 
     #[test]

@@ -99,36 +99,66 @@ const DLC_TYPES: &[(&str, &[&str])] = &[
 const NEARLY_FULL: usize = 3;
 
 /// Height types from one XML list: the fill type names (upper-cased, as the game keys them,
-/// de-duplicated) and the list's `numChannels`, when it sets one. Pure.
+/// de-duplicated) and the list's `numChannels`, when it sets one. Only entries where the game
+/// reads them count (`<root><densityMapHeightTypes><densityMapHeightType>`), and a file that
+/// doesn't parse counts as empty, since the game can't load it either. Pure.
 pub fn parse_list(xml: &[u8]) -> (Vec<String>, Option<u32>) {
+    named_list(
+        xml,
+        b"densityMapHeightTypes",
+        b"densityMapHeightType",
+        b"fillTypeName",
+    )
+    .map(|(names, channels)| (names, channels.and_then(|v| v.trim().parse().ok())))
+    .unwrap_or_default()
+}
+
+/// The `name_attr` values of `<root><list><item>` entries, upper-cased and de-duplicated, and the
+/// list element's `numChannels`. `None` when the XML doesn't parse. Pure.
+pub(crate) fn named_list(
+    xml: &[u8],
+    list: &[u8],
+    item: &[u8],
+    name_attr: &[u8],
+) -> Option<(Vec<String>, Option<String>)> {
     use quick_xml::events::Event;
     use quick_xml::Reader;
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(true);
     let (mut names, mut channels) = (Vec::new(), None);
+    // Open elements from the root down; `Empty` elements never open.
+    let mut stack: Vec<Vec<u8>> = Vec::new();
     let mut buf = Vec::new();
     loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
-                b"densityMapHeightType" => {
-                    if let Some(n) = attr(&e, b"fillTypeName") {
+        let event = reader.read_event_into(&mut buf).ok()?;
+        match &event {
+            Event::Start(e) | Event::Empty(e) => {
+                let name = e.name().as_ref().to_vec();
+                if stack.len() == 1 && name == list && channels.is_none() {
+                    channels = attr(e, b"numChannels");
+                }
+                let in_list = stack.len() == 2 && stack[1] == list;
+                if in_list && name == item {
+                    if let Some(n) = attr(e, name_attr) {
                         let n = n.trim().to_uppercase();
                         if !n.is_empty() && !names.contains(&n) {
                             names.push(n);
                         }
                     }
                 }
-                b"densityMapHeightTypes" if channels.is_none() => {
-                    channels = attr(&e, b"numChannels").and_then(|v| v.trim().parse().ok());
+                if matches!(event, Event::Start(_)) {
+                    stack.push(name);
                 }
-                _ => {}
-            },
-            Ok(Event::Eof) | Err(_) => break,
+            }
+            Event::End(_) => {
+                stack.pop();
+            }
+            Event::Eof => break,
             _ => {}
         }
         buf.clear();
     }
-    (names, channels)
+    Some((names, channels))
 }
 
 /// The map's own height-type file, from its `map.xml`: `Some` only when it points inside the
@@ -285,13 +315,27 @@ pub fn dlc_names(table: &[(&str, &[&str])], stems: &[String]) -> Vec<String> {
 }
 
 /// One active mod's height types.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModTypes {
     pub label: String,
     pub tech_name: String,
-    pub types: Vec<String>,
-    /// Declared in modDesc (exact), not found in a script-loaded XML (estimate).
-    pub exact: bool,
+    /// Declared in modDesc: the game loads these.
+    pub exact: Vec<String>,
+    /// Found in other `*heightType*.xml` files the mod ships: a script may load them.
+    pub estimate: Vec<String>,
+}
+
+impl ModTypes {
+    fn all(&self) -> impl Iterator<Item = &str> {
+        self.exact.iter().chain(&self.estimate).map(String::as_str)
+    }
+
+    /// Drop entries for fill types that won't exist: the game rejects a height type whose fill
+    /// type isn't registered ("has invalid fill type"), so it takes no slot.
+    pub fn retain_known(&mut self, known: &std::collections::HashSet<String>) {
+        self.exact.retain(|t| known.contains(t));
+        self.estimate.retain(|t| known.contains(t));
+    }
 }
 
 /// A map's list, when the map brings its own.
@@ -304,55 +348,64 @@ pub struct MapTypes {
     pub extra: Option<ModTypes>,
 }
 
-/// Read a mod's height types. A declared modDesc file wins; otherwise, for non-maps, any
-/// `*heightType*.xml` in the zip counts as an estimate. `read` fetches a member's bytes.
+/// Does this member's file name look like a height-type list a script might load?
+pub fn is_candidate(member: &str) -> bool {
+    let base = member.rsplit('/').next().unwrap_or(member).to_lowercase();
+    base.contains("heighttype") && base.ends_with(".xml")
+}
+
+/// Read a mod's height types: the modDesc-declared file exactly, plus (for non-maps) any other
+/// `*heightType*.xml` in it as an estimate. `read` fetches a member's bytes; `candidates` lists the
+/// members that pass [`is_candidate`].
 pub fn mod_types(
     label: &str,
     tech_name: &str,
     md: &ModDesc,
     read: &dyn Fn(&str) -> Option<Vec<u8>>,
-    members: &dyn Fn() -> Vec<String>,
+    candidates: &dyn Fn() -> Vec<String>,
 ) -> Option<ModTypes> {
-    let (types, exact) = if let Some(f) = &md.height_types_file {
-        (parse_list(&read(f)?).0, true)
-    } else if md.is_map {
-        return None;
-    } else {
-        let mut all: Vec<String> = Vec::new();
-        for m in members() {
-            let base = m.rsplit('/').next().unwrap_or(&m).to_lowercase();
-            if base.contains("heighttype") && base.ends_with(".xml") {
-                for t in read(&m).map(|b| parse_list(&b).0).unwrap_or_default() {
-                    if !all.contains(&t) {
-                        all.push(t);
-                    }
+    let declared = md.height_types_file.as_deref();
+    let exact = declared
+        .and_then(read)
+        .map(|b| parse_list(&b).0)
+        .unwrap_or_default();
+    let mut estimate: Vec<String> = Vec::new();
+    if !md.is_map {
+        for m in candidates() {
+            if Some(m.as_str()) == declared {
+                continue;
+            }
+            for t in read(&m).map(|b| parse_list(&b).0).unwrap_or_default() {
+                if !exact.contains(&t) && !estimate.contains(&t) {
+                    estimate.push(t);
                 }
             }
         }
-        (all, false)
-    };
-    (!types.is_empty()).then(|| ModTypes {
+    }
+    (!exact.is_empty() || !estimate.is_empty()).then(|| ModTypes {
         label: label.into(),
         tech_name: tech_name.into(),
-        types,
         exact,
+        estimate,
     })
 }
 
 /// The budget for one map.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Budget {
-    /// The mod map's name, or `None` for the base list.
+    /// The mod map's name, or `None` for the base-game maps.
     pub map: Option<String>,
     pub cap: usize,
     pub base: usize,
-    /// Slots the DLCs add beyond the map's list.
+    /// Slots the installed DLCs add beyond the map's list.
     pub dlc: usize,
-    /// Slots counted from the map list and exactly-declared mods only.
+    /// Whether the base crops' types are in `base` (only some maps grow those crops).
+    pub crops_estimated: bool,
+    /// Slots counted from the map list and modDesc-declared mod lists only.
     pub exact_total: usize,
     /// Every slot, estimates included.
     pub total: usize,
-    /// Mods adding new slots, most first: (label, tech name, slots, exact).
+    /// Mods adding new slots, most first: (label, tech name, slots, all of them declared).
     pub mods: Vec<(String, String, usize, bool)>,
 }
 
@@ -369,6 +422,7 @@ pub fn evaluate(game: &GameData, map: Option<&MapTypes>, mods: &[ModTypes]) -> B
         .copied()
         .chain(game.foliage.iter().map(String::as_str))
         .collect();
+    let crops_estimated = base_set.len() > exact.len();
     let mut all: BTreeSet<&str> = base_set.clone();
     let dlc_before = all.len();
     all.extend(game.dlc.iter().map(String::as_str));
@@ -381,17 +435,16 @@ pub fn evaluate(game: &GameData, map: Option<&MapTypes>, mods: &[ModTypes]) -> B
     }
     let mut per_mod = Vec::new();
     for m in &active {
-        let new = m
-            .types
-            .iter()
-            .filter(|t| !fixed.contains(t.as_str()))
-            .count();
-        all.extend(m.types.iter().map(String::as_str));
-        if m.exact {
-            exact.extend(m.types.iter().map(String::as_str));
-        }
+        let new = m.all().filter(|t| !fixed.contains(t)).count();
+        all.extend(m.all());
+        exact.extend(m.exact.iter().map(String::as_str));
         if new > 0 {
-            per_mod.push((m.label.clone(), m.tech_name.clone(), new, m.exact));
+            per_mod.push((
+                m.label.clone(),
+                m.tech_name.clone(),
+                new,
+                m.estimate.is_empty(),
+            ));
         }
     }
     per_mod.sort_by(|a, b| {
@@ -403,22 +456,31 @@ pub fn evaluate(game: &GameData, map: Option<&MapTypes>, mods: &[ModTypes]) -> B
         cap: cap_for(channels),
         base: base_set.len(),
         dlc,
+        crops_estimated,
         exact_total: exact.len(),
         total: all.len(),
         mods: per_mod,
     }
 }
 
-/// The tightest budget across the candidate maps: each active mod map (the player is likely on
-/// one of them), or the base list when none is active. Pure.
-pub fn worst(game: &GameData, maps: &[MapTypes], mods: &[ModTypes]) -> Budget {
-    if maps.is_empty() {
-        return evaluate(game, None, mods);
+/// How serious a severity is, for picking the worst map: critical first.
+pub(crate) fn severity_rank(s: Option<&str>) -> u8 {
+    match s {
+        Some("critical") => 3,
+        Some("warning") => 2,
+        Some("info") => 1,
+        _ => 0,
     }
-    maps.iter()
-        .map(|m| evaluate(game, Some(m), mods))
-        .max_by_key(|b| b.total as i64 - b.cap as i64)
-        .expect("maps is non-empty")
+}
+
+/// The worst budget across the maps the save might use: the base-game maps and each active mod
+/// map (only the savegame's map loads, and Silo doesn't know which that is). Worst means most
+/// serious first, then least room. Pure.
+pub fn worst(game: &GameData, maps: &[MapTypes], mods: &[ModTypes]) -> Budget {
+    std::iter::once(evaluate(game, None, mods))
+        .chain(maps.iter().map(|m| evaluate(game, Some(m), mods)))
+        .max_by_key(|b| (severity_rank(severity(b)), b.total as i64 - b.cap as i64))
+        .expect("the base-game maps are always a candidate")
 }
 
 /// How serious a budget is: critical when the exactly-counted slots alone run over, warning when
@@ -439,7 +501,7 @@ pub fn severity(b: &Budget) -> Option<&'static str> {
 pub fn explain(b: &Budget) -> String {
     let on = match &b.map {
         Some(m) => format!("{m} has"),
-        None => "Your map has".into(),
+        None => "The base-game maps have".into(),
     };
     let mod_slots: usize = b.total - b.base - b.dlc;
     let top: Vec<String> = b
@@ -449,28 +511,36 @@ pub fn explain(b: &Budget) -> String {
         .map(|(l, _, n, _)| format!("{l} ({n})"))
         .collect();
     let mut s = format!(
-        "{on} room for {} ground-pile types, the materials you can tip onto the ground. The base game uses {}, your DLCs {}, and your active mods {} more: {} in all.",
+        "{on} room for {} ground-pile types, the materials you can tip onto the ground. The base game uses {}, your installed DLCs {}, and your active mods {} more: {} in all.",
         b.cap, b.base, b.dlc, mod_slots, b.total
     );
     if b.total > b.cap {
-        s.push_str(" When they run out, Straw Harvest and Pumps n' Hoses refuse to load and the game closes your save.");
+        s.push_str(" If that's what loads, the game runs out. Mods take their slots first, so DLCs that need slots, like Straw Harvest and Pumps n' Hoses, turn themselves off and close the save.");
     } else {
         let left = b.cap - b.total;
         s.push_str(&format!(
-            " Only {left} {} left, so one more mod that adds piles could stop Straw Harvest and Pumps n' Hoses from loading.",
+            " Only {left} {} left, so one more mod that adds piles could stop Straw Harvest or Pumps n' Hoses from loading.",
             if left == 1 { "is" } else { "are" }
         ));
     }
     if !top.is_empty() {
-        s.push_str(&format!(" Most slots: {}.", top.join(", ")));
+        s.push_str(&format!(
+            " New types per mod (some mods share them): {}.",
+            top.join(", ")
+        ));
     }
-    let estimated = b.mods.iter().filter(|m| !m.3).count();
-    if b.dlc > 0 || estimated > 0 {
-        s.push_str(" Some counts are estimates: DLC counts can change with updates");
-        if estimated > 0 {
-            s.push_str(", and mods that add piles from a script may not use all of theirs");
-        }
-        s.push('.');
+    let mut why: Vec<&str> = Vec::new();
+    if b.dlc > 0 {
+        why.push("a DLC that's off in your save takes none");
+    }
+    if b.crops_estimated {
+        why.push("3 belong to crops only some maps grow");
+    }
+    if b.mods.iter().any(|m| !m.3) {
+        why.push("mods that add piles from a script may not use all of theirs");
+    }
+    if !why.is_empty() {
+        s.push_str(&format!(" Some counts are estimates: {}.", why.join(", ")));
     }
     if b.total > b.cap {
         s.push_str(&format!(
@@ -495,12 +565,7 @@ mod tests {
     }
 
     fn m(label: &str, types: &[&str], exact: bool) -> ModTypes {
-        ModTypes {
-            label: label.into(),
-            tech_name: format!("FS25_{label}"),
-            types: types.iter().map(|s| s.to_string()).collect(),
-            exact,
-        }
+        mm(label, types.iter().map(|s| s.to_string()).collect(), exact)
     }
 
     fn many(prefix: &str, n: usize) -> Vec<String> {
@@ -508,11 +573,16 @@ mod tests {
     }
 
     fn mm(label: &str, types: Vec<String>, exact: bool) -> ModTypes {
+        let (exact, estimate) = if exact {
+            (types, vec![])
+        } else {
+            (vec![], types)
+        };
         ModTypes {
             label: label.into(),
             tech_name: format!("FS25_{label}"),
-            types,
             exact,
+            estimate,
         }
     }
 
@@ -531,6 +601,13 @@ mod tests {
             (vec![], None)
         );
         assert_eq!(parse_list(b"not xml").0.len(), 0);
+        // Only where the game reads them: entries elsewhere, or in a file that doesn't parse,
+        // take no slot.
+        let elsewhere = br#"<map><examples><densityMapHeightType fillTypeName="X"/></examples>
+            <densityMapHeightTypes><densityMapHeightType fillTypeName="Y"/></densityMapHeightTypes></map>"#;
+        assert_eq!(parse_list(elsewhere).0, ["Y"]);
+        let broken = br#"<map><densityMapHeightTypes><densityMapHeightType fillTypeName="Y"/></wrong></map>"#;
+        assert!(parse_list(broken).0.is_empty());
     }
 
     #[test]
@@ -615,10 +692,14 @@ mod tests {
         assert_eq!(severity(&b), Some("warning"));
         let text = explain(&b);
         assert!(
-            text.contains("your DLCs 3, and your active mods 16 more: 67 in all"),
+            text.contains("your installed DLCs 3, and your active mods 16 more: 67 in all"),
             "{text}"
         );
         assert!(text.contains("from a script"), "{text}");
+        assert!(
+            text.contains("a DLC that's off in your save takes none"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -672,44 +753,109 @@ mod tests {
         assert_eq!(b.total, 68);
         let base = worst(&game(48, &[]), &[], &mods);
         assert_eq!(base.map, None);
-        assert!(explain(&base).starts_with("Your map has room"));
+        assert!(explain(&base).starts_with("The base-game maps have room"));
+    }
+
+    /// An active mod map doesn't mean the save uses it: the base-game maps stay a candidate.
+    #[test]
+    fn a_roomy_mod_map_does_not_hide_the_base_maps() {
+        let roomy = MapTypes {
+            label: "Roomy".into(),
+            list: Some((many("M", 40), 7)),
+            extra: None,
+        };
+        let b = worst(
+            &game(48, &[]),
+            &[roomy],
+            &[mm("Fills", many("F", 20), true)],
+        );
+        assert_eq!((b.map, b.cap, b.total), (None, 63, 68));
+    }
+
+    /// A Problem on one map outranks a bigger Review on another.
+    #[test]
+    fn worst_ranks_by_severity_first() {
+        // Base maps: 48 exact + 5 DLC + 12 estimated = 65, a warning.
+        let g = game(48, &["D0", "D1", "D2", "D3", "D4"]);
+        // Mod map: its own 64-name list, already over 63 exactly, holds the DLC and script names
+        // too, so it totals only 64: critical, with less overflow than the base maps' 65.
+        let mut own = many("D", 5);
+        own.extend(many("S", 12));
+        own.extend(many("M", 47));
+        let tight = MapTypes {
+            label: "Tight".into(),
+            list: Some((own, 6)),
+            extra: None,
+        };
+        let mods = [mm("Script", many("S", 12), false)];
+        assert_eq!(evaluate(&g, None, &mods).total, 65);
+        let b = worst(&g, &[tight], &mods);
+        assert_eq!(b.map.as_deref(), Some("Tight"));
+        assert_eq!(b.total, 64);
+        assert_eq!(severity(&b), Some("critical"));
     }
 
     #[test]
-    fn mod_types_prefers_the_declared_file() {
+    fn mod_types_counts_declared_and_shipped_lists() {
         let list = br#"<map><densityMapHeightTypes><densityMapHeightType fillTypeName="A"/></densityMapHeightTypes></map>"#.to_vec();
-        let other = br#"<map><densityMapHeightTypes><densityMapHeightType fillTypeName="B"/></densityMapHeightTypes></map>"#.to_vec();
+        let other = br#"<map><densityMapHeightTypes><densityMapHeightType fillTypeName="A"/><densityMapHeightType fillTypeName="B"/></densityMapHeightTypes></map>"#.to_vec();
         let read = |name: &str| match name {
             "xml/declared.xml" => Some(list.clone()),
             "xml/densityMapHeightTypes.xml" => Some(other.clone()),
             _ => None,
         };
-        let members = || {
+        let candidates = || {
             vec![
-                "modDesc.xml".to_string(),
+                "xml/declared.xml".to_string(),
                 "xml/densityMapHeightTypes.xml".to_string(),
             ]
         };
 
+        // The declared file is exact; another list it ships may also be loaded by a script.
         let declared = ModDesc {
             height_types_file: Some("xml/declared.xml".into()),
             ..Default::default()
         };
-        let t = mod_types("M", "FS25_M", &declared, &read, &members).unwrap();
-        assert_eq!((t.types, t.exact), (vec!["A".to_string()], true));
+        let t = mod_types("M", "FS25_M", &declared, &read, &candidates).unwrap();
+        assert_eq!(
+            (t.exact, t.estimate),
+            (vec!["A".to_string()], vec!["B".to_string()])
+        );
 
-        // No declaration: the script-loaded file counts, as an estimate.
-        let t = mod_types("M", "FS25_M", &ModDesc::default(), &read, &members).unwrap();
-        assert_eq!((t.types, t.exact), (vec!["B".to_string()], false));
+        // No declaration: every shipped list is an estimate.
+        let t = mod_types("M", "FS25_M", &ModDesc::default(), &read, &candidates).unwrap();
+        assert!(t.exact.is_empty());
+        assert_eq!(t.estimate, ["A", "B"]);
 
-        // A map's own list is handled as the map's, never as a mod estimate.
+        // A map's shipped lists are the map's business, never a mod estimate.
         let map = ModDesc {
             is_map: true,
             ..Default::default()
         };
-        assert!(mod_types("M", "FS25_M", &map, &read, &members).is_none());
+        assert!(mod_types("M", "FS25_M", &map, &read, &candidates).is_none());
         // Nothing found: no entry.
         assert!(mod_types("M", "FS25_M", &ModDesc::default(), &read, &Vec::new).is_none());
+    }
+
+    #[test]
+    fn candidates_are_height_type_xml_by_name() {
+        assert!(is_candidate("xml/densityMapHeightTypes.xml"));
+        assert!(is_candidate("xml/BSU_heightTypes.XML"));
+        assert!(!is_candidate("xml/heightTypes.lua"));
+        assert!(!is_candidate("heighttypes/fillTypes.xml"));
+    }
+
+    #[test]
+    fn unknown_fill_types_take_no_slot() {
+        let mut t = mm("Fills", vec!["REAL".into(), "GHOST".into()], true);
+        t.estimate = vec!["MAYBE".into(), "GONE".into()];
+        let known: std::collections::HashSet<String> =
+            ["REAL", "MAYBE"].iter().map(|s| s.to_string()).collect();
+        t.retain_known(&known);
+        assert_eq!(
+            (t.exact, t.estimate),
+            (vec!["REAL".to_string()], vec!["MAYBE".to_string()])
+        );
     }
 
     #[test]

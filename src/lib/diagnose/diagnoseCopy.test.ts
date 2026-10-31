@@ -18,7 +18,7 @@ function report(crashed: boolean, mods: LogModHealth[], over: Partial<LogReport>
     crashed,
     mods,
     unattributed: 0,
-    totalFindings: 0, groundPileCap: null, fillTypeCap: null, droppedFillTypes: [],
+    totalFindings: 0, groundPileCap: null, groundPileDisabled: [], fillTypeCap: null, droppedFillTypes: [],
     ...over,
   };
 }
@@ -80,9 +80,10 @@ describe("conflict copy", () => {
     expect(conflictTitle({ kind: "uniqueType", mods: two })).toBe("Two mods claim the same exclusive slot");
     // #339: the ground-pile budget reads by how serious it is, not by how many mods.
     expect(conflictTitle({ kind: "heightTypes", mods: two, severity: "critical" })).toBe("Mods need more ground-pile slots than the map has");
+    expect(conflictTitle({ kind: "heightTypes", mods: two, severity: "warning" })).toBe("Mods may need more ground-pile slots than the map has");
     expect(conflictTitle({ kind: "heightTypes", mods: [], severity: "info" })).toBe("Ground-pile slots are nearly full");
     expect(conflictTitle({ kind: "fillTypeCap", mods: two, severity: "warning" })).toBe(
-      "Mods add more material types than the game supports",
+      "Mods may add more material types than the game supports",
     );
     expect(conflictTitle({ kind: "fillTypeCap", mods: [], severity: "info" })).toBe("Material types are nearly full");
     expect(conflictTitle({ kind: "map", mods: ["M1", "M2", "M3", "M4"] })).toBe("More than one map is active");
@@ -233,12 +234,16 @@ describe("crash notice model", () => {
 });
 
 describe("ground-pile cap note (#339)", () => {
-  it("names the cap and the DLCs it stops, in plain words", () => {
-    const n = groundPileCapNote(63);
-    expect(n.title).toBe("The game ran out of ground-pile slots.");
-    expect(n.body).toContain("the map's 63 ground-pile types");
-    expect(n.body).toContain("Straw Harvest and Pumps n' Hoses");
-    expect(n.body).not.toMatch(/height type|densityMap|—/);
+  it("names only what actually turned itself off", () => {
+    const both = groundPileCapNote(63, ["Pumps N' Hoses", "Straw Harvest"]);
+    expect(both.title).toBe("The game ran out of ground-pile slots.");
+    expect(both.body).toContain("room for 63 ground-pile types");
+    expect(both.body).toContain("so Pumps N' Hoses and Straw Harvest turned themselves off and the save closed");
+    expect(groundPileCapNote(63, ["Straw Harvest"]).body).toContain("Straw Harvest turned itself off");
+    const none = groundPileCapNote(63, []).body;
+    expect(none).toContain("some of them couldn't be added");
+    expect(none).not.toMatch(/Straw Harvest|Pumps/);
+    expect(none).not.toMatch(/height type|densityMap|—/);
   });
 });
 

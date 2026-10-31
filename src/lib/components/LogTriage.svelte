@@ -221,7 +221,7 @@
         <p><strong>{verdict.title}</strong> {verdict.body}</p>
       </div>
       {#if r.groundPileCap}
-        {@const note = groundPileCapNote(r.groundPileCap)}
+        {@const note = groundPileCapNote(r.groundPileCap, r.groundPileDisabled)}
         <div class="verdict bad" role="note">
           <Icon name="problem" size={16} />
           <p><strong>{note.title}</strong> {note.body}</p>
