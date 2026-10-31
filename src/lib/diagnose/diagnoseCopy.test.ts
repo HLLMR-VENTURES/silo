@@ -2,7 +2,7 @@
 // and keeping only the newest conflict check.
 import { describe, expect, it } from "vitest";
 import { bisectRounds, crashNoticeOffers, crashNoticeText, likelyCulprit } from "./crashNotice";
-import { canParkOne, conflictCounts, conflictHeadline, conflictTitle, severityLabel } from "./conflictCopy";
+import { canParkOne, conflictCounts, conflictHeadline, conflictTitle, groundPileCapNote, severityLabel } from "./conflictCopy";
 import { countsLine, groupLogMods, lastRunMeta, lastRunVerdict, logModDetails, logTimeLabel } from "./lastRun";
 import { latestOnly } from "./latest";
 import type { LogModHealth, LogReport } from "../types";
@@ -18,7 +18,7 @@ function report(crashed: boolean, mods: LogModHealth[], over: Partial<LogReport>
     crashed,
     mods,
     unattributed: 0,
-    totalFindings: 0,
+    totalFindings: 0, groundPileCap: null,
     ...over,
   };
 }
@@ -78,6 +78,9 @@ describe("conflict copy", () => {
     expect(conflictTitle({ kind: "script", mods: two })).toBe("Two mods ship a script with the same file name");
     expect(conflictTitle({ kind: "fillType", mods: ["A", "B", "C"] })).toBe("3 mods define the same fill type");
     expect(conflictTitle({ kind: "uniqueType", mods: two })).toBe("Two mods claim the same exclusive slot");
+    // #339: the ground-pile budget reads by how serious it is, not by how many mods.
+    expect(conflictTitle({ kind: "heightTypes", mods: two, severity: "critical" })).toBe("Mods need more ground-pile slots than the map has");
+    expect(conflictTitle({ kind: "heightTypes", mods: [], severity: "info" })).toBe("Ground-pile slots are nearly full");
     expect(conflictTitle({ kind: "map", mods: ["M1", "M2", "M3", "M4"] })).toBe("More than one map is active");
     expect(conflictTitle({ kind: "somethingNew", mods: two })).toBe("Two mods clash");
   });
@@ -222,5 +225,15 @@ describe("crash notice model", () => {
   it("uses the library's current title", async () => {
     const { crashNoticeModel } = await import("./crashNotice");
     expect(crashNoticeModel({ ...base, live: { title: "Mulcher XL", active: true } })?.park).toBe("Mulcher XL");
+  });
+});
+
+describe("ground-pile cap note (#339)", () => {
+  it("names the cap and the DLCs it stops, in plain words", () => {
+    const n = groundPileCapNote(63);
+    expect(n.title).toBe("The game ran out of ground-pile slots.");
+    expect(n.body).toContain("the map's 63 ground-pile types");
+    expect(n.body).toContain("Straw Harvest and Pumps n' Hoses");
+    expect(n.body).not.toMatch(/height type|densityMap|—/);
   });
 });

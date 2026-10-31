@@ -161,7 +161,7 @@ describe("Problems", () => {
 });
 
 function report(crashed: boolean, mods: LogReport["mods"]): LogReport {
-  return { engineVersion: "1.4.0.0", modCount: 3, cleanExit: !crashed, crashed, mods, unattributed: 2, totalFindings: 9 };
+  return { engineVersion: "1.4.0.0", modCount: 3, cleanExit: !crashed, crashed, mods, unattributed: 2, totalFindings: 9, groundPileCap: null };
 }
 
 const lookup = (t: string) =>

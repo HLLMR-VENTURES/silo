@@ -10,6 +10,7 @@ export function conflictKindLabel(kind: string): string {
     action: "Control action",
     brand: "Brand",
     storeCategory: "Shop category",
+    heightTypes: "Ground-pile slots",
   };
   return words[kind] ?? kind;
 }

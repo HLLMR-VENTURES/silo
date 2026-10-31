@@ -52,6 +52,11 @@ pub struct ModDesc {
     /// `<fillTypes filename>` — the additional fillTypes XML this mod registers. Used to
     /// detect cross-mod fillType name collisions (silent load-order overrides).
     pub fill_types_file: Option<String>,
+    /// `<densityMapHeightTypes filename>`: the ground-pile (height) types this mod adds. They
+    /// share the map's fixed number of slots (#339).
+    pub height_types_file: Option<String>,
+    /// The map's `<map configFilename>` (`map.xml`), for maps that bring their own height types.
+    pub map_config_file: Option<String>,
 }
 
 /// Pick the best display title from a set of localized strings.
@@ -153,9 +158,17 @@ fn handle_open(md: &mut ModDesc, e: &quick_xml::events::BytesStart, name: &str, 
                 md.fill_types_file = Some(f.replace('\\', "/"));
             }
         }
+        "densityMapHeightTypes" if parent == "modDesc" => {
+            if let Some(f) = attr(e, b"filename") {
+                md.height_types_file = Some(f.replace('\\', "/"));
+            }
+        }
         "map" if parent == "maps" => {
             if md.map_id.is_none() {
                 md.map_id = attr(e, b"id");
+            }
+            if md.map_config_file.is_none() {
+                md.map_config_file = attr(e, b"configFilename").map(|f| f.replace('\\', "/"));
             }
         }
         "sourceFile" if parent == "extraSourceFiles" => {
@@ -347,7 +360,8 @@ mod tests {
     fn detects_map_and_registrations() {
         let xml = r#"<modDesc descVersion="105">
             <author>A</author><version>1.0.0.0</version><iconFilename>i.dds</iconFilename>
-            <maps><map id="mapFoo"><title><en>Foo Valley</en></title></map></maps>
+            <maps><map id="mapFoo" configFilename="map\map.xml"><title><en>Foo Valley</en></title></map></maps>
+            <densityMapHeightTypes filename="xml/heightTypes.xml"/>
             <specializations>
                 <specialization name="fooSpec" className="C" filename="f.lua"/>
             </specializations>
@@ -361,6 +375,8 @@ mod tests {
         let md = parse(xml);
         assert!(md.is_map);
         assert_eq!(md.map_id.as_deref(), Some("mapFoo"));
+        assert_eq!(md.map_config_file.as_deref(), Some("map/map.xml"));
+        assert_eq!(md.height_types_file.as_deref(), Some("xml/heightTypes.xml"));
         assert_eq!(md.map_title.as_deref(), Some("Foo Valley"));
         assert_eq!(md.unique_type.as_deref(), Some("fooUnique"));
         // One specialization registration + one vehicleType registration.

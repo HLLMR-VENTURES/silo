@@ -85,6 +85,19 @@ pub struct LogReport {
     /// Findings that couldn't be tied to any mod (engine/base-game/unknown).
     pub unattributed: usize,
     pub total_findings: usize,
+    /// The game ran out of ground-pile (height) type slots: the cap it reported, e.g. 63 (#339).
+    pub ground_pile_cap: Option<u32>,
+}
+
+/// The cap in "maximum number (63) of height types already registered", the line the game
+/// logs when mods ask for more ground-pile slots than the map has (#339).
+fn ground_pile_cap(line: &str) -> Option<u32> {
+    let l = line.to_lowercase();
+    let at = l.find("maximum number (")? + "maximum number (".len();
+    let rest = &l[at..];
+    let close = rest.find(')')?;
+    rest[close..].contains("of height types").then_some(())?;
+    rest[..close].trim().parse().ok()
 }
 
 /// Strip an optional leading `YYYY-MM-DD HH:MM:SS.mmm ` timestamp, then any indentation.
@@ -190,6 +203,7 @@ pub fn parse(log: &str) -> LogReport {
     let mut engine_version: Option<String> = None;
     let mut mods_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut clean_exit = false;
+    let mut ground_pile: Option<u32> = None;
 
     // Dedup findings: the engine writes a scan pass AND a load pass, repeating the same
     // warnings. Key on (mod, severity, message) so a mod that logs one thing twice per
@@ -205,6 +219,9 @@ pub fn parse(log: &str) -> LogReport {
         let line_no = i + 1;
         let s = strip_prefix(raw);
 
+        if ground_pile.is_none() {
+            ground_pile = ground_pile_cap(s);
+        }
         if engine_version.is_none() {
             if let Some(rest) = s.strip_prefix("GIANTS Engine Runtime ") {
                 engine_version = Some(rest.trim().to_string());
@@ -314,6 +331,7 @@ pub fn parse(log: &str) -> LogReport {
         mods,
         unattributed,
         total_findings: findings.len(),
+        ground_pile_cap: ground_pile,
     }
 }
 
@@ -478,5 +496,29 @@ Error: Out of memory";
             Some("FS25_Bar".into())
         );
         assert_eq!(mod_from_path("no mod here"), None);
+    }
+
+    /// #339: the slot-cap line, wherever the game puts it, with its number.
+    #[test]
+    fn finds_the_ground_pile_cap() {
+        assert_eq!(
+            ground_pile_cap("Error: addDensityMapHeightType \"GRAVEL_FINE\": maximum number (63) of height types already registered. Adjust densityMapHeightTypes#numChannels to allow for more"),
+            Some(63)
+        );
+        assert_eq!(
+            ground_pile_cap("Warning: Maximum number (127) of height types already registered!"),
+            Some(127)
+        );
+        assert_eq!(
+            ground_pile_cap("Maximum number of pallets (5) reached"),
+            None
+        );
+        assert_eq!(ground_pile_cap("Error: something else"), None);
+        let log = "GIANTS Engine Runtime 10.0
+2026-10-30 10:00:00.000 Error: maximum number (63) of height types already registered
+Application quit
+";
+        assert_eq!(parse(log).ground_pile_cap, Some(63));
+        assert_eq!(parse(CRASHY).ground_pile_cap, None);
     }
 }

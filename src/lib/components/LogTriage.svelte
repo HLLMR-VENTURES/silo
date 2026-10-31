@@ -21,6 +21,7 @@
   import type { LibraryLookup } from "../diagnose/crashNotice";
   import { formatCount, plural } from "../plural";
   import { latestOnly } from "../diagnose/latest";
+  import { groundPileCapNote } from "../diagnose/conflictCopy";
   import { describeError, NO_LOG_COPY } from "../errorCopy";
 
   interface Props {
@@ -219,6 +220,13 @@
         <Icon name={verdict.tone === "good" ? "check" : "problem"} size={16} />
         <p><strong>{verdict.title}</strong> {verdict.body}</p>
       </div>
+      {#if r.groundPileCap}
+        {@const note = groundPileCapNote(r.groundPileCap)}
+        <div class="verdict bad" role="note">
+          <Icon name="problem" size={16} />
+          <p><strong>{note.title}</strong> {note.body}</p>
+        </div>
+      {/if}
       {#if r.crashed && groups.causes.length === 0}
         <div class="cta">
           <Button variant="primary" icon="diagnose" onclick={findProblemMod} disabled={!canBisect}>Find the problem mod</Button>

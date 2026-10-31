@@ -403,6 +403,8 @@ export interface LogReport {
   mods: LogModHealth[];
   unattributed: number;
   totalFindings: number;
+  /** The game ran out of ground-pile slots: the cap it reported (e.g. 63), else null (#339). */
+  groundPileCap: number | null;
 }
 
 // ── Multiplayer mod-set sync ──
