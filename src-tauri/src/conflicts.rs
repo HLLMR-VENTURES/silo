@@ -283,7 +283,7 @@ fn height_type_conflict(parsed: &[Parsed], game: &heighttypes::GameData) -> Opti
             let list =
                 p.md.map_config_file
                     .as_deref()
-                    .and_then(&read)
+                    .and_then(read)
                     .and_then(|xml| heighttypes::map_list_file(&xml))
                     .and_then(|f| read(&f))
                     .map(|b| heighttypes::parse_list(&b))
