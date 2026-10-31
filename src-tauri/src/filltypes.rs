@@ -10,14 +10,15 @@
 //! * the base list `data/maps/maps_fillTypes.xml`, plus the `UNKNOWN` type the game adds first:
 //!   exact;
 //! * the map: a mod map's own `<fillTypes filename>` (in `map.xml`, and in its modDesc), exact;
-//!   the base maps' own additions are encrypted, so [`BASE_MAP_EXTRA`] holds them: an estimate;
+//!   a base map adds the fill types of the crops it grows (`data/foliage/<crop>/*.xml`), and
+//!   which crops it grows is in the encrypted archives, so they're an estimate;
 //! * DLCs: encrypted, so their fill types come from [`DLC_FILL_TYPES`]: an estimate;
 //! * mods: their modDesc `<fillTypes filename>`, exact.
 //!
 //! A fill type that already exists is updated in place, never added again
 //! (`FillTypeManager:loadFillTypes`), so each name counts once.
 
-use crate::heighttypes::{dlc_names, installed_dlc, map_own_file};
+use crate::heighttypes::{dlc_names, foliage_names, installed_dlc, map_own_file};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -35,9 +36,9 @@ const UNKNOWN: &str = "UNKNOWN";
 /// install can't be read.
 const BASE_FALLBACK_COUNT: usize = 177;
 
-/// What a base map can add beyond the base list: Riverbend Springs loads these crops' fill types
-/// (178 to 182), Hutan Pantai none. Their `map.xml` is inside the encrypted game archives, so
-/// these were read in-game (FS25 1.25).
+/// What a base map can add beyond the base list: the fill types the base crops declare in
+/// `data/foliage/<crop>/*.xml`, for when the install can't be read. Riverbend Springs grows these
+/// crops (178 to 182); Zielonka and Hutan Pantai don't (178), measured in-game on FS25 1.25.
 const BASE_MAP_EXTRA: &[&str] = &["BANANA", "COFFEECHERRIES", "ONION", "ONION_DIRTY"];
 
 /// Fill types each DLC adds, keyed by its `pdlc/<stem>.dlc` file name, read in-game from
@@ -152,8 +153,9 @@ fn owned(list: &[&str]) -> Vec<String> {
 }
 
 impl GameData {
-    /// Read the base list from the install (falling back to [`BASE_FALLBACK_COUNT`] placeholder
-    /// names) and look up the installed DLCs.
+    /// Read the base list and the crops' fill types from the install (falling back to
+    /// [`BASE_FALLBACK_COUNT`] placeholder names and [`BASE_MAP_EXTRA`]) and look up the installed
+    /// DLCs.
     pub fn load(install_dir: Option<&Path>) -> Self {
         let read = install_dir
             .and_then(|d| std::fs::read(d.join("data/maps/maps_fillTypes.xml")).ok())
@@ -169,7 +171,10 @@ impl GameData {
         let stems = install_dir.map(installed_dlc).unwrap_or_default();
         GameData {
             base,
-            map_extra: owned(BASE_MAP_EXTRA),
+            map_extra: install_dir
+                .and_then(|d| foliage_names(d, fill_type_names))
+                .filter(|f| !f.is_empty())
+                .unwrap_or_else(|| owned(BASE_MAP_EXTRA)),
             dlc: dlc_names(DLC_FILL_TYPES, &stems),
         }
     }
@@ -480,6 +485,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("silo_ft_install_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("data/maps")).unwrap();
+        std::fs::create_dir_all(dir.join("data/foliage/banana")).unwrap();
+        std::fs::write(
+            dir.join("data/foliage/banana/banana.xml"),
+            r#"<foliageType><fillTypes><fillType name="BANANA"/></fillTypes><!-- <fillType name="OLD"/> --></foliageType>"#,
+        )
+        .unwrap();
         std::fs::write(
             dir.join("data/maps/maps_fillTypes.xml"),
             r#"<map><fillTypes><fillType name="WHEAT"/><fillType name="unknown"/><fillType name="BARLEY"/></fillTypes></map>"#,
@@ -488,8 +499,12 @@ mod tests {
         let g = GameData::load(Some(&dir));
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(g.base, ["UNKNOWN", "WHEAT", "BARLEY"]);
-        // No install: UNKNOWN plus the 1.25 count.
-        assert_eq!(GameData::load(None).base.len(), 178);
+        // The crops' own fill types, with commented-out ones skipped.
+        assert_eq!(g.map_extra, ["BANANA"]);
+        // No install: UNKNOWN plus the 1.25 count, and the measured crop list.
+        let none = GameData::load(None);
+        assert_eq!(none.base.len(), 178);
+        assert_eq!(none.map_extra.len(), 4);
     }
 
     /// The in-game counts (FS25 1.25): 178 base, 182 on Riverbend Springs, 230 with every DLC.

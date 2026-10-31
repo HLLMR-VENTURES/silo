@@ -188,6 +188,12 @@ fn owned(list: &[&str]) -> Vec<String> {
 
 /// Every height type the base crops declare in `data/foliage/<crop>/*.xml`.
 fn foliage_types(install_dir: &Path) -> Option<Vec<String>> {
+    foliage_names(install_dir, |b| parse_list(b).0)
+}
+
+/// Every name `parse` finds in the base crops' `data/foliage/<crop>/*.xml`, de-duplicated. The
+/// crops a map grows bring these with them (ground-pile types, and fill types for #341).
+pub fn foliage_names(install_dir: &Path, parse: fn(&[u8]) -> Vec<String>) -> Option<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     for crop in std::fs::read_dir(install_dir.join("data/foliage"))
         .ok()?
@@ -201,10 +207,7 @@ fn foliage_types(install_dir: &Path) -> Option<Vec<String>> {
             if p.extension().and_then(|e| e.to_str()) != Some("xml") {
                 continue;
             }
-            for t in std::fs::read(&p)
-                .map(|b| parse_list(&b).0)
-                .unwrap_or_default()
-            {
+            for t in std::fs::read(&p).map(|b| parse(&b)).unwrap_or_default() {
                 if !out.contains(&t) {
                     out.push(t);
                 }
