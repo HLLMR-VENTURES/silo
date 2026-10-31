@@ -563,7 +563,11 @@ mod tests {
         let b = evaluate(&g, None, &[f]);
         assert_eq!((b.exact_total, b.total), (178, 258));
         assert_eq!(severity(&b), Some("warning"));
-        assert!(explain(&b).contains("some mods' lists may not load"), "{}", explain(&b));
+        assert!(
+            explain(&b).contains("some mods' lists may not load"),
+            "{}",
+            explain(&b)
+        );
     }
 
     #[test]
