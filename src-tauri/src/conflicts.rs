@@ -392,7 +392,10 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
     }
     for (m, fills) in map_heights.iter_mut().zip(&map_fills) {
         let mut with_map = known.clone();
-        with_map.extend(fills.types.iter().cloned());
+        // A map's own fill types can be rejected in an overflow too.
+        if !fills_may_overflow {
+            with_map.extend(fills.types.iter().cloned());
+        }
         m.downgrade_unknown(&with_map);
     }
     let budget = heighttypes::worst(game.heights, &map_heights, &mod_heights);

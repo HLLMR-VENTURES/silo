@@ -179,6 +179,15 @@ fn walk(
             // Text or CDATA outside the root makes the document invalid.
             Event::Text(t) if stack.is_empty() && !t.is_empty() => return None,
             Event::CData(_) if stack.is_empty() => return None,
+            // Only the five predefined entities and character references resolve: these files
+            // declare no others.
+            Event::GeneralRef(r) => {
+                if r.is_char_ref() {
+                    r.resolve_char_ref().ok()??;
+                } else if !matches!(&r[..], b"lt" | b"gt" | b"amp" | b"apos" | b"quot") {
+                    return None;
+                }
+            }
             Event::Eof => break,
             _ => {}
         }
@@ -187,10 +196,12 @@ fn walk(
     (stack.is_empty() && roots == 1).then_some(())
 }
 
-/// Every attribute of an element parses, with no name repeated.
+/// Every attribute of an element parses and decodes (no unknown entity), with no name repeated.
 fn well_formed(e: &quick_xml::events::BytesStart) -> Option<()> {
     for a in e.attributes().with_checks(true) {
-        a.ok()?;
+        a.ok()?
+            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+            .ok()?;
     }
     Some(())
 }
@@ -754,6 +765,16 @@ mod tests {
         assert_eq!(parse_list_checked(stray), None);
         let cdata = br#"<map><densityMapHeightTypes><densityMapHeightType fillTypeName="Y"/></densityMapHeightTypes></map><![CDATA[junk]]>"#;
         assert_eq!(parse_list_checked(cdata), None);
+        // An undeclared entity, in an attribute nothing reads or in text, breaks the file too.
+        let entity = br#"<map unused="&bogus;"><densityMapHeightTypes><densityMapHeightType fillTypeName="Y"/></densityMapHeightTypes></map>"#;
+        assert_eq!(parse_list_checked(entity), None);
+        let text = br#"<map><note>&bogus;</note><densityMapHeightTypes><densityMapHeightType fillTypeName="Y"/></densityMapHeightTypes></map>"#;
+        assert_eq!(parse_list_checked(text), None);
+        let fine = br#"<map><note>A &amp; B &#233;</note><densityMapHeightTypes><densityMapHeightType fillTypeName="Y"/></densityMapHeightTypes></map>"#;
+        assert_eq!(
+            parse_list_checked(fine),
+            Some((vec!["Y".to_string()], None))
+        );
         // An empty but valid list is not a failure.
         assert_eq!(
             parse_list_checked(b"<map><densityMapHeightTypes/></map>"),
