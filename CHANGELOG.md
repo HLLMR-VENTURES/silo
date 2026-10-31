@@ -11,10 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Conflicts** now checks your active mods against the map's **ground-pile slots**, the fixed
   number of materials (63 on the base maps) that can lie on the ground as piles. The base game
-  already uses 51 of them and the DLCs up to 5 more. When mods ask for more, Straw Harvest and
-  Pumps n' Hoses refuse to load and the game closes your save. Silo now warns before you launch,
-  names the mods using the most slots, and adds a note when 3 or fewer are left. **Last run**
-  explains the game's "maximum number of height types" error when it happens. (#339)
+  already uses 48 to 51 of them, depending on the map, and the DLCs up to 5 more. When mods ask
+  for more, Straw Harvest and Pumps n' Hoses can refuse to load and close your save. Silo now
+  warns before you launch, names the mods using the most slots, and adds a note when 3 or fewer
+  are left. **Last run** explains the game's "maximum number of height types" error, and says
+  which DLCs turned themselves off, when it happens. (#339)
+- **Conflicts** also checks your active mods against the game's limit of **255 material types**
+  (crops, feed, fertilizers, products and the like). The base game uses 178 to 182 of them, and
+  every DLC together brings that to about 230. Past 255 the game quietly skips the rest, and mods
+  register after the DLCs, so it's mods' materials that go missing. Silo warns before you launch,
+  counting mods that load their materials from a script too, and names the mods adding the most.
+  **Last run** lists the materials the game skipped. (#341)
 
 ## [1.0.3] - 2026-10-29
 

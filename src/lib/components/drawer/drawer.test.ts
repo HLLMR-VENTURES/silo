@@ -155,7 +155,7 @@ describe("drawer header badges", () => {
       crashed: true,
       mods: [{ modName: "FS25_Mod3", errors: 14, warnings: 0, benign: 0, sample: "Error: boom", sampleLine: 1 }],
       unattributed: 0,
-      totalFindings: 14, groundPileCap: null,
+      totalFindings: 14, groundPileCap: null, groundPileDisabled: [], fillTypeCap: null, droppedFillTypes: [],
     };
     vi.mocked(scanLog).mockImplementation(() => Promise.resolve(log));
     render(ModDetail, props(entry(3, { path: "C:/mods/badges3.zip" })));

@@ -34,8 +34,19 @@ const WHAT: Record<string, string> = {
  */
 export function conflictTitle(c: Pick<Conflict, "kind" | "mods"> & Partial<Pick<Conflict, "severity">>): string {
   if (c.kind === "map") return "More than one map is active";
-  if (c.kind === "heightTypes")
-    return c.severity === "info" ? "Ground-pile slots are nearly full" : "Mods need more ground-pile slots than the map has";
+  // #339 / #341: the budgets read by how sure Silo is, not by how many mods.
+  if (c.kind === "fillTypeCap") {
+    if (c.severity === "info") return "Material types are nearly full";
+    return c.severity === "critical"
+      ? "More material types than the game supports"
+      : "Possibly more material types than the game supports";
+  }
+  if (c.kind === "heightTypes") {
+    if (c.severity === "info") return "Ground-pile slots are nearly full";
+    return c.severity === "critical"
+      ? "More ground-pile types than the map has room for"
+      : "Possibly more ground-pile types than the map has room for";
+  }
   const n = Math.max(c.mods.length, 2);
   return `${modsWord(n)} ${WHAT[c.kind] ?? "clash"}`;
 }
@@ -43,12 +54,32 @@ export function conflictTitle(c: Pick<Conflict, "kind" | "mods"> & Partial<Pick<
 /**
  * The Last run note when the game ran out of ground-pile slots (#339).
  * @param cap the cap the game reported, e.g. 63
+ * @param disabled what turned itself off for lack of slots, as the game names it
  * @return the note's bold title and its body
  */
-export function groundPileCapNote(cap: number): { title: string; body: string } {
+export function groundPileCapNote(cap: number, disabled: string[]): { title: string; body: string } {
+  const what =
+    disabled.length > 0
+      ? `and ${disabled.join(" and ")} reported turning ${disabled.length === 1 ? "itself" : "themselves"} off and closing the save`
+      : "so it rejected the ones that didn't fit, and whatever needed them may not work";
   return {
     title: "The game ran out of ground-pile slots.",
-    body: `Your mods asked for more than the map's ${formatCount(cap)} ground-pile types (the materials you can tip onto the ground), so Straw Harvest and Pumps n' Hoses refused to load and the save closed. Diagnose → Conflicts shows which mods use the most slots. Turn a few of those off.`,
+    body: `The map has room for ${formatCount(cap)} ground-pile types (the materials you can tip onto the ground), and the game was asked for more, ${what}. Diagnose → Conflicts shows which mods use the most slots. Turn a few of those off.`,
+  };
+}
+
+/**
+ * The Last run note when the game hit its fill-type limit and skipped some (#341).
+ * @param cap the limit the game reported, e.g. 255
+ * @param dropped the fill types it skipped
+ * @return the note's bold title and its body
+ */
+export function fillTypeCapNote(cap: number, dropped: string[]): { title: string; body: string } {
+  const n = dropped.length;
+  const shown = dropped.slice(0, 5).join(", ") + (n > 5 ? ` and ${formatCount(n - 5)} more` : "");
+  return {
+    title: "The game ran out of material types.",
+    body: `It supports ${formatCount(cap)}, and your mods asked for more, so it skipped ${formatCount(n)} ${plural(n, { one: "material", other: "materials" })}: ${shown}. The mods that add them may not fully work. Diagnose → Conflicts shows which mods add the most. Turn a few of those off.`,
   };
 }
 

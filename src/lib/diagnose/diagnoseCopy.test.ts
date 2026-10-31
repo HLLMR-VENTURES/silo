@@ -2,7 +2,7 @@
 // and keeping only the newest conflict check.
 import { describe, expect, it } from "vitest";
 import { bisectRounds, crashNoticeOffers, crashNoticeText, likelyCulprit } from "./crashNotice";
-import { canParkOne, conflictCounts, conflictHeadline, conflictTitle, groundPileCapNote, severityLabel } from "./conflictCopy";
+import { canParkOne, conflictCounts, conflictHeadline, conflictTitle, fillTypeCapNote, groundPileCapNote, severityLabel } from "./conflictCopy";
 import { countsLine, groupLogMods, lastRunMeta, lastRunVerdict, logModDetails, logTimeLabel } from "./lastRun";
 import { latestOnly } from "./latest";
 import type { LogModHealth, LogReport } from "../types";
@@ -18,7 +18,7 @@ function report(crashed: boolean, mods: LogModHealth[], over: Partial<LogReport>
     crashed,
     mods,
     unattributed: 0,
-    totalFindings: 0, groundPileCap: null,
+    totalFindings: 0, groundPileCap: null, groundPileDisabled: [], fillTypeCap: null, droppedFillTypes: [],
     ...over,
   };
 }
@@ -79,8 +79,13 @@ describe("conflict copy", () => {
     expect(conflictTitle({ kind: "fillType", mods: ["A", "B", "C"] })).toBe("3 mods define the same fill type");
     expect(conflictTitle({ kind: "uniqueType", mods: two })).toBe("Two mods claim the same exclusive slot");
     // #339: the ground-pile budget reads by how serious it is, not by how many mods.
-    expect(conflictTitle({ kind: "heightTypes", mods: two, severity: "critical" })).toBe("Mods need more ground-pile slots than the map has");
+    expect(conflictTitle({ kind: "heightTypes", mods: two, severity: "critical" })).toBe("More ground-pile types than the map has room for");
+    expect(conflictTitle({ kind: "heightTypes", mods: two, severity: "warning" })).toBe("Possibly more ground-pile types than the map has room for");
     expect(conflictTitle({ kind: "heightTypes", mods: [], severity: "info" })).toBe("Ground-pile slots are nearly full");
+    expect(conflictTitle({ kind: "fillTypeCap", mods: two, severity: "warning" })).toBe(
+      "Possibly more material types than the game supports",
+    );
+    expect(conflictTitle({ kind: "fillTypeCap", mods: [], severity: "info" })).toBe("Material types are nearly full");
     expect(conflictTitle({ kind: "map", mods: ["M1", "M2", "M3", "M4"] })).toBe("More than one map is active");
     expect(conflictTitle({ kind: "somethingNew", mods: two })).toBe("Two mods clash");
   });
@@ -229,11 +234,27 @@ describe("crash notice model", () => {
 });
 
 describe("ground-pile cap note (#339)", () => {
-  it("names the cap and the DLCs it stops, in plain words", () => {
-    const n = groundPileCapNote(63);
-    expect(n.title).toBe("The game ran out of ground-pile slots.");
-    expect(n.body).toContain("the map's 63 ground-pile types");
-    expect(n.body).toContain("Straw Harvest and Pumps n' Hoses");
-    expect(n.body).not.toMatch(/height type|densityMap|—/);
+  it("names only what actually turned itself off", () => {
+    const both = groundPileCapNote(63, ["Pumps N' Hoses", "Straw Harvest"]);
+    expect(both.title).toBe("The game ran out of ground-pile slots.");
+    expect(both.body).toContain("room for 63 ground-pile types");
+    expect(both.body).toContain("and Pumps N' Hoses and Straw Harvest reported turning themselves off and closing the save");
+    expect(groundPileCapNote(63, ["Straw Harvest"]).body).toContain("Straw Harvest reported turning itself off");
+    const none = groundPileCapNote(63, []).body;
+    expect(none).toContain("it rejected the ones that didn't fit");
+    expect(none).not.toMatch(/Straw Harvest|Pumps/);
+    expect(none).not.toMatch(/height type|densityMap|—/);
+  });
+});
+
+describe("fill-type cap note (#341)", () => {
+  it("says how many were skipped and names the first few", () => {
+    const one = fillTypeCapNote(255, ["LIQUID_UREA"]);
+    expect(one.title).toBe("The game ran out of material types.");
+    expect(one.body).toContain("It supports 255");
+    expect(one.body).toContain("skipped 1 material: LIQUID_UREA.");
+    const many = fillTypeCapNote(255, ["A", "B", "C", "D", "E", "F", "G"]);
+    expect(many.body).toContain("skipped 7 materials: A, B, C, D, E and 2 more.");
+    expect(many.body).not.toMatch(/fill type|fillType|—/);
   });
 });
