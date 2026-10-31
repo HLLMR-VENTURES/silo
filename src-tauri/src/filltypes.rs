@@ -115,8 +115,8 @@ pub fn fill_type_names(xml: &[u8]) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The map's own fill-type file, from its `map.xml`. Pure.
-pub fn map_fill_file(map_xml: &[u8]) -> Option<String> {
+/// The map's own fill-type file, from its `map.xml`. See [`map_own_file`]. Pure.
+pub fn map_fill_file(map_xml: &[u8]) -> Option<Option<String>> {
     map_own_file(map_xml, b"fillTypes")
 }
 
@@ -171,17 +171,14 @@ impl GameData {
         .as_ref()
     }
 
-    /// Every fill type that can exist with these mods: what a height type needs to take a slot.
-    pub fn known(&self, maps: &[MapFills], mods: &[ModFills]) -> HashSet<String> {
+    /// The fill types known for certain to exist: the base list and the mods' declared lists.
+    /// A height type needs its fill type to take a slot; one whose fill type is only possible (a
+    /// DLC that may be off, a crop only some maps grow, a list a script may load) stays an
+    /// estimate. Add a map's own fill types for that map's candidate.
+    pub fn known_exact(&self, mods: &[ModFills]) -> HashSet<String> {
         let mut out: HashSet<String> = self.base.iter().cloned().collect();
-        out.extend(self.map_extra.iter().cloned());
-        out.extend(self.dlc.iter().cloned());
-        for m in maps {
-            out.extend(m.types.iter().cloned());
-        }
         for m in mods {
             out.extend(m.exact.iter().cloned());
-            out.extend(m.estimate.iter().cloned());
         }
         out
     }
@@ -345,10 +342,13 @@ pub fn explain(b: &Budget) -> String {
         b.base, b.dlc, mod_count, b.total
     );
     if b.total > CAP {
+        let over = b.total - CAP;
         s.push_str(&format!(
-            " If that's what loads, the game skips every one past {CAP}. In testing the DLCs registered before mods, so expect about {} of the mods' materials to go missing, and what uses them may not work.",
-            b.total - CAP
+            " If that's what loads, the game skips every one past {CAP}, about {over}, and what uses them may not work."
         ));
+        if mod_count > 0 {
+            s.push_str(" In testing the DLCs registered before mods, so it was mods' materials that went missing.");
+        }
     } else {
         let left = CAP - b.total;
         s.push_str(&format!(
@@ -376,10 +376,10 @@ pub fn explain(b: &Budget) -> String {
         why.push("a few belong to crops only some maps grow");
     }
     if b.mods.iter().any(|m| !m.3) {
-        why.push("mods that load theirs from a script may not use them all");
+        why.push("some mods' lists may not load");
     }
     if !why.is_empty() {
-        s.push_str(&format!(" Some counts are estimates: {}.", why.join(", ")));
+        s.push_str(&format!(" Some counts are estimates: {}.", why.join("; ")));
     }
     if b.total > CAP {
         s.push_str(&format!(" Turn off mods until you're at {CAP} or fewer."));
@@ -486,10 +486,15 @@ mod tests {
     fn map_fill_file_only_inside_the_map() {
         assert_eq!(
             map_fill_file(br#"<map><fillTypes filename="config\fillTypes.xml"/></map>"#),
-            Some("config/fillTypes.xml".into())
+            Some(Some("config/fillTypes.xml".into()))
         );
         assert_eq!(
             map_fill_file(br#"<map><fillTypes filename="$data/maps/maps_fillTypes.xml"/></map>"#),
+            Some(None)
+        );
+        // A map.xml that doesn't parse: Silo can't tell.
+        assert_eq!(
+            map_fill_file(br#"<map><fillTypes filename="a.xml"/>"#),
             None
         );
     }
@@ -518,8 +523,9 @@ mod tests {
             ),
             "{text}"
         );
+        assert!(text.contains("past 255, about 10"), "{text}");
         assert!(
-            text.contains("expect about 10 of the mods' materials to go missing"),
+            text.contains("it was mods' materials that went missing"),
             "{text}"
         );
         assert!(
@@ -557,7 +563,7 @@ mod tests {
         let b = evaluate(&g, None, &[f]);
         assert_eq!((b.exact_total, b.total), (178, 258));
         assert_eq!(severity(&b), Some("warning"));
-        assert!(explain(&b).contains("from a script"), "{}", explain(&b));
+        assert!(explain(&b).contains("some mods' lists may not load"), "{}", explain(&b));
     }
 
     #[test]
@@ -615,20 +621,20 @@ mod tests {
         assert_eq!(worst(&g, &[], &[]).base, 182);
     }
 
+    /// Only certain sources make a fill type known: not DLCs (may be off), crops (some maps) or
+    /// lists a script may load.
     #[test]
-    fn known_fill_types_cover_every_source() {
+    fn known_fill_types_are_the_certain_ones() {
         let g = game(2, 1, 1);
-        let maps = [MapFills {
-            label: "M".into(),
-            types: vec!["ROCK".into()],
-        }];
         let mut f = m("A", vec!["NEW".into()]);
         f.estimate = vec!["MAYBE".into()];
-        let known = g.known(&maps, &[f]);
-        for n in ["BASE0", "MAPX0", "DLC0", "ROCK", "NEW", "MAYBE"] {
+        let known = g.known_exact(&[f]);
+        for n in ["BASE0", "BASE1", "NEW"] {
             assert!(known.contains(n), "{n}");
         }
-        assert!(!known.contains("GHOST"));
+        for n in ["MAPX0", "DLC0", "MAYBE"] {
+            assert!(!known.contains(n), "{n}");
+        }
     }
 
     /// The in-game counts (FS25 1.25): 178 base, 182 on Riverbend Springs, 230 with every DLC.

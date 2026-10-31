@@ -131,7 +131,8 @@ fn same_author(parsed: &[Parsed], idxs: &[usize]) -> bool {
 }
 
 /// The members of a zip or unpacked dir whose `/`-separated path passes `keep`. Filtering while
-/// listing keeps this cheap on every scan: most mods have no candidates at all.
+/// listing keeps the lists small (most mods have no candidates), though every mod is still
+/// listed on each scan.
 fn candidate_members(path: &str, kind: &str, keep: fn(&str) -> bool) -> Vec<String> {
     if kind == "zip" {
         let Ok(f) = std::fs::File::open(path) else {
@@ -170,7 +171,8 @@ fn read_member(path: &str, kind: &str, member: &str) -> Option<Vec<u8>> {
         // Cap the read — a compared member could be a zip-bombed script.
         crate::scan::read_capped(e, 32 * 1024 * 1024, &member).ok()
     } else {
-        std::fs::read(Path::new(path).join(&member)).ok()
+        let f = std::fs::File::open(Path::new(path).join(&member)).ok()?;
+        crate::scan::read_capped(f, 32 * 1024 * 1024, &member).ok()
     }
 }
 
@@ -234,6 +236,40 @@ fn map_conflict(maps: Involved) -> Option<Conflict> {
     ))
 }
 
+/// Where a map's height types come from: no `map.xml` reference means the base list; a reference
+/// Silo can't follow (an unreadable or malformed `map.xml` or list), or a list that names nothing
+/// (it may only set the channels), is unsure.
+fn map_list(p: &Parsed, config: Option<&str>) -> heighttypes::MapList {
+    use heighttypes::MapList;
+    let read = |m: &str| read_member(&p.path, &p.kind, m);
+    let Some(config) = config else {
+        return MapList::Base;
+    };
+    let unsure = MapList::Unsure {
+        channels: heighttypes::DEFAULT_CHANNELS,
+    };
+    let Some(reference) = read(config).and_then(|xml| heighttypes::map_list_file(&xml)) else {
+        return unsure;
+    };
+    let Some(file) = reference else {
+        return MapList::Base;
+    };
+    let Some((names, channels)) = read(&file).and_then(|b| heighttypes::parse_list_checked(&b))
+    else {
+        return unsure;
+    };
+    let channels = channels.unwrap_or(heighttypes::DEFAULT_CHANNELS);
+    if names.is_empty() {
+        MapList::Unsure { channels }
+    } else {
+        MapList::Own {
+            names,
+            unsure: vec![],
+            channels,
+        }
+    }
+}
+
 /// Either budget's candidate lists: `*heightType*.xml` or `*fillTypes*.xml`.
 fn budget_candidate(member: &str) -> bool {
     heighttypes::is_candidate(member) || filltypes::is_candidate(member)
@@ -295,7 +331,7 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
             let read = |m: &str| read_member(&p.path, &p.kind, m);
             let mut types: Vec<String> = config
                 .and_then(read)
-                .and_then(|xml| filltypes::map_fill_file(&xml))
+                .and_then(|xml| filltypes::map_fill_file(&xml).flatten())
                 .and_then(|f| read(&f))
                 .map(|b| fill_type_names(&b))
                 .unwrap_or_default();
@@ -313,21 +349,16 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
         .collect();
     let mut map_heights: Vec<heighttypes::MapTypes> = maps
         .iter()
-        .map(|(p, label, config)| {
-            let read = |m: &str| read_member(&p.path, &p.kind, m);
-            // A list that names no types but sets its channels still sets the cap.
-            let list = config
-                .and_then(read)
-                .and_then(|xml| heighttypes::map_list_file(&xml))
-                .and_then(|f| read(&f))
-                .map(|b| heighttypes::parse_list(&b))
-                .filter(|(names, ch)| !names.is_empty() || ch.is_some())
-                .map(|(names, ch)| (names, ch.unwrap_or(heighttypes::DEFAULT_CHANNELS)));
-            heighttypes::MapTypes {
-                label: label.clone(),
-                list,
-                extra: heighttypes::mod_types(&p.label, &p.tech_name, &p.md, &read, &Vec::new),
-            }
+        .map(|(p, label, config)| heighttypes::MapTypes {
+            label: label.clone(),
+            list: map_list(p, *config),
+            extra: heighttypes::mod_types(
+                &p.label,
+                &p.tech_name,
+                &p.md,
+                &|m| read_member(&p.path, &p.kind, m),
+                &Vec::new,
+            ),
         })
         .collect();
 
@@ -347,13 +378,21 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
                     .unzip(),
             ));
         }
-        let known = fg.known(&map_fills, &mod_fills);
-        for m in &mut mod_heights {
-            m.downgrade_unknown(&known);
-        }
-        for m in map_heights.iter_mut().filter_map(|m| m.extra.as_mut()) {
-            m.downgrade_unknown(&known);
-        }
+    }
+    // A height type stays exact only if its fill type certainly exists in that scenario: the
+    // base list and mods' declared lists, plus a map's own for that map. Without a readable
+    // fill list nothing is certain.
+    let known = game
+        .fills
+        .map(|fg| fg.known_exact(&mod_fills))
+        .unwrap_or_default();
+    for m in &mut mod_heights {
+        m.downgrade_unknown(&known);
+    }
+    for (m, fills) in map_heights.iter_mut().zip(&map_fills) {
+        let mut with_map = known.clone();
+        with_map.extend(fills.types.iter().cloned());
+        m.downgrade_unknown(&with_map);
     }
     let budget = heighttypes::worst(game.heights, &map_heights, &mod_heights);
     if let Some(severity) = heighttypes::severity(&budget) {

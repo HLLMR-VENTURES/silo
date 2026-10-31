@@ -103,6 +103,12 @@ const NEARLY_FULL: usize = 3;
 /// reads them count (`<root><densityMapHeightTypes><densityMapHeightType>`), and a file that
 /// doesn't parse counts as empty, since the game can't load it either. Pure.
 pub fn parse_list(xml: &[u8]) -> (Vec<String>, Option<u32>) {
+    parse_list_checked(xml).unwrap_or_default()
+}
+
+/// [`parse_list`], but `None` when the file doesn't parse, so a caller can tell "names nothing"
+/// from "can't be read". Pure.
+pub fn parse_list_checked(xml: &[u8]) -> Option<(Vec<String>, Option<u32>)> {
     named_list(
         xml,
         b"densityMapHeightTypes",
@@ -110,7 +116,6 @@ pub fn parse_list(xml: &[u8]) -> (Vec<String>, Option<u32>) {
         b"fillTypeName",
     )
     .map(|(names, channels)| (names, channels.and_then(|v| v.trim().parse().ok())))
-    .unwrap_or_default()
 }
 
 /// The `name_attr` values of `<root><list><item>` entries, upper-cased and de-duplicated, and the
@@ -159,16 +164,20 @@ fn walk(
         match reader.read_event_into(&mut buf).ok()? {
             Event::Start(e) => {
                 roots += usize::from(stack.is_empty());
+                well_formed(&e)?;
                 visit(stack.len(), stack.last().map_or(&[][..], |p| p), &e)?;
                 stack.push(e.name().as_ref().to_vec());
             }
             Event::Empty(e) => {
                 roots += usize::from(stack.is_empty());
+                well_formed(&e)?;
                 visit(stack.len(), stack.last().map_or(&[][..], |p| p), &e)?;
             }
             Event::End(_) => {
                 stack.pop()?;
             }
+            // Text outside the root makes the document invalid.
+            Event::Text(t) if stack.is_empty() && !t.is_empty() => return None,
             Event::Eof => break,
             _ => {}
         }
@@ -177,16 +186,24 @@ fn walk(
     (stack.is_empty() && roots == 1).then_some(())
 }
 
-/// The map's own height-type file, from its `map.xml`: `Some` only when it points inside the
-/// map. `$data/...` (the base list) and no reference both mean the base list. Pure.
-pub fn map_list_file(map_xml: &[u8]) -> Option<String> {
+/// Every attribute of an element parses, with no name repeated.
+fn well_formed(e: &quick_xml::events::BytesStart) -> Option<()> {
+    for a in e.attributes().with_checks(true) {
+        a.ok()?;
+    }
+    Some(())
+}
+
+/// The map's own height-type file, from its `map.xml`. See [`map_own_file`]. Pure.
+pub fn map_list_file(map_xml: &[u8]) -> Option<Option<String>> {
     map_own_file(map_xml, b"densityMapHeightTypes")
 }
 
-/// The file a map's `map.xml` names in `<root><tag filename>`, when it points inside the map
-/// rather than at the base game's `$data/...`. Only the root's own child counts, and only in a
-/// document that parses whole. Pure.
-pub fn map_own_file(map_xml: &[u8], tag: &[u8]) -> Option<String> {
+/// The file a map's `map.xml` names in `<root><tag filename>`: `Some(Some(file))` when it points
+/// inside the map, `Some(None)` when it has no such reference or points at the base game's
+/// `$data/...`, and `None` when the `map.xml` doesn't parse whole, so Silo can't tell. Only the
+/// root's own child counts. Pure.
+pub fn map_own_file(map_xml: &[u8], tag: &[u8]) -> Option<Option<String>> {
     let mut found: Option<Option<String>> = None;
     walk(map_xml, |depth, _, e| {
         if depth == 1 && e.name().as_ref() == tag && found.is_none() {
@@ -194,8 +211,12 @@ pub fn map_own_file(map_xml: &[u8], tag: &[u8]) -> Option<String> {
         }
         Some(())
     })?;
-    let f = found??.trim().replace('\\', "/");
-    (!f.is_empty() && !f.starts_with('$')).then_some(f)
+    Some(
+        found
+            .flatten()
+            .map(|f| f.trim().replace('\\', "/"))
+            .filter(|f| !f.is_empty() && !f.starts_with('$')),
+    )
 }
 
 /// An attribute's value: `Some(None)` when it's absent, `None` when the element's attributes
@@ -378,14 +399,44 @@ impl ModTypes {
     }
 }
 
-/// A map's list, when the map brings its own.
+/// Where a map's height types come from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MapList {
+    /// It has no list of its own: the base game's.
+    Base,
+    /// Its own list, read in full. `unsure` holds the entries whose fill type Silo can't find.
+    Own {
+        names: Vec<String>,
+        unsure: Vec<String>,
+        channels: u32,
+    },
+    /// It points at a list Silo can't read, or one that names nothing: what loads is unknown, so
+    /// the base game's types count as an estimate, against the channels it sets (if any).
+    Unsure { channels: u32 },
+}
+
+/// A candidate map: its list and what its modDesc adds.
 #[derive(Debug, Clone)]
 pub struct MapTypes {
     pub label: String,
-    /// The map's own list, or `None` for the base list.
-    pub list: Option<(Vec<String>, u32)>,
+    pub list: MapList,
     /// What the map's modDesc adds on top, like any mod.
     pub extra: Option<ModTypes>,
+}
+
+impl MapTypes {
+    /// [`ModTypes::downgrade_unknown`] for the map's own list and its extras.
+    pub fn downgrade_unknown(&mut self, known: &std::collections::HashSet<String>) {
+        if let MapList::Own { names, unsure, .. } = &mut self.list {
+            let (keep, move_out): (Vec<String>, Vec<String>) =
+                names.drain(..).partition(|t| known.contains(t));
+            *names = keep;
+            unsure.extend(move_out);
+        }
+        if let Some(extra) = &mut self.extra {
+            extra.downgrade_unknown(known);
+        }
+    }
 }
 
 /// Does this member's file name look like a height-type list a script might load?
@@ -441,6 +492,8 @@ pub struct Budget {
     pub dlc: usize,
     /// Whether the base crops' types are in `base` (only some maps grow those crops).
     pub crops_estimated: bool,
+    /// Whether Silo couldn't read the map's own list, or it named nothing.
+    pub list_unsure: bool,
     /// Installed DLCs that turn themselves off without their slots.
     pub at_risk: Vec<String>,
     /// Slots counted from the map list and modDesc-declared mod lists only.
@@ -453,20 +506,30 @@ pub struct Budget {
 
 /// Count one map's slots. Pure.
 pub fn evaluate(game: &GameData, map: Option<&MapTypes>, mods: &[ModTypes]) -> Budget {
-    let (base, channels) = match map.and_then(|m| m.list.clone()) {
-        // A list that names no types only sets the channels; the base types stand.
-        Some((list, ch)) if list.is_empty() => (game.base.clone(), ch),
-        Some((list, ch)) => (list, ch),
-        None => (game.base.clone(), game.base_channels),
+    let (base, unsure, channels) = match map.map(|m| &m.list) {
+        None | Some(MapList::Base) => (game.base.clone(), vec![], game.base_channels),
+        Some(MapList::Own {
+            names,
+            unsure,
+            channels,
+        }) => (names.clone(), unsure.clone(), *channels),
+        Some(MapList::Unsure { channels }) => (vec![], game.base.clone(), *channels),
     };
-    // The map's list is exact; the base crops' types load only on maps that grow them.
+    // The map's list is exact; what Silo couldn't confirm, and the base crops' types (they load
+    // only on maps that grow them), are estimates.
     let mut exact: BTreeSet<&str> = base.iter().map(String::as_str).collect();
-    let base_set: BTreeSet<&str> = exact
+    let listed: BTreeSet<&str> = exact
+        .iter()
+        .copied()
+        .chain(unsure.iter().map(String::as_str))
+        .collect();
+    let list_unsure = listed.len() > exact.len();
+    let base_set: BTreeSet<&str> = listed
         .iter()
         .copied()
         .chain(game.foliage.iter().map(String::as_str))
         .collect();
-    let crops_estimated = base_set.len() > exact.len();
+    let crops_estimated = base_set.len() > listed.len();
     let mut all: BTreeSet<&str> = base_set.clone();
     let dlc_before = all.len();
     all.extend(game.dlc.iter().map(String::as_str));
@@ -501,6 +564,7 @@ pub fn evaluate(game: &GameData, map: Option<&MapTypes>, mods: &[ModTypes]) -> B
         base: base_set.len(),
         dlc,
         crops_estimated,
+        list_unsure,
         at_risk: game.at_risk.clone(),
         exact_total: exact.len(),
         total: all.len(),
@@ -565,7 +629,7 @@ pub fn explain(b: &Budget) -> String {
         match b.at_risk.len() {
             0 => s.push_str(", and those materials can't lie on the ground as piles."),
             n => s.push_str(&format!(
-                ". Mods register first, so {risk} may then turn {} off and close the save.",
+                ". In testing, mods registered before the DLCs, so {risk} may then turn {} off and close the save.",
                 if n == 1 { "itself" } else { "themselves" }
             )),
         }
@@ -593,13 +657,16 @@ pub fn explain(b: &Budget) -> String {
         why.push("a DLC that's off in your save takes none");
     }
     if b.crops_estimated {
-        why.push("3 belong to crops only some maps grow");
+        why.push("a few belong to crops only some maps grow");
+    }
+    if b.list_unsure {
+        why.push("Silo couldn't fully read the map's own list");
     }
     if b.mods.iter().any(|m| !m.3) {
-        why.push("mods that add piles from a script may not use all of theirs");
+        why.push("some mods' lists may not load, or name materials Silo can't find");
     }
     if !why.is_empty() {
-        s.push_str(&format!(" Some counts are estimates: {}.", why.join(", ")));
+        s.push_str(&format!(" Some counts are estimates: {}.", why.join("; ")));
     }
     if b.total > b.cap {
         s.push_str(&format!(
@@ -668,25 +735,54 @@ mod tests {
         assert_eq!(parse_list(elsewhere).0, ["Y"]);
         let broken = br#"<map><densityMapHeightTypes><densityMapHeightType fillTypeName="Y"/></wrong></map>"#;
         assert!(parse_list(broken).0.is_empty());
+        assert_eq!(parse_list_checked(broken), None);
+        // A repeated attribute on any element, or text outside the root, breaks the file too.
+        let dup = br#"<map><x a="1" a="2"/><densityMapHeightTypes><densityMapHeightType fillTypeName="Y"/></densityMapHeightTypes></map>"#;
+        assert_eq!(parse_list_checked(dup), None);
+        let stray = br#"<map><densityMapHeightTypes><densityMapHeightType fillTypeName="Y"/></densityMapHeightTypes></map>junk"#;
+        assert_eq!(parse_list_checked(stray), None);
+        // An empty but valid list is not a failure.
+        assert_eq!(
+            parse_list_checked(b"<map><densityMapHeightTypes/></map>"),
+            Some((vec![], None))
+        );
     }
 
     #[test]
     fn map_list_file_only_when_it_points_inside_the_map() {
         assert_eq!(
             map_list_file(br#"<map><densityMapHeightTypes filename="map\xml\types.xml"/></map>"#),
-            Some("map/xml/types.xml".into())
+            Some(Some("map/xml/types.xml".into()))
         );
         assert_eq!(
             map_list_file(
                 br#"<map><densityMapHeightTypes filename="$data/maps/maps_densityMapHeightTypes.xml"/></map>"#
             ),
+            Some(None)
+        );
+        assert_eq!(map_list_file(b"<map><fillTypes/></map>"), Some(None));
+        // A map.xml that doesn't parse whole, or has a broken attribute anywhere: can't tell.
+        assert_eq!(
+            map_list_file(b"<map><densityMapHeightTypes filename=\"x.xml\"/>"),
             None
         );
-        assert_eq!(map_list_file(b"<map><fillTypes/></map>"), None);
+        assert_eq!(
+            map_list_file(
+                br#"<map><other a="1" a="2"/><densityMapHeightTypes filename="x.xml"/></map>"#
+            ),
+            None
+        );
+        // A reference nested deeper is not the map's.
+        assert_eq!(
+            map_list_file(
+                br#"<map><examples><densityMapHeightTypes filename="old.xml"/></examples></map>"#
+            ),
+            Some(None)
+        );
         // A commented-out reference is no reference (FS25_BackRoadsCounty4x does this).
         assert_eq!(
             map_list_file(br#"<map><!-- <densityMapHeightTypes filename="x.xml" /> --></map>"#),
-            None
+            Some(None)
         );
     }
 
@@ -755,7 +851,7 @@ mod tests {
             text.contains("your installed DLCs 3, and your active mods 16 more: 67 in all"),
             "{text}"
         );
-        assert!(text.contains("from a script"), "{text}");
+        assert!(text.contains("some mods' lists may not load"), "{text}");
         assert!(
             text.contains("a DLC that's off in your save takes none"),
             "{text}"
@@ -782,7 +878,11 @@ mod tests {
     fn a_map_with_its_own_list_replaces_the_base_and_sets_the_cap() {
         let map = MapTypes {
             label: "Big Valley".into(),
-            list: Some((many("M", 40), 7)),
+            list: MapList::Own {
+                names: many("M", 40),
+                unsure: vec![],
+                channels: 7,
+            },
             extra: Some(m("Big Valley", &["EXTRA"], true)),
         };
         let b = evaluate(
@@ -799,12 +899,16 @@ mod tests {
     fn worst_map_wins_and_no_maps_means_the_base_list() {
         let roomy = MapTypes {
             label: "Roomy".into(),
-            list: Some((many("M", 10), 6)),
+            list: MapList::Own {
+                names: many("M", 10),
+                unsure: vec![],
+                channels: 6,
+            },
             extra: None,
         };
         let stock = MapTypes {
             label: "Stock-list map".into(),
-            list: None,
+            list: MapList::Base,
             extra: None,
         };
         let mods = [mm("Fills", many("F", 20), true)];
@@ -821,7 +925,11 @@ mod tests {
     fn a_roomy_mod_map_does_not_hide_the_base_maps() {
         let roomy = MapTypes {
             label: "Roomy".into(),
-            list: Some((many("M", 40), 7)),
+            list: MapList::Own {
+                names: many("M", 40),
+                unsure: vec![],
+                channels: 7,
+            },
             extra: None,
         };
         let b = worst(
@@ -833,12 +941,13 @@ mod tests {
     }
 
     /// A Problem on one map outranks a bigger Review on another.
-    /// A map list that names nothing but sets 7 channels keeps the base types and a 127 cap.
+    /// A map list that names nothing but sets 7 channels keeps a 127 cap; the base types count
+    /// as an estimate, since what loads instead is unknown.
     #[test]
     fn an_empty_map_list_still_sets_the_channels() {
         let map = MapTypes {
             label: "Wide".into(),
-            list: Some((vec![], 7)),
+            list: MapList::Unsure { channels: 7 },
             extra: None,
         };
         let b = evaluate(
@@ -847,7 +956,46 @@ mod tests {
             &[mm("Fills", many("F", 16), true)],
         );
         assert_eq!((b.base, b.cap, b.total), (48, 127, 64));
+        // What loads is unknown, so the base types are only an estimate.
+        assert_eq!(b.exact_total, 16);
         assert_eq!(severity(&b), None);
+        assert!(explain(&b).contains("Silo couldn't fully read the map's own list"));
+    }
+
+    /// An unreadable map list can't make a Problem: its base types are estimates.
+    #[test]
+    fn an_unreadable_map_list_is_never_a_problem() {
+        let map = MapTypes {
+            label: "Broken".into(),
+            list: MapList::Unsure { channels: 6 },
+            extra: None,
+        };
+        let b = evaluate(
+            &game(48, &[]),
+            Some(&map),
+            &[mm("Fills", many("F", 16), true)],
+        );
+        assert_eq!((b.exact_total, b.total), (16, 64));
+        assert_eq!(severity(&b), Some("warning"));
+    }
+
+    /// Entries in a map's own list whose fill type Silo can't find become estimates too.
+    #[test]
+    fn a_map_lists_unknown_entries_become_estimates() {
+        let mut map = MapTypes {
+            label: "Own".into(),
+            list: MapList::Own {
+                names: many("M", 64),
+                unsure: vec![],
+                channels: 6,
+            },
+            extra: None,
+        };
+        let known: std::collections::HashSet<String> = many("M", 62).into_iter().collect();
+        map.downgrade_unknown(&known);
+        let b = evaluate(&game(48, &[]), Some(&map), &[]);
+        assert_eq!((b.exact_total, b.total), (62, 64));
+        assert_eq!(severity(&b), Some("warning"));
     }
 
     #[test]
@@ -861,7 +1009,11 @@ mod tests {
         own.extend(many("M", 47));
         let tight = MapTypes {
             label: "Tight".into(),
-            list: Some((own, 6)),
+            list: MapList::Own {
+                names: own,
+                unsure: vec![],
+                channels: 6,
+            },
             extra: None,
         };
         let mods = [mm("Script", many("S", 12), false)];
@@ -974,7 +1126,11 @@ mod tests {
         // A map with its own list still loads the base crops.
         let map = MapTypes {
             label: "Own list".into(),
-            list: Some((many("M", 10), 6)),
+            list: MapList::Own {
+                names: many("M", 10),
+                unsure: vec![],
+                channels: 6,
+            },
             extra: None,
         };
         assert_eq!(evaluate(&g, Some(&map), &[]).total, 13);
