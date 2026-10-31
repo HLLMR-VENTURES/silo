@@ -176,8 +176,9 @@ fn walk(
             Event::End(_) => {
                 stack.pop()?;
             }
-            // Text outside the root makes the document invalid.
+            // Text or CDATA outside the root makes the document invalid.
             Event::Text(t) if stack.is_empty() && !t.is_empty() => return None,
+            Event::CData(_) if stack.is_empty() => return None,
             Event::Eof => break,
             _ => {}
         }
@@ -411,8 +412,10 @@ pub enum MapList {
         channels: u32,
     },
     /// It points at a list Silo can't read, or one that names nothing: what loads is unknown, so
-    /// the base game's types count as an estimate, against the channels it sets (if any).
-    Unsure { channels: u32 },
+    /// the base game's types count as an estimate. `channels` is the list's own `numChannels`
+    /// when Silo could read it; without it the cap is unknown too, and a 6-channel guess can't
+    /// make a Problem.
+    Unsure { channels: Option<u32> },
 }
 
 /// A candidate map: its list and what its modDesc adds.
@@ -494,6 +497,8 @@ pub struct Budget {
     pub crops_estimated: bool,
     /// Whether Silo couldn't read the map's own list, or it named nothing.
     pub list_unsure: bool,
+    /// Whether `cap` is a guess (the map's list couldn't be read).
+    pub cap_unsure: bool,
     /// Installed DLCs that turn themselves off without their slots.
     pub at_risk: Vec<String>,
     /// Slots counted from the map list and modDesc-declared mod lists only.
@@ -506,14 +511,19 @@ pub struct Budget {
 
 /// Count one map's slots. Pure.
 pub fn evaluate(game: &GameData, map: Option<&MapTypes>, mods: &[ModTypes]) -> Budget {
-    let (base, unsure, channels) = match map.map(|m| &m.list) {
-        None | Some(MapList::Base) => (game.base.clone(), vec![], game.base_channels),
+    let (base, unsure, channels, cap_unsure) = match map.map(|m| &m.list) {
+        None | Some(MapList::Base) => (game.base.clone(), vec![], game.base_channels, false),
         Some(MapList::Own {
             names,
             unsure,
             channels,
-        }) => (names.clone(), unsure.clone(), *channels),
-        Some(MapList::Unsure { channels }) => (vec![], game.base.clone(), *channels),
+        }) => (names.clone(), unsure.clone(), *channels, false),
+        Some(MapList::Unsure { channels }) => (
+            vec![],
+            game.base.clone(),
+            channels.unwrap_or(DEFAULT_CHANNELS),
+            channels.is_none(),
+        ),
     };
     // The map's list is exact; what Silo couldn't confirm, and the base crops' types (they load
     // only on maps that grow them), are estimates.
@@ -565,6 +575,7 @@ pub fn evaluate(game: &GameData, map: Option<&MapTypes>, mods: &[ModTypes]) -> B
         dlc,
         crops_estimated,
         list_unsure,
+        cap_unsure,
         at_risk: game.at_risk.clone(),
         exact_total: exact.len(),
         total: all.len(),
@@ -595,7 +606,7 @@ pub fn worst(game: &GameData, maps: &[MapTypes], mods: &[ModTypes]) -> Budget {
 /// How serious a budget is: critical when the exactly-counted slots alone run over, warning when
 /// the estimates push it over, info when 3 or fewer are left, else nothing. Pure.
 pub fn severity(b: &Budget) -> Option<&'static str> {
-    if b.exact_total > b.cap {
+    if b.exact_total > b.cap && !b.cap_unsure {
         Some("critical")
     } else if b.total > b.cap {
         Some("warning")
@@ -741,6 +752,8 @@ mod tests {
         assert_eq!(parse_list_checked(dup), None);
         let stray = br#"<map><densityMapHeightTypes><densityMapHeightType fillTypeName="Y"/></densityMapHeightTypes></map>junk"#;
         assert_eq!(parse_list_checked(stray), None);
+        let cdata = br#"<map><densityMapHeightTypes><densityMapHeightType fillTypeName="Y"/></densityMapHeightTypes></map><![CDATA[junk]]>"#;
+        assert_eq!(parse_list_checked(cdata), None);
         // An empty but valid list is not a failure.
         assert_eq!(
             parse_list_checked(b"<map><densityMapHeightTypes/></map>"),
@@ -947,7 +960,7 @@ mod tests {
     fn an_empty_map_list_still_sets_the_channels() {
         let map = MapTypes {
             label: "Wide".into(),
-            list: MapList::Unsure { channels: 7 },
+            list: MapList::Unsure { channels: Some(7) },
             extra: None,
         };
         let b = evaluate(
@@ -962,12 +975,25 @@ mod tests {
         assert!(explain(&b).contains("Silo couldn't fully read the map's own list"));
     }
 
-    /// An unreadable map list can't make a Problem: its base types are estimates.
+    /// An unreadable map list can't make a Problem: its base types are estimates, and its cap
+    /// is a guess, so even 64 exactly-declared extras are a Review (the map may have 7 channels).
     #[test]
     fn an_unreadable_map_list_is_never_a_problem() {
+        let wide = MapTypes {
+            label: "Unknown".into(),
+            list: MapList::Unsure { channels: None },
+            extra: None,
+        };
+        let b = evaluate(
+            &game(48, &[]),
+            Some(&wide),
+            &[mm("Fills", many("F", 64), true)],
+        );
+        assert_eq!((b.exact_total, b.cap, b.cap_unsure), (64, 63, true));
+        assert_eq!(severity(&b), Some("warning"));
         let map = MapTypes {
             label: "Broken".into(),
-            list: MapList::Unsure { channels: 6 },
+            list: MapList::Unsure { channels: None },
             extra: None,
         };
         let b = evaluate(

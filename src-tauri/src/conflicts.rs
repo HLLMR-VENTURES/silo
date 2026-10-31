@@ -245,9 +245,7 @@ fn map_list(p: &Parsed, config: Option<&str>) -> heighttypes::MapList {
     let Some(config) = config else {
         return MapList::Base;
     };
-    let unsure = MapList::Unsure {
-        channels: heighttypes::DEFAULT_CHANNELS,
-    };
+    let unsure = MapList::Unsure { channels: None };
     let Some(reference) = read(config).and_then(|xml| heighttypes::map_list_file(&xml)) else {
         return unsure;
     };
@@ -258,14 +256,13 @@ fn map_list(p: &Parsed, config: Option<&str>) -> heighttypes::MapList {
     else {
         return unsure;
     };
-    let channels = channels.unwrap_or(heighttypes::DEFAULT_CHANNELS);
     if names.is_empty() {
         MapList::Unsure { channels }
     } else {
         MapList::Own {
             names,
             unsure: vec![],
-            channels,
+            channels: channels.unwrap_or(heighttypes::DEFAULT_CHANNELS),
         }
     }
 }
@@ -363,8 +360,12 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
         .collect();
 
     let mut out = Vec::new();
+    // When the game may run out of fill types, it rejects some mods' declared ones, so none of
+    // them can vouch for a height type.
+    let mut fills_may_overflow = false;
     if let Some(fg) = game.fills {
         let budget = filltypes::worst(fg, &map_fills, &mod_fills);
+        fills_may_overflow = budget.total > filltypes::CAP;
         if let Some(severity) = filltypes::severity(&budget) {
             out.push(conflict(
                 severity,
@@ -384,7 +385,7 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
     // fill list nothing is certain.
     let known = game
         .fills
-        .map(|fg| fg.known_exact(&mod_fills))
+        .map(|fg| fg.known_exact(if fills_may_overflow { &[] } else { &mod_fills }))
         .unwrap_or_default();
     for m in &mut mod_heights {
         m.downgrade_unknown(&known);
@@ -780,6 +781,71 @@ mod tests {
         let kinds: Vec<&str> = found.iter().map(|c| c.kind.as_str()).collect();
         // The brand is one game-wide name, so it still clashes; nothing else does.
         assert_eq!(kinds, ["brand"], "{found:?}");
+    }
+
+    /// #341: when the game may run out of fill types, a mod's declared fill types may be the
+    /// ones rejected, so they can't make its ground-pile types exact: a Review, not a Problem.
+    #[test]
+    fn a_fill_overflow_keeps_dependent_piles_an_estimate() {
+        let base = std::env::temp_dir().join(format!("silo_conflict_ft_{}", std::process::id()));
+        let dir = base.join("FS25_BigPack");
+        std::fs::create_dir_all(dir.join("xml")).unwrap();
+        std::fs::write(
+            dir.join("modDesc.xml"),
+            r#"<modDesc descVersion="92"><fillTypes filename="xml/fills.xml"/><densityMapHeightTypes filename="xml/piles.xml"/></modDesc>"#,
+        )
+        .unwrap();
+        let fills: String = (0..80)
+            .map(|n| format!(r#"<fillType name="F{n}"/>"#))
+            .collect();
+        std::fs::write(
+            dir.join("xml/fills.xml"),
+            format!("<map><fillTypes>{fills}</fillTypes></map>"),
+        )
+        .unwrap();
+        let piles: String = (0..16)
+            .map(|n| format!(r#"<densityMapHeightType fillTypeName="F{n}"/>"#))
+            .collect();
+        std::fs::write(
+            dir.join("xml/piles.xml"),
+            format!("<map><densityMapHeightTypes>{piles}</densityMapHeightTypes></map>"),
+        )
+        .unwrap();
+        let inputs = vec![ConflictInput {
+            tech_name: "FS25_BigPack".into(),
+            title: Some("Big Pack".into()),
+            path: dir.to_string_lossy().into_owned(),
+            kind: "dir".into(),
+        }];
+        let heights = heighttypes::GameData {
+            base: (0..48).map(|n| format!("BASE{n}")).collect(),
+            base_channels: 6,
+            ..Default::default()
+        };
+        let fill_base = filltypes::GameData {
+            base: (0..178).map(|n| format!("BASE{n}")).collect(),
+            ..Default::default()
+        };
+        let found = detect_with(
+            &inputs,
+            Some(GameLists {
+                heights: &heights,
+                fills: Some(&fill_base),
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&base);
+        // 178 + 80 = 258 fill types: a Problem on its own.
+        let fills = found
+            .iter()
+            .find(|c| c.kind == "fillTypeCap")
+            .expect("fills");
+        assert_eq!(fills.severity, "critical");
+        // 48 + 16 = 64 piles, but their fill types may be the rejected ones.
+        let piles = found
+            .iter()
+            .find(|c| c.kind == "heightTypes")
+            .expect("piles");
+        assert_eq!(piles.severity, "warning");
     }
 
     #[test]
