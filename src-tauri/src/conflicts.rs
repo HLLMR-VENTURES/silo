@@ -737,6 +737,7 @@ mod tests {
         let game = heighttypes::GameData {
             base: (0..48).map(|n| format!("BASE{n}")).collect(),
             base_channels: 6,
+            foliage: vec![],
             dlc: vec![],
         };
         let found = detect_with(&inputs, Some(&game));

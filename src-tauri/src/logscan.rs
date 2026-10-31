@@ -502,7 +502,7 @@ Error: Out of memory";
     #[test]
     fn finds_the_ground_pile_cap() {
         assert_eq!(
-            ground_pile_cap("Error: maximum number (63) of height types already registered"),
+            ground_pile_cap("Error: addDensityMapHeightType \"GRAVEL_FINE\": maximum number (63) of height types already registered. Adjust densityMapHeightTypes#numChannels to allow for more"),
             Some(63)
         );
         assert_eq!(

@@ -1,21 +1,24 @@
 //! Ground-pile slot budget (#339). FS25 gives each map a fixed number of density-map height
 //! types, the slots that let a material lie on the ground as a pile: `2^numChannels - 1`, so 63
-//! on the base maps (6 channels). The base game already fills 48 of them
-//! (`data/maps/maps_densityMapHeightTypes.xml`), and the DLCs and mods share the rest. When
-//! registration runs past the cap the log says "maximum number (63) of height types already
-//! registered", and Straw Harvest and Pumps n' Hoses refuse to load and close the save
-//! (GIANTS forum t=219513, PnH 1.2.0 changelog).
+//! on the base maps (6 channels). The base game already fills 51 of them: 48 from
+//! `data/maps/maps_densityMapHeightTypes.xml` and 3 from crop (foliage) XML, coffee cherries and
+//! onions. The DLCs and mods share the rest. Mods register before the DLCs, so when the slots run
+//! out the DLCs lose: the log says `addDensityMapHeightType "X": maximum number (63) of height
+//! types already registered`, then Straw Harvest and Pumps n' Hoses disable themselves and close
+//! the save (measured in-game on FS25 1.25, 2026-10-31).
 //!
 //! What we can count:
 //! * the map's list: the base game's, or the map's own when its `map.xml` points
 //!   `<densityMapHeightTypes filename>` at a file inside the map (treated as replacing the base
-//!   list, the way the base maps point at `$data/maps/maps_densityMapHeightTypes.xml`);
+//!   list, the way the base maps point at `$data/maps/maps_densityMapHeightTypes.xml`), plus the
+//!   base crops' types;
 //! * mods that declare `<densityMapHeightTypes filename>` in modDesc: exact;
 //! * mods that register the same XML from Lua (SoilFertilizer, AdvancedSilageTypes and others):
 //!   an estimate, from any `*heightType*.xml` in the zip;
 //! * DLCs: encrypted, so their types come from [`DLC_TYPES`], measured in-game, also an estimate.
 //!
-//! Each fill type takes one slot however many sources declare it.
+//! Each fill type takes one slot however many sources declare it: re-declaring `STRAW` in a mod
+//! kept the count the same in-game (the mod's settings replace the base ones).
 
 use crate::moddesc::ModDesc;
 use std::collections::BTreeSet;
@@ -78,10 +81,19 @@ const BASE_TYPES: &[&str] = &[
     "DIGESTATE",
 ];
 
+/// The base crops' own height types (`data/foliage/coffeeCherries/coffeeCherries.xml`,
+/// `data/foliage/onion/onion.xml`), used when the install can't be read.
+const BASE_FOLIAGE_TYPES: &[&str] = &["COFFEECHERRIES", "ONION", "ONION_DIRTY"];
+
 /// Height types each DLC adds, keyed by its `pdlc/<stem>.dlc` file name. The archives are
-/// encrypted, so these were read in-game from `g_densityMapHeightManager` and may drift with
-/// DLC updates. A DLC that isn't listed adds none.
-const DLC_TYPES: &[(&str, &[&str])] = &[];
+/// encrypted, so these were read in-game from `g_densityMapHeightManager` (FS25 1.25, each pack
+/// alone and all together: 51 base, 56 with every pack) and may drift with DLC updates. The other
+/// packs add none.
+const DLC_TYPES: &[(&str, &[&str])] = &[
+    ("strawHarvestPack", &["HAY_PELLETS", "STRAW_PELLETS"]),
+    ("pumpsAndHosesPack", &["SEPARATED_MANURE"]),
+    ("beansAndAlpacasPack", &["IRONORE", "COPPERORE"]),
+];
 
 /// Slots left at or below which we add a note.
 const NEARLY_FULL: usize = 3;
@@ -156,24 +168,61 @@ pub fn cap_for(channels: u32) -> usize {
     (1usize << channels.clamp(1, 16)) - 1
 }
 
-/// What the game itself brings: the base list and the installed DLCs' types.
+/// What the game itself brings: the base list, the base crops' types and the installed DLCs'.
 #[derive(Debug, Clone, Default)]
 pub struct GameData {
     pub base: Vec<String>,
     pub base_channels: u32,
+    /// The base crops' types. They load on every map, the map's own list or not.
+    pub foliage: Vec<String>,
     pub dlc: Vec<String>,
 }
 
+fn owned(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+/// Every height type the base crops declare in `data/foliage/<crop>/*.xml`.
+fn foliage_types(install_dir: &Path) -> Option<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for crop in std::fs::read_dir(install_dir.join("data/foliage"))
+        .ok()?
+        .flatten()
+    {
+        let Ok(files) = std::fs::read_dir(crop.path()) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let p = f.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("xml") {
+                continue;
+            }
+            for t in std::fs::read(&p)
+                .map(|b| parse_list(&b).0)
+                .unwrap_or_default()
+            {
+                if !out.contains(&t) {
+                    out.push(t);
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
 impl GameData {
-    /// Read the base list from the install (falling back to [`BASE_TYPES`]) and look up the
-    /// installed DLCs in `pdlc/`.
+    /// Read the base list and crop types from the install (falling back to [`BASE_TYPES`] and
+    /// [`BASE_FOLIAGE_TYPES`]) and look up the installed DLCs in `pdlc/`.
     pub fn load(install_dir: Option<&Path>) -> Self {
         let read = install_dir
             .and_then(|d| std::fs::read(d.join("data/maps/maps_densityMapHeightTypes.xml")).ok())
             .map(|b| parse_list(&b))
             .filter(|(names, _)| !names.is_empty());
-        let (base, channels) =
-            read.unwrap_or_else(|| (BASE_TYPES.iter().map(|s| s.to_string()).collect(), None));
+        let (base, channels) = read.unwrap_or_else(|| (owned(BASE_TYPES), None));
+        let foliage = install_dir
+            .and_then(foliage_types)
+            .filter(|f| !f.is_empty())
+            .unwrap_or_else(|| owned(BASE_FOLIAGE_TYPES));
         let stems: Vec<String> = install_dir
             .and_then(|d| std::fs::read_dir(d.join("pdlc")).ok())
             .into_iter()
@@ -188,6 +237,7 @@ impl GameData {
         GameData {
             base,
             base_channels: channels.unwrap_or(DEFAULT_CHANNELS),
+            foliage,
             dlc: dlc_types(&stems),
         }
     }
@@ -296,7 +346,11 @@ pub fn evaluate(game: &GameData, map: Option<&MapTypes>, mods: &[ModTypes]) -> B
         Some((list, ch)) => (list, ch),
         None => (game.base.clone(), game.base_channels),
     };
-    let base_set: BTreeSet<&str> = base.iter().map(String::as_str).collect();
+    let base_set: BTreeSet<&str> = base
+        .iter()
+        .chain(&game.foliage)
+        .map(String::as_str)
+        .collect();
     let mut exact: BTreeSet<&str> = base_set.clone();
     let mut all: BTreeSet<&str> = base_set.clone();
     let dlc_before = all.len();
@@ -330,7 +384,7 @@ pub fn evaluate(game: &GameData, map: Option<&MapTypes>, mods: &[ModTypes]) -> B
     Budget {
         map: map.map(|m| m.label.clone()),
         cap: cap_for(channels),
-        base: base.len(),
+        base: base_set.len(),
         dlc,
         exact_total: exact.len(),
         total: all.len(),
@@ -418,6 +472,7 @@ mod tests {
         GameData {
             base: (0..base).map(|i| format!("BASE{i}")).collect(),
             base_channels: 6,
+            foliage: vec![],
             dlc: dlc.iter().map(|s| s.to_string()).collect(),
         }
     }
@@ -643,6 +698,70 @@ mod tests {
     #[test]
     fn dlc_lookup_ignores_case_and_unknown_packs() {
         assert!(dlc_types(&["someUnknownPack".into()]).is_empty());
+        // Measured in-game: Straw Harvest 2, Pumps n' Hoses 1, Beans & Alpacas 2, others none.
+        let all = dlc_types(&[
+            "STRAWHARVESTPACK".into(),
+            "pumpsAndHosesPack".into(),
+            "beansAndAlpacasPack".into(),
+            "vredoPack".into(),
+        ]);
+        assert_eq!(
+            all,
+            [
+                "HAY_PELLETS",
+                "STRAW_PELLETS",
+                "SEPARATED_MANURE",
+                "IRONORE",
+                "COPPERORE"
+            ]
+        );
+    }
+
+    #[test]
+    fn base_crop_types_count_on_every_map() {
+        let mut g = game(48, &[]);
+        g.foliage = vec!["ONION".into(), "COFFEECHERRIES".into(), "BASE0".into()];
+        let b = evaluate(&g, None, &[]);
+        assert_eq!((b.base, b.total), (50, 50));
+        // A map with its own list still loads the base crops.
+        let map = MapTypes {
+            label: "Own list".into(),
+            list: Some((many("M", 10), 6)),
+            extra: None,
+        };
+        assert_eq!(evaluate(&g, Some(&map), &[]).total, 13);
+    }
+
+    #[test]
+    fn loads_the_lists_from_an_install() {
+        let dir = std::env::temp_dir().join(format!("silo_ht_install_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("data/maps")).unwrap();
+        std::fs::create_dir_all(dir.join("data/foliage/onion")).unwrap();
+        std::fs::create_dir_all(dir.join("pdlc")).unwrap();
+        std::fs::write(
+            dir.join("data/maps/maps_densityMapHeightTypes.xml"),
+            r#"<map><densityMapHeightTypes numChannels="6"><densityMapHeightType fillTypeName="WHEAT"/><densityMapHeightType fillTypeName="STRAW"/></densityMapHeightTypes></map>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("data/foliage/onion/onion.xml"),
+            r#"<foliageType><densityMapHeightTypes><densityMapHeightType fillTypeName="ONION"/></densityMapHeightTypes></foliageType>"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("pdlc/strawHarvestPack.dlc"), b"x").unwrap();
+        std::fs::write(dir.join("pdlc/readme.txt"), b"x").unwrap();
+        let g = GameData::load(Some(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(g.base, ["WHEAT", "STRAW"]);
+        assert_eq!(g.foliage, ["ONION"]);
+        assert_eq!(g.dlc, ["HAY_PELLETS", "STRAW_PELLETS"]);
+        assert_eq!(g.base_channels, 6);
+
+        // No install: the built-in 1.25 lists, 51 slots, and no DLCs.
+        let none = GameData::load(None);
+        assert_eq!(none.base.len() + none.foliage.len(), 51);
+        assert!(none.dlc.is_empty());
     }
 
     #[test]
