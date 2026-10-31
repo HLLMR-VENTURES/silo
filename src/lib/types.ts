@@ -405,6 +405,10 @@ export interface LogReport {
   totalFindings: number;
   /** The game ran out of ground-pile slots: the cap it reported (e.g. 63), else null (#339). */
   groundPileCap: number | null;
+  /** The game hit its fill-type limit: the limit it reported (e.g. 255), else null (#341). */
+  fillTypeCap: number | null;
+  /** The fill types it skipped because of that limit. */
+  droppedFillTypes: string[];
 }
 
 // ── Multiplayer mod-set sync ──

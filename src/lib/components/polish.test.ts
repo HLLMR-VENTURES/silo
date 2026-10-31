@@ -69,7 +69,7 @@ describe("the log line button (L19)", () => {
       crashed: true,
       mods: [{ modName: "FS25_X", errors: 3, warnings: 0, benign: 0, sample: "Error: boom", sampleLine: 12 }],
       unattributed: 0,
-      totalFindings: 3, groundPileCap: null,
+      totalFindings: 3, groundPileCap: null, fillTypeCap: null, droppedFillTypes: [],
     });
     api.logStatus.mockResolvedValue({ path: "log.txt", modifiedMs: 1, gameRunning: false, lastSeenMs: null });
     render(LogTriage, { activeMods: ["FS25_X"], activeMaps: [], onApply: vi.fn(), onBisecting: vi.fn() });

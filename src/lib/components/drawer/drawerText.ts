@@ -11,6 +11,7 @@ export function conflictKindLabel(kind: string): string {
     brand: "Brand",
     storeCategory: "Shop category",
     heightTypes: "Ground-pile slots",
+    fillTypeCap: "Material types",
   };
   return words[kind] ?? kind;
 }

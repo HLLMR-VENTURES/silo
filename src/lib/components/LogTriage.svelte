@@ -21,7 +21,7 @@
   import type { LibraryLookup } from "../diagnose/crashNotice";
   import { formatCount, plural } from "../plural";
   import { latestOnly } from "../diagnose/latest";
-  import { groundPileCapNote } from "../diagnose/conflictCopy";
+  import { fillTypeCapNote, groundPileCapNote } from "../diagnose/conflictCopy";
   import { describeError, NO_LOG_COPY } from "../errorCopy";
 
   interface Props {
@@ -222,6 +222,13 @@
       </div>
       {#if r.groundPileCap}
         {@const note = groundPileCapNote(r.groundPileCap)}
+        <div class="verdict bad" role="note">
+          <Icon name="problem" size={16} />
+          <p><strong>{note.title}</strong> {note.body}</p>
+        </div>
+      {/if}
+      {#if r.fillTypeCap && r.droppedFillTypes.length > 0}
+        {@const note = fillTypeCapNote(r.fillTypeCap, r.droppedFillTypes)}
         <div class="verdict bad" role="note">
           <Icon name="problem" size={16} />
           <p><strong>{note.title}</strong> {note.body}</p>

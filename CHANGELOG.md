@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Pumps n' Hoses refuse to load and the game closes your save. Silo now warns before you launch,
   names the mods using the most slots, and adds a note when 3 or fewer are left. **Last run**
   explains the game's "maximum number of height types" error when it happens. (#339)
+- **Conflicts** also checks your active mods against the game's limit of **255 material types**
+  (crops, feed, fertilizers, products and the like). The base game and its DLCs use about 230 of
+  them. Past 255 the game quietly skips the rest, and mods load last, so their materials go
+  missing and the parts that use them stop working. Silo warns before you launch and names the
+  mods adding the most. **Last run** lists the materials the game skipped. (#341)
 
 ## [1.0.3] - 2026-10-29
 

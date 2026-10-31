@@ -34,6 +34,8 @@ const WHAT: Record<string, string> = {
  */
 export function conflictTitle(c: Pick<Conflict, "kind" | "mods"> & Partial<Pick<Conflict, "severity">>): string {
   if (c.kind === "map") return "More than one map is active";
+  if (c.kind === "fillTypeCap")
+    return c.severity === "info" ? "Material types are nearly full" : "Mods add more material types than the game supports";
   if (c.kind === "heightTypes")
     return c.severity === "info" ? "Ground-pile slots are nearly full" : "Mods need more ground-pile slots than the map has";
   const n = Math.max(c.mods.length, 2);
@@ -49,6 +51,21 @@ export function groundPileCapNote(cap: number): { title: string; body: string } 
   return {
     title: "The game ran out of ground-pile slots.",
     body: `Your mods asked for more than the map's ${formatCount(cap)} ground-pile types (the materials you can tip onto the ground), so Straw Harvest and Pumps n' Hoses refused to load and the save closed. Diagnose → Conflicts shows which mods use the most slots. Turn a few of those off.`,
+  };
+}
+
+/**
+ * The Last run note when the game hit its fill-type limit and skipped some (#341).
+ * @param cap the limit the game reported, e.g. 255
+ * @param dropped the fill types it skipped
+ * @return the note's bold title and its body
+ */
+export function fillTypeCapNote(cap: number, dropped: string[]): { title: string; body: string } {
+  const n = dropped.length;
+  const shown = dropped.slice(0, 5).join(", ") + (n > 5 ? ` and ${formatCount(n - 5)} more` : "");
+  return {
+    title: "The game ran out of material types.",
+    body: `It supports ${formatCount(cap)}, and your mods asked for more, so it skipped ${formatCount(n)} ${plural(n, { one: "material", other: "materials" })}: ${shown}. The mods that add them won't fully work. Diagnose → Conflicts shows which mods add the most. Turn a few of those off.`,
   };
 }
 

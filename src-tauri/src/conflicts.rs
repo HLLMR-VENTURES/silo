@@ -8,6 +8,7 @@
 //!   each other (warning)
 //! * more than one active map (info only: FS25 loads just the savegame's map)
 //! * more ground-pile (height) types than the map has slots for (#339, see `heighttypes`)
+//! * more fill types than the game's 255 (#341, see `filltypes`)
 //!
 //! Signal refinement: a clash among mods by the **same author** is usually
 //! intentional (shared packs/utilities), and two mods shipping the **byte-identical
@@ -22,6 +23,7 @@
 //!
 //! Runs on demand for the active set only, so it stays cheap.
 
+use crate::filltypes::{self, fill_type_names};
 use crate::heighttypes;
 use crate::moddesc;
 use crate::scan;
@@ -198,36 +200,6 @@ fn identical_script(parsed: &[Parsed], idxs: &[usize], basename: &str) -> bool {
     prev.is_some()
 }
 
-/// Extract declared `<fillType name>` values (UPPER-cased, as the game keys them) from
-/// a mod's fillTypes XML. Pure — unit-testable. The registry match is case-insensitive
-/// (FillTypeManager string.upper's the name), so we normalize here too.
-fn fill_type_names(xml: &[u8]) -> Vec<String> {
-    use quick_xml::events::Event;
-    use quick_xml::Reader;
-    let mut reader = Reader::from_reader(xml);
-    reader.config_mut().trim_text(true);
-    let mut out = Vec::new();
-    let mut buf = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"fillType" => {
-                if let Some(a) = e.attributes().flatten().find(|a| a.key.as_ref() == b"name") {
-                    if let Ok(v) = a.normalized_value(quick_xml::XmlVersion::Implicit1_0) {
-                        let n = v.trim().to_uppercase();
-                        if !n.is_empty() && !out.contains(&n) {
-                            out.push(n);
-                        }
-                    }
-                }
-            }
-            Ok(Event::Eof) | Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    out
-}
-
 /// The involved mods, deduplicated by tech name (two different mods may share a title).
 fn labels(parsed: &[Parsed], idxs: &[usize]) -> Involved {
     let mut out: Vec<String> = Vec::new();
@@ -312,18 +284,91 @@ fn height_type_conflict(parsed: &[Parsed], game: &heighttypes::GameData) -> Opti
     ))
 }
 
-/// Detect conflicts within the given active set, without the ground-pile budget (it needs the
+/// The fill-type budget for the active set, as a conflict when it's tight or over.
+fn fill_type_cap_conflict(parsed: &[Parsed], game: &filltypes::GameData) -> Option<Conflict> {
+    let names = |p: &Parsed| -> Vec<String> {
+        p.md.fill_types_file
+            .as_deref()
+            .and_then(|f| read_member(&p.path, &p.kind, f))
+            .map(|b| fill_type_names(&b))
+            .unwrap_or_default()
+    };
+    let mods: Vec<filltypes::ModFills> = parsed
+        .par_iter()
+        .filter(|p| !p.md.is_map)
+        .map(|p| filltypes::ModFills {
+            label: p.label.clone(),
+            tech_name: p.tech_name.clone(),
+            types: names(p),
+        })
+        .filter(|m| !m.types.is_empty())
+        .collect();
+    let maps: Vec<filltypes::MapFills> = parsed
+        .iter()
+        .filter(|p| p.md.is_map)
+        .map(|p| {
+            let read = |m: &str| read_member(&p.path, &p.kind, m);
+            let mut types: Vec<String> =
+                p.md.map_config_file
+                    .as_deref()
+                    .and_then(read)
+                    .and_then(|xml| filltypes::map_fill_file(&xml))
+                    .and_then(|f| read(&f))
+                    .map(|b| fill_type_names(&b))
+                    .unwrap_or_default();
+            for t in names(p) {
+                if !types.contains(&t) {
+                    types.push(t);
+                }
+            }
+            filltypes::MapFills {
+                label: p.label.clone(),
+                types,
+            }
+        })
+        .collect();
+    let budget = filltypes::worst(game, &maps, &mods);
+    let severity = filltypes::severity(&budget)?;
+    let involved: Involved = budget
+        .mods
+        .iter()
+        .map(|(l, t, _)| (l.clone(), t.clone()))
+        .unzip();
+    Some(conflict(
+        severity,
+        "fillTypeCap",
+        "Material types",
+        filltypes::explain(&budget),
+        involved,
+    ))
+}
+
+/// What the game itself brings, for the budget checks: the base lists and installed DLCs.
+#[derive(Debug, Clone, Copy)]
+pub struct GameLists<'a> {
+    pub heights: &'a heighttypes::GameData,
+    pub fills: &'a filltypes::GameData,
+}
+
+impl GameLists<'static> {
+    /// The lists for the game Silo detects, read once per run.
+    pub fn cached() -> Self {
+        GameLists {
+            heights: heighttypes::GameData::cached(),
+            fills: filltypes::GameData::cached(),
+        }
+    }
+}
+
+/// Detect conflicts within the given active set, without the budget checks (they need the
 /// game's own lists; see [`detect_with`]).
 pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
     detect_with(inputs, None)
 }
 
 /// Detect conflicts within the given active set. With `game`, also check the ground-pile slot
-/// budget against the base game and installed DLCs.
-pub fn detect_with(
-    inputs: &[ConflictInput],
-    game: Option<&heighttypes::GameData>,
-) -> Vec<Conflict> {
+/// and fill-type budgets against the base game and installed DLCs.
+pub fn detect_with(inputs: &[ConflictInput], game: Option<GameLists>) -> Vec<Conflict> {
     let parsed: Vec<Parsed> = inputs
         .par_iter()
         .filter_map(|i| {
@@ -480,8 +525,9 @@ pub fn detect_with(
         ));
     }
 
-    if let Some(c) = game.and_then(|g| height_type_conflict(&parsed, g)) {
-        out.push(c);
+    if let Some(g) = game {
+        out.extend(height_type_conflict(&parsed, g.heights));
+        out.extend(fill_type_cap_conflict(&parsed, g.fills));
     }
 
     // critical → warning → info, then by name.
@@ -740,7 +786,14 @@ mod tests {
             foliage: vec![],
             dlc: vec![],
         };
-        let found = detect_with(&inputs, Some(&game));
+        let fills = filltypes::GameData::default();
+        let found = detect_with(
+            &inputs,
+            Some(GameLists {
+                heights: &game,
+                fills: &fills,
+            }),
+        );
         let without = detect(&inputs);
         let _ = std::fs::remove_dir_all(&base);
 

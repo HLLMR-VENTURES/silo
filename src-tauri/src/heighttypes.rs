@@ -134,6 +134,12 @@ pub fn parse_list(xml: &[u8]) -> (Vec<String>, Option<u32>) {
 /// The map's own height-type file, from its `map.xml`: `Some` only when it points inside the
 /// map. `$data/...` (the base list) and no reference both mean the base list. Pure.
 pub fn map_list_file(map_xml: &[u8]) -> Option<String> {
+    map_own_file(map_xml, b"densityMapHeightTypes")
+}
+
+/// The file a map's `map.xml` names in its first `<tag filename>`, when it points inside the map
+/// rather than at the base game's `$data/...`. Pure.
+pub fn map_own_file(map_xml: &[u8], tag: &[u8]) -> Option<String> {
     use quick_xml::events::Event;
     use quick_xml::Reader;
     let mut reader = Reader::from_reader(map_xml);
@@ -141,9 +147,7 @@ pub fn map_list_file(map_xml: &[u8]) -> Option<String> {
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e))
-                if e.name().as_ref() == b"densityMapHeightTypes" =>
-            {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == tag => {
                 let f = attr(&e, b"filename")?.trim().replace('\\', "/");
                 return (!f.is_empty() && !f.starts_with('$')).then_some(f);
             }
@@ -223,17 +227,7 @@ impl GameData {
             .and_then(foliage_types)
             .filter(|f| !f.is_empty())
             .unwrap_or_else(|| owned(BASE_FOLIAGE_TYPES));
-        let stems: Vec<String> = install_dir
-            .and_then(|d| std::fs::read_dir(d.join("pdlc")).ok())
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| {
-                let p = e.path();
-                (p.extension()?.to_str()? == "dlc")
-                    .then(|| p.file_stem()?.to_str().map(String::from))?
-            })
-            .collect();
+        let stems = install_dir.map(installed_dlc).unwrap_or_default();
         GameData {
             base,
             base_channels: channels.unwrap_or(DEFAULT_CHANNELS),
@@ -253,10 +247,29 @@ impl GameData {
     }
 }
 
+/// The installed DLCs: the stems of the install's `pdlc/*.dlc` files.
+pub fn installed_dlc(install_dir: &Path) -> Vec<String> {
+    std::fs::read_dir(install_dir.join("pdlc"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            (p.extension()?.to_str()? == "dlc")
+                .then(|| p.file_stem()?.to_str().map(String::from))?
+        })
+        .collect()
+}
+
 /// The height types the given DLCs add, per [`DLC_TYPES`]. Pure.
 fn dlc_types(stems: &[String]) -> Vec<String> {
+    dlc_names(DLC_TYPES, stems)
+}
+
+/// The names a per-DLC table gives for the installed DLCs, de-duplicated, in table order. Pure.
+pub fn dlc_names(table: &[(&str, &[&str])], stems: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for (stem, types) in DLC_TYPES {
+    for (stem, types) in table {
         if stems.iter().any(|s| s.eq_ignore_ascii_case(stem)) {
             for t in *types {
                 if !out.iter().any(|o| o == t) {

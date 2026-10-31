@@ -87,6 +87,20 @@ pub struct LogReport {
     pub total_findings: usize,
     /// The game ran out of ground-pile (height) type slots: the cap it reported, e.g. 63 (#339).
     pub ground_pile_cap: Option<u32>,
+    /// The game hit its fill-type limit: the limit it reported, e.g. 255 (#341).
+    pub fill_type_cap: Option<u32>,
+    /// The fill types it skipped because of that limit, in log order.
+    pub dropped_fill_types: Vec<String>,
+}
+
+/// The limit and the skipped name in "FillTypeManager.addFillType too many fill types. Only 255
+/// fill types are supported. Ignoring 'LIQUID_UREA'." (#341).
+fn dropped_fill_type(line: &str) -> Option<(u32, String)> {
+    let rest =
+        &line[line.find("too many fill types. Only ")? + "too many fill types. Only ".len()..];
+    let cap = rest.split_whitespace().next()?.parse().ok()?;
+    let name = rest.split("Ignoring '").nth(1)?.split('\'').next()?.trim();
+    (!name.is_empty()).then(|| (cap, name.to_string()))
 }
 
 /// The cap in "maximum number (63) of height types already registered", the line the game
@@ -204,6 +218,8 @@ pub fn parse(log: &str) -> LogReport {
     let mut mods_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut clean_exit = false;
     let mut ground_pile: Option<u32> = None;
+    let mut fill_cap: Option<u32> = None;
+    let mut dropped: Vec<String> = Vec::new();
 
     // Dedup findings: the engine writes a scan pass AND a load pass, repeating the same
     // warnings. Key on (mod, severity, message) so a mod that logs one thing twice per
@@ -221,6 +237,12 @@ pub fn parse(log: &str) -> LogReport {
 
         if ground_pile.is_none() {
             ground_pile = ground_pile_cap(s);
+        }
+        if let Some((cap, name)) = dropped_fill_type(s) {
+            fill_cap = Some(cap);
+            if !dropped.contains(&name) {
+                dropped.push(name);
+            }
         }
         if engine_version.is_none() {
             if let Some(rest) = s.strip_prefix("GIANTS Engine Runtime ") {
@@ -332,6 +354,8 @@ pub fn parse(log: &str) -> LogReport {
         unattributed,
         total_findings: findings.len(),
         ground_pile_cap: ground_pile,
+        fill_type_cap: fill_cap,
+        dropped_fill_types: dropped,
     }
 }
 
@@ -520,5 +544,20 @@ Application quit
 ";
         assert_eq!(parse(log).ground_pile_cap, Some(63));
         assert_eq!(parse(CRASHY).ground_pile_cap, None);
+    }
+
+    /// #341: each skipped fill type is its own line; collect the names once each.
+    #[test]
+    fn finds_dropped_fill_types() {
+        let line = "Error: FillTypeManager.addFillType too many fill types. Only 255 fill types are supported. Ignoring 'LIQUID_UREA'.";
+        assert_eq!(dropped_fill_type(line), Some((255, "LIQUID_UREA".into())));
+        assert_eq!(dropped_fill_type("Error: something else 'X'"), None);
+        let other = line.replace("LIQUID_UREA", "GYPSUM");
+        let log =
+            format!("GIANTS Engine Runtime 10.0\n{line}\n{other}\n{line}\nApplication quit\n");
+        let r = parse(&log);
+        assert_eq!(r.fill_type_cap, Some(255));
+        assert_eq!(r.dropped_fill_types, ["LIQUID_UREA", "GYPSUM"]);
+        assert!(parse(CRASHY).dropped_fill_types.is_empty());
     }
 }

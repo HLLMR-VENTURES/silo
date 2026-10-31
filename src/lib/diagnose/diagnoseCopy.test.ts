@@ -2,7 +2,7 @@
 // and keeping only the newest conflict check.
 import { describe, expect, it } from "vitest";
 import { bisectRounds, crashNoticeOffers, crashNoticeText, likelyCulprit } from "./crashNotice";
-import { canParkOne, conflictCounts, conflictHeadline, conflictTitle, groundPileCapNote, severityLabel } from "./conflictCopy";
+import { canParkOne, conflictCounts, conflictHeadline, conflictTitle, fillTypeCapNote, groundPileCapNote, severityLabel } from "./conflictCopy";
 import { countsLine, groupLogMods, lastRunMeta, lastRunVerdict, logModDetails, logTimeLabel } from "./lastRun";
 import { latestOnly } from "./latest";
 import type { LogModHealth, LogReport } from "../types";
@@ -18,7 +18,7 @@ function report(crashed: boolean, mods: LogModHealth[], over: Partial<LogReport>
     crashed,
     mods,
     unattributed: 0,
-    totalFindings: 0, groundPileCap: null,
+    totalFindings: 0, groundPileCap: null, fillTypeCap: null, droppedFillTypes: [],
     ...over,
   };
 }
@@ -81,6 +81,10 @@ describe("conflict copy", () => {
     // #339: the ground-pile budget reads by how serious it is, not by how many mods.
     expect(conflictTitle({ kind: "heightTypes", mods: two, severity: "critical" })).toBe("Mods need more ground-pile slots than the map has");
     expect(conflictTitle({ kind: "heightTypes", mods: [], severity: "info" })).toBe("Ground-pile slots are nearly full");
+    expect(conflictTitle({ kind: "fillTypeCap", mods: two, severity: "warning" })).toBe(
+      "Mods add more material types than the game supports",
+    );
+    expect(conflictTitle({ kind: "fillTypeCap", mods: [], severity: "info" })).toBe("Material types are nearly full");
     expect(conflictTitle({ kind: "map", mods: ["M1", "M2", "M3", "M4"] })).toBe("More than one map is active");
     expect(conflictTitle({ kind: "somethingNew", mods: two })).toBe("Two mods clash");
   });
@@ -235,5 +239,17 @@ describe("ground-pile cap note (#339)", () => {
     expect(n.body).toContain("the map's 63 ground-pile types");
     expect(n.body).toContain("Straw Harvest and Pumps n' Hoses");
     expect(n.body).not.toMatch(/height type|densityMap|—/);
+  });
+});
+
+describe("fill-type cap note (#341)", () => {
+  it("says how many were skipped and names the first few", () => {
+    const one = fillTypeCapNote(255, ["LIQUID_UREA"]);
+    expect(one.title).toBe("The game ran out of material types.");
+    expect(one.body).toContain("It supports 255");
+    expect(one.body).toContain("skipped 1 material: LIQUID_UREA.");
+    const many = fillTypeCapNote(255, ["A", "B", "C", "D", "E", "F", "G"]);
+    expect(many.body).toContain("skipped 7 materials: A, B, C, D, E and 2 more.");
+    expect(many.body).not.toMatch(/fill type|fillType|—/);
   });
 });

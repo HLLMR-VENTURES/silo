@@ -10,6 +10,7 @@ pub mod conflicts;
 pub mod db;
 mod diagnostics;
 pub mod error;
+pub mod filltypes;
 pub mod firstrun;
 pub mod fsgame;
 mod fslog;
@@ -3679,7 +3680,7 @@ async fn detect_conflicts(
     mods: Vec<conflicts::ConflictInput>,
 ) -> Result<Vec<conflicts::Conflict>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        conflicts::detect_with(&mods, Some(heighttypes::GameData::cached()))
+        conflicts::detect_with(&mods, Some(conflicts::GameLists::cached()))
     })
     .await
     .map_err(|e| e.to_string())
