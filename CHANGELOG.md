@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Conflicts** now checks your active mods against the map's **ground-pile slots**, the fixed
+  number of materials (63 on the base maps) that can lie on the ground as piles. The base game
+  already uses 48 of them. When mods ask for more, Straw Harvest and Pumps n' Hoses refuse to load
+  and the game closes your save. Silo now warns before you launch, names the mods using the most
+  slots, and adds a note when 3 or fewer are left. **Last run** explains the game's "maximum
+  number of height types" error when it happens. (#339)
+
 ## [1.0.3] - 2026-10-29
 
 The library database moves to version 3 (one added column, for the per-mod update switch). Silo
