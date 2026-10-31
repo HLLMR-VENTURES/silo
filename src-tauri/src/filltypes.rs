@@ -35,13 +35,73 @@ const UNKNOWN: &str = "UNKNOWN";
 /// install can't be read.
 const BASE_FALLBACK_COUNT: usize = 177;
 
-/// What the base maps add beyond the base list. Their `map.xml` is inside the encrypted game
-/// archives, so these were read in-game (Riverbend Springs, FS25 1.25).
-const BASE_MAP_EXTRA: &[&str] = &[];
+/// What a base map can add beyond the base list: Riverbend Springs loads these crops' fill types
+/// (178 to 182), Hutan Pantai none. Their `map.xml` is inside the encrypted game archives, so
+/// these were read in-game (FS25 1.25).
+const BASE_MAP_EXTRA: &[&str] = &["BANANA", "COFFEECHERRIES", "ONION", "ONION_DIRTY"];
 
 /// Fill types each DLC adds, keyed by its `pdlc/<stem>.dlc` file name, read in-game from
 /// `g_fillTypeManager` (FS25 1.25). They may drift with DLC updates. The other packs add none.
-const DLC_FILL_TYPES: &[(&str, &[&str])] = &[];
+const DLC_FILL_TYPES: &[(&str, &[&str])] = &[
+    (
+        "beansAndAlpacasPack",
+        &[
+            "ALPACAARMCHAIR",
+            "ALPACACHAIR",
+            "ALPACAFLEECE",
+            "ALPACAWOOL",
+            "ALPACAPILLOW",
+            "ALPACAPLUSH",
+            "ALPACASOCKS",
+            "BANANACANDY",
+            "BANANACHIPS",
+            "BANANAMILK",
+            "COFFEEBAGS",
+            "COFFEEPACKED",
+            "COFFEECAPSULES",
+            "COFFEEYOGURT",
+            "COFFEEBEVERAGE",
+            "TIRAMISU",
+            "COPPERORE",
+            "IRONORE",
+            "PIGMENTS",
+            "RESIN",
+            "PAINTBUCKETS",
+            "BANANABOX",
+            "BANANAFRIEDBOX",
+            "BANANACAKE",
+            "BANANAJAM",
+            "FUNGICIDE",
+            "ALPACA_WHITE",
+            "ALPACA_BROWN",
+            "ALPACA_GREY",
+            "ALPACA_FAWN",
+        ],
+    ),
+    (
+        "highlandsFishingPack",
+        &[
+            "COAL",
+            "STONEBIG",
+            "CASTLEROCK",
+            "SHINGLEROOF",
+            "FISHFOOD",
+            "SALMONYOUNG",
+            "SALMON",
+            "TROUTYOUNG",
+            "TROUT",
+            "FRIEDONION",
+            "ONIONBAG",
+            "ONIONSALT",
+            "ONIONSOUP",
+        ],
+    ),
+    ("pumpsAndHosesPack", &["SEPARATED_MANURE", "UMBILICAL_HOSE"]),
+    (
+        "strawHarvestPack",
+        &["MOLASSES", "HAY_PELLETS", "STRAW_PELLETS"],
+    ),
+];
 
 /// Declared `<fillType name>` values, upper-cased as the game keys them (`string.upper` in
 /// `FillTypeManager:loadFillTypes`) and de-duplicated. Pure.
@@ -430,6 +490,22 @@ mod tests {
         assert_eq!(g.base, ["UNKNOWN", "WHEAT", "BARLEY"]);
         // No install: UNKNOWN plus the 1.25 count.
         assert_eq!(GameData::load(None).base.len(), 178);
+    }
+
+    /// The in-game counts (FS25 1.25): 178 base, 182 on Riverbend Springs, 230 with every DLC.
+    #[test]
+    fn the_measured_tables_add_up() {
+        assert_eq!(BASE_MAP_EXTRA.len(), 4);
+        let counts: Vec<usize> = DLC_FILL_TYPES.iter().map(|(_, t)| t.len()).collect();
+        assert_eq!(counts, [30, 13, 2, 3]);
+        let stems: Vec<String> = DLC_FILL_TYPES.iter().map(|(s, _)| s.to_string()).collect();
+        let g = GameData {
+            base: many("BASE", 178),
+            map_extra: owned(BASE_MAP_EXTRA),
+            dlc: dlc_names(DLC_FILL_TYPES, &stems),
+        };
+        let b = evaluate(&g, None, &[]);
+        assert_eq!((b.base, b.dlc, b.total), (182, 48, 230));
     }
 
     #[test]

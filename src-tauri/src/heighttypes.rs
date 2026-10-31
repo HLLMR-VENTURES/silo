@@ -1,8 +1,8 @@
 //! Ground-pile slot budget (#339). FS25 gives each map a fixed number of density-map height
 //! types, the slots that let a material lie on the ground as a pile: `2^numChannels - 1`, so 63
-//! on the base maps (6 channels). The base game already fills 51 of them: 48 from
-//! `data/maps/maps_densityMapHeightTypes.xml` and 3 from crop (foliage) XML, coffee cherries and
-//! onions. The DLCs and mods share the rest. Mods register before the DLCs, so when the slots run
+//! on the base maps (6 channels). The base game already fills 48 of them from
+//! `data/maps/maps_densityMapHeightTypes.xml`, and 51 on maps that grow coffee cherries and onions
+//! (their crop XML adds 3; Riverbend Springs does, Hutan Pantai doesn't). The DLCs and mods share the rest. Mods register before the DLCs, so when the slots run
 //! out the DLCs lose: the log says `addDensityMapHeightType "X": maximum number (63) of height
 //! types already registered`, then Straw Harvest and Pumps n' Hoses disable themselves and close
 //! the save (measured in-game on FS25 1.25, 2026-10-31).
@@ -10,8 +10,8 @@
 //! What we can count:
 //! * the map's list: the base game's, or the map's own when its `map.xml` points
 //!   `<densityMapHeightTypes filename>` at a file inside the map (treated as replacing the base
-//!   list, the way the base maps point at `$data/maps/maps_densityMapHeightTypes.xml`), plus the
-//!   base crops' types;
+//!   list, the way the base maps point at `$data/maps/maps_densityMapHeightTypes.xml`): exact;
+//!   plus the base crops' types, which only some maps load: an estimate;
 //! * mods that declare `<densityMapHeightTypes filename>` in modDesc: exact;
 //! * mods that register the same XML from Lua (SoilFertilizer, AdvancedSilageTypes and others):
 //!   an estimate, from any `*heightType*.xml` in the zip;
@@ -177,7 +177,7 @@ pub fn cap_for(channels: u32) -> usize {
 pub struct GameData {
     pub base: Vec<String>,
     pub base_channels: u32,
-    /// The base crops' types. They load on every map, the map's own list or not.
+    /// The base crops' types. Only maps that grow those crops load them, so they're an estimate.
     pub foliage: Vec<String>,
     pub dlc: Vec<String>,
 }
@@ -359,12 +359,13 @@ pub fn evaluate(game: &GameData, map: Option<&MapTypes>, mods: &[ModTypes]) -> B
         Some((list, ch)) => (list, ch),
         None => (game.base.clone(), game.base_channels),
     };
-    let base_set: BTreeSet<&str> = base
+    // The map's list is exact; the base crops' types load only on maps that grow them.
+    let mut exact: BTreeSet<&str> = base.iter().map(String::as_str).collect();
+    let base_set: BTreeSet<&str> = exact
         .iter()
-        .chain(&game.foliage)
-        .map(String::as_str)
+        .copied()
+        .chain(game.foliage.iter().map(String::as_str))
         .collect();
-    let mut exact: BTreeSet<&str> = base_set.clone();
     let mut all: BTreeSet<&str> = base_set.clone();
     let dlc_before = all.len();
     all.extend(game.dlc.iter().map(String::as_str));
@@ -731,11 +732,13 @@ mod tests {
     }
 
     #[test]
-    fn base_crop_types_count_on_every_map() {
+    fn base_crop_types_count_as_an_estimate() {
         let mut g = game(48, &[]);
         g.foliage = vec!["ONION".into(), "COFFEECHERRIES".into(), "BASE0".into()];
         let b = evaluate(&g, None, &[]);
         assert_eq!((b.base, b.total), (50, 50));
+        // Only some maps grow those crops, so they never count toward a Problem.
+        assert_eq!(b.exact_total, 48);
         // A map with its own list still loads the base crops.
         let map = MapTypes {
             label: "Own list".into(),
