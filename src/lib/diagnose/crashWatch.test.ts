@@ -25,7 +25,7 @@ function report(crashed: boolean): LogReport {
     crashed,
     mods: [],
     unattributed: 0,
-    totalFindings: 0,
+    totalFindings: 0, groundPileCap: null,
   };
 }
 

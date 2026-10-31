@@ -7,6 +7,7 @@
 //! * `<extraSourceFiles>` global Lua with the same basename — they can overwrite
 //!   each other (warning)
 //! * more than one active map (info only: FS25 loads just the savegame's map)
+//! * more ground-pile (height) types than the map has slots for (#339, see `heighttypes`)
 //!
 //! Signal refinement: a clash among mods by the **same author** is usually
 //! intentional (shared packs/utilities), and two mods shipping the **byte-identical
@@ -21,6 +22,7 @@
 //!
 //! Runs on demand for the active set only, so it stays cheap.
 
+use crate::heighttypes;
 use crate::moddesc;
 use crate::scan;
 use rayon::prelude::*;
@@ -123,6 +125,34 @@ fn same_author(parsed: &[Parsed], idxs: &[usize]) -> bool {
     match it.next() {
         Some(first) if !first.is_empty() => it.all(|a| a.eq_ignore_ascii_case(first)),
         _ => false,
+    }
+}
+
+/// Every member's path in a zip or unpacked dir, `/`-separated.
+fn list_members(path: &str, kind: &str) -> Vec<String> {
+    if kind == "zip" {
+        let Ok(f) = std::fs::File::open(path) else {
+            return Vec::new();
+        };
+        let Ok(ar) = zip::ZipArchive::new(f) else {
+            return Vec::new();
+        };
+        ar.file_names()
+            .flatten()
+            .map(|n| n.replace('\\', "/"))
+            .collect()
+    } else {
+        let root = Path::new(path);
+        walkdir::WalkDir::new(root)
+            .max_depth(6)
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file())
+            .filter_map(|e| {
+                let rel = e.path().strip_prefix(root).ok()?;
+                Some(rel.to_string_lossy().replace('\\', "/"))
+            })
+            .collect()
     }
 }
 
@@ -230,8 +260,70 @@ fn map_conflict(maps: Involved) -> Option<Conflict> {
     ))
 }
 
-/// Detect conflicts within the given active set.
+/// The ground-pile slot budget for the active set, as a conflict when it's tight or over.
+fn height_type_conflict(parsed: &[Parsed], game: &heighttypes::GameData) -> Option<Conflict> {
+    let mods: Vec<heighttypes::ModTypes> = parsed
+        .par_iter()
+        .filter(|p| !p.md.is_map)
+        .filter_map(|p| {
+            heighttypes::mod_types(
+                &p.label,
+                &p.tech_name,
+                &p.md,
+                &|m| read_member(&p.path, &p.kind, m),
+                &|| list_members(&p.path, &p.kind),
+            )
+        })
+        .collect();
+    let maps: Vec<heighttypes::MapTypes> = parsed
+        .iter()
+        .filter(|p| p.md.is_map)
+        .map(|p| {
+            let read = |m: &str| read_member(&p.path, &p.kind, m);
+            let list =
+                p.md.map_config_file
+                    .as_deref()
+                    .and_then(&read)
+                    .and_then(|xml| heighttypes::map_list_file(&xml))
+                    .and_then(|f| read(&f))
+                    .map(|b| heighttypes::parse_list(&b))
+                    .filter(|(names, _)| !names.is_empty())
+                    .map(|(names, ch)| (names, ch.unwrap_or(heighttypes::DEFAULT_CHANNELS)));
+            heighttypes::MapTypes {
+                label: p.label.clone(),
+                list,
+                extra: heighttypes::mod_types(&p.label, &p.tech_name, &p.md, &read, &Vec::new),
+            }
+        })
+        .collect();
+    let budget = heighttypes::worst(game, &maps, &mods);
+    let severity = heighttypes::severity(&budget)?;
+    let involved: Involved = budget
+        .mods
+        .iter()
+        .map(|(l, t, _, _)| (l.clone(), t.clone()))
+        .unzip();
+    Some(conflict(
+        severity,
+        "heightTypes",
+        "Ground-pile slots",
+        heighttypes::explain(&budget),
+        involved,
+    ))
+}
+
+/// Detect conflicts within the given active set, without the ground-pile budget (it needs the
+/// game's own lists; see [`detect_with`]).
 pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
+    detect_with(inputs, None)
+}
+
+/// Detect conflicts within the given active set. With `game`, also check the ground-pile slot
+/// budget against the base game and installed DLCs.
+pub fn detect_with(
+    inputs: &[ConflictInput],
+    game: Option<&heighttypes::GameData>,
+) -> Vec<Conflict> {
     let parsed: Vec<Parsed> = inputs
         .par_iter()
         .filter_map(|i| {
@@ -386,6 +478,10 @@ pub fn detect(inputs: &[ConflictInput]) -> Vec<Conflict> {
             ),
             involved,
         ));
+    }
+
+    if let Some(c) = game.and_then(|g| height_type_conflict(&parsed, g)) {
+        out.push(c);
     }
 
     // critical → warning → info, then by name.
@@ -596,6 +692,66 @@ mod tests {
         assert!(names.contains(&"LIMESTONE".to_string()));
         assert!(names.contains(&"COMPOST".to_string()));
         assert_eq!(names.iter().filter(|n| *n == "LIMESTONE").count(), 1);
+    }
+
+    /// #339: the ground-pile budget runs over the active set, only when the game's lists are
+    /// known, and names the mods that use the slots.
+    #[test]
+    fn ground_pile_budget_names_the_mods_using_slots() {
+        let base = std::env::temp_dir().join(format!("silo_conflict_ht_{}", std::process::id()));
+        let mut inputs = Vec::new();
+        // One mod declares its piles in modDesc, one ships them for a script to load.
+        for (i, declared) in [true, false].iter().enumerate() {
+            let dir = base.join(format!("FS25_Piles{i}"));
+            std::fs::create_dir_all(dir.join("xml")).unwrap();
+            let decl = if *declared {
+                r#"<densityMapHeightTypes filename="xml/types.xml"/>"#
+            } else {
+                ""
+            };
+            std::fs::write(
+                dir.join("modDesc.xml"),
+                format!(r#"<modDesc descVersion="92"><author>A{i}</author>{decl}</modDesc>"#),
+            )
+            .unwrap();
+            let entries: String = (0..10)
+                .map(|n| format!(r#"<densityMapHeightType fillTypeName="P{i}_{n}"/>"#))
+                .collect();
+            let file = if *declared {
+                "types.xml"
+            } else {
+                "densityMapHeightTypes.xml"
+            };
+            std::fs::write(
+                dir.join("xml").join(file),
+                format!("<map><densityMapHeightTypes>{entries}</densityMapHeightTypes></map>"),
+            )
+            .unwrap();
+            inputs.push(ConflictInput {
+                tech_name: format!("FS25_Piles{i}"),
+                title: Some(format!("Piles {i}")),
+                path: dir.to_string_lossy().into_owned(),
+                kind: "dir".into(),
+            });
+        }
+        let game = heighttypes::GameData {
+            base: (0..48).map(|n| format!("BASE{n}")).collect(),
+            base_channels: 6,
+            dlc: vec![],
+        };
+        let found = detect_with(&inputs, Some(&game));
+        let without = detect(&inputs);
+        let _ = std::fs::remove_dir_all(&base);
+
+        // 48 + 10 exact = 58 fits; the script mod's 10 push it to 68: a warning, not critical.
+        let c = found
+            .iter()
+            .find(|c| c.kind == "heightTypes")
+            .expect("budget");
+        assert_eq!(c.severity, "warning");
+        assert!(c.explanation.contains("68 in all"), "{}", c.explanation);
+        assert_eq!(c.tech_names, vec!["FS25_Piles0", "FS25_Piles1"]);
+        assert!(without.iter().all(|c| c.kind != "heightTypes"));
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod fsgame;
 mod fslog;
 pub mod gamelaunch;
 pub mod github;
+pub mod heighttypes;
 pub mod icons;
 pub mod logscan;
 pub mod moddesc;
@@ -3677,9 +3678,11 @@ async fn export_set_file(name: String, mods: Vec<String>, path: String) -> Resul
 async fn detect_conflicts(
     mods: Vec<conflicts::ConflictInput>,
 ) -> Result<Vec<conflicts::Conflict>, String> {
-    tauri::async_runtime::spawn_blocking(move || conflicts::detect(&mods))
-        .await
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        conflicts::detect_with(&mods, Some(heighttypes::GameData::cached()))
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // ── Game launch ──

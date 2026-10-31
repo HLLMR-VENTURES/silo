@@ -32,10 +32,24 @@ const WHAT: Record<string, string> = {
  * @param c the conflict
  * @return e.g. "Two mods ship a script with the same file name", "More than one map is active"
  */
-export function conflictTitle(c: Pick<Conflict, "kind" | "mods">): string {
+export function conflictTitle(c: Pick<Conflict, "kind" | "mods"> & Partial<Pick<Conflict, "severity">>): string {
   if (c.kind === "map") return "More than one map is active";
+  if (c.kind === "heightTypes")
+    return c.severity === "info" ? "Ground-pile slots are nearly full" : "Mods need more ground-pile slots than the map has";
   const n = Math.max(c.mods.length, 2);
   return `${modsWord(n)} ${WHAT[c.kind] ?? "clash"}`;
+}
+
+/**
+ * The Last run note when the game ran out of ground-pile slots (#339).
+ * @param cap the cap the game reported, e.g. 63
+ * @return the note's bold title and its body
+ */
+export function groundPileCapNote(cap: number): { title: string; body: string } {
+  return {
+    title: "The game ran out of ground-pile slots.",
+    body: `Your mods asked for more than the map's ${formatCount(cap)} ground-pile types (the materials you can tip onto the ground), so Straw Harvest and Pumps n' Hoses refused to load and the save closed. Diagnose → Conflicts shows which mods use the most slots. Turn a few of those off.`,
+  };
 }
 
 /** A conflict that a "Park one…" menu can fix: two or more named mods, and not the maps note. */
