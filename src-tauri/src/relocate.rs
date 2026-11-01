@@ -433,7 +433,8 @@ fn delete_source(src: &Path) -> Result<(), String> {
 /// atomic replace; folder links are removed and re-made, restoring the old link if that fails);
 /// a zip hardlinked to `src` is atomically replaced by a hardlink or symlink to `dst` —
 /// otherwise it would keep the old copy's bytes alive after that copy is deleted, and the move
-/// would free nothing (where only a copy is possible it's kept as the standalone copy instead).
+/// would free nothing (where the new link might be a copy it's kept as the standalone copy
+/// instead, see `LinkPolicy::can_only_copy`).
 /// Copied zips, marker-copied folders and the user's own files are standalone and left alone;
 /// a link to anything else is not ours to change.
 fn repoint(
@@ -449,26 +450,35 @@ fn repoint(
     let link = env.mods.join(&row.file_name);
     let Ok(meta) = link.symlink_metadata() else {
         organize::make_link(dst, &link, &row.kind, policy).map_err(|e| format!("relink: {e}"))?;
+        // A link that reaches nothing is left as it is (removing it could race whatever
+        // replaces it); the retry checks it again before the old copy may go.
+        reaches_the_copy(&link, &row.kind)?;
         env.note_projection(row, &link);
         return Ok(());
     };
     if !meta.file_type().is_symlink() {
-        // Only a hardlink of the very file being moved — provably Silo's projection. Where the
-        // new link could only be a full copy (another drive, no symlinks), keep it: once the
-        // old copy is deleted it simply becomes the mod's standalone copy, with no second copy
-        // made (and its date kept).
+        // Only a hardlink of the very file being moved — provably Silo's projection. It's
+        // swapped for a real link to the new copy (a hardlink, or a symlink where allowed) —
+        // never for a copy. Where no link is known to work (`can_only_copy`: another drive
+        // without symlinks, a mods folder that rejects hardlinks, a drive Silo can't identify),
+        // or the link fails anyway, it's kept: once the old copy is deleted it simply becomes
+        // the mod's standalone copy, with no second copy made in the mods folder (and its date
+        // kept). `check_move` counts the same cases.
         if row.kind != "dir" && meta.is_file() && same_file(&link, src) && !policy.can_only_copy() {
-            return replace_zip_link(env, row, &link, dst, policy);
+            let linked = organize::replace_zip_link_if_linkable(&link, dst, policy)
+                .map_err(|e| format!("relink: {e}"))?;
+            if linked {
+                env.note_projection(row, &link);
+            }
         }
         return Ok(());
     }
-    let target = std::fs::read_link(&link).map_err(|e| format!("relink: {e}"))?;
-    let points_at_src = target == src
-        || matches!(
-            (std::fs::canonicalize(&link), std::fs::canonicalize(src)),
-            (Ok(a), Ok(b)) if a == b
-        );
-    if !points_at_src && link.exists() {
+    if !stale_symlink(&link, src).map_err(|e| format!("relink: {e}"))? {
+        // Already pointing at the new copy (a step that stopped after re-linking, now retried):
+        // it must still reach it before the old copy may go. Any other link isn't ours.
+        if stale_symlink(&link, dst).unwrap_or(false) {
+            return reaches_the_copy(&link, &row.kind);
+        }
         return Ok(());
     }
     if row.kind == "dir" {
@@ -488,9 +498,95 @@ fn repoint(
             }
             return Err(format!("relink: {e}"));
         }
-        return Ok(());
+        // A link that reaches nothing is left as it is (removing it could race whatever
+        // replaces it); the step stops before the old copy goes, and the retry checks again.
+        return reaches_the_copy(&link, &row.kind);
     }
     replace_zip_link(env, row, &link, dst, policy)
+}
+
+/// A symlink entry `link` that `repoint` makes again: it points at `src`, the copy being moved
+/// — the same path (a relative target read from the link's folder, compared as an identity
+/// key), or the same file once both resolve. A link to anything else, dangling or not, is not
+/// ours to change.
+fn stale_symlink(link: &Path, src: &Path) -> std::io::Result<bool> {
+    let target = std::fs::read_link(link)?;
+    if target == src {
+        return Ok(true);
+    }
+    let resolved = match link.parent() {
+        Some(dir) if target.is_relative() => dir.join(&target),
+        _ => target,
+    };
+    let key = |p: &Path| crate::modsroot::normalize_key(&p.to_string_lossy(), cfg!(windows));
+    Ok(key(&resolved) == key(src)
+        || matches!(
+            (std::fs::canonicalize(link), std::fs::canonicalize(src)),
+            (Ok(a), Ok(b)) if a == b
+        ))
+}
+
+/// What a move's re-links could cost in space, by case (`repoint`). Bytes, from the archived
+/// copies in `archive`. Whether each case costs anything depends on the new archive
+/// (`check_move`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RelinkCost {
+    /// Active zips hardlinked to their archived copy. Where no real link to the new copy can be
+    /// made, `repoint` keeps that hardlink as the mod's standalone copy, so deleting the old
+    /// copy frees nothing: on one drive these stay used alongside their new copies.
+    pub kept: u64,
+    /// Active zips whose mods-folder entry is missing or a symlink to the archived copy:
+    /// `repoint` makes each again — a full copy in the mods folder where only a copy can be
+    /// made (`LinkPolicy::can_only_copy`).
+    pub copied_zips: u64,
+    /// Active folder mods whose entry is missing or a symlink to the archived copy: made again,
+    /// a full copy where a folder link may not work (`organize::dir_link_may_copy`).
+    pub copied_dirs: u64,
+    /// The largest mod in `rows` (active or not) that isn't counted in `kept`.
+    pub largest_unkept: u64,
+    /// The largest single entry in `copied_zips` / `copied_dirs`.
+    pub largest_copied_zip: u64,
+    pub largest_copied_dir: u64,
+}
+
+/// `RelinkCost` of the active mods in `rows`, with their mods-folder entries in `mods` and
+/// archived copies in `archive` — the same cases `repoint` tells apart. Read-only.
+pub fn relink_cost(mods: &Path, archive: &Path, rows: &[OrganizedRow]) -> RelinkCost {
+    let mut cost = RelinkCost::default();
+    for row in rows {
+        let src = organize::archive_path(archive, &row.category, &row.file_name);
+        let size = size_of(&src);
+        if !row.active {
+            cost.largest_unkept = cost.largest_unkept.max(size);
+            continue;
+        }
+        let link = mods.join(&row.file_name);
+        let dir = row.kind == "dir";
+        let made_again = match link.symlink_metadata() {
+            Err(_) => true,
+            Ok(m) if m.file_type().is_symlink() => stale_symlink(&link, &src).unwrap_or(false),
+            Ok(m) => {
+                if !dir && m.is_file() && same_file(&link, &src) {
+                    cost.kept += size;
+                    continue;
+                }
+                false
+            }
+        };
+        cost.largest_unkept = cost.largest_unkept.max(size);
+        match (made_again, dir) {
+            (true, true) => {
+                cost.copied_dirs += size;
+                cost.largest_copied_dir = cost.largest_copied_dir.max(size);
+            }
+            (true, false) => {
+                cost.copied_zips += size;
+                cost.largest_copied_zip = cost.largest_copied_zip.max(size);
+            }
+            _ => {}
+        }
+    }
+    cost
 }
 
 /// Atomically swap a zip's mods-folder entry `link` for a new link to `dst`
@@ -503,8 +599,67 @@ fn replace_zip_link(
     policy: &mut LinkPolicy,
 ) -> Result<(), String> {
     organize::replace_zip_link(link, dst, policy).map_err(|e| format!("relink: {e}"))?;
+    reaches_the_copy(link, &row.kind)?;
     env.note_projection(row, link);
     Ok(())
+}
+
+/// The mods-folder entry `link` that `repoint` made reaches the kind of mod it should (a file
+/// for a zip, a folder for a folder mod). A link to a new copy that went missing while it was
+/// made (a sync client removing it, say) would dangle: that's an error, so the step stops before
+/// the old copy is deleted. Only an observation: `forward_one` / `back_one` check the new copy
+/// again right before deleting the old one.
+fn reaches_the_copy(link: &Path, kind: &str) -> Result<(), String> {
+    match std::fs::metadata(link) {
+        Ok(m) if right_kind(&m, kind) => Ok(()),
+        _ => Err(format!(
+            "relink: Silo couldn't open the mod through its new link at {}. Check the new archive folder, then resume.",
+            link.display()
+        )),
+    }
+}
+
+/// A file for a zip, a folder for a folder mod.
+fn right_kind(m: &std::fs::Metadata, kind: &str) -> bool {
+    if kind == "dir" {
+        m.is_dir()
+    } else {
+        m.is_file()
+    }
+}
+
+/// Right before the old copy `old` is deleted, both copies are still themselves (not links), of
+/// the mod's kind, and still match as they did when verified: the same size for a zip, the same
+/// files and sizes for a folder mod (`Check::Listing`; no second hash of every byte). A copy
+/// that vanished, was swapped for a link, or was replaced by something else since (a sync
+/// client, say) stops the step with both kept. An observation, not a lock: an identical-size
+/// swap in between isn't caught.
+fn still_there(old: &Path, new: &Path, kind: &str) -> Result<(), StepErr> {
+    let real = |p: &Path| {
+        p.symlink_metadata()
+            .ok()
+            .filter(|m| !m.file_type().is_symlink() && right_kind(m, kind))
+    };
+    let Some(n) = real(new) else {
+        return Err(StepErr::Failed(format!(
+            "move: the new copy at {} is gone, so Silo kept the original. Check that folder, then resume.",
+            new.display()
+        )));
+    };
+    let same = match real(old) {
+        Some(_) if kind == "dir" => verify(old, new, kind, Check::Listing).unwrap_or(false),
+        Some(o) => o.len() == n.len(),
+        None => false,
+    };
+    if same {
+        Ok(())
+    } else {
+        Err(StepErr::Failed(format!(
+            "move: {} and {} no longer match, so Silo kept both. Check them, then resume.",
+            old.display(),
+            new.display()
+        )))
+    }
 }
 
 /// What a step needs from the run: the DB (to save the marker) and the mods folder.
@@ -632,6 +787,7 @@ fn forward_one(
     if abort() {
         return Err(StepErr::Interrupted);
     }
+    still_there(&src, &dst, &row.kind)?;
     delete_source(&src).map_err(StepErr::Failed)?;
     Ok(Step::Moved)
 }
@@ -675,6 +831,7 @@ fn back_one(
     if abort() {
         return Err(StepErr::Interrupted);
     }
+    still_there(&src, &home, &row.kind)?;
     delete_source(&src).map_err(StepErr::Failed)?;
     env.unrecord(marker, &row.tech_name)?;
     Ok(Step::Moved)
@@ -1505,6 +1662,14 @@ fn short_of(bytes: u64, free: Option<u64>) -> Option<String> {
 /// Space problem, if the target drive can't hold `bytes` plus a 1 GB margin.
 pub fn space_problem(bytes: u64, free: Option<u64>) -> Option<String> {
     short_of(bytes, free).map(|s| format!("Not enough free space: {s}."))
+}
+
+/// Space problem on the mods folder's own drive (another drive than the new archive's), if it
+/// can't hold the `bytes` of copies a move makes there plus a 1 GB margin.
+pub fn mods_space_problem(bytes: u64, free: Option<u64>) -> Option<String> {
+    short_of(bytes, free).map(|s| {
+        format!("Not enough free space on your mods folder's drive for copies of your active mods: {s}.")
+    })
 }
 
 /// Loose mods (zips / mod folders) at the top level of an archive folder — candidates to adopt.
@@ -2481,6 +2646,234 @@ mod tests {
         assert_eq!(same_file::Handle::from_path(&flat).unwrap(), before);
         assert!(!same_file(&flat, &zip_at(&f.new, "FS25_A")));
         assert_eq!(std::fs::read(&flat).unwrap(), b"PK\x03\x04 FS25_A");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// Same drive, but a hardlink into the new archive isn't known to work — the mods folder
+    /// is cloud-synced and rejects it, or the drive can't be identified and no probe could run —
+    /// and no symlinks: the hardlink is kept as the mod's standalone copy, never traded for a
+    /// copy in the mods folder that no free-space check counted (#188).
+    #[test]
+    fn a_hardlink_is_kept_when_a_new_hardlink_isnt_known_to_work() {
+        let f = fx("nohardlink");
+        let flat = add_hardlinked(&f, "FS25_A");
+        let r = db::load_organized(&f.conn, &f.key).remove(0);
+        let before = same_file::Handle::from_path(&flat).unwrap();
+        let layout = dest(&f);
+        let mut pol = LinkPolicy::decided_for_tests(&layout, false, false, false);
+        let mut m = marker(&f);
+        assert_eq!(
+            forward_one(&env(&f), &r, &mut m, &mut pol, &|| false),
+            Ok(Step::Moved)
+        );
+        assert!(!zip_at(&f.old, "FS25_A").exists());
+        assert!(zip_at(&f.new, "FS25_A").exists());
+        assert_eq!(same_file::Handle::from_path(&flat).unwrap(), before);
+        assert_eq!(std::fs::read(&flat).unwrap(), b"PK FS25_A");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// `reaches_the_copy` wants the right kind of thing behind the link: a file for a zip, a
+    /// folder for a folder mod (#188).
+    #[test]
+    fn a_new_link_must_reach_the_right_kind_of_copy() {
+        let f = fx("reaches");
+        let file = f.mods.join("FS25_A.zip");
+        std::fs::write(&file, b"PK").unwrap();
+        assert_eq!(reaches_the_copy(&file, "zip"), Ok(()));
+        assert!(reaches_the_copy(&file, "dir").is_err());
+        assert_eq!(reaches_the_copy(&f.old, "dir"), Ok(()));
+        assert!(
+            reaches_the_copy(&f.old, "zip").is_err(),
+            "a folder isn't a zip"
+        );
+        let e = reaches_the_copy(&f.mods.join("FS25_Gone.zip"), "zip").unwrap_err();
+        assert!(
+            e.contains("Silo couldn't open the mod through its new link"),
+            "{e}"
+        );
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// Right before the old copy goes, the new one must be itself and of the mod's kind: gone,
+    /// the wrong kind, or swapped for a link all stop the step, and `forward_one` then keeps
+    /// the original (#188).
+    #[test]
+    fn a_vanished_or_swapped_new_copy_keeps_the_original() {
+        let f = fx("stillthere");
+        let r = add_zip(&f, "FS25_A", false);
+        let src = zip_at(&f.old, "FS25_A");
+        let dst = zip_at(&f.new, "FS25_A");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::copy(&src, &dst).unwrap();
+        assert!(still_there(&src, &dst, "zip").is_ok());
+        assert!(still_there(&src, &dst, "dir").is_err());
+        assert!(still_there(&src, &f.new, "zip").is_err());
+        let gone = zip_at(&f.new, "FS25_Gone");
+        match still_there(&src, &gone, "zip") {
+            Err(StepErr::Failed(e)) => assert!(e.contains("so Silo kept the original"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        // Replaced since it was verified (another size), on either side: both kept.
+        std::fs::write(&dst, b"something else entirely").unwrap();
+        match still_there(&src, &dst, "zip") {
+            Err(StepErr::Failed(e)) => assert!(e.contains("so Silo kept both"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        std::fs::copy(&src, &dst).unwrap();
+        let other = f.base.join("other.zip");
+        std::fs::write(&other, b"a different file").unwrap();
+        assert!(still_there(&other, &dst, "zip").is_err());
+        // A folder mod: a folder with other files than the original isn't it.
+        let (fa, fb) = (f.base.join("fa"), f.base.join("fb"));
+        std::fs::create_dir_all(&fa).unwrap();
+        std::fs::create_dir_all(&fb).unwrap();
+        std::fs::write(fa.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        assert!(
+            still_there(&fa, &fb, "dir").is_err(),
+            "an empty folder isn't the copy"
+        );
+        std::fs::write(fb.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        assert!(still_there(&fa, &fb, "dir").is_ok());
+        // Swapped for a link back to the original: refused, and a step keeps the original.
+        std::fs::remove_file(&dst).unwrap();
+        if organize::symlink_file(&src, &dst).is_ok() {
+            assert!(still_there(&src, &dst, "zip").is_err());
+            let mut m = marker(&f);
+            env(&f).record(&mut m, "FS25_A").unwrap();
+            let layout = dest(&f);
+            let mut pol = LinkPolicy::copy_only_for_tests(&layout);
+            assert!(matches!(
+                forward_one(&env(&f), &r, &mut m, &mut pol, &|| false),
+                Err(StepErr::Failed(_))
+            ));
+            assert_eq!(std::fs::read(&src).unwrap(), b"PK\x03\x04 FS25_A");
+        }
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// A retried step whose mods-folder link already points at the new copy, which has gone
+    /// again: the step stops (so the old copy isn't deleted) instead of treating the link as
+    /// someone else's (#188).
+    #[test]
+    fn a_retried_link_to_a_vanished_new_copy_stops_the_step() {
+        let f = fx("retrylink");
+        let r = add_zip(&f, "FS25_A", true);
+        let link = f.mods.join("FS25_A.zip");
+        let dst = zip_at(&f.new, "FS25_A");
+        if organize::symlink_file(&dst, &link).is_err() {
+            // No symlinks here (Windows without Developer Mode): nothing to test.
+            let _ = std::fs::remove_dir_all(&f.base);
+            return;
+        }
+        let layout = dest(&f);
+        let mut pol = LinkPolicy::decided_for_tests(&layout, true, true, false);
+        let e = repoint(&env(&f), &r, &zip_at(&f.old, "FS25_A"), &dst, &mut pol).unwrap_err();
+        assert!(
+            e.contains("couldn't open the mod through its new link"),
+            "{e}"
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), dst, "left as it was");
+        assert!(zip_at(&f.old, "FS25_A").exists());
+        // Once the new copy is back, the retry passes.
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::copy(zip_at(&f.old, "FS25_A"), &dst).unwrap();
+        assert_eq!(
+            repoint(&env(&f), &r, &zip_at(&f.old, "FS25_A"), &dst, &mut pol),
+            Ok(())
+        );
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// A symlink of the user's own in the mods folder, under an active mod's name, pointing at
+    /// a file that isn't there (an unplugged drive): a move leaves it exactly as it is.
+    #[test]
+    fn a_dangling_symlink_of_the_users_own_survives_a_move() {
+        let f = fx("userlink");
+        add_zip(&f, "FS25_A", true);
+        let link = f.mods.join("FS25_A.zip");
+        let theirs = f.base.join("usb/FS25_A.zip");
+        if organize::symlink_file(&theirs, &link).is_err() {
+            // No symlinks here (Windows without Developer Mode): nothing to test.
+            let _ = std::fs::remove_dir_all(&f.base);
+            return;
+        }
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&link).unwrap(), theirs);
+        assert!(zip_at(&f.new, "FS25_A").exists());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// Where a hardlink is known to work, the hardlink is moved to the new copy as before.
+    #[test]
+    fn a_hardlink_follows_the_mod_when_a_new_hardlink_works() {
+        let f = fx("hardlinkworks");
+        let flat = add_hardlinked(&f, "FS25_A");
+        let r = db::load_organized(&f.conn, &f.key).remove(0);
+        let layout = dest(&f);
+        let mut pol = LinkPolicy::decided_for_tests(&layout, false, false, true);
+        let mut m = marker(&f);
+        assert_eq!(
+            forward_one(&env(&f), &r, &mut m, &mut pol, &|| false),
+            Ok(Step::Moved)
+        );
+        assert!(same_file(&flat, &zip_at(&f.new, "FS25_A")));
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// `relink_cost` sorts active zips the way `repoint` does: a hardlink to the archived copy
+    /// is kept, a missing entry (or a symlink into the archive) is made again. A standalone
+    /// copy, a parked mod and a folder mod cost nothing (#188).
+    #[test]
+    fn relink_cost_counts_kept_hardlinks_and_entries_made_again() {
+        let f = fx("relinkcost");
+        let size = |tech: &str| std::fs::metadata(zip_at(&f.old, tech)).unwrap().len();
+        add_hardlinked(&f, "FS25_Linked");
+        add_zip(&f, "FS25_Missing", true);
+        add_zip(&f, "FS25_Copied", true);
+        std::fs::copy(
+            zip_at(&f.old, "FS25_Copied"),
+            f.mods.join("FS25_Copied.zip"),
+        )
+        .unwrap();
+        add_zip(&f, "FS25_Parked", false);
+        let dir = row("FS25_Dir", "FS25_Dir", "dir", true);
+        std::fs::create_dir_all(f.old.join("Tools/FS25_Dir")).unwrap();
+        std::fs::write(f.old.join("Tools/FS25_Dir/modDesc.xml"), b"<modDesc/>").unwrap();
+        db::upsert_organized(&f.conn, &f.key, &dir).unwrap();
+        let rows = db::load_organized(&f.conn, &f.key);
+        let mut want = RelinkCost {
+            kept: size("FS25_Linked"),
+            copied_zips: size("FS25_Missing"),
+            copied_dirs: size_of(&f.old.join("Tools/FS25_Dir")),
+            largest_copied_zip: 0,
+            largest_copied_dir: 0,
+            largest_unkept: ["FS25_Missing", "FS25_Copied", "FS25_Parked"]
+                .iter()
+                .map(|t| size(t))
+                .chain([size_of(&f.old.join("Tools/FS25_Dir"))])
+                .max()
+                .unwrap(),
+        };
+        want.largest_copied_zip = size("FS25_Missing");
+        want.largest_copied_dir = want.copied_dirs;
+        assert!(want.copied_dirs > 0);
+        assert_eq!(relink_cost(&f.mods, &f.old, &rows), want);
+        // A symlink to the archived copy is made again too; one pointing anywhere else —
+        // dangling or not — is the user's and costs nothing.
+        let sym = f.mods.join("FS25_Copied.zip");
+        std::fs::remove_file(&sym).unwrap();
+        if organize::symlink_file(&zip_at(&f.old, "FS25_Copied"), &sym).is_ok() {
+            want.copied_zips += size("FS25_Copied");
+            want.largest_copied_zip = want.largest_copied_zip.max(size("FS25_Copied"));
+            assert_eq!(relink_cost(&f.mods, &f.old, &rows), want);
+            std::fs::remove_file(&sym).unwrap();
+            organize::symlink_file(&f.base.join("gone.zip"), &sym).unwrap();
+            want.copied_zips -= size("FS25_Copied");
+            want.largest_copied_zip = size("FS25_Missing");
+            assert_eq!(relink_cost(&f.mods, &f.old, &rows), want);
+        }
         let _ = std::fs::remove_dir_all(&f.base);
     }
 

@@ -830,6 +830,19 @@ pub fn claim_unscoped(conn: &Connection, root: &str) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// Every mods folder (identity key) Silo has organized mods for — also one it only reached
+/// through FS25's override, which never joined the known list. A failed read is an error, never
+/// "none".
+pub fn organized_roots(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT root FROM organized WHERE root <> '' ORDER BY root")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+}
+
 /// How many mods Silo has organized in this folder.
 pub fn count_organized(conn: &Connection, root: &str) -> i64 {
     conn.query_row(
@@ -1606,6 +1619,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         base.join("silo.db")
+    }
+
+    /// Every folder with organized mods, once each, never the legacy '' root; a failed read is
+    /// an error, never "none".
+    #[test]
+    fn organized_roots_lists_each_folder_once() {
+        let path = temp_db("roots");
+        let conn = open(&path).unwrap();
+        let row = |tech: &str| OrganizedRow {
+            tech_name: tech.into(),
+            file_name: format!("{tech}.zip"),
+            kind: "zip".into(),
+            category: "Tools".into(),
+            subcategory: None,
+            active: false,
+        };
+        upsert_organized(&conn, "/b", &row("FS25_A")).unwrap();
+        upsert_organized(&conn, "/b", &row("FS25_B")).unwrap();
+        upsert_organized(&conn, "/a", &row("FS25_A")).unwrap();
+        upsert_organized(&conn, "", &row("FS25_C")).unwrap();
+        assert_eq!(organized_roots(&conn).unwrap(), vec!["/a", "/b"]);
+        conn.execute_batch("DROP TABLE organized").unwrap();
+        assert!(organized_roots(&conn).is_err());
+        drop(conn);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

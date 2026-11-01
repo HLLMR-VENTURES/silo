@@ -698,11 +698,84 @@ pub(crate) fn replace_zip_link(
     let tmp = relink_tmp(link);
     let _ = remove_path(&tmp);
     make_link(dst, &tmp, "zip", policy)?;
+    // A new entry that reaches no file (the copy went while it was linked) never replaces the
+    // working one.
+    if !std::fs::metadata(&tmp).is_ok_and(|m| m.is_file()) {
+        let _ = remove_path(&tmp);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the new copy of the mod isn't there",
+        ));
+    }
     std::fs::rename(&tmp, link).inspect_err(|_| {
         let _ = remove_path(&tmp);
     })?;
     crate::fslog::moved("move", &tmp, link);
     Ok(())
+}
+
+/// `replace_zip_link`, but only for a real link: a hardlink to `dst`, else a symlink where
+/// `policy` allows one — never a copy. `Ok(false)` when neither could be made: `link` is left
+/// exactly as it was (for a move, the mod's hardlink then stays as its standalone copy instead
+/// of being traded for a second full copy). A `dst` that isn't there (any more) is an error,
+/// never a link to nothing: like `link_zip`, a `NotFound` or `AlreadyExists` from the hardlink
+/// stops here, and the new entry must reach a file before it replaces `link` and again after,
+/// so a caller never deletes the old copy behind a dangling link.
+pub(crate) fn replace_zip_link_if_linkable(
+    link: &Path,
+    dst: &Path,
+    policy: &mut LinkPolicy,
+) -> std::io::Result<bool> {
+    replace_zip_link_if_linkable_with(
+        link,
+        dst,
+        || policy.allow_symlink(),
+        |s, l| std::fs::hard_link(s, l),
+        symlink_file,
+    )
+}
+
+/// `replace_zip_link_if_linkable` with the link strategies injected (tests).
+fn replace_zip_link_if_linkable_with(
+    link: &Path,
+    dst: &Path,
+    allow_symlink: impl FnOnce() -> bool,
+    hard: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    soft: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<bool> {
+    use std::io::ErrorKind::{AlreadyExists, NotFound};
+    let reaches_a_file = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.is_file());
+    let gone = || std::io::Error::new(NotFound, "the new copy of the mod isn't there");
+    if !reaches_a_file(dst) {
+        return Err(gone());
+    }
+    let tmp = relink_tmp(link);
+    let _ = remove_path(&tmp);
+    let linked = match hard(dst, &tmp) {
+        Ok(()) => true,
+        Err(e) if matches!(e.kind(), AlreadyExists | NotFound) => return Err(e),
+        Err(_) if allow_symlink() => match soft(dst, &tmp) {
+            Ok(()) => true,
+            Err(e) if e.kind() == AlreadyExists => return Err(e),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    };
+    if !linked {
+        return Ok(false);
+    }
+    if !reaches_a_file(&tmp) {
+        let _ = remove_path(&tmp);
+        return Err(gone());
+    }
+    std::fs::rename(&tmp, link).inspect_err(|_| {
+        let _ = remove_path(&tmp);
+    })?;
+    crate::fslog::moved("link", dst, link);
+    if !reaches_a_file(link) {
+        return Err(gone());
+    }
+    Ok(true)
 }
 
 /// A zip's mods-folder entry `link` was just (re)made by Silo: refresh its projection record so
@@ -1193,11 +1266,14 @@ pub(crate) fn make_link(
 
 /// Whether a zip projection may fall back to a symlink — decided lazily, at most once per
 /// engine call, and only after a hardlink attempt actually failed, so the common same-volume
-/// case never probes (or writes) anything.
+/// case never probes (or writes) anything. `can_only_copy` (asked by an archive move before it
+/// re-links an active mod's hardlink) also probes a hardlink, once.
 pub(crate) struct LinkPolicy<'a> {
     layout: &'a Layout,
     cached: Option<bool>,
     cross_volume: Option<bool>,
+    /// A probe hardlink from the mods folder into the archive worked (`hardlink_known`).
+    hardlinks: Option<bool>,
 }
 
 impl<'a> LinkPolicy<'a> {
@@ -1206,16 +1282,30 @@ impl<'a> LinkPolicy<'a> {
             layout,
             cached: None,
             cross_volume: None,
+            hardlinks: None,
         }
     }
 
     /// A policy that decided the archive is on another drive with no symlinks (copies only).
     #[cfg(test)]
     pub(crate) fn copy_only_for_tests(layout: &'a Layout) -> Self {
+        Self::decided_for_tests(layout, true, false, false)
+    }
+
+    /// A policy with every answer decided up front: the archive is on another drive
+    /// (`cross_volume`), symlinks are allowed, a hardlink is known to work.
+    #[cfg(test)]
+    pub(crate) fn decided_for_tests(
+        layout: &'a Layout,
+        cross_volume: bool,
+        symlinks: bool,
+        hardlinks: bool,
+    ) -> Self {
         LinkPolicy {
             layout,
-            cached: Some(false),
-            cross_volume: Some(true),
+            cached: Some(symlinks),
+            cross_volume: Some(cross_volume),
+            hardlinks: Some(hardlinks),
         }
     }
 
@@ -1239,10 +1329,26 @@ impl<'a> LinkPolicy<'a> {
         allow
     }
 
-    /// A zip link into this archive can only be a full copy: it's on another drive (no
-    /// hardlink) and symlinks aren't allowed.
+    /// A hardlink from the mods folder into this archive is known to work (`hardlink_known`).
+    /// Asked at most once; probes only when the archive isn't on another drive.
+    fn hardlinks_work(&mut self) -> bool {
+        if let Some(h) = self.hardlinks {
+            return h;
+        }
+        let layout = self.layout;
+        let h = hardlink_known(self.cross_volume(), || {
+            hardlinks_between(&layout.mods, &layout.archive)
+        });
+        self.hardlinks = Some(h);
+        h
+    }
+
+    /// A new zip link into this archive could end up a full copy: symlinks aren't allowed and
+    /// a hardlink isn't known to work — the archive is on another drive, the mods folder
+    /// rejects hardlinks (a cloud-synced folder), or Silo can't tell (a drive it can't
+    /// identify, where no probe could be made).
     pub(crate) fn can_only_copy(&mut self) -> bool {
-        self.cross_volume() && !self.allow_symlink()
+        !self.allow_symlink() && !self.hardlinks_work()
     }
 
     /// The mods folder is inside a Mac App Store sandbox, so the game can't follow any link
@@ -1256,6 +1362,56 @@ impl<'a> LinkPolicy<'a> {
 /// (what `LinkPolicy` allows across drives, and what the move preflight reports).
 pub(crate) fn symlinks_usable(layout: &Layout) -> bool {
     !in_mac_app_container(&layout.mods) && supports_symlinks(layout)
+}
+
+/// A folder mod's link from the mods folder into this archive might end up a full copy
+/// (`make_link`'s dir branch): always inside a Mac App Store container; otherwise unless a probe
+/// folder link, made the way `make_link` makes one, actually worked (`dir_links_between`).
+pub(crate) fn dir_link_may_copy(layout: &Layout) -> bool {
+    in_mac_app_container(&layout.mods)
+        || dir_links_between(&layout.mods, &layout.archive) != Some(true)
+}
+
+/// Whether a folder link from the mods folder into the archive can be made here, the way
+/// `make_link` makes one (`link_dir_native`: a symlink, or on Windows a junction, which a FAT
+/// or exFAT mods folder or a network archive refuses): an empty probe folder in `archive`
+/// linked into `mods`, both removed again. `Some(worked)`, or `None` when no probe could be
+/// made. Never creates `mods` or `archive`; a crash's leftovers are swept by
+/// `sweep_link_probes`.
+pub(crate) fn dir_links_between(mods: &Path, archive: &Path) -> Option<bool> {
+    use std::io::ErrorKind::AlreadyExists;
+    if !archive.is_dir() || !mods.is_dir() {
+        return None;
+    }
+    let prefix = format!("{SYMLINK_PROBE}-dir");
+    for name in probe_names(&prefix).take(PROBE_TRIES) {
+        let target = archive.join(&name);
+        match std::fs::create_dir(&target) {
+            Ok(()) => {}
+            Err(e) if e.kind() == AlreadyExists => continue,
+            Err(_) => return None,
+        }
+        let at = mods.join(format!("{name}.link"));
+        let r = link_dir_native(&target, &at);
+        let taken = matches!(&r, Err(e) if e.kind() == AlreadyExists);
+        if !taken {
+            let _ = remove_probe_link(&at);
+        }
+        // Only ever an empty folder: the probe Silo just made.
+        let _ = std::fs::remove_dir(&target);
+        match r {
+            Ok(()) => return Some(true),
+            Err(_) if taken => continue,
+            Err(_) => return Some(false),
+        }
+    }
+    None
+}
+
+/// Remove a probe link: a file link, or a folder link (a dir symlink or junction, which Windows
+/// removes as a folder — `remove_dir` never removes a folder with anything in it).
+fn remove_probe_link(at: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(at).or_else(|_| std::fs::remove_dir(at))
 }
 
 /// The Mac App Store FS25 is sandboxed: it can't follow a link out of its container. Compared
@@ -1603,7 +1759,16 @@ pub(crate) fn sweep_link_probes(dir: &Path, min_age: std::time::Duration) {
             .ok()
             .and_then(|m| now.duration_since(m).ok())
             .is_some_and(|age| age >= min_age);
-        if old && !meta.is_dir() && std::fs::remove_file(e.path()).is_ok() {
+        if !old {
+            continue;
+        }
+        // A probe folder (`dir_links_between`) only while empty; a link of either kind.
+        let removed = if meta.is_dir() {
+            std::fs::remove_dir(e.path())
+        } else {
+            remove_probe_link(&e.path())
+        };
+        if removed.is_ok() {
             crate::fslog::changed("remove-stale-probe", &e.path());
         }
     }
@@ -1614,17 +1779,58 @@ pub(crate) fn sweep_link_probes(dir: &Path, min_age: std::time::Duration) {
 /// are `C:\`, and `Path::starts_with` treats those prefixes as different.
 fn mount_in(disks: &sysinfo::Disks, p: &Path) -> Option<(PathBuf, u64)> {
     let c = std::fs::canonicalize(p).ok()?;
-    let windows = cfg!(windows);
-    let key = crate::modsroot::normalize_key(&c.to_string_lossy(), windows);
-    disks
-        .list()
+    let key = crate::modsroot::normalize_key(&c.to_string_lossy(), cfg!(windows));
+    let (mounts, list) = listed_mounts(disks);
+    let i = pick_mount(Path::new(&key), device_of(&c), &mounts)?;
+    let d = &list[i];
+    Some((d.mount_point().to_path_buf(), d.available_space()))
+}
+
+/// The disk list's mount points (normalized keys) with their device ids, and the disks.
+fn listed_mounts(disks: &sysinfo::Disks) -> (Vec<(PathBuf, Option<u64>)>, &[sysinfo::Disk]) {
+    let list = disks.list();
+    let mounts = list
         .iter()
-        .filter(|d| {
-            let mount = crate::modsroot::normalize_key(&d.mount_point().to_string_lossy(), windows);
-            Path::new(&key).starts_with(Path::new(&mount))
+        .map(|d| {
+            let mount =
+                crate::modsroot::normalize_key(&d.mount_point().to_string_lossy(), cfg!(windows));
+            (PathBuf::from(mount), device_of(d.mount_point()))
         })
-        .max_by_key(|d| d.mount_point().components().count())
-        .map(|d| (d.mount_point().to_path_buf(), d.available_space()))
+        .collect();
+    (mounts, list)
+}
+
+/// The filesystem's device id for `p` (Unix); `None` elsewhere or when it can't be read.
+fn device_of(p: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(p).ok().map(|m| m.dev())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = p;
+        None
+    }
+}
+
+/// Pure: which of `mounts` (normalized mount point, device id) holds the path `key` (normalized,
+/// device id `dev`). With a device id (Unix) the filesystem decides: the first listed mount of
+/// that device, so every path on one filesystem names the same mount (a bind-mounted alias, or
+/// macOS keeping `/Users` on the data volume listed at `/System/Volumes/Data`, not at `/`), and
+/// none when the device isn't listed — an unlisted mount below a listed one (a network share at
+/// `/mnt/share` under `/`) is unknown, never its parent. Without device ids (Windows), the
+/// longest mount point that contains the path.
+fn pick_mount(key: &Path, dev: Option<u64>, mounts: &[(PathBuf, Option<u64>)]) -> Option<usize> {
+    match dev {
+        Some(dev) => mounts.iter().position(|(_, d)| *d == Some(dev)),
+        None => mounts
+            .iter()
+            .enumerate()
+            .filter(|(_, (m, _))| key.starts_with(m))
+            .max_by_key(|(_, (m, _))| m.components().count())
+            .map(|(i, _)| i),
+    }
 }
 
 /// Mount point holding `p`, for same-drive checks and free space (one disk enumeration).
@@ -1639,13 +1845,58 @@ pub(crate) fn known_same_mount(a: &Option<(PathBuf, u64)>, b: &Option<(PathBuf, 
     matches!((a, b), (Some((ma, _)), Some((mb, _))) if ma == mb)
 }
 
-/// What the disk list says about `a` and `b` (one enumeration for both): `Some(same)` when it
-/// knows both mounts, `None` when it doesn't know one of them (a network share, …).
+/// Pure: a hardlink from the mods folder into the archive is known to work — the archive
+/// isn't on another drive (`cross_volume`) and a probe hardlink (`probe`, asked only then)
+/// worked. A probe that couldn't run (`None`) isn't knowing: on a drive Silo can't identify
+/// it counts as "might copy", never as "will link".
+pub(crate) fn hardlink_known(cross_volume: bool, probe: impl FnOnce() -> Option<bool>) -> bool {
+    !cross_volume && probe() == Some(true)
+}
+
+/// What the disk list says about `a` and `b` for linking (one enumeration for both):
+/// `Some(same)` when it can tell, `None` when it can't (a network share, …) — see
+/// `link_relation`.
 pub(crate) fn volume_relation(a: &Path, b: &Path) -> Option<bool> {
     let disks = sysinfo::Disks::new_with_refreshed_list();
-    match (mount_in(&disks, a), mount_in(&disks, b)) {
-        (Some((ma, _)), Some((mb, _))) => Some(ma == mb),
-        _ => None,
+    let (mounts, _) = listed_mounts(&disks);
+    let at = |p: &Path| {
+        let c = std::fs::canonicalize(p).ok()?;
+        let key = crate::modsroot::normalize_key(&c.to_string_lossy(), cfg!(windows));
+        Some((PathBuf::from(key), device_of(&c)))
+    };
+    let ((ka, da), (kb, db)) = (at(a)?, at(b)?);
+    link_relation((&ka, da), (&kb, db), &mounts)
+}
+
+/// Pure: whether two paths (normalized key, device id) are one volume for linking. Different
+/// device ids: different volumes. The same device id: one volume only when both sit under the
+/// same listed mount point of that device — a hardlink can't cross mount points even within one
+/// filesystem (a bind-mounted alias fails with `EXDEV`), so otherwise it's unknown and gets
+/// probed. Without device ids (Windows): the longest listed mount point of each, when both are
+/// listed.
+fn link_relation(
+    a: (&Path, Option<u64>),
+    b: (&Path, Option<u64>),
+    mounts: &[(PathBuf, Option<u64>)],
+) -> Option<bool> {
+    let longest = |key: &Path, dev: Option<u64>| {
+        mounts
+            .iter()
+            .enumerate()
+            .filter(|(_, (m, d))| key.starts_with(m) && (dev.is_none() || *d == dev))
+            .max_by_key(|(_, (m, _))| m.components().count())
+            .map(|(i, _)| i)
+    };
+    match (a.1, b.1) {
+        (Some(da), Some(db)) if da != db => Some(false),
+        (Some(_), Some(_)) => match (longest(a.0, a.1), longest(b.0, b.1)) {
+            (Some(ia), Some(ib)) if ia == ib => Some(true),
+            _ => None,
+        },
+        _ => match (longest(a.0, None), longest(b.0, None)) {
+            (Some(ia), Some(ib)) => Some(ia == ib),
+            _ => None,
+        },
     }
 }
 
@@ -4088,6 +4339,182 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// The longest listed mount point holds a path only when it is the same filesystem: an
+    /// unlisted share mounted below `/` is unknown, a path on a filesystem listed elsewhere
+    /// (macOS's data volume) is that one, and without device ids (Windows) the longest wins
+    /// (#188).
+    #[test]
+    fn pick_mount_checks_the_device_not_just_the_prefix() {
+        let m = |p: &str, d: Option<u64>| (PathBuf::from(p), d);
+        let mounts = vec![
+            m("/", Some(1)),
+            m("/home", Some(2)),
+            m("/System/Volumes/Data", Some(3)),
+        ];
+        let pick = |k: &str, d| pick_mount(Path::new(k), d, &mounts);
+        assert_eq!(pick("/home/me/mods", Some(2)), Some(1));
+        assert_eq!(pick("/opt/x", Some(1)), Some(0));
+        assert_eq!(pick("/mnt/share/archive", Some(9)), None, "unlisted share");
+        assert_eq!(
+            pick("/Users/me/mods", Some(3)),
+            Some(2),
+            "firmlinked data volume"
+        );
+        assert_eq!(
+            pick("/home/me", None),
+            Some(1),
+            "no device ids: longest prefix"
+        );
+        // Two listed mounts of one filesystem: every path on it names the first.
+        let aliased = vec![
+            m("/", Some(1)),
+            m("/data", Some(5)),
+            m("/srv/alias", Some(5)),
+        ];
+        assert_eq!(
+            pick_mount(Path::new("/srv/alias/x"), Some(5), &aliased),
+            Some(1)
+        );
+        assert_eq!(pick_mount(Path::new("/data/y"), Some(5), &aliased), Some(1));
+        // Windows lists no device ids: drive letters decide.
+        let no_dev = vec![m("/c", None), m("/d", None)];
+        assert_eq!(pick_mount(Path::new("/d/mods"), None, &no_dev), Some(1));
+        assert_eq!(pick_mount(Path::new("/e/mods"), None, &no_dev), None);
+    }
+
+    /// A real folder pair: the probe folder link is made and both probes are removed again; a
+    /// missing folder is inconclusive and never created (#188).
+    #[test]
+    fn a_folder_link_probe_cleans_up_after_itself() {
+        let base = std::env::temp_dir().join(format!("silo_dirlink_probe_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        let archive = base.join("lib");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(&archive).unwrap();
+        // Symlinks on Unix, junctions on NTFS: both work in a temp folder.
+        assert_eq!(dir_links_between(&mods, &archive), Some(true));
+        assert_eq!(std::fs::read_dir(&mods).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(&archive).unwrap().count(), 0);
+        assert_eq!(dir_links_between(&mods, &base.join("missing")), None);
+        assert!(!base.join("missing").exists());
+        let layout = Layout {
+            mods: mods.clone(),
+            archive: archive.clone(),
+        };
+        assert!(!dir_link_may_copy(&layout));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// For linking, one device under two listed mount points (a bind-mounted alias) is unknown —
+    /// hardlinks can't cross mount points — so it gets probed; different devices are different
+    /// volumes; one mount point is one volume. Without device ids, the listed mounts decide.
+    #[test]
+    fn link_relation_never_assumes_a_hardlink_across_mount_points() {
+        let m = |p: &str, d: Option<u64>| (PathBuf::from(p), d);
+        let mounts = vec![
+            m("/", Some(1)),
+            m("/data", Some(5)),
+            m("/mnt/library", Some(5)),
+        ];
+        let rel = |a: &str, da, b: &str, db| {
+            link_relation((Path::new(a), da), (Path::new(b), db), &mounts)
+        };
+        assert_eq!(rel("/data/mods", Some(5), "/data/lib", Some(5)), Some(true));
+        assert_eq!(rel("/data/mods", Some(5), "/mnt/library/x", Some(5)), None);
+        assert_eq!(rel("/data/mods", Some(5), "/home/me", Some(1)), Some(false));
+        // An unlisted mount of a device: unknown.
+        assert_eq!(rel("/data/mods", Some(5), "/srv/x", Some(5)), None);
+        let no_dev = vec![m("/c", None), m("/d", None)];
+        let rel =
+            |a: &str, b: &str| link_relation((Path::new(a), None), (Path::new(b), None), &no_dev);
+        assert_eq!(rel("/c/mods", "/c/lib"), Some(true));
+        assert_eq!(rel("/c/mods", "/d/lib"), Some(false));
+        assert_eq!(rel("/c/mods", "/e/lib"), None);
+    }
+
+    /// The policy says a hardlink works (a probe made one), but this mod's own link fails (a
+    /// cloud provider that started refusing) and no symlink is allowed, or the symlink fails
+    /// too: the working entry is kept exactly as it was, never swapped for a copy (#188).
+    #[test]
+    fn a_failed_link_keeps_the_working_entry() {
+        let base = std::env::temp_dir().join(format!("silo_linkfails_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let link = base.join("FS25_A.zip");
+        std::fs::write(&link, b"PK A").unwrap();
+        let dst = base.join("new.zip");
+        std::fs::write(&dst, b"PK A").unwrap();
+        let refused = |_: &Path, _: &Path| Err(std::io::Error::from_raw_os_error(396));
+        for allow in [false, true] {
+            let r = replace_zip_link_if_linkable_with(&link, &dst, || allow, refused, refused);
+            assert!(!r.unwrap(), "no link, so nothing replaced");
+            assert!(!crate::relocate::same_file(&link, &dst));
+            assert_eq!(std::fs::read(&link).unwrap(), b"PK A");
+            assert!(!base.join("FS25_A.zip.silo-relink-tmp").exists());
+        }
+        // A link that works replaces the entry.
+        let r = replace_zip_link_if_linkable_with(
+            &link,
+            &dst,
+            || false,
+            |s, l| std::fs::hard_link(s, l),
+            refused,
+        );
+        assert!(r.unwrap());
+        assert!(crate::relocate::same_file(&link, &dst));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A new copy that vanishes before or while it's linked is an error, never a link to nothing
+    /// in place of the working entry — with symlinks allowed too (#188).
+    #[test]
+    fn a_vanished_new_copy_never_replaces_the_working_entry() {
+        let base = std::env::temp_dir().join(format!("silo_vanished_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let link = base.join("FS25_A.zip");
+        std::fs::write(&link, b"PK A").unwrap();
+        let dst = base.join("new.zip");
+        std::fs::write(&dst, b"PK A").unwrap();
+        let soft_called = std::cell::Cell::new(false);
+        let r = replace_zip_link_if_linkable_with(
+            &link,
+            &dst,
+            || true,
+            |_, _| Err(std::io::ErrorKind::NotFound.into()),
+            |_, _| {
+                soft_called.set(true);
+                Ok(())
+            },
+        );
+        assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert!(!soft_called.get(), "never falls through to a symlink");
+        // A "link" that reaches no file (the copy went while it was made) is refused too.
+        let r = replace_zip_link_if_linkable_with(
+            &link,
+            &dst,
+            || true,
+            |_, _| Err(std::io::ErrorKind::Unsupported.into()),
+            |_, l| std::fs::create_dir(l),
+        );
+        assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read(&link).unwrap(), b"PK A");
+        assert!(!base.join("FS25_A.zip.silo-relink-tmp").exists());
+        // Missing from the start: an error, and nothing is attempted.
+        std::fs::remove_file(&dst).unwrap();
+        let r = replace_zip_link_if_linkable_with(
+            &link,
+            &dst,
+            || true,
+            |_, _| panic!("no hardlink to a missing copy"),
+            |_, _| panic!("no symlink to a missing copy"),
+        );
+        assert!(r.is_err());
+        assert_eq!(std::fs::read(&link).unwrap(), b"PK A");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn known_same_mount_needs_both_mounts_known_and_equal() {
         let c = Some((PathBuf::from("C:\\"), 1));
@@ -4100,7 +4527,9 @@ mod tests {
 
     /// On a mount the disk list can't identify where no probe can even be made (a path that
     /// won't resolve), the answer is inconclusive, not "another drive": linking falls back to
-    /// the hardlink-first path, which copies safely if the link fails.
+    /// the hardlink-first path, which copies safely if the link fails. But a hardlink isn't
+    /// known to work there either, so a new link might be a copy (`can_only_copy`): a move
+    /// keeps an active mod's hardlink instead of trading it for a possible copy (#188).
     #[test]
     fn an_unknown_mount_where_no_probe_can_run_is_inconclusive() {
         let base = std::env::temp_dir().join(format!("silo_unknown_mount_{}", std::process::id()));
@@ -4118,7 +4547,69 @@ mod tests {
             archive: unknown,
         };
         assert!(same_volume_for_links(&layout));
+        assert!(LinkPolicy::new(&layout).can_only_copy());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A hardlink counts as working only when a probe made one: never across drives (no probe
+    /// even runs), never when the probe couldn't run (an unidentified drive), never where the
+    /// mods folder rejects it (a cloud-synced folder on the same drive) (#188).
+    #[test]
+    fn a_hardlink_is_known_to_work_only_when_a_probe_made_one() {
+        let asked = std::cell::Cell::new(false);
+        let probe = |answer: Option<bool>| {
+            let a = &asked;
+            move || {
+                a.set(true);
+                answer
+            }
+        };
+        assert!(hardlink_known(false, probe(Some(true))));
+        assert!(!hardlink_known(false, probe(Some(false))), "cloud folder");
+        assert!(!hardlink_known(false, probe(None)), "unidentified drive");
+        asked.set(false);
+        assert!(!hardlink_known(true, probe(Some(true))));
+        assert!(!asked.get(), "another drive is never probed");
+    }
+
+    /// Same drive, a working hardlink: a new link is a hardlink, never a copy. Same drive where
+    /// the mods folder rejects hardlinks, or a drive Silo can't identify: it might be a copy.
+    /// Another drive with symlinks: a symlink.
+    #[test]
+    fn can_only_copy_unless_a_link_is_known_to_work() {
+        let layout = Layout {
+            mods: PathBuf::from("/m"),
+            archive: PathBuf::from("/a"),
+        };
+        let d = |cross, sym, hard| LinkPolicy::decided_for_tests(&layout, cross, sym, hard);
+        assert!(!d(false, false, true).can_only_copy());
+        assert!(d(false, false, false).can_only_copy());
+        assert!(!d(true, true, false).can_only_copy());
+        assert!(d(true, false, false).can_only_copy());
+    }
+
+    /// A real same-drive pair (a temp folder) where hardlinks work: no copy.
+    #[test]
+    fn a_same_drive_archive_where_hardlinks_work_links() {
+        let base = std::env::temp_dir().join(format!("silo_hardlinks_work_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let layout = Layout {
+            mods: base.join("mods"),
+            archive: base.join("mods").join("archive"),
+        };
+        std::fs::create_dir_all(&layout.archive).unwrap();
+        assert_eq!(hardlinks_between(&layout.mods, &layout.archive), Some(true));
         assert!(!LinkPolicy::new(&layout).can_only_copy());
+        let left: Vec<_> = std::fs::read_dir(&layout.mods)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(
+            left,
+            vec![std::ffi::OsString::from("archive")],
+            "probes are removed"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -4210,6 +4701,25 @@ mod tests {
         assert!(!old.exists() && !old_sym.exists(), "stale probes removed");
         assert!(fresh.exists(), "a probe running right now is kept");
         assert!(mine.exists(), "never anything else");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A crash's folder probe (`dir_links_between`) is swept only while empty; a folder with
+    /// anything in it, or under another name, is never touched.
+    #[test]
+    fn stale_folder_probes_are_swept_only_while_empty() {
+        let (base, _mods, archive) = probe_dirs("sweepdir");
+        let empty = archive.join(".silo-symlink-probe-dir-1-0");
+        let full = archive.join(".silo-symlink-probe-dir-1-1");
+        let category = archive.join("Tools");
+        for d in [&empty, &full, &category] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(full.join("keep.txt"), b"x").unwrap();
+        sweep_link_probes(&archive, std::time::Duration::ZERO);
+        assert!(!empty.exists());
+        assert!(full.join("keep.txt").exists());
+        assert!(category.exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 
