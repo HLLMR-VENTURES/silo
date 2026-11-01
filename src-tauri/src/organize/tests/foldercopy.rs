@@ -443,3 +443,172 @@ fn flattening_a_changed_folder_copy_keeps_the_edits_in_backups() {
     drop(conn);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// Part of what park and flatten say when they keep a copy whose archived copy can't be shown
+/// to hold its files (#399).
+const KEPT_UNPROVEN: &str =
+    "stays in your mods folder: Silo couldn't confirm the copy in your library archive matches it";
+
+/// Park or flatten (`flattening`) the fixture's folder copy, and check it was kept exactly as
+/// Silo wrote it, said so, and left the archived copy and the manifest row alone.
+fn assert_kept_on(base: &Path, conn: &Connection, src: &Path, flat: &Path, flattening: bool) {
+    let layout = Layout::default_for(base);
+    let rep = if flattening {
+        flatten(conn, &layout)
+    } else {
+        set_active(conn, &layout, &HashSet::new())
+    };
+    assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+    // Flatten also lists what it left in the archive.
+    assert!(flattening || rep.errors.len() == 1, "{:?}", rep.errors);
+    assert!(
+        rep.errors[0].starts_with(&format!("FS25_Dir: FS25_Dir {KEPT_UNPROVEN}")),
+        "{:?}",
+        rep.errors
+    );
+    assert!(rep.notices.is_empty(), "{:?}", rep.notices);
+    assert_eq!(std::fs::read(flat.join("a.lua")).unwrap(), b"print(1)");
+    assert!(
+        flat.join(SILO_MARKER).is_file(),
+        "the copy is kept as it was"
+    );
+    assert!(
+        src.symlink_metadata().is_ok(),
+        "the archived copy stays put"
+    );
+    assert!(!base.join("backups").exists());
+    let rows = db::load_organized(conn, &crate::modsroot::canonical_key(base));
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].active, "the mod is still on");
+}
+
+/// An untouched folder copy whose archived copy no longer holds its files (cut short, a file
+/// lost, rewritten at the same size) may be the only good copy: park and flatten keep it.
+#[test]
+fn a_folder_copy_is_kept_when_the_archived_copy_doesnt_hold_its_files() {
+    type Damage = fn(&Path);
+    let cases: [(&str, Damage); 3] = [
+        ("cut", |src| {
+            std::fs::write(src.join("a.lua"), b"pri").unwrap()
+        }),
+        ("lost", |src| {
+            std::fs::remove_file(src.join("a.lua")).unwrap()
+        }),
+        ("rewritten", |src| {
+            std::fs::write(src.join("a.lua"), b"print(2)").unwrap()
+        }),
+    ];
+    for (tag, damage) in cases {
+        for flattening in [false, true] {
+            let base = temp_dir_for(&format!("keep_copy_{tag}_{flattening}"));
+            let conn = db::open(&base.join("silo.db")).unwrap();
+            let (src, flat) = folder_copy_fixture(&base, &conn);
+            damage(&src);
+            assert_kept_on(&base, &conn, &src, &flat, flattening);
+            drop(conn);
+            let _ = std::fs::remove_dir_all(&base);
+        }
+    }
+}
+
+/// No archived copy at all, or a file where the archived folder should be (the wrong kind):
+/// nothing proves the copy's files are anywhere else, so it's kept.
+#[test]
+fn a_folder_copy_is_kept_when_there_is_no_archived_folder() {
+    let base = temp_dir_for("keep_copy_missing");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = folder_copy_fixture(&base, &conn);
+    std::fs::remove_dir_all(&src).unwrap();
+    let err = clear_projection(&flat, &src, &base).unwrap_err();
+    assert!(err.to_string().contains(KEPT_UNPROVEN), "{err}");
+    assert_eq!(std::fs::read(flat.join("a.lua")).unwrap(), b"print(1)");
+
+    std::fs::write(&src, b"print(1)").unwrap();
+    let err = clear_projection(&flat, &src, &base).unwrap_err();
+    assert!(err.to_string().contains(KEPT_UNPROVEN), "{err}");
+    assert_eq!(std::fs::read(flat.join("a.lua")).unwrap(), b"print(1)");
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// An archived copy that is a link (to a folder elsewhere) isn't a copy: what it reaches can
+/// change or go without Silo knowing. The mods-folder copy is kept.
+#[test]
+fn a_folder_copy_is_kept_when_the_archived_copy_is_a_link() {
+    for flattening in [false, true] {
+        let base = temp_dir_for(&format!("keep_copy_link_{flattening}"));
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let (src, flat) = folder_copy_fixture(&base, &conn);
+        let elsewhere = base.join("elsewhere").join("FS25_Dir");
+        std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        std::fs::rename(&src, &elsewhere).unwrap();
+        if link_dir_native(&elsewhere, &src).is_err() {
+            drop(conn);
+            let _ = std::fs::remove_dir_all(&base);
+            return; // no folder links here
+        }
+        assert_kept_on(&base, &conn, &src, &flat, flattening);
+        assert_eq!(std::fs::read(elsewhere.join("a.lua")).unwrap(), b"print(1)");
+        drop(conn);
+        let _ = std::fs::remove_dir(&src).or_else(|_| std::fs::remove_file(&src));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+/// A file inside the archived folder that is a link to an identical file elsewhere doesn't
+/// hold that file's bytes either.
+#[test]
+fn a_folder_copy_is_kept_when_an_archived_file_is_a_link() {
+    let base = temp_dir_for("keep_copy_filelink");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = folder_copy_fixture(&base, &conn);
+    let twin = base.join("twin.lua");
+    std::fs::write(&twin, b"print(1)").unwrap();
+    std::fs::remove_file(src.join("a.lua")).unwrap();
+    if symlink_file(&twin, &src.join("a.lua")).is_err() {
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+        return; // no file symlinks here (Windows without Developer Mode)
+    }
+    assert_kept_on(&base, &conn, &src, &flat, false);
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// An intact archived copy still lets an untouched copy go, even when the archive holds more
+/// than the copy (a marker filed back with it).
+#[test]
+fn an_untouched_folder_copy_goes_while_the_archive_holds_its_files() {
+    for flattening in [false, true] {
+        let base = temp_dir_for(&format!("drop_copy_{flattening}"));
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let (src, flat) = folder_copy_fixture(&base, &conn);
+        std::fs::write(src.join(SILO_MARKER), b"silo\n").unwrap();
+        let layout = Layout::default_for(&base);
+        let rep = if flattening {
+            flatten(&conn, &layout)
+        } else {
+            set_active(&conn, &layout, &HashSet::new())
+        };
+        assert_eq!(rep.changed, 1, "{:?}", rep.errors);
+        assert!(rep.errors.is_empty() && rep.notices.is_empty(), "{rep:?}");
+        assert!(!base.join("backups").exists());
+        if flattening {
+            assert!(!src.exists(), "moved back out of the archive");
+        } else {
+            assert!(flat.symlink_metadata().is_err(), "the copy is removed");
+            assert!(src.join("a.lua").is_file());
+        }
+        assert_eq!(
+            std::fs::read(if flattening {
+                flat.join("a.lua")
+            } else {
+                src.join("a.lua")
+            })
+            .unwrap(),
+            b"print(1)"
+        );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}

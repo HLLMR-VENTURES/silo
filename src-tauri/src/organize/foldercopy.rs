@@ -131,9 +131,11 @@ fn same_tree_contents(copy: &Path, src: &Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Remove a marked folder copy only if unchanged; otherwise move it to
-/// `<mods_root>/backups/<name>.<secs>/` and return that path so the caller can tell the user.
-/// The kept copy loses Silo's marker: it is the user's folder now.
+/// Remove a marked folder copy only if unchanged and its archived copy `src` still holds every
+/// file of it (`scratch::copy_held_by_archive`); an unchanged copy the archive doesn't hold is
+/// kept where it is, with an error saying why (it may be the only good copy, #399). A changed
+/// copy is moved to `<mods_root>/backups/<name>.<secs>/` and that path returned so the caller
+/// can tell the user. The kept copy loses Silo's marker: it is the user's folder now.
 pub(crate) fn retire_folder_copy(
     link: &Path,
     src: &Path,
@@ -153,6 +155,9 @@ pub(super) fn retire_folder_copy_with(
     rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> std::io::Result<Option<PathBuf>> {
     if copy_unchanged(link, src).unwrap_or(false) {
+        if !crate::scratch::copy_held_by_archive(link, src) {
+            return Err(not_held_by_archive(link, src));
+        }
         std::fs::remove_dir_all(link)?;
         crate::fslog::changed("unlink", link);
         return Ok(None);
@@ -192,16 +197,39 @@ fn backup_move_error(name: &str, e: &std::io::Error) -> String {
 }
 
 /// Free a mods-folder slot holding Silo's projection of `src`. A marked folder copy goes
-/// through [`retire_folder_copy`] (an edited one is kept in backups, its path returned);
-/// anything else through [`remove_link`].
+/// through [`retire_folder_copy`] (an edited one is kept in backups, its path returned). A zip
+/// (a copy, or a hardlink) goes only while the archived `src` is a real zip holding the same
+/// bytes (`scratch::copy_held_by_archive`); otherwise it's kept, with an error saying why
+/// (#399). Anything else (a link) through [`remove_link`].
 pub(super) fn clear_projection(
     link: &Path,
     src: &Path,
     mods_root: &Path,
 ) -> std::io::Result<Option<PathBuf>> {
     let meta = link.symlink_metadata()?;
-    if meta.is_dir() && !meta.file_type().is_symlink() && link.join(SILO_MARKER).is_file() {
+    let real = !meta.file_type().is_symlink();
+    if real && meta.is_dir() && link.join(SILO_MARKER).is_file() {
         return retire_folder_copy(link, src, mods_root);
     }
+    if real && meta.is_file() && !crate::scratch::copy_held_by_archive(link, src) {
+        return Err(not_held_by_archive(link, src));
+    }
     remove_link(link).map(|()| None)
+}
+
+/// What the user is told when a copy in the mods folder is kept because its archived copy is
+/// missing, a link, or doesn't hold the same bytes: removing it could lose the only good copy.
+fn not_held_by_archive(link: &Path, src: &Path) -> std::io::Error {
+    log::warn!(
+        "kept {}: the archived copy at {} doesn't hold the same bytes",
+        link.display(),
+        src.display()
+    );
+    let name = link
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| link.display().to_string());
+    std::io::Error::other(format!(
+        "{name} stays in your mods folder: Silo couldn't confirm the copy in your library archive matches it (it may be missing, damaged or incomplete), so removing this one could lose the only good copy."
+    ))
 }

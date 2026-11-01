@@ -192,6 +192,8 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
             //     still match what we recorded when we wrote it → our own untouched copy, no
             //     hash needed. Otherwise fall back to the careful structural/content check.
             //     If the user swapped in their own file at that name, neither matches — leave it.
+            // Then `clear_projection` removes a copy only while the archived copy is a real copy
+            // holding the same bytes (#399): ownership alone doesn't make it a spare.
             if !src.exists() {
                 rep.errors.push(format!(
                     "{}: there's no copy in your library archive, so Silo kept the file in your mods folder. It won't delete the only copy.",

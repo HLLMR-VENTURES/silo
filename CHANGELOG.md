@@ -41,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Switching mods folders now clears messages about the folder you left. (#396)
+- Turning off a mod, or restoring a plain mods folder, no longer deletes a mod's copy in your
+  mods folder unless the copy in your library archive is really there and holds the same files.
+  If it's missing, damaged or only a link, Silo keeps the mods-folder copy and says why. (#399)
 - Moving your library archive, organizing, re-linking mods in your mods folder and mod
   updates no longer delete Silo's temporary files just by their name. Each temporary file now
   has a name of its own, and Silo only removes one once it has checked that it isn't the only

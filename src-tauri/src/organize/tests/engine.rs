@@ -694,3 +694,154 @@ fn adopting_files_loose_archive_mods_into_categories() {
     );
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// Part of what park and flatten say when they keep a copy whose archived copy can't be shown
+/// to hold the same bytes (#399).
+const KEPT_UNPROVEN: &str =
+    "stays in your mods folder: Silo couldn't confirm the copy in your library archive matches it";
+
+/// An active zip `FS25_Foo` archived in `Vehicles` whose mods-folder entry is a byte copy with
+/// its provenance recorded, as activation leaves it where hardlinks fail. Returns (src, flat).
+fn zip_copy_fixture(base: &Path, conn: &Connection) -> (PathBuf, PathBuf) {
+    let key = crate::modsroot::canonical_key(base);
+    let cat = base.join(ARCHIVE).join("Vehicles");
+    std::fs::create_dir_all(&cat).unwrap();
+    let src = cat.join("FS25_Foo.zip");
+    std::fs::write(&src, b"PK\x03\x04 the archived build").unwrap();
+    organize_row(conn, base, "FS25_Foo", "Vehicles", true);
+    let flat = base.join("FS25_Foo.zip");
+    std::fs::copy(&src, &flat).unwrap();
+    let (size, mtime) = file_stats(&flat).unwrap();
+    db::record_projection(conn, &key, "FS25_Foo.zip", size, mtime);
+    (src, flat)
+}
+
+/// Park a zip copy whose archived copy no longer holds the same bytes (cut short, rewritten at
+/// the same size): the mods-folder copy may be the only good one, so it's kept and the mod
+/// stays on. Flatten keeps it too, and never moves the archived copy over it.
+#[test]
+fn a_zip_copy_is_kept_when_the_archived_copy_doesnt_match() {
+    let cases: [(&str, &[u8]); 2] = [
+        ("cut", b"PK\x03\x04 the arch"),
+        ("rewritten", b"PK\x03\x04 the archived bui1d"),
+    ];
+    for (tag, damaged) in cases {
+        for flattening in [false, true] {
+            let base = temp_dir_for(&format!("keep_zip_{tag}_{flattening}"));
+            let conn = db::open(&base.join("silo.db")).unwrap();
+            let key = crate::modsroot::canonical_key(&base);
+            let (src, flat) = zip_copy_fixture(&base, &conn);
+            std::fs::write(&src, damaged).unwrap();
+            let layout = Layout::default_for(&base);
+            let rep = if flattening {
+                flatten(&conn, &layout)
+            } else {
+                set_active(&conn, &layout, &HashSet::new())
+            };
+            assert_eq!(rep.changed, 0, "{tag}: {:?}", rep.errors);
+            // Flatten refuses it as not Silo's (no recorded provenance there), and also lists
+            // what it left in the archive.
+            assert!(!rep.errors.is_empty(), "{tag}");
+            if !flattening {
+                assert_eq!(rep.errors.len(), 1, "{tag}: {:?}", rep.errors);
+                assert!(
+                    rep.errors[0].starts_with(&format!("FS25_Foo: FS25_Foo.zip {KEPT_UNPROVEN}")),
+                    "{tag}: {:?}",
+                    rep.errors
+                );
+            }
+            assert_eq!(
+                std::fs::read(&flat).unwrap(),
+                b"PK\x03\x04 the archived build",
+                "{tag}: the mods-folder copy is kept"
+            );
+            assert_eq!(std::fs::read(&src).unwrap(), damaged, "{tag}");
+            let rows = db::load_organized(&conn, &key);
+            assert_eq!(rows.len(), 1, "{tag}");
+            assert!(rows[0].active, "{tag}: the mod is still on");
+            drop(conn);
+            let _ = std::fs::remove_dir_all(&base);
+        }
+    }
+}
+
+/// No archived copy, or a folder where the archived zip should be (the wrong kind): the zip
+/// copy is kept.
+#[test]
+fn a_zip_copy_is_kept_when_there_is_no_archived_zip() {
+    let base = temp_dir_for("keep_zip_missing");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = zip_copy_fixture(&base, &conn);
+    std::fs::remove_file(&src).unwrap();
+    let err = clear_projection(&flat, &src, &base).unwrap_err();
+    assert!(err.to_string().contains(KEPT_UNPROVEN), "{err}");
+    assert!(flat.is_file());
+
+    std::fs::create_dir_all(&src).unwrap();
+    let err = clear_projection(&flat, &src, &base).unwrap_err();
+    assert!(err.to_string().contains(KEPT_UNPROVEN), "{err}");
+    assert_eq!(
+        std::fs::read(&flat).unwrap(),
+        b"PK\x03\x04 the archived build"
+    );
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// An archived zip that is a link to an identical file elsewhere isn't a copy: the mods-folder
+/// copy is kept.
+#[test]
+fn a_zip_copy_is_kept_when_the_archived_zip_is_a_link() {
+    let base = temp_dir_for("keep_zip_link");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = zip_copy_fixture(&base, &conn);
+    let elsewhere = base.join("elsewhere.zip");
+    std::fs::rename(&src, &elsewhere).unwrap();
+    if symlink_file(&elsewhere, &src).is_err() {
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+        return; // no file symlinks here (Windows without Developer Mode)
+    }
+    let rep = set_active(&conn, &Layout::default_for(&base), &HashSet::new());
+    assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+    assert!(
+        rep.errors.len() == 1 && rep.errors[0].contains(KEPT_UNPROVEN),
+        "{:?}",
+        rep.errors
+    );
+    assert_eq!(
+        std::fs::read(&flat).unwrap(),
+        b"PK\x03\x04 the archived build"
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// An intact archived copy still lets the projection go: a byte copy (proven by its bytes) and
+/// a hardlink (one file under two names).
+#[test]
+fn a_zip_projection_goes_while_the_archive_holds_its_bytes() {
+    for hardlink in [false, true] {
+        let base = temp_dir_for(&format!("drop_zip_{hardlink}"));
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
+        let (src, flat) = zip_copy_fixture(&base, &conn);
+        if hardlink {
+            std::fs::remove_file(&flat).unwrap();
+            std::fs::hard_link(&src, &flat).unwrap();
+            db::forget_projection(&conn, &key, "FS25_Foo.zip");
+        }
+        let rep = set_active(&conn, &Layout::default_for(&base), &HashSet::new());
+        assert_eq!(rep.changed, 1, "{hardlink}: {:?}", rep.errors);
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+        assert!(flat.symlink_metadata().is_err(), "{hardlink}: removed");
+        assert_eq!(
+            std::fs::read(&src).unwrap(),
+            b"PK\x03\x04 the archived build"
+        );
+        assert!(!db::load_organized(&conn, &key)[0].active);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
