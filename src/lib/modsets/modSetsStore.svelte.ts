@@ -33,8 +33,12 @@ export interface ModSetsDeps {
   /** A mod's display title. */
   title: (techName: string) => string;
   /** App's guarded switch: true = clean, false = finished with problems (reported), null =
-   *  refused because another write runs (said so; nothing changed). */
+   *  nothing changed: refused because another write or a scan runs (said so), cancelled, or it
+   *  failed (reported) and the mods folder still holds the old set. */
   setActiveSetTo: (mods: string[], label: string) => Promise<boolean | null>;
+  /** Wait briefly for a running library scan, so the active mods read next aren't about to be
+   *  replaced by it. False when it still runs (refused, said why). */
+  settle: () => Promise<boolean>;
   /** App's switch Undo toast (one at a time, with the staleness guard). */
   undo: SwitchUndo;
   /** Saving, replacing and deleting sets wait for a foreground library change. True when it
@@ -172,10 +176,16 @@ export function createModSets(deps: ModSetsDeps): ModSets {
     target: () => Promise<{ id: number; name: string; kind: Loadout["kind"] } | null>,
   ) {
     deps.undo.dismiss();
+    // The snapshot and Undo keep the active mods from before: not while a scan may replace them.
+    if (!(await deps.settle())) return;
     const previous = [...deps.active()];
     const was = currentState();
     const clean = await deps.setActiveSetTo(mods, `Switching to ${name}`);
-    if (clean === null) return; // refused: another write is running, nothing changed
+    // Refused, or failed with nothing changed (said so): no snapshot, not remembered, no Undo.
+    if (clean === null) return;
+    // What the switch left (mods Silo couldn't park stay on), so Undo's staleness check holds.
+    // Kept now: a scan landing during the saves below could bring changes made since.
+    const left = [...deps.active()];
     let snapshotId: number | null = null;
     if (previous.length > 0) {
       try {
@@ -195,12 +205,13 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       message: clean ? `Switched to ${name}.` : `Switch to ${name} finished with problems.`,
       tone: clean ? "neutral" : "warn",
       previous,
-      // What the switch left (mods Silo couldn't park stay on), so Undo's staleness check holds.
-      expected: [...deps.active()],
+      expected: left,
     });
   }
 
   async function switchTo(set: Loadout) {
+    // The confirmation's diff is from the active mods: not while a scan may replace them.
+    if (!(await deps.settle())) return;
     const library = deps.library();
     const diff = activeSetDiff([...deps.active()], set.mods, library);
     if (diff.on.length + diff.off.length === 0) {
@@ -364,6 +375,9 @@ export function createModSets(deps: ModSetsDeps): ModSets {
   }
 
   async function useSave(s: Savegame) {
+    // Which of the save's mods are in the library, and the diff, are read from the last scan:
+    // not while a scan may replace it.
+    if (!(await deps.settle())) return;
     const library = deps.library();
     if (!library) {
       deps.refuse("Wait for Silo to finish reading your library.");
@@ -436,6 +450,8 @@ export function createModSets(deps: ModSetsDeps): ModSets {
   async function applyMembership(techNames: string[], edits: MembershipEdit[]): Promise<boolean> {
     if (edits.length === 0) return true;
     if (deps.editRefused()) return false;
+    if (!(await deps.settle())) return false;
+    if (deps.editRefused()) return false; // a write that started during the wait
     const st = currentState();
     const change = activeChange(edits, st.kind === "none" ? null : st.id, deps.active());
     const previous = [...deps.active()];
@@ -448,8 +464,11 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       deps.undo.dismiss();
       const label = change.on.length > 0 ? "Turning on mods" : "Parking mods";
       switched = await deps.setActiveSetTo([...target], label);
-      if (switched === null) return false; // refused or cancelled: nothing changed
+      if (switched === null) return false; // refused, cancelled or failed: nothing changed
     }
+    // What the switch left, kept now for Undo's staleness check: a scan landing during the save
+    // below could bring changes made since.
+    const expected = [...deps.active()];
     const before = edits.map((e) => ({ id: e.set.id, name: e.set.name, mods: [...e.set.mods] }));
     const written = new Map(edits.map((e) => [e.set.id, e.mods]));
     try {
@@ -463,12 +482,11 @@ export function createModSets(deps: ModSetsDeps): ModSets {
           message: "Your mod sets weren't saved, but your active mods changed.",
           tone: "warn",
           previous,
-          expected: [...deps.active()],
+          expected,
         });
       return false;
     }
     await reload();
-    const expected = [...deps.active()];
     const names = techNames.map(deps.title);
     let message = membershipMessage(names, edits);
     if (switched !== null) {
@@ -489,6 +507,9 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       });
     };
     const undo = async () => {
+      // A running scan first (it may change the active mods, and saving sets can go on meanwhile):
+      // every check below must still hold when the write starts.
+      if (switched !== null && !(await deps.settle())) return offer();
       const stale = before.find((b) => {
         const now = sets.find((l) => l.id === b.id);
         return !now || !sameMods(now.mods, written.get(b.id) ?? []);
