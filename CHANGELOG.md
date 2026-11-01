@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fewer false conflict warnings. Two maps no longer show as a **Problem** or **Review** for
+  adding the same brand, shop category, control action or fill type: the game loads only the map
+  your savegame uses, so they never meet. A map still conflicts with a non-map mod that adds the
+  same thing. (#352)
+- Two mods that each ship a script with the same file name (`main.lua`, say) are now a **Note**,
+  not something to review. The game keeps each mod's scripts apart, so the name alone doesn't
+  make them clash. (#352)
 - A mod set switch that fails (an unplugged library drive, say) no longer leaves the Library,
   **Play** and the multiplayer share list showing the new set while the game loads the old one.
   Silo reads your mods folder again before it lets go, and when nothing changed it doesn't save a
