@@ -320,12 +320,23 @@ pub fn evaluate(game: &GameData, map: Option<&MapFills>, mods: &[ModFills]) -> B
 /// serious first, then fullest. Pure.
 pub fn worst(game: &GameData, maps: &[MapFills], mods: &[ModFills]) -> Budget {
     std::iter::once(evaluate(game, None, mods))
-        .chain(maps.iter().map(|m| {
-            let on_map = for_map(mods, &m.keys, ModFills::absorb_scoped, |f| &f.scoped);
-            evaluate(game, Some(m), &on_map)
-        }))
+        .chain(
+            maps.iter()
+                .map(|m| evaluate(game, Some(m), &mods_on(Some(m), mods))),
+        )
         .max_by_key(|b| (severity_rank(severity(b)), b.total))
         .expect("the base-game maps are always a candidate")
+}
+
+/// `mods` as they load on `map` (the base-game maps when `None`). Pure.
+pub(crate) fn mods_on<'a>(
+    map: Option<&MapFills>,
+    mods: &'a [ModFills],
+) -> std::borrow::Cow<'a, [ModFills]> {
+    match map {
+        None => std::borrow::Cow::Borrowed(mods),
+        Some(m) => for_map(mods, &m.keys, ModFills::absorb_scoped, |f| &f.scoped),
+    }
 }
 
 /// Critical when the exactly-counted fill types alone run over, warning when the estimates push

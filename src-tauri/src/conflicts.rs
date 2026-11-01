@@ -383,7 +383,7 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
             }
         })
         .collect();
-    let mut map_heights: Vec<heighttypes::MapTypes> = maps
+    let map_heights: Vec<heighttypes::MapTypes> = maps
         .iter()
         .map(|(p, label, config)| heighttypes::MapTypes {
             label: label.clone(),
@@ -400,12 +400,8 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
         .collect();
 
     let mut out = Vec::new();
-    // When the game may run out of fill types, it rejects some mods' declared ones, so none of
-    // them can vouch for a height type.
-    let mut fills_may_overflow = false;
     if let Some(fg) = game.fills {
         let budget = filltypes::worst(fg, &map_fills, &mod_fills);
-        fills_may_overflow = budget.total > filltypes::CAP;
         if let Some(severity) = filltypes::severity(&budget) {
             out.push(conflict(
                 severity,
@@ -421,24 +417,36 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
         }
     }
     // A height type stays exact only if its fill type certainly exists in that scenario: the
-    // base list and mods' declared lists, plus a map's own for that map. Without a readable
-    // fill list nothing is certain.
-    let known = game
-        .fills
-        .map(|fg| fg.known_exact(if fills_may_overflow { &[] } else { &mod_fills }))
-        .unwrap_or_default();
-    for m in &mut mod_heights {
-        m.downgrade_unknown(&known);
-    }
-    for (m, fills) in map_heights.iter_mut().zip(&map_fills) {
-        let mut with_map = known.clone();
-        // A map's own fill types can be rejected in an overflow too.
-        if !fills_may_overflow {
-            with_map.extend(fills.types.iter().cloned());
+    // base list and mods' declared lists, plus the map's own on that map (for the map's height
+    // types and every mod's alike). When the game may run out of fill types in that scenario it
+    // rejects some declared ones, so none of them (the map's own included) can vouch. Without a
+    // readable fill list nothing is certain. Each map scenario (base-game maps first) is judged
+    // on its own, then the worst is shown.
+    let scenarios = std::iter::once(None).chain((0..maps.len()).map(Some));
+    let budget = heighttypes::worst_of(scenarios.map(|i| {
+        let map_fill = i.map(|i| &map_fills[i]);
+        let fills_here = filltypes::mods_on(map_fill, &mod_fills);
+        let overflow = game.fills.is_some_and(|fg| {
+            filltypes::evaluate(fg, map_fill, &fills_here).total > filltypes::CAP
+        });
+        let mut known = game
+            .fills
+            .map(|fg| fg.known_exact(if overflow { &[] } else { &fills_here }))
+            .unwrap_or_default();
+        if let (Some(f), Some(_), false) = (map_fill, game.fills, overflow) {
+            known.extend(f.types.iter().cloned());
         }
-        m.downgrade_unknown(&with_map);
-    }
-    let budget = heighttypes::worst(game.heights, &map_heights, &mod_heights);
+        let map_here = i.map(|i| {
+            let mut m = map_heights[i].clone();
+            m.downgrade_unknown(&known);
+            m
+        });
+        let mut mods_here = heighttypes::mods_on(map_here.as_ref(), &mod_heights).into_owned();
+        for m in &mut mods_here {
+            m.downgrade_unknown(&known);
+        }
+        heighttypes::evaluate(game.heights, map_here.as_ref(), &mods_here)
+    }));
     if let Some(severity) = heighttypes::severity(&budget) {
         out.push(conflict(
             severity,
@@ -823,6 +831,170 @@ mod tests {
         let kinds: Vec<&str> = found.iter().map(|c| c.kind.as_str()).collect();
         // The brand is one game-wide name, so it still clashes; nothing else does.
         assert_eq!(kinds, ["brand"], "{found:?}");
+    }
+
+    /// #392: a fill-type overflow on one map doesn't turn the ground-pile count into an estimate
+    /// on a map where the fill types fit: here the base-game maps run out of ground-pile slots
+    /// for certain, while only the mod map runs out of fill types.
+    #[test]
+    fn a_fill_overflow_on_one_map_leaves_other_maps_exact() {
+        let base = std::env::temp_dir().join(format!("silo_conflict_ft2_{}", std::process::id()));
+        let map = base.join("FS25_BigMap");
+        let piles_mod = base.join("FS25_Piles");
+        std::fs::create_dir_all(map.join("xml")).unwrap();
+        std::fs::create_dir_all(piles_mod.join("xml")).unwrap();
+        std::fs::write(
+            map.join("modDesc.xml"),
+            r#"<modDesc descVersion="92"><maps><map id="M"/></maps><fillTypes filename="xml/fills.xml"/></modDesc>"#,
+        )
+        .unwrap();
+        let map_fills: String = (0..80)
+            .map(|n| format!(r#"<fillType name="M{n}"/>"#))
+            .collect();
+        std::fs::write(
+            map.join("xml/fills.xml"),
+            format!("<map><fillTypes>{map_fills}</fillTypes></map>"),
+        )
+        .unwrap();
+        std::fs::write(
+            piles_mod.join("modDesc.xml"),
+            r#"<modDesc descVersion="92"><fillTypes filename="xml/fills.xml"/><densityMapHeightTypes filename="xml/piles.xml"/></modDesc>"#,
+        )
+        .unwrap();
+        let fills: String = (0..16)
+            .map(|n| format!(r#"<fillType name="F{n}"/>"#))
+            .collect();
+        std::fs::write(
+            piles_mod.join("xml/fills.xml"),
+            format!("<map><fillTypes>{fills}</fillTypes></map>"),
+        )
+        .unwrap();
+        let piles: String = (0..16)
+            .map(|n| format!(r#"<densityMapHeightType fillTypeName="F{n}"/>"#))
+            .collect();
+        std::fs::write(
+            piles_mod.join("xml/piles.xml"),
+            format!("<map><densityMapHeightTypes>{piles}</densityMapHeightTypes></map>"),
+        )
+        .unwrap();
+        let input = |dir: &std::path::Path, tech: &str| ConflictInput {
+            tech_name: tech.into(),
+            title: Some(tech.into()),
+            path: dir.to_string_lossy().into_owned(),
+            kind: "dir".into(),
+        };
+        let inputs = vec![input(&map, "FS25_BigMap"), input(&piles_mod, "FS25_Piles")];
+        let heights = heighttypes::GameData {
+            base: (0..48).map(|n| format!("BASE{n}")).collect(),
+            base_channels: 6,
+            ..Default::default()
+        };
+        let fill_base = filltypes::GameData {
+            base: (0..178).map(|n| format!("BASE{n}")).collect(),
+            ..Default::default()
+        };
+        let found = detect_with(
+            &inputs,
+            Some(GameLists {
+                heights: &heights,
+                fills: Some(&fill_base),
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&base);
+        // On the mod map: 178 + 80 + 16 = 274 fill types.
+        let fills = found
+            .iter()
+            .find(|c| c.kind == "fillTypeCap")
+            .expect("fills");
+        assert_eq!(fills.severity, "critical");
+        // On the base-game maps 178 + 16 fill types fit, so 48 + 16 = 64 piles is certain.
+        let piles = found
+            .iter()
+            .find(|c| c.kind == "heightTypes")
+            .expect("piles");
+        assert_eq!(piles.severity, "critical");
+    }
+
+    /// #392: on a map, the map's own fill types vouch for other mods' ground-pile types too.
+    #[test]
+    fn a_maps_fill_types_make_other_mods_piles_exact_on_that_map() {
+        let base = std::env::temp_dir().join(format!("silo_conflict_ft3_{}", std::process::id()));
+        let map = base.join("FS25_FillMap");
+        let piles_mod = base.join("FS25_MapPiles");
+        std::fs::create_dir_all(map.join("xml")).unwrap();
+        std::fs::create_dir_all(piles_mod.join("xml")).unwrap();
+        std::fs::write(
+            map.join("modDesc.xml"),
+            r#"<modDesc descVersion="92"><maps><map id="M"/></maps><fillTypes filename="xml/fills.xml"/></modDesc>"#,
+        )
+        .unwrap();
+        let fills: String = (0..16)
+            .map(|n| format!(r#"<fillType name="F{n}"/>"#))
+            .collect();
+        std::fs::write(
+            map.join("xml/fills.xml"),
+            format!("<map><fillTypes>{fills}</fillTypes></map>"),
+        )
+        .unwrap();
+        std::fs::write(
+            piles_mod.join("modDesc.xml"),
+            r#"<modDesc descVersion="92"><densityMapHeightTypes filename="xml/piles.xml"/></modDesc>"#,
+        )
+        .unwrap();
+        let piles: String = (0..16)
+            .map(|n| format!(r#"<densityMapHeightType fillTypeName="F{n}"/>"#))
+            .collect();
+        std::fs::write(
+            piles_mod.join("xml/piles.xml"),
+            format!("<map><densityMapHeightTypes>{piles}</densityMapHeightTypes></map>"),
+        )
+        .unwrap();
+        let input = |dir: &std::path::Path, tech: &str| ConflictInput {
+            tech_name: tech.into(),
+            title: Some(tech.into()),
+            path: dir.to_string_lossy().into_owned(),
+            kind: "dir".into(),
+        };
+        let inputs = vec![
+            input(&map, "FS25_FillMap"),
+            input(&piles_mod, "FS25_MapPiles"),
+        ];
+        let heights = heighttypes::GameData {
+            base: (0..48).map(|n| format!("BASE{n}")).collect(),
+            base_channels: 6,
+            ..Default::default()
+        };
+        let fill_base = filltypes::GameData {
+            base: (0..178).map(|n| format!("BASE{n}")).collect(),
+            ..Default::default()
+        };
+        let found = detect_with(
+            &inputs,
+            Some(GameLists {
+                heights: &heights,
+                fills: Some(&fill_base),
+            }),
+        );
+        // Without the game's fill list nobody knows whether the map's fill types fit.
+        let blind = detect_with(
+            &inputs,
+            Some(GameLists {
+                heights: &heights,
+                fills: None,
+            }),
+        );
+        let _ = std::fs::remove_dir_all(&base);
+        // On the map its 16 fill types exist, so 48 + 16 = 64 piles is certain.
+        let piles = |found: &[Conflict]| {
+            found
+                .iter()
+                .find(|c| c.kind == "heightTypes")
+                .expect("piles")
+                .severity
+                .clone()
+        };
+        assert_eq!(piles(&found), "critical");
+        assert_eq!(piles(&blind), "warning");
     }
 
     /// #341: when the game may run out of fill types, a mod's declared fill types may be the

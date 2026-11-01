@@ -32,6 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- With a mod map that adds many material types, the ground-pile check no longer treats the
+  base-game maps as uncertain too: each map is judged on whether its own material types fit.
+  (#392)
+- If Silo's own dialog window has failed, questions whose safe answer is the default (deleting,
+  forgetting, **Point Farming Simulator 25 at this folder too?**) now keep it as the default in
+  the system dialog Silo shows instead. Before, Enter there picked the action. (#392)
+- On a mod map, the map's own material types now count for other mods' ground-pile types too,
+  so a set that's certainly over the limit on that map shows as a Problem, not a Review. (#392)
+- A catalog image too large to show now shows the placeholder instead of a cut-off picture.
+  (#392)
 - When you switch mods folders, **Point Farming Simulator 25 at this folder too?** now has
   **Only in Silo** selected, so pressing Enter changes nothing outside Silo. (#385)
 - The ground-pile and material-type checks no longer count lists a mod ships for one particular

@@ -837,14 +837,26 @@ pub fn fetch_image(url: &str) -> Result<String, String> {
         .filter(|m| m.starts_with("image/"))
         .unwrap_or("image/jpeg")
         .to_string();
-    let mut bytes = Vec::new();
-    resp.into_reader()
-        .take(16 * 1024 * 1024)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
+    let bytes = read_capped(resp.into_reader(), MAX_IMAGE_BYTES)?;
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Ok(format!("data:{mime};base64,{b64}"))
+}
+
+/// The largest catalog image Silo shows.
+const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// All of `r`, or an error when it holds more than `cap` bytes: a cut-off image would render
+/// broken, so an oversized one is refused (the UI shows its placeholder). Pure over `r`.
+fn read_capped(r: impl Read, cap: u64) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    r.take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > cap {
+        return Err("the image is too large".to_string());
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -1110,6 +1122,14 @@ mod tests {
     }
 
     use super::*;
+
+    /// #392: an image over the cap is refused, not cut off; one at the cap is kept whole.
+    #[test]
+    fn oversized_images_are_refused_not_truncated() {
+        assert_eq!(read_capped(&[7u8; 10][..], 10).unwrap().len(), 10);
+        assert!(read_capped(&[7u8; 11][..], 10).is_err());
+        assert!(read_capped(&[][..], 10).unwrap().is_empty());
+    }
 
     #[test]
     fn mod_ids_stay_in_one_path_segment() {
