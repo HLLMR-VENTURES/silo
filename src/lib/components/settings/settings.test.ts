@@ -205,9 +205,26 @@ describe("ModsFolderSettings", () => {
     expect(screen.getByRole("switch", { name: /this folder's profile/ })).toHaveAttribute("aria-checked", "false");
     expect(screen.getByText(/Otherwise the game loads your main profile's mods/)).toBeInTheDocument();
     unmount();
-    render(ModsFolderSettings, { ...base, modsStatus: profileStatus({ ...p, supported: false }) });
+    const why =
+      "Silo can't start Farming Simulator 25 with a separate profile on macOS yet: it isn't confirmed that the Mac version of the game supports one.";
+    render(ModsFolderSettings, {
+      ...base,
+      modsStatus: profileStatus({
+        ...p,
+        supported: false,
+        unsupportedReason: why,
+      }),
+    });
     expect(screen.queryByRole("switch", { name: /this folder's profile/ })).toBeNull();
-    expect(screen.getByText(/works on Windows only for now/)).toBeInTheDocument();
+    // The note says why, in the backend's words, and what Play does instead (#405).
+    expect(
+      screen.getByText(
+        /isn't confirmed that the Mac version of the game supports one/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Play starts your main profile/),
+    ).toBeInTheDocument();
   });
 });
 
