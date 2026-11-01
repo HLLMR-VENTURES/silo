@@ -491,9 +491,15 @@ async fn gh_status(app: tauri::AppHandle) -> Result<GhStatus, String> {
     let db = db_path(&app)?;
     off_main(move || {
         let conn = db::open(&db)?;
-        // Signed out: no read removes what a Disconnect left behind, so do it here.
+        // Signed out: no read removes what a Disconnect left behind, so do it here. A Disconnect
+        // that couldn't clean up storage at all (the marker is still there) is retried whole.
         if GH_SESSION.signed_out() {
-            secrets::sweep(&conn, "gh_token");
+            let retried = GH_SESSION.retry_sign_out(|| gh_clear_account(&conn));
+            match retried {
+                Some(Err(e)) => log::warn!("GitHub: retrying the unfinished Disconnect: {e}"),
+                Some(Ok(())) => {}
+                None => secrets::sweep(&conn, "gh_token"),
+            }
         }
         // Capability comes from the scopes GitHub actually granted. Older connections predate
         // scope capture and only carry the coarse booleans — honour those until the next
@@ -1724,26 +1730,35 @@ async fn gh_logout(app: tauri::AppHandle) -> Result<(), String> {
                     return (false, Err(gh_not_removed(&e, marked)));
                 }
             };
-            // Silo stops using the token even when the keychain keeps a copy it couldn't
-            // delete (it's distrusted, and removed once the store allows), or the database
-            // keeps a row it couldn't delete (revoked), so the account is disconnected either
-            // way; that leftover is still reported below. Everything else is cleared even when
-            // one step fails.
-            let token = secrets::clear(&conn, "gh_token");
-            // Legacy flags from before scope capture (gh_write, gh_gist) too, so nothing lingers.
-            let rest = ["gh_user", "gh_scopes", "gh_write", "gh_gist"]
-                .into_iter()
-                .map(|k| db::set_app_setting(&conn, k, None))
-                .fold(Ok(()), Result::and);
-            // Clean (so the signed-out marker can go): the token can't be read back, even after
-            // a restart, and the account details are gone.
-            match (token, rest) {
-                (Ok(left), Ok(())) => (true, left.message().map_or(Ok(()), |m| Err(m.into()))),
-                (Ok(_), Err(e)) | (Err(e), _) => (false, Err(gh_not_removed(&e, marked))),
-            }
+            let (clean, r) = gh_clear_account(&conn);
+            (
+                clean,
+                r.map_err(|e| if clean { e } else { gh_not_removed(&e, marked) }),
+            )
         })
     })
     .await
+}
+
+/// Remove the GitHub account from storage: the token and the account details. Returns whether
+/// storage is clean (the token can't be read back, even after a restart, and the details are
+/// gone; then the signed-out marker can go) and what to tell the user.
+///
+/// Silo stops using the token even when the keychain keeps a copy it couldn't delete (it's
+/// distrusted, and removed once the store allows), or the database keeps a row it couldn't
+/// delete (revoked), so that still counts as clean; the leftover is reported. Everything else is
+/// cleared even when one step fails.
+fn gh_clear_account(conn: &rusqlite::Connection) -> (bool, Result<(), String>) {
+    let token = secrets::clear(conn, "gh_token");
+    // Legacy flags from before scope capture (gh_write, gh_gist) too, so nothing lingers.
+    let rest = ["gh_user", "gh_scopes", "gh_write", "gh_gist"]
+        .into_iter()
+        .map(|k| db::set_app_setting(conn, k, None))
+        .fold(Ok(()), Result::and);
+    match (token, rest) {
+        (Ok(left), Ok(())) => (true, left.message().map_or(Ok(()), |m| Err(m.into()))),
+        (Ok(_), Err(e)) | (Err(e), _) => (false, Err(e)),
+    }
 }
 
 /// Disconnect couldn't clean up storage (`e`). Silo stays signed out for this run; across a

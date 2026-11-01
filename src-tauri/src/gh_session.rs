@@ -17,7 +17,7 @@
 //! sign-in touches storage, and removed only once storage is consistent again, so a crash, a
 //! failed cleanup or a half-saved sign-in all leave the account signed out on the next run.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -249,7 +249,7 @@ impl Session {
         let Some(p) = &g.marker else {
             return Ok(false);
         };
-        std::fs::write(p, b"signed out\n").map_err(|e| {
+        write_durably(p).map_err(|e| {
             log::warn!("GitHub: couldn't write the signed-out marker: {e}");
             e.to_string()
         })?;
@@ -275,6 +275,23 @@ impl Session {
         g.marker
             .as_ref()
             .is_some_and(|p| p.try_exists().unwrap_or(true))
+    }
+
+    /// Retry a Disconnect that couldn't clean up storage: only while signed out with the marker
+    /// still there and no Disconnect running. Under the lock, so no sign-in's store runs in the
+    /// middle: whatever token storage holds is one Silo must not use. `clear` returns whether
+    /// storage is now clean (then the marker goes) and its result. None when there was nothing
+    /// to retry.
+    pub fn retry_sign_out<T>(&self, clear: impl FnOnce() -> (bool, T)) -> Option<T> {
+        let g = self.lock();
+        if !g.signed_out || g.closing > 0 || !Self::marker_exists(&g) {
+            return None;
+        }
+        let (clean, out) = clear();
+        if clean {
+            let _ = Self::remove_marker(&g);
+        }
+        Some(out)
     }
 
     fn end_sign_out(g: &mut State) {
@@ -500,6 +517,20 @@ impl Default for Session {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Write the marker so it survives a power loss: the file's contents and (on Unix) its entry
+/// in the folder are flushed to disk before this returns.
+fn write_durably(p: &Path) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(p)?;
+    f.write_all(b"signed out\n")?;
+    f.sync_all()?;
+    #[cfg(unix)]
+    if let Some(dir) = p.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -834,6 +865,36 @@ mod tests {
         assert!(gate.commit(attempt, || failed(false)).unwrap().is_err());
         assert!(path.exists());
         assert!(gate.signed_out());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_unfinished_disconnect_is_retried_only_while_it_applies() {
+        let path = marker_path("retry");
+        let gate = Session::new();
+        gate.use_marker(path.clone());
+        // Connected, no marker: nothing to retry.
+        assert_eq!(gate.retry_sign_out(|| (true, "ran")), None);
+        // A Disconnect that couldn't clean up: retried until it can.
+        gate.begin_sign_out().finish(|_| (false, ()));
+        assert_eq!(
+            gate.retry_sign_out(|| (false, "still failing")),
+            Some("still failing")
+        );
+        assert!(path.exists());
+        assert_eq!(gate.retry_sign_out(|| (true, "cleaned")), Some("cleaned"));
+        assert!(!path.exists());
+        assert_eq!(gate.retry_sign_out(|| (true, "again")), None);
+        // A clean Disconnect leaves nothing to retry, and while one runs nothing is retried.
+        let so = gate.begin_sign_out();
+        assert_eq!(gate.retry_sign_out(|| (true, "during")), None);
+        so.finish(|_| (true, ()));
+        assert_eq!(gate.retry_sign_out(|| (true, "after")), None);
+        // Reconnected: never retried, so the new token is safe.
+        gate.begin_sign_out().finish(|_| (false, ()));
+        let attempt = gate.begin();
+        gate.commit(attempt, ok).unwrap().unwrap();
+        assert_eq!(gate.retry_sign_out(|| (true, "after reconnect")), None);
         let _ = std::fs::remove_file(&path);
     }
 
