@@ -5007,7 +5007,14 @@ fn ensure_well_formed(xml: &str) -> Result<(), String> {
             Ok(Event::DocType(_)) if doctype || depth > 0 || roots > 0 => {
                 return refuse("a <!DOCTYPE> can only come once, before the root element".into());
             }
-            Ok(Event::DocType(_)) => doctype = true,
+            // Settings files have no DTD: only a bare `<!DOCTYPE name>` passes, since Silo
+            // can't check an internal subset or an external one.
+            Ok(Event::DocType(d)) => {
+                if xmltext::check_name(String::from_utf8_lossy(&d).trim().as_bytes()).is_err() {
+                    return refuse("a <!DOCTYPE> can only name the root element".into());
+                }
+                doctype = true;
+            }
             Ok(Event::Start(_)) => {
                 if depth == 0 {
                     roots += 1;
@@ -5542,6 +5549,8 @@ mod tests {
             "<settings><?1bad data?></settings>",
             "<settings><?XML data?></settings>",
             "<settings><value>hello]]></value></settings>",
+            "<!DOCTYPE settings [garbage]>\n<settings/>",
+            "<!DOCTYPE settings SYSTEM \"x.dtd\"><settings/>",
         ] {
             let Err(e) = super::ensure_well_formed(bad) else {
                 panic!("accepted {bad:?}");

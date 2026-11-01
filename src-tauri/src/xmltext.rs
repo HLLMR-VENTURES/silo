@@ -171,8 +171,8 @@ pub fn check_reference(name: &str) -> Result<(), String> {
 }
 
 /// Check every attribute of a tag the way the game's parser does: each one a valid name,
-/// quoted and named once (`with_checks`), no `<` in a value, and every `&` starting a
-/// reference that [`check_reference`] accepts.
+/// quoted and named once (`with_checks`), no `<` or character XML can't hold in a value,
+/// and every `&` starting a reference that [`check_reference`] accepts.
 pub fn check_attributes(e: &BytesStart) -> Result<(), String> {
     let mut attrs = e.attributes();
     attrs.with_checks(true);
@@ -180,11 +180,13 @@ pub fn check_attributes(e: &BytesStart) -> Result<(), String> {
         let a = a.map_err(|err| err.to_string())?;
         check_name(a.key.as_ref())?;
         let key = String::from_utf8_lossy(a.key.as_ref()).into_owned();
-        let value = String::from_utf8_lossy(&a.value);
+        let value = std::str::from_utf8(&a.value)
+            .map_err(|_| format!("the value of {key} isn't valid text"))?;
+        check_chars(value).map_err(|why| format!("the value of {key}: {why}"))?;
         if value.contains('<') {
             return Err(format!("the value of {key} contains '<'"));
         }
-        let mut rest = value.as_ref();
+        let mut rest = value;
         while let Some(at) = rest.find('&') {
             let after = &rest[at + 1..];
             let Some(end) = after.find(';') else {

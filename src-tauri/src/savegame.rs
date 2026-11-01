@@ -407,6 +407,7 @@ mod tests {
             "<mod modName=\"a & b\"/>",
             "<mod title=\"Missing identity\" required=\"true\"/>",
             "<mod modName=\" \" title=\"Blank\"/>",
+            "<mod modName=\"FS25_B\u{1}\"/>",
         ] {
             let xml = format!("{}    {extra}\n{}", &full[..end], &full[end..]);
             let err = parse(&xml, 1, "savegame1").unwrap_err();
