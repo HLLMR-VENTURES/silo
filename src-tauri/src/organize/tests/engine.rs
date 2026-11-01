@@ -859,11 +859,21 @@ fn flatten_doesnt_list_a_dead_link_at_a_kept_mods_archive_path() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// On Windows the archived zip is found under any casing of its folder and name, so a kept mod's
-/// zip renamed to other casing is still that mod's, not unrecognized (#410).
-#[cfg(windows)]
+/// Whether names in `dir` ignore case (NTFS, APFS by default), probed with a file of its own.
+fn folds_case(dir: &Path) -> bool {
+    let probe = dir.join("CaseProbe.tmp");
+    std::fs::write(&probe, b"").unwrap();
+    let folds = dir.join("caseprobe.tmp").exists();
+    std::fs::remove_file(&probe).unwrap();
+    folds
+}
+
+/// A kept mod's zip whose folder and name were renamed to other casing: where the filesystem
+/// still finds it under the recorded name (NTFS, APFS), it's that mod's and isn't unrecognized
+/// (#410). Where it doesn't (case-sensitive), there is no archived copy and the renamed file is
+/// listed as unrecognized.
 #[test]
-fn flatten_doesnt_list_a_kept_mods_zip_under_other_casing() {
+fn flatten_matches_a_kept_mods_zip_under_other_casing_as_the_filesystem_does() {
     let base = temp_dir_for("flatten_kept_casing");
     let conn = db::open(&base.join("silo.db")).unwrap();
     let (src, flat) = zip_copy_fixture(&base, &conn);
@@ -872,20 +882,63 @@ fn flatten_doesnt_list_a_kept_mods_zip_under_other_casing() {
     std::fs::rename(&src, cat.join("fs25_foo.zip")).unwrap();
     std::fs::rename(cat, &lower_cat).unwrap();
     std::fs::write(lower_cat.join("fs25_foo.zip"), b"PK\x03\x04 the arch").unwrap();
+    let folds = folds_case(&lower_cat);
 
     let rep = flatten(&conn, &Layout::default_for(&base));
 
-    assert_eq!(rep.changed, 0, "{:?}", rep.errors);
-    assert_eq!(rep.errors.len(), 1, "{:?}", rep.errors);
-    assert!(rep.errors[0].contains(KEPT_UNPROVEN), "{:?}", rep.errors);
+    assert_eq!(rep.changed, usize::from(!folds), "{:?}", rep.errors);
+    if folds {
+        assert_eq!(rep.errors.len(), 1, "{:?}", rep.errors);
+        assert!(rep.errors[0].contains(KEPT_UNPROVEN), "{:?}", rep.errors);
+    } else {
+        assert_eq!(
+            rep.errors,
+            [
+                "FS25_Foo: there's no copy in your library archive, so Silo kept the file in your mods folder.".to_string(),
+                format!("{UNRECOGNIZED} fs25_foo.zip. Nothing was deleted."),
+            ]
+        );
+    }
     assert!(flat.is_file() && lower_cat.join("fs25_foo.zip").is_file());
     drop(conn);
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// In a case-sensitive folder, a second file whose name differs from a kept mod's zip only in
+/// case is a different file: it's still listed as unrecognized (#410). (Skipped where names
+/// ignore case: the two can't both exist.)
+#[test]
+fn flatten_lists_a_file_differing_from_a_kept_mods_zip_only_in_case() {
+    let base = temp_dir_for("flatten_kept_case_twin");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = zip_copy_fixture(&base, &conn);
+    let cat = src.parent().unwrap();
+    if folds_case(cat) {
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+    std::fs::write(&src, b"PK\x03\x04 the arch").unwrap(); // cut short: the copy is kept
+    std::fs::write(cat.join("fs25_foo.zip"), b"PK theirs").unwrap();
+
+    let rep = flatten(&conn, &Layout::default_for(&base));
+
+    assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+    assert_eq!(rep.errors.len(), 2, "{:?}", rep.errors);
+    assert!(rep.errors[0].contains(KEPT_UNPROVEN), "{:?}", rep.errors);
+    assert_eq!(
+        rep.errors[1],
+        format!("{UNRECOGNIZED} fs25_foo.zip. Nothing was deleted.")
+    );
+    assert!(flat.is_file() && cat.join("fs25_foo.zip").is_file());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// What counts as inside a mod's archive entry: the entry itself; a folder mod's files below it;
-/// nothing below a zip mod's entry; never a name that only starts the same. Casing is ignored on
-/// Windows only.
+/// nothing below a zip mod's entry; never a name that only starts the same. Another spelling
+/// counts only when it's the same entry on disk: not when nothing proves it (no such file), and
+/// not for a hardlink under another name.
 #[test]
 fn in_archive_entry_matches_the_entry_and_a_folder_mods_files() {
     let a = Path::new("archive");
@@ -912,7 +965,21 @@ fn in_archive_entry_matches_the_entry_and_a_folder_mods_files() {
         false
     ));
     let other_case = a.join("vehicles").join("fs25_foo.zip");
-    assert_eq!(in_archive_entry(&other_case, &zip, false), cfg!(windows));
+    assert!(!in_archive_entry(&other_case, &zip, false));
+
+    // On disk: another casing is the entry exactly where the filesystem folds case.
+    let base = temp_dir_for("in_archive_entry_disk");
+    let cat = base.join("Vehicles");
+    std::fs::create_dir_all(&cat).unwrap();
+    let zip = cat.join("FS25_Foo.zip");
+    std::fs::write(&zip, b"PK").unwrap();
+    let folds = folds_case(&cat);
+    let other_case = base.join("vehicles").join("fs25_foo.zip");
+    assert_eq!(in_archive_entry(&other_case, &zip, false), folds);
+    let twin = cat.join("Copy.zip");
+    std::fs::hard_link(&zip, &twin).unwrap();
+    assert!(!in_archive_entry(&twin, &zip, false));
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// A file in Silo's own archive that no organized mod owns is still listed as unrecognized,

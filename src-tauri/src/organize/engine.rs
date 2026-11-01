@@ -427,23 +427,35 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
 }
 
 /// Whether `path` is the archive entry `entry`, or a file inside it when it's a folder mod's
-/// (`is_dir`; a zip mod's entry owns nothing below it). Names compare as the filesystem finds
-/// them: ignoring case on Windows (like `modsroot::normalize_key`), so a renamed casing still
-/// matches the entry Silo reported.
+/// (`is_dir`; a zip mod's entry owns nothing below it). The part of `path` at `entry`'s depth
+/// must be spelled the same, or be the same entry on disk (`scratch::entry_number`, never
+/// following a link) under a name that differs only as a case-insensitive filesystem allows
+/// (case, how an accent is encoded). So a renamed casing matches where the filesystem finds the
+/// entry under it (NTFS, APFS), and a second file that differs only in case, in a case-sensitive
+/// folder, doesn't.
 pub(crate) fn in_archive_entry(path: &Path, entry: &Path, is_dir: bool) -> bool {
-    let name = |c: std::path::Component| {
-        let s = c.as_os_str().to_string_lossy();
-        if cfg!(windows) {
-            s.to_lowercase()
-        } else {
-            s.into_owned()
-        }
-    };
-    let mut path = path.components();
-    let same = entry
-        .components()
-        .all(|e| path.next().is_some_and(|c| name(c) == name(e)));
-    same && (is_dir || path.next().is_none())
+    let depth = entry.components().count();
+    let mut rest = path.components();
+    let head: PathBuf = rest.by_ref().take(depth).collect();
+    if head.components().count() != depth || (!is_dir && rest.next().is_some()) {
+        return false;
+    }
+    if head == entry {
+        return true;
+    }
+    let same_names = head.components().zip(entry.components()).all(|(a, b)| {
+        let (a, b) = (
+            a.as_os_str().to_string_lossy(),
+            b.as_os_str().to_string_lossy(),
+        );
+        crate::fold_file_name(&a) == crate::fold_file_name(&b)
+            || a.to_uppercase() == b.to_uppercase()
+    });
+    same_names
+        && matches!(
+            (crate::scratch::entry_number(&head), crate::scratch::entry_number(entry)),
+            (Some(x), Some(y)) if x == y
+        )
 }
 
 /// Remove each category folder Silo filed into under `archive`, but only if it is empty.
