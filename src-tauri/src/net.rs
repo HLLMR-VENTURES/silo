@@ -234,8 +234,15 @@ fn follow_redirects(
     let mut hops = 0;
     loop {
         let resp = send(&url, url.origin() == origin).map_err(FetchError::Http)?;
-        if !matches!(resp.status(), 301 | 302 | 303 | 307 | 308) {
-            return Ok(resp);
+        match resp.status() {
+            301 | 302 | 303 | 307 | 308 => {}
+            // 300 / 304 / 305 and the like: nothing to follow, and no body to use.
+            s @ 300..=399 => {
+                return Err(FetchError::Refused(format!(
+                    "unexpected response (error {s})"
+                )))
+            }
+            _ => return Ok(resp),
         }
         hops += 1;
         if hops > MAX_REDIRECTS {
@@ -327,8 +334,9 @@ fn reject_bad_ip(ip: IpAddr, allow_localhost: bool) -> Result<(), String> {
         IpAddr::V6(v6) => {
             v6.is_unspecified() || {
                 let s = v6.segments();
-                // fc00::/7 unique-local, fe80::/10 link-local
-                (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
+                // fc00::/7 unique-local, fe80::/10 link-local, fec0::/10 site-local (deprecated,
+                // still routed on some internal networks)
+                (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 || (s[0] & 0xffc0) == 0xfec0
             }
         }
     };
@@ -369,6 +377,7 @@ mod tests {
             "https://127.0.0.1/x",
             "https://[::1]/x",
             "https://[fc00::1]/x",
+            "https://[fec0::1234]/x",
             "https://localhost/x",
             // IPv4-mapped IPv6 reaches the IPv4 address on a dual-stack socket.
             "https://[::ffff:169.254.169.254]/x",
@@ -505,6 +514,13 @@ mod tests {
 
         let (res, _) = run_chain("https://a.example.com/", vec![(302, None)]);
         assert!(res.unwrap_err().contains("Location"));
+
+        // Any other 3xx is an error, not an empty success, and nothing more is requested.
+        for status in [300, 304, 305] {
+            let (res, sent) = run_chain("https://a.example.com/", vec![(status, Some("/x"))]);
+            assert!(res.unwrap_err().contains(&status.to_string()));
+            assert_eq!(sent.len(), 1);
+        }
     }
 
     #[test]
@@ -538,6 +554,7 @@ mod tests {
             "127.0.0.1:443",
             "[::1]:443",
             "[fd00::1]:443",
+            "[fec0::1234]:443",
             "[::ffff:10.0.0.1]:443",
         ] {
             let res = public_addrs("evil.example.com:443", stub(vec![private]));
