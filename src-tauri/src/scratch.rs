@@ -398,7 +398,7 @@ pub(crate) fn sweep_where(
 
 /// Whether a recorded scratch path may still hold something: it's there, or its folder can't be
 /// reached right now (so whether it's there can't be told).
-pub(crate) fn may_hold(path: &Path) -> bool {
+fn may_hold(path: &Path) -> bool {
     path.symlink_metadata().is_ok() || !path.parent().is_some_and(|d| d.symlink_metadata().is_ok())
 }
 

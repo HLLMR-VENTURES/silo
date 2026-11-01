@@ -860,7 +860,9 @@ fn occupied(at: &Path) -> StepErr {
 /// two places) that the sweep kept: renamed aside, its replacement then failed to verify
 /// against it (changed or damaged while Silo was stopped). That old copy may be the only intact
 /// one, so the move can't count the mod as moved, or copy the other one back over it, until
-/// the user has looked at both.
+/// the user has looked at both. The journal decides, not a fresh look: an entry the sweep kept
+/// because its folder couldn't be reached still counts if another mod's step has since made
+/// that folder again.
 fn unresolved_old(env: &Env, a: &Path, b: &Path) -> Result<(), StepErr> {
     let kept: Vec<PathBuf> = env
         .journal()
@@ -868,13 +870,12 @@ fn unresolved_old(env: &Env, a: &Path, b: &Path) -> Result<(), StepErr> {
         .into_iter()
         .filter(|e| e.role == scratch::Role::MoveOld && (e.from == a || e.from == b))
         .map(|e| e.path)
-        .filter(|p| scratch::may_hold(p))
         .collect();
     match kept.first() {
         None => Ok(()),
-        // Its folder can't be reached: the kept copy can't be checked, so nothing counts as done.
+        // Not where it was kept: its folder was moved or can't be reached, so it can't be checked.
         Some(k) if !exists(k) => Err(StepErr::Failed(format!(
-            "move: Silo kept an earlier copy of this mod at {}, but that folder can't be reached right now. Reconnect it, then resume.",
+            "move: Silo kept an earlier copy of this mod at {}, but it can't be found there now. Reconnect or put back that folder, then resume.",
             k.display()
         ))),
         Some(k) => Err(StepErr::Failed(format!(
@@ -3072,6 +3073,44 @@ mod tests {
         std::fs::remove_file(&dst).unwrap();
         assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
         assert_eq!(std::fs::read(&src).unwrap(), b"PK FS25_A");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_kept_old_copy_still_stops_a_cancel_after_another_mod_remakes_its_folder() {
+        let f = fx("keptoldtwo");
+        let a = add_zip(&f, "FS25_A", false);
+        let b = add_zip(&f, "FS25_B", false);
+        let mut m = marker(&f);
+        // A finished moving.
+        let (a_src, a_dst) = (zip_at(&f.old, "FS25_A"), zip_at(&f.new, "FS25_A"));
+        copy_verify_place(&env(&f), &a_src, &a_dst, "zip", &|| false).unwrap();
+        env(&f).record(&mut m, &a.tech_name).unwrap();
+        std::fs::remove_file(&a_src).unwrap();
+        // B's old copy was set aside, then its new copy was damaged while Silo was stopped.
+        let (b_src, b_dst) = (zip_at(&f.old, "FS25_B"), zip_at(&f.new, "FS25_B"));
+        copy_verify_place(&env(&f), &b_src, &b_dst, "zip", &|| false).unwrap();
+        env(&f).record(&mut m, &b.tech_name).unwrap();
+        let old_name = recorded_old(&f, &b_src, &b_dst, "zip");
+        std::fs::rename(&b_src, &old_name).unwrap();
+        std::fs::remove_file(&b_dst).unwrap();
+        std::fs::write(&b_dst, b"PK truncated").unwrap();
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        // The old archive goes out of reach; the cancel moves A home, making the folder again.
+        let aside = f.base.join("archive-aside");
+        std::fs::rename(&f.old, &aside).unwrap();
+        let out = run_with(&f, Op::Cancel, &|| false).unwrap().unwrap();
+        assert!(
+            out.errors
+                .iter()
+                .any(|e| e.contains(&old_name.display().to_string())),
+            "{:?}",
+            out.errors
+        );
+        assert!(a_src.exists(), "A came home");
+        assert!(!b_src.exists(), "the damaged B wasn't copied home");
+        assert!(setting(&f).is_none(), "never finished");
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
