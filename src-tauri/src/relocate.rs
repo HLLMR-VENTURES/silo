@@ -669,7 +669,7 @@ fn relink_renamed(
 /// old folder link before the new one goes in, on the copy path too). Before the first boundary
 /// can pause the move, every such entry of a recorded active mod is re-pointed at (or made
 /// again for) whichever of its two places holds the mod now, when that is the real copy (with
-/// both there, a missing entry is made for the one the step moves from). Runs on every run,
+/// both there and the same, a missing entry is made as the step would make it). Runs on every run,
 /// whatever the drives look like now: the work it mends was recorded earlier. Returns what
 /// couldn't be mended, phrased like a step's errors: the run then pauses at once, listing them.
 fn mend_renamed_links(env: &Env, marker: &mut MoveMarker) -> Vec<String> {
@@ -775,12 +775,30 @@ fn mend_renamed_links(env: &Env, marker: &mut MoveMarker) -> Vec<String> {
         let (gone, here, archive) = match (exists(&a), exists(&b)) {
             (false, true) => (a, b, &marker.to),
             (true, false) => (b, a, &marker.from),
-            // Both (a copy not yet deleted): a missing entry is made again for the copy the
-            // step moves from, as it was; a link is the step's to sort out.
-            (true, true) if missing => match marker.direction {
-                Direction::Forward => (b, a, &marker.from),
-                Direction::Back => (a, b, &marker.to),
-            },
+            // Both (a copy not yet deleted): a missing entry is made again as the step would
+            // make it, for the copy it moves to and with that archive's links, once the two
+            // copies are proven the same (every file's SHA-256); copies that differ are listed
+            // before either is linked. A link is the step's to sort out.
+            (true, true) if missing => {
+                let (from, to, archive) = match marker.direction {
+                    Direction::Forward => (a, b, &marker.to),
+                    Direction::Back => (b, a, &marker.from),
+                };
+                match verify(&from, &to, &row.kind, Check::Contents) {
+                    Ok(true) => (from, to, archive),
+                    Ok(false) => {
+                        cant(
+                            &mut errors,
+                            &format!("{} and {} differ", from.display(), to.display()),
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        errors.push(format!("{}: relink: {e}", row.tech_name));
+                        continue;
+                    }
+                }
+            }
             (true, true) => continue,
             (false, false) => {
                 cant(&mut errors, "neither archive holds it");
@@ -5721,10 +5739,9 @@ mod tests {
         }
     }
 
-    /// A folder link lost by a crash mid-rename (no note: the link was made again elsewhere),
-    /// where the two archives don't say plainly where the mod is: with a copy in each it's made
-    /// again for the one the move goes from; with none, or only something that isn't the mod's
-    /// copy, the move pauses at once saying so.
+    /// A folder link lost by a crash mid-rename, where the two archives don't say plainly where
+    /// the mod is: with the same copy in each it's made again as the step would make it; with
+    /// none, or only something that isn't the mod's copy, the move pauses at once saying so.
     #[test]
     fn a_missing_link_is_made_again_or_reported_before_the_first_pause() {
         for (tag, case) in [
@@ -5738,10 +5755,9 @@ mod tests {
                 .or_else(|_| std::fs::remove_dir(&link))
                 .unwrap();
             match case {
-                "both" => {
-                    std::fs::create_dir_all(&src).unwrap();
-                    std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
-                }
+                // An identical copy back at the old place (the same files): checked, then
+                // linked as the step would, to the copy the move goes to.
+                "both" => copy_verify_place(&env(&f), &dst, &src, "dir", &|| false).unwrap(),
                 "neither" => std::fs::remove_dir_all(&dst).unwrap(),
                 _ => {
                     std::fs::remove_dir_all(&dst).unwrap();
@@ -5753,7 +5769,7 @@ mod tests {
                 assert!(paused.errors.is_empty(), "{tag}: {:?}", paused.errors);
                 assert_eq!(
                     std::fs::canonicalize(&link).unwrap(),
-                    std::fs::canonicalize(&src).unwrap(),
+                    std::fs::canonicalize(&dst).unwrap(),
                     "{tag}"
                 );
             } else {
@@ -5795,5 +5811,55 @@ mod tests {
         std::fs::write(&placed, b"PK").unwrap();
         flush_rename(&placed, &f.new.join("Tools").join("FS25_A.zip")).unwrap();
         let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// A copy-path crash mid-relink: both archives hold the mod (placed, not yet deleted) and
+    /// its active entry is missing. With the copies the same, the entry is made again as the
+    /// step would make it: for the copy the move goes to, as a hardlink of that very copy
+    /// (forward: the new one; cancel: home). With them different, neither is linked and the
+    /// move pauses at once saying so, with or without a pause already asked for.
+    #[test]
+    fn a_missing_entry_beside_two_copies_is_made_as_the_step_would_or_reported() {
+        let cases = [
+            ("bothfwd", Op::Resume, true, PAUSE),
+            ("bothback", Op::Cancel, true, PAUSE),
+            ("bothbackrun", Op::Cancel, true, 0),
+            ("bothdiff", Op::Cancel, false, PAUSE),
+            ("bothdiffrun", Op::Cancel, false, 0),
+        ];
+        for (tag, op, same, request) in cases {
+            let f = fx(tag);
+            add_zip(&f, "FS25_A", true);
+            let (old, new) = (zip_at(&f.old, "FS25_A"), zip_at(&f.new, "FS25_A"));
+            let flat = f.mods.join("FS25_A.zip");
+            copy_verify_place(&env(&f), &old, &new, "zip", &|| false).unwrap();
+            if !same {
+                std::fs::write(&new, b"PK\x03\x04 changed since").unwrap();
+            }
+            let mut m = marker(&f);
+            env(&f).record(&mut m, "FS25_A").unwrap();
+            m.paused = true;
+            save_marker(&f.conn, &f.key, &m).unwrap();
+            let back = matches!(op, Op::Cancel);
+            let out = run_on(&f, op, one_drive, request).unwrap();
+            if same {
+                let want = if back { &old } else { &new };
+                assert!(same_file(&flat, want), "{tag}: linked as the step would");
+                match out {
+                    Some(m) => assert!(m.errors.is_empty(), "{tag}: {:?}", m.errors),
+                    None => assert!(!new.exists(), "{tag}: the cancel finished"),
+                }
+            } else {
+                let m = out.expect("paused");
+                assert_eq!(m.errors.len(), 1, "{tag}: {:?}", m.errors);
+                assert!(m.errors[0].contains("differ"), "{tag}: {:?}", m.errors);
+                assert!(
+                    flat.symlink_metadata().is_err(),
+                    "{tag}: neither copy is linked"
+                );
+                assert!(old.exists() && new.exists(), "{tag}: both kept");
+            }
+            let _ = std::fs::remove_dir_all(&f.base);
+        }
     }
 }
