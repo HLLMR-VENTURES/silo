@@ -200,6 +200,7 @@
   import ActiveFilters from "./lib/components/library/ActiveFilters.svelte";
   import { Selection } from "./lib/state/selection.svelte";
   import { createSwitchUndo, switchMessage } from "./lib/state/switchUndo";
+  import { setSwitchOutcome, switchOutcome } from "./lib/state/switchOutcome";
   import { getVerdict } from "./lib/provenanceCache.svelte";
   import FilterBar from "./lib/components/FilterBar.svelte";
   import ModSettings from "./lib/components/ModSettings.svelte";
@@ -413,6 +414,12 @@
   /** Wait briefly for a running scan to end; true once none runs (a switch may go ahead). */
   function settleScan(): Promise<boolean> {
     return scanSettle.wait(scanning, SCAN_SETTLE_MS);
+  }
+  /** settleScan, refusing with SCAN_WAIT when the scan still runs. True to go ahead. */
+  async function settleScanOrRefuse(): Promise<boolean> {
+    if (await settleScan()) return true;
+    refuse(SCAN_WAIT);
+    return false;
   }
   /** What Silo did while starting (e.g. restored the database), until dismissed. */
   const STARTUP_KEY = "startup";
@@ -917,23 +924,41 @@
     }
   }
 
+  /**
+   * After a switch that threw or reported problems, read the mods folder again while the caller
+   * still holds the write (as bisectRound does), so the Library, Play and the multiplayer share
+   * list show what the game will load, not the optimistic set (#347).
+   */
+  async function reconcileHeld() {
+    await waitWhile(() => scanning);
+    await runScan(false, undefined, true);
+  }
+
   /** Set the active set through the loadout apply path (optimistic set, then project it).
-   *  @return true when it applied without errors (failures are reported), null when another
-   *  library write was running so nothing changed */
+   *  After a throw or reported problems it rescans before it lets go of the write.
+   *  @return true when it applied without errors; false when it finished with problems
+   *  (reported) and the active mods changed; null when nothing changed: another library write
+   *  was running (said so), or it failed (reported) and the mods folder still holds the old set */
   async function setActiveSetTo(techNames: string[], label: string): Promise<boolean | null> {
     const op = beginWrite(label);
     if (!op) return null;
-    activeSet = new Set(techNames);
-    let clean = false;
+    const before = activeSet;
+    const next = new Set(techNames);
+    activeSet = next; // optimistic: the Library shows the new set at once
+    let errors: number | null = null; // null: set_active threw
     try {
-      const rep = await applyActive(techNames);
-      clean = rep.errors.length === 0;
-    } catch (e) {
-      reportError(e, "Applying your mods");
+      try {
+        errors = (await applyActive(techNames)).errors.length;
+      } catch (e) {
+        // Taken as nothing applied: put the set back (unless something else set it since).
+        if (activeSet === next) activeSet = before;
+        reportError(e, "Applying your mods");
+      }
+      if (errors !== 0) await reconcileHeld();
     } finally {
       op.end();
     }
-    return clean;
+    return switchOutcome(errors, before, activeSet, !scanFailed);
   }
 
   /** The Undo toast of the last switch (a mod, a bulk change or a loadout); a new one dismisses it. */
@@ -941,6 +966,7 @@
     toast,
     blocked: (expected) => activeUndoBlocked(expected),
     reapply: (previous) => switchActiveSet(previous, "Switching back"),
+    settle: settleScanOrRefuse,
   });
 
   /**
@@ -949,22 +975,46 @@
    * loose mod is parked; the switch's confirmation already said they'd be parked), and unzipped
    * folder mods, which Silo can't park, stay on and are named. Used by mod set switches, Use
    * this save's mods and the switch Undo.
-   * @return as setActiveSetTo: true clean, false with problems, null refused or cancelled
+   * @return as setActiveSetTo: true clean, false with problems, null refused, cancelled or
+   *   failed with nothing changed
    */
   async function switchActiveSet(target: string[], label: string): Promise<boolean | null> {
+    // A scan running now read the mods folder before this switch: landing after it, it would put
+    // the old active set back on screen, and the next toggle would re-apply that (#347). Wait for
+    // it, then plan from what it found.
+    if (!(await settleScanOrRefuse())) return null;
+    /** The active mods before any filing (taken again after the dialog's scan wait, so a change
+     *  that scan found isn't counted as the switch's). Stopping short with the active mods still
+     *  these, nothing happened: the caller records nothing. Changed (a mod filing couldn't link
+     *  back is parked now), the caller keeps its snapshot and Undo can put it back. */
+    let baseline = activeSet;
     const { loose } = parkPlan(mods, activeSet, target);
     if (loose.length > 0) {
       const one = loose.length === 1 ? loose[0] : null;
       const name = one ? (one.title ?? one.techName) : modsCount(loose.length);
       if (!(await explainParkLoose(name, one?.category ?? null, loose.length))) return null;
-      // Filed and kept active (linked back): the switch below parks them through set_active, so
-      // if it's refused they're simply still on, as before.
-      const filed = await applyLoose(
-        loose.map(looseInput),
-        loose.map((m) => m.techName),
-        true,
-      );
-      if (filed === null) return null; // refused, and said why: nothing changed
+      // A scan started while the dialog was open (alt-tabbing back) read the folder before the
+      // filing: landing after it, it would still show these mods as loose and the switch below
+      // would keep them on. Wait for it, then file the explained mods that are still loose.
+      if (!(await settleScanOrRefuse())) return null;
+      baseline = activeSet;
+      const explained = new Set(loose.map((m) => m.techName));
+      const toFile = parkPlan(mods, activeSet, target).loose.filter((m) => explained.has(m.techName));
+      if (toFile.length > 0) {
+        // Filed and kept active (linked back): the switch below parks them through set_active,
+        // so if it's refused they're simply still on, as before. Filing ends with a rescan.
+        const filed = await applyLoose(
+          toFile.map(looseInput),
+          toFile.map((m) => m.techName),
+          true,
+        );
+        if (filed === null) return null; // refused, and said why: nothing changed
+        // Its rescan is skipped if a scan queued behind the filing started first. That one began
+        // after the filing (none ran when it started, and none starts while a write is held), so
+        // it reads what filing left: wait for it however long it takes, rather than judge from
+        // the optimistic set (a mod filing couldn't link back would look still on).
+        await waitWhile(() => scanning);
+      }
     }
     // Whatever is still active and can't be parked (folder mods, a zip that couldn't be filed)
     // stays in the set, so what Silo shows is what the game loads.
@@ -973,7 +1023,9 @@
     const result = await setActiveSetTo([...target, ...stay.map((m) => m.techName)], label);
     if (result !== null && fixed.length > 0)
       toast({ message: fixedOnText(fixed.map((m) => m.title ?? m.techName)), tone: "warn" });
-    return result === null ? null : result && stay.length === 0;
+    // Short of the target with the active mods as they were (only a folder mod was to be parked,
+    // say, or the apply was refused): nothing to record.
+    return setSwitchOutcome(result, stay.length === 0, baseline, activeSet);
   }
 
   /**
@@ -1006,6 +1058,7 @@
       return m?.title ?? t;
     },
     setActiveSetTo: switchActiveSet,
+    settle: settleScanOrRefuse,
     undo: switchUndo,
     editRefused: loadoutEditRefused,
     refuse,
@@ -1236,17 +1289,23 @@
     if (next.has(techName)) next.delete(techName);
     else next.add(techName);
     activeSet = next; // optimistic: the switch moves at once
-    let clean: boolean | null = null;
+    let errors: number | null = null; // null: set_active threw
     try {
-      const rep = await applyActive([...next]);
-      clean = rep.errors.length === 0;
-    } catch (e) {
-      // Nothing was applied: put the switch back (unless something else set the mods since).
-      if (activeSet === next) activeSet = before;
-      reportError(e, "Changing which mods are active");
+      try {
+        errors = (await applyActive([...next])).errors.length;
+      } catch (e) {
+        // Taken as nothing applied: put the switch back (unless something else set the mods since).
+        if (activeSet === next) activeSet = before;
+        reportError(e, "Changing which mods are active");
+      }
+      // Problems: read the mods folder again before letting go of the write, so the switch shows
+      // what the game will load (#347).
+      if (errors !== 0) await reconcileHeld();
     } finally {
       op.end();
     }
+    // Nothing changed (it failed, and the mods folder still holds the old set): no Undo.
+    const clean = switchOutcome(errors, before, activeSet, !scanFailed);
     if (clean === null) return;
     switchUndo.offer({
       message: switchMessage([name], !turningOff, clean),
