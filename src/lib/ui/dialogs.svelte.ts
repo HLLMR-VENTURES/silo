@@ -149,9 +149,17 @@ export function osConfirmText(opts: ConfirmOptions): string {
 /**
  * Ask with the OS dialog, with the same text and labels as the in-app one.
  * @param opts the in-app confirm options
- * @returns true only when the confirm (verb) button is pressed; false if the dialog fails
+ * @returns true only when the confirm (verb) button is pressed; false if the dialog fails, and
+ *   for a prompt that asked for Cancel to have focus (its verb changes something outside Silo):
+ *   the OS dialog can't choose its default button, so Enter would pick the verb. Such a prompt
+ *   gets the safe answer instead; its action stays available where it normally lives.
  */
 export async function askOs(opts: ConfirmOptions): Promise<boolean> {
+  if (opts.focus === "cancel") {
+    const answer = opts.cancel ?? "Cancel";
+    console.warn(`[Silo] no dialog host for "${opts.title}"; answered "${answer}"`);
+    return false;
+  }
   try {
     return await confirmDialog(osConfirmText(opts), {
       okLabel: opts.confirm,

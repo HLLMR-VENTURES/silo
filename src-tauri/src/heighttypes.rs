@@ -841,13 +841,30 @@ pub(crate) fn severity_rank(s: Option<&str>) -> u8 {
 /// map count only with that map; the base-game maps match none. Worst means most serious first,
 /// then least room. Pure.
 pub fn worst(game: &GameData, maps: &[MapTypes], mods: &[ModTypes]) -> Budget {
-    std::iter::once(evaluate(game, None, mods))
-        .chain(maps.iter().map(|m| {
-            let on_map = for_map(mods, &m.keys, ModTypes::absorb_scoped, |t| &t.scoped);
-            evaluate(game, Some(m), &on_map)
-        }))
+    worst_of(
+        std::iter::once(evaluate(game, None, mods)).chain(
+            maps.iter()
+                .map(|m| evaluate(game, Some(m), &mods_on(Some(m), mods))),
+        ),
+    )
+}
+
+/// The most serious of some budgets: by severity, then least room. Pure.
+pub(crate) fn worst_of(budgets: impl Iterator<Item = Budget>) -> Budget {
+    budgets
         .max_by_key(|b| (severity_rank(severity(b)), b.total as i64 - b.cap as i64))
         .expect("the base-game maps are always a candidate")
+}
+
+/// `mods` as they load on `map` (the base-game maps when `None`). Pure.
+pub(crate) fn mods_on<'a>(
+    map: Option<&MapTypes>,
+    mods: &'a [ModTypes],
+) -> std::borrow::Cow<'a, [ModTypes]> {
+    match map {
+        None => std::borrow::Cow::Borrowed(mods),
+        Some(m) => for_map(mods, &m.keys, ModTypes::absorb_scoped, |t| &t.scoped),
+    }
 }
 
 /// How serious a budget is: critical when the exactly-counted slots alone run over, warning when

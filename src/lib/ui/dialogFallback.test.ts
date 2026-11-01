@@ -62,6 +62,19 @@ describe("ask() without a dialog host", () => {
     await expect(ask(opts)).resolves.toBe(false);
   });
 
+  it("a prompt that wants Cancel focused gets the safe answer, not an OS dialog where Enter is the verb (#392)", async () => {
+    registerDialogHost()();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const point = {
+      title: "Point Farming Simulator 25 at this folder too?",
+      confirm: "Update the game's setting",
+      cancel: "Only in Silo",
+      focus: "cancel" as const,
+    };
+    await expect(ask(point)).resolves.toBe(false);
+    expect(pluginConfirm).not.toHaveBeenCalled();
+  });
+
   it("askText() after the host failed gives null and says so in an error toast", async () => {
     registerDialogHost()();
     await expect(askText({ title: "Rename", label: "Name", confirm: "Rename" })).resolves.toBeNull();
