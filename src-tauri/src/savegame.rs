@@ -546,6 +546,10 @@ mod tests {
         assert_eq!(std::fs::read_dir(&main_backups).unwrap().count(), 0);
 
         // Once it's a real folder again, the backup goes in it, each in a new folder.
+        // The link itself goes (a symlink is a file on Linux/macOS, a junction a folder here).
+        #[cfg(unix)]
+        std::fs::remove_file(profile.join("SiloBackups")).unwrap();
+        #[cfg(windows)]
         std::fs::remove_dir(profile.join("SiloBackups")).unwrap();
         let a = PathBuf::from(backup(&profile, "savegame1").unwrap());
         let b = PathBuf::from(backup(&profile, "savegame1").unwrap());
