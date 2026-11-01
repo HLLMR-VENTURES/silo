@@ -84,23 +84,32 @@ hidden and always off, and the note under the folder gives `gameprofile::unsuppo
   the Steam client did decode Silo's exact link and pass `-profile "<dir>"` on (#404, 2026-11-01),
   which makes Linux likely to work, but the Linux client and its way of splitting arguments haven't
   been tried. Until a tester confirms one way, the switch stays hidden.
-- **How the folder would be written on Linux.** Inside the prefix the game sees Windows paths.
-  Proton links `dosdevices/z:` to `/` (and `c:` to `../drive_c`) in every prefix it sets up
-  ([`proton`, prefix setup](https://github.com/ValveSoftware/Proton/blob/proton_10.0/proton)), so
-  any host folder is `Z:\home\<you>\…`. Use `Z:` even for a folder inside the prefix: a `C:\…`
-  path means a different folder if Steam starts the game in another prefix than the one Silo
-  found (an old library, or the Flatpak Steam beside the native one). Keep the folder in double
-  quotes and refuse names with `$`, a backtick, `"` or `\`, so the argument splits the same by the
-  Windows rules and as shell words. A profile's own `gameSettings.xml` names its mods folder in
-  the game's drive letters, which would have to be read through the prefix's drive map
-  (`modsroot::PathMap`), refusing `..` (Wine stops `..` at the drive's top folder, a host path
-  doesn't).
+- **How the folder would probably be written on Linux** (a candidate, not established). Inside
+  the prefix the game sees Windows paths. When a prefix has no `dosdevices/z:` link, Proton creates
+  one to `/` (and `c:` to `../drive_c`); an existing link is kept as it is
+  ([`proton`, prefix setup](https://github.com/ValveSoftware/Proton/blob/proton_10.0/proton)). So
+  a host folder is usually `Z:\home\<you>\…`, if that prefix's `z:` is still `/` and the game sees
+  the same files as Silo. That second part isn't a given with the Flatpak Steam: it runs the game
+  in a sandbox without general access to your home folder, where `~` can be the app's own private
+  folder, so `Z:\home\<you>\…` may not be the folder Silo sees
+  ([Steam Flatpak manifest](https://github.com/flathub/com.valvesoftware.Steam/blob/master/com.valvesoftware.Steam.yml),
+  [Flatpak sandbox permissions](https://docs.flatpak.org/en/latest/sandbox-permissions.html)).
+  Prefer `Z:` over `C:\…` even for a folder inside the prefix: `C:\…` means another folder if
+  Steam starts the game in a different prefix than the one Silo found (an old library, or the
+  Flatpak Steam beside the native one). Keep the folder in double quotes and refuse names with
+  `$`, a backtick, `"` or `\`, so the argument splits the same by the Windows rules and as shell
+  words. The follow-up still has to find out which prefix Steam actually launches: a profile's
+  own `gameSettings.xml` names its mods folder in the game's drive letters (possibly `C:\…`),
+  which must be read through that prefix's drive map (`modsroot::PathMap`), refusing `..` (Wine
+  stops `..` at the drive's top folder, a host path doesn't).
 - **macOS: not established.** We have no Mac build to inspect. No GIANTS page, forum post or
   community tool we found starts FS25 (or FS22) on a Mac with `-profile`. The community tools that
   pass arguments are Windows only
-  ([FSPassion](https://github.com/Michel-MichelMichel/FSPassion)); others switch mods folders with
-  symlinks instead ([FS25 Linux Mod Switcher](https://github.com/william17050/FS25_Linux_Mod_Switcher),
-  [fs25-profile-switcher](https://github.com/Chouteau49/fs25-profile-switcher)). The Mac build is
+  ([FSPassion](https://github.com/Michel-MichelMichel/FSPassion)); others swap the mods folder's
+  contents instead and start the game normally: by symlink on Linux
+  ([FS25 Linux Mod Switcher](https://github.com/william17050/FS25_Linux_Mod_Switcher)), by NTFS
+  hardlink or copy on Windows ([fs25-profile-switcher](https://github.com/Chouteau49/fs25-profile-switcher)).
+  None of them shows anything about `-profile` on a Mac. The Mac build is
   its own binary inside the `.app` bundle, so the Windows strings say nothing about it. A Mac
   profile folder would be shaped like the default `~/Library/Application Support/FarmingSimulator2025`.
 
