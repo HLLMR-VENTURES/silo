@@ -686,27 +686,24 @@ fn urlencode(s: &str) -> String {
 /// Download a resolved .zip to the temp file `part`, streaming so the caller can report
 /// progress. Validates PK magic, caps at `update::MAX_BYTES` (4 GiB, the same as updates), and
 /// checks the whole archive (central
-/// directory, `modDesc.xml`, and the catalog's SHA-256 when known). On any failure `part` is
-/// removed, so a failed download never leaves a half-written file; on success the caller
-/// places `part` (it needs no library lock until then). `on_progress` is called with
+/// directory, `modDesc.xml`, and the catalog's SHA-256 when known). The part is the claim's
+/// own new file (`PartClaim::create`); on any failure dropping the claim removes it, so a
+/// failed download never leaves a half-written file. On success the caller places it (it
+/// needs no library lock until then). `on_progress` is called with
 /// (bytes_done, total_bytes) — total is None when the server omits Content-Length. Kept
 /// Tauri-agnostic; the command layer turns it into events.
 pub fn download_to_part<F: Fn(u64, Option<u64>)>(
     url: &str,
-    part: &std::path::Path,
+    part: &crate::PartClaim,
     expected_sha256: Option<&str>,
     on_progress: F,
 ) -> Result<(), String> {
-    let result = fetch_and_validate(url, part, expected_sha256, &on_progress);
-    if result.is_err() {
-        let _ = std::fs::remove_file(part);
-    }
-    result
+    fetch_and_validate(url, part, expected_sha256, &on_progress)
 }
 
 fn fetch_and_validate(
     url: &str,
-    part: &std::path::Path,
+    claim: &crate::PartClaim,
     expected_sha256: Option<&str>,
     on_progress: &dyn Fn(u64, Option<u64>),
 ) -> Result<(), String> {
@@ -723,9 +720,10 @@ fn fetch_and_validate(
         .and_then(|s| s.parse().ok())
         .filter(|&t| t <= CAP);
 
-    // Errors return early; `download_to_part` removes the part (the handle is closed by then).
-    // Always a new file: a leftover from a crashed run is removed, never written into.
-    let mut file = crate::paths::create_fresh(part).map_err(|e| e.to_string())?;
+    // Errors return early; dropping the claim removes the part (the handle is closed by then).
+    // Always a new file at the claim's own name: nothing already there is removed or written into.
+    let part = claim.path();
+    let mut file = claim.create().map_err(|e| e.to_string())?;
     let mut reader = resp.into_reader();
 
     let mut buf = [0u8; 64 * 1024];

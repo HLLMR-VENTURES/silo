@@ -951,7 +951,7 @@ async fn download_update(
         let old_link = current_link(&db, &dest)?;
         // Public release assets don't need auth, and a download must never carry the user's
         // GitHub credential — keep the token for explicit API actions only.
-        let part = update::fetch(&asset_url, &dest)?;
+        let part = update::fetch(&asset_url, &dest, Some(&db))?;
         // The new file keeps the link when it's another release of that entry; settled here,
         // outside the lock, and recorded before the swap so the updated file always has it.
         let mut link_problem = None;
@@ -1204,12 +1204,42 @@ fn recover_interrupted_updates() -> update::Recovery {
     r
 }
 
-/// Background recovery over `layout` (costly steps at most once per session per file).
+/// Silo's database, once the app has started: where background recovery records its scratch.
+static APP_DB: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Background recovery over `layout` (costly steps at most once per session per file), with
+/// the scratch journal in Silo's database when it can be opened.
 fn settle_layout(layout: &organize::Layout) -> update::Recovery {
+    let conn = APP_DB.get().and_then(|p| match db::open(p) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            log::warn!("couldn't open the scratch journal: {e}");
+            None
+        }
+    });
+    let journal = conn.as_ref().map(scratch::DbJournal);
+    settle_layout_with(layout, journal.as_ref().map(|j| j as &dyn scratch::Journal))
+}
+
+/// [`settle_layout`] with its journal given (tests). With one, relink temps an earlier
+/// recovery, update or relink left in the mods folder (a crash) are swept first (only recorded
+/// ones, each proven: `scratch::sweep_where`), and the relinks this recovery makes record theirs
+/// (#400). Without one nothing it makes is recorded, so nothing it leaves is ever removed.
+fn settle_layout_with(
+    layout: &organize::Layout,
+    journal: Option<&dyn scratch::Journal>,
+) -> update::Recovery {
+    let mut policy = organize::LinkPolicy::new(layout);
+    if let Some(j) = journal {
+        scratch::sweep_where(j, &|e| {
+            e.role == scratch::Role::RelinkTmp && scratch::inside(&e.path, &layout.mods)
+        });
+        policy = policy.with_journal(j);
+    }
     update::settle(
         &update::layout_dirs(layout),
         &layout.mods,
-        &mut organize::LinkPolicy::new(layout),
+        &mut policy,
         update::Attempt::Background,
     )
 }
@@ -1536,10 +1566,11 @@ async fn install_remote_mod(
         if path_taken(&dest) {
             return Err(already_in_library(&dest));
         }
-        let part = claim_part(&dest)?;
+        let db = db_path(&app)?;
+        let part = claim_part(&dest, Some(&db))?;
         siloapi::download_to_part(
             &resolved.url,
-            part.path(),
+            &part,
             resolved.expected_sha256.as_deref(),
             |done, total| {
                 let _ = emitter.emit(
@@ -1557,7 +1588,6 @@ async fn install_remote_mod(
         // earlier install left for the same name and bytes. Recorded before the file is placed,
         // so a placed file never has a missing or stale link; put back as it was if the file
         // then isn't placed. A download the catalog has a hash for was already checked against it.
-        let db = db_path(&app)?;
         let stem = catalogalias::zip_tech_name(&dest);
         let hash_part = || match &resolved.expected_sha256 {
             Some(h) => Ok(h.clone()),
@@ -1735,28 +1765,69 @@ fn still_a_mods_folder(root: &std::path::Path, mods_roots: &[PathBuf]) -> Result
     }
 }
 
-/// Downloads whose `.zip.part` is in use, by `same_file_key`. Downloads run outside the
-/// library lock, so two at once for the same file must not share (and corrupt) one part file.
-static PARTS_IN_FLIGHT: std::sync::Mutex<Vec<FileKey>> = std::sync::Mutex::new(Vec::new());
+/// Downloads running now. Each claims its mod file's part name (`key`, by `same_file_key`):
+/// downloads run outside the library lock, so two at once for the same file are refused. And
+/// each holds the part file it streams into (`path`, its own name), which no sweep removes
+/// while it's claimed (`remove_unclaimed_part`).
+static PARTS_IN_FLIGHT: std::sync::Mutex<Vec<InFlight>> = std::sync::Mutex::new(Vec::new());
 
-/// A download's claim on its part file. Dropping it removes whatever part is left
-/// (a failed or abandoned download) and frees the name.
+struct InFlight {
+    key: FileKey,
+    path: FileKey,
+}
+
+/// A download's claim on its part file (#400): a name of its own beside the mod
+/// (`<file>.<token><suffix>`, `scratch::unique_beside`), recorded in the scratch journal
+/// (`scratch::Role::Part`) before it's made, and made only by [`PartClaim::create`], which never
+/// opens anything already there. Dropping the claim removes the part it made (a failed or
+/// abandoned download) while that is still a file, frees the name, and drops the record once
+/// nothing is there. A part a crash leaves stays recorded, for `scratch::sweep_where`.
 pub struct PartClaim {
     path: PathBuf,
     key: FileKey,
+    /// The database whose journal recorded the part (none in tests that don't need one).
+    db: Option<PathBuf>,
+    /// [`PartClaim::create`] made the file.
+    made: std::sync::atomic::AtomicBool,
 }
 
 impl PartClaim {
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
+
+    /// Make the part file: a new file at the claim's own name, never one already there (a
+    /// clash fails; nothing is removed or written into).
+    pub fn create(&self) -> std::io::Result<std::fs::File> {
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)?;
+        self.made.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(f)
+    }
 }
 
 impl Drop for PartClaim {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-        let mut held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-        held.retain(|k| k != &self.key);
+        // Only the file this claim made, and only while it is one (never through a link).
+        let made = self.made.load(std::sync::atomic::Ordering::SeqCst);
+        if made && self.path.symlink_metadata().is_ok_and(|m| m.is_file()) {
+            if let Err(e) = std::fs::remove_file(&self.path) {
+                log::warn!("couldn't remove {}: {e}", self.path.display());
+            }
+        }
+        {
+            let mut held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+            held.retain(|c| c.key != self.key);
+        }
+        if let Some(db) = &self.db {
+            match db::open(db) {
+                // Placed, removed or never made: the record goes. Still there: kept recorded.
+                Ok(conn) => scratch::settle(&scratch::DbJournal(&conn), &self.path),
+                Err(e) => log::warn!("couldn't update the scratch journal: {e}"),
+            }
+        }
     }
 }
 
@@ -1810,37 +1881,121 @@ fn fold_file_name(name: &str) -> String {
     decomposed.to_lowercase().to_uppercase().nfc().collect()
 }
 
-/// Claim the part file a download of `dest` streams into, refusing while another download
-/// of the same file is running.
-fn claim_part(dest: &std::path::Path) -> Result<PartClaim, String> {
-    claim_part_at(dest, dest.with_extension("zip.part"))
+/// Why a part file couldn't be claimed.
+#[derive(Debug)]
+pub enum ClaimError {
+    /// Another download of the same file is running.
+    Busy(String),
+    /// The scratch journal couldn't record the part, so it was never made.
+    Journal(String),
 }
 
-/// Claim `path` as the part file a download of `dest` streams into (see [`claim_part`]).
-fn claim_part_at(dest: &std::path::Path, path: PathBuf) -> Result<PartClaim, String> {
-    let key = same_file_key(&path);
-    let mut held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-    if held.iter().any(|k| k.overlaps(&key)) {
-        return Err(format!("{} is already downloading", file_label(dest)));
+impl From<ClaimError> for String {
+    fn from(e: ClaimError) -> String {
+        match e {
+            ClaimError::Busy(m) | ClaimError::Journal(m) => m,
+        }
     }
-    held.push(key.clone());
-    Ok(PartClaim { path, key })
 }
 
-/// Remove a part file left by an earlier run, unless a download in this run has claimed it.
-/// The claim list stays locked across the check and the removal, so a download can't claim it
-/// in between. Returns whether a file was removed.
-fn remove_unclaimed_part(path: &std::path::Path) -> bool {
+/// Suffix of an install's part file (`<file>.<token>.part`). `scan` never lists it (not a zip).
+const INSTALL_PART_SUFFIX: &str = ".part";
+
+/// Claim the part file an install of `dest` streams into, refusing while another download of
+/// the same file is running. `db`: the database whose scratch journal records it.
+fn claim_part(
+    dest: &std::path::Path,
+    db: Option<&std::path::Path>,
+) -> Result<PartClaim, ClaimError> {
+    claim_part_at(
+        dest,
+        &dest.with_extension("zip.part"),
+        INSTALL_PART_SUFFIX,
+        db,
+    )
+}
+
+/// Claim a part file for a download of `dest` (see [`PartClaim`]): `name` is what two downloads
+/// of one file are told apart by, `suffix` ends the part's own name. The claim is held before
+/// the part is recorded, so a sweep never sees a recorded part of a running download
+/// unclaimed. A journal that can't record stops the download before it starts.
+pub(crate) fn claim_part_at(
+    dest: &std::path::Path,
+    name: &std::path::Path,
+    suffix: &str,
+    db: Option<&std::path::Path>,
+) -> Result<PartClaim, ClaimError> {
+    let key = same_file_key(name);
+    let path = scratch::unique_beside(dest, suffix);
+    {
+        let mut held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        if held.iter().any(|c| c.key.overlaps(&key)) {
+            return Err(ClaimError::Busy(format!(
+                "{} is already downloading",
+                file_label(dest)
+            )));
+        }
+        held.push(InFlight {
+            key: key.clone(),
+            path: same_file_key(&path),
+        });
+    }
+    let claim = PartClaim {
+        path,
+        key,
+        db: db.map(std::path::Path::to_path_buf),
+        made: std::sync::atomic::AtomicBool::new(false),
+    };
+    if let Some(db) = db {
+        let journal_err = |e: String| {
+            ClaimError::Journal(format!(
+                "Silo couldn't note the download of {} in its database, so it didn't start: {e}",
+                file_label(dest)
+            ))
+        };
+        let conn = db::open(db).map_err(journal_err)?;
+        scratch::Journal::record(
+            &scratch::DbJournal(&conn),
+            &scratch::Entry {
+                path: claim.path.clone(),
+                role: scratch::Role::Part,
+                from: dest.to_path_buf(),
+                to: dest.to_path_buf(),
+                kind: "zip".into(),
+                size: None,
+            },
+        )
+        .map_err(journal_err)?;
+    }
+    Ok(claim)
+}
+
+/// Whether a download running now holds the part file `path`.
+pub(crate) fn part_in_flight(path: &std::path::Path) -> bool {
+    let key = same_file_key(path);
+    PARTS_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|c| c.path.overlaps(&key))
+}
+
+/// Remove a recorded part file (`scratch::Role::Part`) no download running now claims, while it
+/// is a file (never a link or a folder). The claim list stays locked across the check and the
+/// removal, so a download can't claim it in between. `None` when it's claimed or not a file.
+pub(crate) fn remove_unclaimed_part(path: &std::path::Path) -> Option<std::io::Result<()>> {
     let held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
     let key = same_file_key(path);
-    if held.iter().any(|k| k.overlaps(&key)) {
-        return false;
+    if held
+        .iter()
+        .any(|c| c.path.overlaps(&key) || c.key.overlaps(&key))
+    {
+        return None;
     }
-    let removed = std::fs::remove_file(path).is_ok();
-    if removed {
-        fslog::changed("remove", path);
+    if !path.symlink_metadata().is_ok_and(|m| m.is_file()) {
+        return None;
     }
-    removed
+    Some(std::fs::remove_file(path))
 }
 
 /// Anything at `p`, including a broken link (which `Path::exists` would call absent).
@@ -6381,38 +6536,47 @@ async fn collection_apply(
                         rows.push(present_row(&m.tech_name, &resolved.filename));
                         continue;
                     }
-                    let Ok(part) = claim_part(&dest) else {
-                        // A different name the claim treats as the same file as one of this
-                        // set's own downloads: never reported as present.
-                        let key = same_file_key(&dest);
-                        if let Some(p) = pending
-                            .iter()
-                            .find(|p| same_file_key(&p.dest).overlaps(&key))
-                        {
-                            rows.push(fail_row(
-                                &m.tech_name,
-                                format!(
-                                    "Its file name can't be told apart from {} in this set. \
-                                     Install it on its own afterwards.",
-                                    file_label(&p.dest)
-                                ),
-                            ));
+                    let part = match claim_part(&dest, Some(&db)) {
+                        Ok(part) => part,
+                        // Silo couldn't record the part: nothing was downloaded.
+                        Err(ClaimError::Journal(e)) => {
+                            rows.push(fail_row(&m.tech_name, e));
                             failed_count += 1;
                             continue;
                         }
-                        // Taken only by another download running right now (e.g. from Browse).
-                        rows.push(ApplyRow {
-                            tech_name: m.tech_name.clone(),
-                            filename: Some(resolved.filename.clone()),
-                            status: "skipped".into(),
-                            verdict: None,
-                            detail: Some("Already downloading elsewhere in Silo.".into()),
-                        });
-                        continue;
+                        Err(ClaimError::Busy(_)) => {
+                            // A different name the claim treats as the same file as one of this
+                            // set's own downloads: never reported as present.
+                            let key = same_file_key(&dest);
+                            if let Some(p) = pending
+                                .iter()
+                                .find(|p| same_file_key(&p.dest).overlaps(&key))
+                            {
+                                rows.push(fail_row(
+                                    &m.tech_name,
+                                    format!(
+                                        "Its file name can't be told apart from {} in this set. \
+                                     Install it on its own afterwards.",
+                                        file_label(&p.dest)
+                                    ),
+                                ));
+                                failed_count += 1;
+                                continue;
+                            }
+                            // Taken only by another download running right now (e.g. from Browse).
+                            rows.push(ApplyRow {
+                                tech_name: m.tech_name.clone(),
+                                filename: Some(resolved.filename.clone()),
+                                status: "skipped".into(),
+                                verdict: None,
+                                detail: Some("Already downloading elsewhere in Silo.".into()),
+                            });
+                            continue;
+                        }
                     };
                     match siloapi::download_to_part(
                         &resolved.url,
-                        part.path(),
+                        &part,
                         resolved.expected_sha256.as_deref(),
                         |_done, _total| {},
                     ) {
@@ -7372,6 +7536,7 @@ pub fn run() {
             // storage left this marker: stay signed out until a sign-in succeeds.
             if let Ok(p) = db_path(app.handle()) {
                 GH_SESSION.use_marker(p.with_file_name("github-signed-out"));
+                let _ = APP_DB.set(p);
             }
             log::info!(
                 "Silo {} starting on {}",
@@ -9261,8 +9426,8 @@ mod tests {
     fn a_busy_library_fails_the_pending_downloads_and_removes_their_parts() {
         let base = temp_base("place_pending_busy");
         let dest = base.join("mods").join("FS25_Wait.zip");
-        let part = super::claim_part(&dest).unwrap();
-        std::fs::write(part.path(), b"done").unwrap();
+        let part = super::claim_part(&dest, None).unwrap();
+        std::io::Write::write_all(&mut part.create().unwrap(), b"done").unwrap();
         let part_path = part.path().to_path_buf();
         let mut rows = vec![super::ApplyRow {
             tech_name: "FS25_Wait".into(),
@@ -9296,16 +9461,19 @@ mod tests {
         // macOS (APFS) ignores case as Windows does; on Linux this only over-claims.
         let base = temp_base("claim_case");
         let mods = base.join("mods");
-        let _first = super::claim_part(&mods.join("FS25_Foo.zip")).unwrap();
-        assert!(super::claim_part(&mods.join("fs25_foo.zip")).is_err());
-        assert!(
-            super::claim_part_at(&mods.join("FS25_FOO.zip"), mods.join("FS25_FOO.zip.part"))
-                .is_err()
-        );
+        let _first = super::claim_part(&mods.join("FS25_Foo.zip"), None).unwrap();
+        assert!(super::claim_part(&mods.join("fs25_foo.zip"), None).is_err());
+        assert!(super::claim_part_at(
+            &mods.join("FS25_FOO.zip"),
+            &mods.join("FS25_FOO.zip.part"),
+            super::INSTALL_PART_SUFFIX,
+            None
+        )
+        .is_err());
         // NTFS uppercases, so both lowercase sigmas are one name.
-        let _sigma = super::claim_part(&mods.join("FS25_\u{3c3}.zip")).unwrap();
-        assert!(super::claim_part(&mods.join("FS25_\u{3c2}.zip")).is_err());
-        assert!(super::claim_part(&mods.join("FS25_\u{3a3}.zip")).is_err());
+        let _sigma = super::claim_part(&mods.join("FS25_\u{3c3}.zip"), None).unwrap();
+        assert!(super::claim_part(&mods.join("FS25_\u{3c2}.zip"), None).is_err());
+        assert!(super::claim_part(&mods.join("FS25_\u{3a3}.zip"), None).is_err());
         // Two spellings of one folder share keys: another case on Windows, a link elsewhere.
         #[cfg(windows)]
         let alias = base.join("MODS");
@@ -9316,14 +9484,14 @@ mod tests {
             a
         };
         assert_ne!(alias, mods);
-        assert!(super::claim_part(&alias.join("FS25_Foo.zip")).is_err());
+        assert!(super::claim_part(&alias.join("FS25_Foo.zip"), None).is_err());
         // NTFS compares names by uppercasing each character, without reordering accents.
-        let _ypo = super::claim_part(&mods.join("FS25_A\u{345}\u{301}.zip")).unwrap();
-        assert!(super::claim_part(&mods.join("FS25_A\u{399}\u{301}.zip")).is_err());
+        let _ypo = super::claim_part(&mods.join("FS25_A\u{345}\u{301}.zip"), None).unwrap();
+        assert!(super::claim_part(&mods.join("FS25_A\u{399}\u{301}.zip"), None).is_err());
         // APFS also treats the two ways of writing an accent as one name.
-        let _cafe = super::claim_part(&mods.join("FS25_Caf\u{e9}.zip")).unwrap();
-        assert!(super::claim_part(&mods.join("FS25_Cafe\u{301}.zip")).is_err());
-        assert!(super::claim_part(&mods.join("fs25_CAFE\u{301}.zip")).is_err());
+        let _cafe = super::claim_part(&mods.join("FS25_Caf\u{e9}.zip"), None).unwrap();
+        assert!(super::claim_part(&mods.join("FS25_Cafe\u{301}.zip"), None).is_err());
+        assert!(super::claim_part(&mods.join("fs25_CAFE\u{301}.zip"), None).is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -9331,8 +9499,8 @@ mod tests {
     fn collection_downloads_are_not_placed_once_their_mods_folder_was_switched_away() {
         let base = temp_base("place_pending_switched");
         let dest = base.join("mods").join("FS25_Moved.zip");
-        let part = super::claim_part(&dest).unwrap();
-        std::fs::write(part.path(), b"done").unwrap();
+        let part = super::claim_part(&dest, None).unwrap();
+        std::io::Write::write_all(&mut part.create().unwrap(), b"done").unwrap();
         let part_path = part.path().to_path_buf();
         let mut rows = vec![super::ApplyRow {
             tech_name: "FS25_Moved".into(),
@@ -9640,16 +9808,142 @@ mod tests {
     fn a_download_claims_its_part_file_until_done() {
         let base = temp_base("claim_part");
         let dest = base.join("mods").join("FS25_Busy.zip");
-        let claim = super::claim_part(&dest).unwrap();
-        assert_eq!(claim.path(), dest.with_extension("zip.part").as_path());
-        std::fs::write(claim.path(), b"half").unwrap();
+        let db = base.join("silo.db");
+        let claim = super::claim_part(&dest, Some(&db)).unwrap();
+        // A name of its own beside the mod (#400), recorded before it's made.
+        let name = claim
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            name.starts_with("FS25_Busy.zip.") && name.ends_with(".part"),
+            "{name}"
+        );
+        assert_ne!(claim.path(), dest.with_extension("zip.part").as_path());
+        let conn = super::db::open(&db).unwrap();
+        let journal = super::scratch::DbJournal(&conn);
+        let recorded = super::scratch::Journal::entries(&journal);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].path, claim.path());
+        assert_eq!(recorded[0].role, super::scratch::Role::Part);
+        std::io::Write::write_all(&mut claim.create().unwrap(), b"half").unwrap();
+        // Made once: a second create never opens what's there.
+        assert!(claim.create().is_err());
+        assert_eq!(std::fs::read(claim.path()).unwrap(), b"half");
         // A second download of the same file can't share (and corrupt) the part.
-        assert!(super::claim_part(&dest).is_err());
+        assert!(super::claim_part(&dest, None).is_err());
         let part = claim.path().to_path_buf();
         drop(claim);
-        // Dropping the claim removes any leftover part and frees the name.
+        // Dropping the claim removes the part it made, drops its record and frees the name.
         assert!(!part.exists());
-        assert!(super::claim_part(&dest).is_ok());
+        assert!(super::scratch::Journal::entries(&journal).is_empty());
+        assert!(super::claim_part(&dest, None).is_ok());
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_claim_never_removes_a_file_it_didnt_make() {
+        // #400: an old fixed-name part (or the user's own `.zip.part`, e.g. a browser's
+        // partial download) is never replaced, written into or removed by a new download.
+        let base = temp_base("claim_not_made");
+        let dest = base.join("mods").join("FS25_Keep.zip");
+        let legacy = dest.with_extension("zip.part");
+        std::fs::write(&legacy, b"the user's partial download").unwrap();
+        let claim = super::claim_part(&dest, None).unwrap();
+        // Something appears at the claim's own name before the download makes it.
+        std::fs::write(claim.path(), b"not Silo's").unwrap();
+        assert!(claim.create().is_err(), "never opens what's already there");
+        let at = claim.path().to_path_buf();
+        drop(claim);
+        assert_eq!(std::fs::read(&at).unwrap(), b"not Silo's");
+        assert_eq!(
+            std::fs::read(&legacy).unwrap(),
+            b"the user's partial download"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A journal that keeps every entry ever recorded, to see what an operation recorded.
+    #[derive(Default)]
+    struct SpyJournal {
+        now: crate::scratch::tests::MemJournal,
+        seen: std::cell::RefCell<Vec<crate::scratch::Entry>>,
+    }
+
+    impl crate::scratch::Journal for SpyJournal {
+        fn record(&self, e: &crate::scratch::Entry) -> Result<(), String> {
+            self.seen.borrow_mut().push(e.clone());
+            self.now.record(e)
+        }
+        fn forget(&self, path: &Path) {
+            self.now.forget(path)
+        }
+        fn entries(&self) -> Vec<crate::scratch::Entry> {
+            self.now.entries()
+        }
+    }
+
+    #[test]
+    fn background_recovery_records_its_relink_temp_and_a_later_one_sweeps_it() {
+        // #400: an interrupted update whose projection still links the old file. Recovery
+        // re-points it through a relink temp, recorded first.
+        use crate::scratch::{Journal, Role};
+        let base = temp_base("settle_relink");
+        let mods = base.join("mods");
+        let layout = crate::organize::Layout::default_for(&mods);
+        let cat = layout.archive.join("Misc");
+        std::fs::create_dir_all(&cat).unwrap();
+        let dest = cat.join("FS25_A.zip");
+        let old = crate::update::old_path(&dest);
+        std::fs::write(&old, b"PK old version").unwrap();
+        let flat = mods.join("FS25_A.zip");
+        std::fs::hard_link(&old, &flat).unwrap();
+        std::fs::write(&dest, b"PK new version").unwrap();
+        let journal = SpyJournal::default();
+
+        super::settle_layout_with(&layout, Some(&journal));
+
+        assert_eq!(std::fs::read(&flat).unwrap(), b"PK new version");
+        let temps: Vec<_> = journal
+            .seen
+            .borrow()
+            .iter()
+            .filter(|e| e.role == Role::RelinkTmp)
+            .cloned()
+            .collect();
+        assert_eq!(temps.len(), 1, "the relink temp was recorded");
+        assert_eq!(temps[0].to, flat);
+        assert!(
+            !journal.entries().iter().any(|e| e.role == Role::RelinkTmp),
+            "placed, so its record went"
+        );
+
+        // A crash between making the temp and renaming it in leaves it there, recorded.
+        let tmp = temps[0].path.clone();
+        std::fs::hard_link(&dest, &tmp).unwrap();
+        journal.record(&temps[0]).unwrap();
+        // An unrecorded look-alike beside it is never touched.
+        let lookalike = crate::scratch::unique_beside(&flat, crate::scratch::RELINK_TMP);
+        std::fs::write(&lookalike, b"not recorded").unwrap();
+
+        super::settle_layout_with(&layout, Some(&journal));
+
+        assert!(
+            tmp.symlink_metadata().is_err(),
+            "the next recovery sweeps it"
+        );
+        let left: Vec<_> = journal.entries().into_iter().map(|e| e.role).collect();
+        assert_eq!(
+            left,
+            vec![Role::UpdateBak],
+            "only the backup it made stays recorded"
+        );
+        assert_eq!(std::fs::read(&flat).unwrap(), b"PK new version");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"PK new version");
+        assert_eq!(std::fs::read(&lookalike).unwrap(), b"not recorded");
         let _ = std::fs::remove_dir_all(&base);
     }
 

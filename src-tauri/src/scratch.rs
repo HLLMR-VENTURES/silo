@@ -2,7 +2,13 @@
 //! - an archive move's in-flight copy (`MoveTmp`, `….silo-move-tmp`);
 //! - the old copy an archive move is deleting (`MoveOld`, `….silo-move-old`);
 //! - the temp a relink makes before renaming it over a mods-folder entry (`RelinkTmp`,
-//!   `….silo-relink-tmp`).
+//!   `….silo-relink-tmp`);
+//! - a download's part file (`Part`: `….silo-update.part` for an update, `….part` for an
+//!   install) (#400).
+//!
+//! The journal also lists the update backups Silo made (`UpdateBak`, #400). Those aren't
+//! scratch: no sweep looks at them. Only `update::prune_backups` removes one, and only a
+//! recorded one past the newest few of its mod.
 //!
 //! Each gets a name of its own (`<name>.<token><suffix>`, see [`unique_beside`]), is recorded
 //! in the journal *before* it is made, and is made exclusively (never over anything already
@@ -31,6 +37,10 @@ pub(crate) enum Role {
     MoveTmp,
     MoveOld,
     RelinkTmp,
+    /// A download's part file (an install or an update), made by a `PartClaim`.
+    Part,
+    /// An update backup Silo moved into `backups/` (never swept; see `update::prune_backups`).
+    UpdateBak,
 }
 
 /// One recorded scratch entry.
@@ -40,13 +50,18 @@ pub(crate) struct Entry {
     pub path: PathBuf,
     pub role: Role,
     /// `MoveTmp`: the original being copied. `MoveOld`: the mod's name it was renamed from.
-    /// `RelinkTmp`: the archived copy it links to (or copies).
+    /// `RelinkTmp`: the archived copy it links to (or copies). `Part`: the mod file it
+    /// downloads. `UpdateBak`: the set-aside old version it was moved from.
     pub from: PathBuf,
     /// `MoveTmp`: where the copy is placed. `MoveOld`: its replacement, which must verify
-    /// before the old copy may go. `RelinkTmp`: the mods-folder entry it replaces.
+    /// before the old copy may go. `RelinkTmp`: the mods-folder entry it replaces. `Part`: the
+    /// mod file it becomes. `UpdateBak`: the mod file it's a previous version of.
     pub to: PathBuf,
     /// `zip` or `dir`.
     pub kind: String,
+    /// `UpdateBak`: its size when Silo made it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 /// Where scratch entries are recorded. Recording comes first: an entry that couldn't be
@@ -74,23 +89,53 @@ impl DbJournal<'_> {
     }
 }
 
+impl DbJournal<'_> {
+    /// Read, change and write the list as one step (`BEGIN IMMEDIATE`, unless the caller's
+    /// transaction is already open): a download records its part outside the library lock, so
+    /// a sweep's `forget` on another connection must never write back a list without it.
+    /// `change` returns whether it changed anything.
+    fn change(&self, change: impl FnOnce(&mut Vec<Entry>) -> bool) -> Result<(), String> {
+        let own = self.0.is_autocommit();
+        if own {
+            self.0
+                .execute_batch("BEGIN IMMEDIATE")
+                .map_err(|e| e.to_string())?;
+        }
+        let mut v = self.entries();
+        let r = if change(&mut v) {
+            self.write(&v)
+        } else {
+            Ok(())
+        };
+        if own {
+            let end = if r.is_ok() { "COMMIT" } else { "ROLLBACK" };
+            if let Err(e) = self.0.execute_batch(end) {
+                let _ = self.0.execute_batch("ROLLBACK");
+                return r.and(Err(e.to_string()));
+            }
+        }
+        r
+    }
+}
+
 impl Journal for DbJournal<'_> {
     fn record(&self, e: &Entry) -> Result<(), String> {
-        let mut v = self.entries();
-        v.retain(|x| x.path != e.path);
-        v.push(e.clone());
-        self.write(&v)
+        self.change(|v| {
+            v.retain(|x| x.path != e.path);
+            v.push(e.clone());
+            true
+        })
     }
 
     fn forget(&self, path: &Path) {
-        let mut v = self.entries();
-        let before = v.len();
-        v.retain(|x| x.path != path);
-        if v.len() != before {
-            if let Err(e) = self.write(&v) {
-                // Only costs a sweep that finds the path gone (or proves it again).
-                log::warn!("couldn't update the scratch journal: {e}");
-            }
+        let r = self.change(|v| {
+            let before = v.len();
+            v.retain(|x| x.path != path);
+            v.len() != before
+        });
+        if let Err(e) = r {
+            // Only costs a sweep that finds the path gone (or proves it again).
+            log::warn!("couldn't update the scratch journal: {e}");
         }
     }
 
@@ -99,6 +144,19 @@ impl Journal for DbJournal<'_> {
         db::get_app_setting(self.0, JOURNAL_KEY)
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default()
+    }
+}
+
+/// No journal: records nothing (so nothing is ever swept), lists nothing.
+pub(crate) struct NoJournal;
+
+impl Journal for NoJournal {
+    fn record(&self, _: &Entry) -> Result<(), String> {
+        Err("Silo has no scratch journal here".into())
+    }
+    fn forget(&self, _: &Path) {}
+    fn entries(&self) -> Vec<Entry> {
+        Vec::new()
     }
 }
 
@@ -141,6 +199,7 @@ pub(crate) fn begin(
         from: from.to_path_buf(),
         to: to.to_path_buf(),
         kind: kind.to_string(),
+        size: None,
     })?;
     Ok(path)
 }
@@ -401,14 +460,24 @@ pub(crate) enum Swept {
 ///   file still left). With no replacement at all it may be the only copy left: a zip is put
 ///   back under its name (`from`) when that's free; a folder (perhaps half-deleted) is kept.
 ///
+/// - `Part`: a file (not a link, not a folder) that no download running now claims
+///   (`crate::remove_unclaimed_part`, which holds the claims across the check and the removal).
+///   A claim records its part before making it exclusively, so a recorded part nothing claims
+///   is a download that stopped (a crash, or a removal that failed).
+///
 /// Only the entries `which` picks are looked at (a relink pass sweeps relink temps; a move
-/// sweeps those and its own folders' move scratch, never an older move's).
+/// sweeps those and its own folders' move scratch, never an older move's). Update backups
+/// (`UpdateBak`) are never swept.
 pub(crate) fn sweep_where(
     journal: &dyn Journal,
     which: &dyn Fn(&Entry) -> bool,
 ) -> Vec<(Entry, Swept)> {
     let mut out = Vec::new();
-    for e in journal.entries().into_iter().filter(|e| which(e)) {
+    for e in journal
+        .entries()
+        .into_iter()
+        .filter(|e| e.role != Role::UpdateBak && which(e))
+    {
         let s = sweep_one(&e);
         match s {
             Swept::Gone | Swept::Removed | Swept::PutBack => journal.forget(&e.path),
@@ -456,8 +525,12 @@ fn sweep_one(e: &Entry) -> Swept {
         // `remove_link` checks the marker's listing (an untouched copy).
         Role::RelinkTmp => (meta.is_dir() && copy_held_by_archive(&e.path, &e.from))
             .then(|| crate::organize::remove_link(&e.path)),
-        // Silo never makes a link as move scratch: a link here isn't its own.
-        Role::MoveTmp | Role::MoveOld if link => None,
+        // Silo never makes a link as move scratch or a part: a link here isn't its own.
+        Role::MoveTmp | Role::MoveOld | Role::Part if link => None,
+        // A download that stopped: a file no download running now claims.
+        Role::Part => crate::remove_unclaimed_part(&e.path),
+        // Never swept (`sweep_where` skips them); kept if one ever gets here.
+        Role::UpdateBak => None,
         // A copy that may have stopped part-way: every byte it holds is still in the original
         // (or, a zip placed by hardlink, in the placed copy).
         Role::MoveTmp => {
@@ -518,11 +591,13 @@ fn remove_link_entry(p: &Path) -> std::io::Result<()> {
 
 /// Recorded scratch entries tied to any of `paths` (as their `from` or `to`) that are still
 /// there, plus older-style scratch names beside them (`<path><suffix>`): what to point the user
-/// at when a mod's copy is missing.
+/// at when a mod's copy is missing. A download's part and an update backup are never a copy
+/// of the mod being moved, so they aren't listed.
 pub(crate) fn kept_for(journal: &dyn Journal, paths: &[&Path]) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = journal
         .entries()
         .into_iter()
+        .filter(|e| !matches!(e.role, Role::Part | Role::UpdateBak))
         .filter(|e| paths.iter().any(|p| e.from == *p || e.to == *p))
         .map(|e| e.path)
         .filter(|p| p.symlink_metadata().is_ok())
@@ -606,6 +681,7 @@ pub(crate) mod tests {
             from: from.into(),
             to: to.into(),
             kind: kind.into(),
+            size: None,
         }
     }
 
