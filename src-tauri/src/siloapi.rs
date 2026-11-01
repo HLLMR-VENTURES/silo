@@ -513,10 +513,19 @@ pub fn resolve_download(
                 .as_deref()
                 .is_some_and(|l| versions_equal(l, &v));
             let latest_hash = detail.archive_sha256.clone().filter(|_| is_latest);
-            manifest(base, id, &v)
+            let hash = manifest(base, id, &v)
                 .map_err(|e| Operational(format!("{MANIFEST_UNCHECKED} {e}")))?
                 .and_then(|m| m.archive_sha256)
-                .or(latest_hash)
+                .or(latest_hash);
+            // The record has a hash but no latest version to tie it to: it may be this build's.
+            let latest_unknown = detail
+                .latest_version
+                .as_deref()
+                .map_or(true, |l| l.trim().is_empty());
+            if hash.is_none() && detail.archive_sha256.is_some() && latest_unknown {
+                return Err(Operational(MANIFEST_UNCHECKED.to_string()));
+            }
+            hash
         }
         None if detail.archive_sha256.is_some() || detail.verified == Some(true) => {
             return Err(Operational(MANIFEST_UNCHECKED.to_string()));
@@ -543,24 +552,35 @@ fn versions_equal(a: &str, b: &str) -> bool {
     match (version_parts(a), version_parts(b)) {
         (Some(pa), Some(pb)) => {
             let n = pa.len().max(pb.len());
-            (0..n).all(|i| pa.get(i).unwrap_or(&0) == pb.get(i).unwrap_or(&0))
+            (0..n).all(|i| {
+                pa.get(i).map_or("0", String::as_str) == pb.get(i).map_or("0", String::as_str)
+            })
         }
         _ => false,
     }
 }
 
-/// `1.2.0` -> [1, 2, 0]; a segment that doesn't start with a digit counts as 0 (SiloAPI's
-/// `parseInt`); `None` unless the first one does.
-fn version_parts(v: &str) -> Option<Vec<u64>> {
+/// `1.02.0` -> ["1", "2", "0"]: each segment's leading digits without leading zeros, kept as
+/// text so no number is too big to compare. A segment that doesn't start with a digit counts
+/// as 0 (SiloAPI's `parseInt`); `None` unless the first one does.
+fn version_parts(v: &str) -> Option<Vec<String>> {
     let v = v.trim();
     let v = v.strip_prefix(['v', 'V']).unwrap_or(v);
-    let lead = |s: &str| -> Option<u64> {
+    let lead = |s: &str| -> Option<String> {
         let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
-        digits.parse().ok()
+        if digits.is_empty() {
+            return None;
+        }
+        let trimmed = digits.trim_start_matches('0');
+        Some(if trimmed.is_empty() { "0" } else { trimmed }.to_string())
     };
     let segs: Vec<&str> = v.split(['.', '-', '+', '_']).collect();
     lead(segs.first()?)?;
-    Some(segs.iter().map(|s| lead(s).unwrap_or(0)).collect())
+    Some(
+        segs.iter()
+            .map(|s| lead(s).unwrap_or_else(|| "0".to_string()))
+            .collect(),
+    )
 }
 
 const MANIFEST_UNCHECKED: &str =
@@ -952,6 +972,13 @@ mod tests {
         "version":"v1.0.0.0",
         "downloadUrl":"https://github.com/a/b/releases/download/v1/FS25_X.zip"}]}"#;
 
+    /// A record with a hash but no latest version to tie it to.
+    const DETAIL_HASH_NO_LATEST: &str = r#"{"id":"m1","techName":"FS25_X","title":"X",
+        "latestVersion":null,"archiveSha256":"latest",
+        "sources":[{"source":"github","sourceUrl":"https://github.com/a/b","installable":true,
+        "version":"1.0",
+        "downloadUrl":"https://github.com/a/b/releases/download/v1/FS25_X.zip"}]}"#;
+
     /// [`DETAIL`], with the latest version's hash on the record.
     const DETAIL_HASHED: &str = r#"{"id":"m1","techName":"FS25_X","title":"X",
         "latestVersion":"1.0.0.0","archiveSha256":"latest","verified":true,
@@ -993,6 +1020,13 @@ mod tests {
         assert!(!versions_equal("1.2.1", "1.2.0"));
         assert!(!versions_equal("beta", "1.0"));
         assert!(versions_equal("beta", "beta"));
+        // No number is too big to compare, and none is cut to 0.
+        assert!(versions_equal(
+            "v18446744073709551616",
+            "18446744073709551616"
+        ));
+        assert!(!versions_equal("1.18446744073709551616", "1.0"));
+        assert!(versions_equal("1.007", "1.7"));
     }
 
     #[test]
@@ -1015,6 +1049,22 @@ mod tests {
             Some("latest"),
             "v-tag of the latest"
         );
+        // A record hash that can't be tied to a version is never dropped silently.
+        for manifest in [
+            ("404 Not Found", "{}"),
+            ("200 OK", r#"{"manifestHash":"h","archiveSha256":null}"#),
+        ] {
+            assert!(matches!(
+                resolve_with(DETAIL_HASH_NO_LATEST, manifest),
+                Err(ResolveError::Operational(_))
+            ));
+        }
+        let r = resolve_with(
+            DETAIL_HASH_NO_LATEST,
+            ("200 OK", r#"{"archiveSha256":"exact","manifestHash":"h"}"#),
+        )
+        .unwrap();
+        assert_eq!(r.expected_sha256.as_deref(), Some("exact"));
         // The manifest's own hash wins when it has one.
         let r = resolve_with(
             DETAIL_HASHED,
