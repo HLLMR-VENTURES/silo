@@ -33,7 +33,9 @@
 //! the next runs hash such a file without asking for its name again. A run stops at its `Limits`
 //! (names looked up, files hashed, time, checked before every request and file; a record waits
 //! for the library lock no longer than the run has left, and only once a run); the rest wait
-//! for the next run. The answer to the hash lookup is read whole or refused (at most 1 MiB).
+//! for the next run. A run's notes go to the database in at most three transactions, and a
+//! busy database stops the run. Whether a file's bytes already have a link is only decided
+//! under the library lock, where an install's own record can't be half done. The answer to the hash lookup is read whole or refused (at most 1 MiB).
 //! Nothing here is shown to the user as an error; it's only logged.
 
 use crate::catalogalias::{self, Link};
@@ -181,7 +183,9 @@ pub fn run<G>(
     run_with(conn, zips, catalog, hash, lock, Limits::default())
 }
 
-/// `run` within `limits`.
+/// `run` within `limits`. Its notes go to the database in at most three transactions (the name
+/// batch with what it decided, the hashed files, the rest of what it decided); when one fails
+/// (the database busy past its wait), the run stops and the files it hadn't settled wait.
 pub fn run_with<G>(
     conn: &Connection,
     zips: &[LibraryZip],
@@ -240,96 +244,105 @@ pub fn run_with<G>(
 
     // A zip the catalog knows by its own name is joined by that and needs no link. Files it
     // said lately it doesn't know go straight on; at most one name lookup's worth of the others.
-    let mut to_name: Vec<usize> = (0..pending.len())
-        .filter(|&i| pending[i].unnamed_ms.is_none())
-        .collect();
-    if to_name.len() > limits.max_named {
-        let later = to_name.split_off(limits.max_named);
-        retry_all(later.iter().map(|&i| pending[i].zip), BUDGET_USED, &mut out);
-        let later: HashSet<usize> = later.into_iter().collect();
-        pending = pending
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| !later.contains(i))
-            .map(|(_, p)| p)
-            .collect();
-        to_name = (0..pending.len())
-            .filter(|&i| pending[i].unnamed_ms.is_none())
-            .collect();
+    let mut kept = Vec::with_capacity(pending.len());
+    let mut to_name = 0;
+    for p in pending {
+        if p.unnamed_ms.is_none() {
+            if to_name == limits.max_named {
+                out.push((p.zip.path.clone(), Outcome::Retry(BUDGET_USED.to_string())));
+                continue;
+            }
+            to_name += 1;
+        }
+        kept.push(p);
     }
+    let mut pending = kept;
     if late() {
         retry_all(pending.iter().map(|p| p.zip), BUDGET_USED, &mut out);
         return out;
     }
-    let mut known = HashSet::new();
-    if !to_name.is_empty() {
-        let names: Vec<String> = to_name
+    if to_name > 0 {
+        let names: Vec<String> = pending
             .iter()
-            .map(|&i| pending[i].zip.tech_name.clone())
+            .filter(|p| p.unnamed_ms.is_none())
+            .map(|p| p.zip.tech_name.clone())
             .collect();
         let answer = catalog.known_tech_names(&names);
-        // The batch is noted as tried at once (any hash kept), so the next run's batch starts
-        // with files not tried yet; and the files the catalog doesn't know by name are noted so,
-        // for the next runs to hash without asking again.
+        // The batch is noted at once, in one transaction: each file as tried (any hash kept), so
+        // the next batch starts with files not tried yet; the ones the catalog knows by name as
+        // settled; the ones it doesn't with when it said so, for the next runs to hash without
+        // asking again.
         let asked_at = now_ms();
-        if let Ok(k) = &answer {
-            for &i in &to_name {
-                if !k.contains(&pending[i].zip.tech_name) {
-                    pending[i].unnamed_ms = Some(asked_at);
+        let mut notes = Vec::new();
+        let mut known = Vec::new();
+        for p in pending.iter_mut().filter(|p| p.unnamed_ms.is_none()) {
+            let decided = match &answer {
+                Ok(k) if k.contains(&p.zip.tech_name) => true,
+                Ok(_) => {
+                    p.unnamed_ms = Some(asked_at);
+                    false
                 }
+                Err(_) => false,
+            };
+            if decided {
+                known.push(p.zip);
             }
+            notes.push((path_key(p.zip), check_of(p, p.sha(), decided)));
         }
-        let notes: Vec<(String, db::AliasCheck)> = to_name
-            .iter()
-            .map(|&i| {
-                (
-                    path_key(pending[i].zip),
-                    check_of(&pending[i], pending[i].sha(), false),
-                )
-            })
-            .collect();
         if let Err(e) = db::note_alias_checks(conn, &notes) {
-            log::warn!(
-                "[catalog] couldn't note which mods were looked up, so they will be again: {e}"
+            log::warn!("[catalog] link backfill stopped: couldn't note what it looked up: {e}");
+            retry_all(pending.iter().map(|p| p.zip), &e, &mut out);
+            return out;
+        }
+        if let Err(e) = answer {
+            log::info!(
+                "[catalog] link backfill couldn't look mods up by name, trying next time: {e}"
+            );
+            retry_all(
+                pending
+                    .iter()
+                    .filter(|p| p.unnamed_ms.is_none())
+                    .map(|p| p.zip),
+                &e,
+                &mut out,
             );
         }
-        match answer {
-            Ok(k) => known = k,
-            Err(e) => {
+        for z in &known {
+            log::debug!("[catalog] {}: not linked (InCatalog)", file_name(z));
+            out.push((z.path.clone(), Outcome::InCatalog));
+        }
+        // On with the files the catalog doesn't know by name (this run's answer, or lately).
+        pending.retain(|p| p.unnamed_ms.is_some());
+    }
+
+    // Hash (or take the noted hash of) at most `max_hashed` of them; every one tried is noted as
+    // tried, in one transaction, so files that keep failing rotate behind the rest.
+    let mut asked: Vec<(&LibraryZip, String)> = Vec::new();
+    let mut notes = Vec::new();
+    let mut tried = 0;
+    for p in &pending {
+        if tried >= limits.max_hashed || late() {
+            out.push((p.zip.path.clone(), Outcome::Retry(BUDGET_USED.to_string())));
+            continue;
+        }
+        tried += 1;
+        let (got, sha) = bytes_of(p, &hash);
+        notes.push((path_key(p.zip), check_of(p, sha.as_deref(), false)));
+        match got {
+            Ok(sha) => asked.push((p.zip, sha)),
+            Err(why) => {
                 log::info!(
-                    "[catalog] link backfill couldn't look mods up by name, trying next time: {e}"
+                    "[catalog] {}: no catalog link yet, trying next time ({why})",
+                    file_name(p.zip)
                 );
-                let asked: HashSet<usize> = to_name.iter().copied().collect();
-                retry_all(
-                    pending
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| asked.contains(i))
-                        .map(|(_, p)| p.zip),
-                    &e,
-                    &mut out,
-                );
-                // The files it said lately it doesn't know by name can still go on.
-                pending.retain(|p| p.unnamed_ms.is_some());
+                out.push((p.zip.path.clone(), Outcome::Retry(why)));
             }
         }
     }
-
-    let mut asked: Vec<(&LibraryZip, String)> = Vec::new();
-    // Files hashed (or tried) this run, read or not.
-    let mut tried = 0;
-    for p in &pending {
-        if known.contains(&p.zip.tech_name) {
-            settle(conn, p.zip, Outcome::InCatalog, None, &mut out);
-        } else if tried >= limits.max_hashed || late() {
-            out.push((p.zip.path.clone(), Outcome::Retry(BUDGET_USED.to_string())));
-        } else {
-            tried += 1;
-            match bytes_of(conn, p, &hash) {
-                Ok(sha) => asked.push((p.zip, sha)),
-                Err(why) => settle(conn, p.zip, Outcome::Retry(why), None, &mut out),
-            }
-        }
+    if let Err(e) = db::note_alias_checks(conn, &notes) {
+        log::warn!("[catalog] link backfill stopped: couldn't note the files it hashed: {e}");
+        retry_all(asked.iter().map(|(z, _)| *z), &e, &mut out);
+        return out;
     }
     if asked.is_empty() {
         return out;
@@ -369,41 +382,62 @@ pub fn run_with<G>(
         }
         lock(left).inspect_err(|_| busy.set(true))
     };
+    let mut decided = Vec::new();
+    let mut outcomes = Vec::new();
     for (z, sha) in asked {
         let outcome = match found.get(&sha) {
             Some(matches) => judge(conn, z, &sha, matches, &take),
             None => Outcome::Retry("Silo's catalog left this file out of its answer".to_string()),
         };
-        settle(conn, z, outcome, Some(&sha), &mut out);
+        log_outcome(z, &outcome);
+        if outcome.decided() {
+            let check = db::AliasCheck {
+                size: z.size,
+                mtime_ms: z.mtime_ms,
+                sha256: Some(sha.clone()),
+                unnamed_ms: None,
+                decided: true,
+                attempted_ms: now_ms(),
+            };
+            decided.push((path_key(z), check));
+        }
+        outcomes.push((z.path.clone(), outcome));
     }
+    // What it decided, in one transaction. When that fails, those files are looked at again
+    // next time (a link recorded meanwhile is then found as already there).
+    if let Err(e) = db::note_alias_checks(conn, &decided) {
+        log::warn!(
+            "[catalog] couldn't note what the link backfill decided, so it will look again: {e}"
+        );
+    }
+    out.extend(outcomes);
     out
 }
 
 /// The zip's whole-file SHA-256 for the version the scan saw: the one noted on an earlier try,
-/// or hashed now. Every try is noted (with the hash once taken, so a later failure doesn't hash
-/// the file again), so a file that keeps failing waits behind files not tried yet.
+/// or hashed now. Also the hash to note for the file: the one taken, or the noted one (none
+/// when the file changed since the scan).
 fn bytes_of(
-    conn: &Connection,
     p: &Pending,
     hash: &impl Fn(&Path) -> Result<String, String>,
-) -> Result<String, String> {
+) -> (Result<String, String>, Option<String>) {
     let z = p.zip;
     let noted = p.sha().map(str::to_string);
     if let Err(why) = unchanged(z) {
-        note(conn, p, noted.as_deref(), false);
-        return Err(why);
+        return (Err(why), noted);
     }
     if let Some(sha) = noted {
-        return Ok(sha);
+        return (Ok(sha.clone()), Some(sha));
     }
     let taken = hash(&z.path).map(|h| h.to_ascii_lowercase());
     // Hashed as the scan saw it, not mid-change.
     if let Err(why) = unchanged(z) {
-        note(conn, p, None, false);
-        return Err(why);
+        return (Err(why), None);
     }
-    note(conn, p, taken.as_ref().ok().map(String::as_str), false);
-    taken.map_err(|e| format!("couldn't read it: {e}"))
+    match taken {
+        Ok(sha) => (Ok(sha.clone()), Some(sha)),
+        Err(e) => (Err(format!("couldn't read it: {e}")), None),
+    }
 }
 
 /// What the catalog's builds with the bytes `sha` of the zip `z` make of it, linking it when
@@ -415,11 +449,6 @@ fn judge<G>(
     matches: &[HashMatch],
     lock: &impl Fn() -> Result<G, String>,
 ) -> Outcome {
-    match catalogalias::recorded_entry(conn, &z.tech_name, sha) {
-        Ok(Some(_)) => return Outcome::AlreadyLinked,
-        Ok(None) => {}
-        Err(e) => return Outcome::Retry(e),
-    }
     let mut ids: Vec<&str> = matches.iter().map(|m| m.id.as_str()).collect();
     ids.sort_unstable();
     ids.dedup();
@@ -443,7 +472,9 @@ fn judge<G>(
 }
 
 /// Record the link an install would have, under the library lock, unless the file changed or
-/// its bytes got a link meanwhile.
+/// its bytes have a link. Whether they have one is only read under the lock: an install writes
+/// its record before placing its file and takes it back if placing fails, all under the lock,
+/// so a record seen without it may not last.
 fn link<G>(
     conn: &Connection,
     z: &LibraryZip,
@@ -475,17 +506,10 @@ fn link<G>(
     }
 }
 
-/// Log what was made of `z`, and keep a decided outcome (with the hash, when taken) for this
-/// version of the file.
-fn settle(
-    conn: &Connection,
-    z: &LibraryZip,
-    outcome: Outcome,
-    sha: Option<&str>,
-    out: &mut Vec<(PathBuf, Outcome)>,
-) {
+/// Log what was made of `z`.
+fn log_outcome(z: &LibraryZip, outcome: &Outcome) {
     let label = file_name(z);
-    match &outcome {
+    match outcome {
         Outcome::Linked(id) => log::info!("[catalog] {label} linked to catalog entry {id}"),
         Outcome::Retry(why) => {
             log::info!("[catalog] {label}: no catalog link yet, trying next time ({why})")
@@ -495,18 +519,6 @@ fn settle(
         }
         other => log::debug!("[catalog] {label}: not linked ({other:?})"),
     }
-    if outcome.decided() {
-        let check = db::AliasCheck {
-            size: z.size,
-            mtime_ms: z.mtime_ms,
-            sha256: sha.map(str::to_string),
-            unnamed_ms: None,
-            decided: true,
-            attempted_ms: now_ms(),
-        };
-        save(conn, z, &check);
-    }
-    out.push((z.path.clone(), outcome));
 }
 
 /// What to note about this version of `p`'s file now: `sha` once taken, what the catalog said
@@ -519,21 +531,6 @@ fn check_of(p: &Pending, sha: Option<&str>, decided: bool) -> db::AliasCheck {
         unnamed_ms: p.unnamed_ms,
         decided,
         attempted_ms: now_ms(),
-    }
-}
-
-/// Note this version of `p`'s file as tried now (see `check_of`).
-fn note(conn: &Connection, p: &Pending, sha: Option<&str>, decided: bool) {
-    save(conn, p.zip, &check_of(p, sha, decided));
-}
-
-/// Save a note about `z`. A failure only means it's looked at again.
-fn save(conn: &Connection, z: &LibraryZip, check: &db::AliasCheck) {
-    if let Err(e) = db::note_alias_check(conn, &path_key(z), check) {
-        log::warn!(
-            "[catalog] {}: couldn't note it was checked, so it will be again: {e}",
-            file_name(z)
-        );
     }
 }
 
@@ -1251,6 +1248,112 @@ mod tests {
         // It waited no longer than the run had left.
         assert!(waited.borrow()[0] <= Limits::default().time);
         assert!(!zips.iter().any(|z| settled(&conn, z)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn files_with_a_noted_hash_rotate_too() {
+        let (dir, conn) = setup("rotate_cached");
+        let (zips, mut fake) = many(&dir, 3);
+        fake.fail_by_hash = true;
+        let two = Limits {
+            max_hashed: 2,
+            ..Limits::default()
+        };
+        let hash = crate::provenance::sha256_file;
+        for _ in 0..3 {
+            run_with(&conn, &zips, &fake, hash, |_| Ok(()), two);
+        }
+        // Every file got its turn at the lookup, though each one failed.
+        let asked: HashSet<String> = fake
+            .asked_by_hash
+            .borrow()
+            .iter()
+            .flatten()
+            .cloned()
+            .collect();
+        assert_eq!(asked.len(), 3, "{:?}", fake.asked_by_hash.borrow());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_link_seen_outside_the_library_lock_is_checked_under_it() {
+        let (dir, conn) = setup("rollback");
+        let file = write_zip(&dir, "FS25_FieldToDoList.zip", b"build one");
+        let zips = [scanned(&file)];
+        let fake = Fake::with(b"build one", vec![todo_build()]);
+        // An install elsewhere recorded these bytes before placing its file...
+        let theirs = Link {
+            catalog_id: "cat-other".into(),
+            catalog_tech_name: None,
+            download_url: None,
+        };
+        let undo =
+            catalogalias::record(&conn, "FS25_FieldToDoList", &sha(b"build one"), 9, &theirs)
+                .unwrap();
+        // ...and while it holds the lock, nothing is decided.
+        let held = |_| -> Result<(), String> { Err("Silo is busy".into()) };
+        let out = run(&conn, &zips, &fake, crate::provenance::sha256_file, held);
+        assert!(matches!(out[0].1, Outcome::Retry(_)), "{out:?}");
+        assert!(!settled(&conn, &zips[0]));
+        // Its placing failed and it took the record back before letting go of the lock.
+        let undo = RefCell::new(Some(undo));
+        let after_rollback = |_| -> Result<(), String> {
+            if let Some(u) = undo.borrow_mut().take() {
+                u.apply(&conn).unwrap();
+            }
+            Ok(())
+        };
+        let out = run(
+            &conn,
+            &zips,
+            &fake,
+            crate::provenance::sha256_file,
+            after_rollback,
+        );
+        assert_eq!(out[0].1, Outcome::Linked("cat-todo".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_busy_database_stops_the_run_after_one_wait() {
+        let (dir, conn) = setup("db_busy");
+        let (zips, mut fake) = many(&dir, 3);
+        fake.known.insert("FS25_File00".into());
+        conn.busy_timeout(std::time::Duration::from_millis(100))
+            .unwrap();
+        // Another connection holds the database's write lock.
+        let other = db::open(&dir.join("silo.db")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        let out = run(&conn, &zips, &fake, crate::provenance::sha256_file, |_| {
+            Ok(())
+        });
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(
+            out.iter().all(|(_, o)| matches!(o, Outcome::Retry(_))),
+            "{out:?}"
+        );
+        assert!(
+            fake.asked_by_hash.borrow().is_empty(),
+            "stopped before the hash lookup"
+        );
+        other.execute_batch("ROLLBACK").unwrap();
+        // Free again: the known one is settled and the others linked.
+        let out = run(&conn, &zips, &fake, crate::provenance::sha256_file, |_| {
+            Ok(())
+        });
+        assert_eq!(
+            out.iter().filter(|(_, o)| *o == Outcome::InCatalog).count(),
+            1
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|(_, o)| matches!(o, Outcome::Linked(_)))
+                .count(),
+            2
+        );
+        assert!(settled(&conn, &zips[0]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
