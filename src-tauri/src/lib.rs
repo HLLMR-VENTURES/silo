@@ -1,6 +1,7 @@
 //! Silo core — Tauri command surface. All heavy logic lives in sibling modules so
 //! it stays unit-testable (and reusable by a future CLI) without a running app.
 
+pub mod aliasbackfill;
 pub mod bindings;
 pub mod bisect;
 pub mod bridge;
@@ -98,6 +99,7 @@ async fn off_main<T: Send + 'static>(
 async fn scan_mods(
     app: tauri::AppHandle,
     roots: Option<Vec<String>>,
+    link_catalog: Option<bool>,
 ) -> Result<scan::ScanResult, String> {
     let supplied: Vec<PathBuf> = roots
         .unwrap_or_default()
@@ -131,10 +133,112 @@ async fn scan_mods(
         );
         result.notices = recovered.notices;
         result.problems = recovered.problems;
+        // Only with the user's leave to send mod names to the catalog (the startup update
+        // check): the backfill asks about some of them (#402).
+        if link_catalog == Some(true) {
+            spawn_alias_backfill(app, backfill_zips(&result.mods));
+        }
         Ok::<_, String>(result)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// How long a catalog-link backfill waits for the library lock before leaving the record for
+/// the next scan.
+const ALIAS_BACKFILL_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Held while a catalog-link backfill runs, so two never run at once.
+static ALIAS_BACKFILL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The library zips in `mods` (from a scan) as the catalog-link backfill takes them.
+fn backfill_zips(mods: &[scan::ModEntry]) -> Vec<aliasbackfill::LibraryZip> {
+    mods.iter()
+        .filter(|m| m.kind == "zip")
+        .map(|m| aliasbackfill::LibraryZip {
+            path: PathBuf::from(&m.path),
+            tech_name: m.tech_name.clone(),
+            size: m.size,
+            mtime_ms: m.mtime_ms,
+        })
+        .collect()
+}
+
+/// Link the zips in `zips` that Silo installed under another name before catalog links were
+/// recorded at install (#402; see `aliasbackfill`). Leaves the files to a run already going (it
+/// or a later one takes them). Never fails: problems are logged. Tells the window which mods were
+/// linked (`catalog:linked`, their techNames: a link is for the name and bytes, so every copy of
+/// those bytes is linked), so a drawer showing one and the Updates list ask again.
+fn backfill_catalog_links(app: &tauri::AppHandle, zips: &[aliasbackfill::LibraryZip]) {
+    if zips.is_empty() {
+        return;
+    }
+    let _running = match ALIAS_BACKFILL.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    let ran = (|| -> Result<Vec<String>, String> {
+        let conn = db::open(&db_path(app)?)?;
+        // A database too busy to tidy up is too busy for the run's notes too.
+        db::prune_alias_checks(&conn)
+            .map_err(|e| format!("couldn't tidy its notes, the database is busy: {e}"))?;
+        let catalog = aliasbackfill::SiloApi {
+            base: siloapi_base(app)?,
+        };
+        // A record waits for the library lock at most this long, and never past the run's time.
+        let out = aliasbackfill::run(&conn, zips, &catalog, provenance::sha256_file, |left| {
+            catalog_link_write_within(left.min(ALIAS_BACKFILL_WAIT))
+        });
+        let linked = linked_tech_names(zips, &out);
+        if !out.is_empty() {
+            log::info!(
+                "[catalog] link backfill looked at {} mods, linked {}",
+                out.len(),
+                linked.len()
+            );
+        }
+        Ok(linked)
+    })();
+    match ran {
+        Ok(linked) if !linked.is_empty() => {
+            let _ = app.emit("catalog:linked", linked);
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!("[catalog] link backfill skipped: {e}"),
+    }
+}
+
+/// The techNames of the zips a backfill run linked, each once (`catalog:linked`'s payload).
+fn linked_tech_names(
+    zips: &[aliasbackfill::LibraryZip],
+    out: &[(PathBuf, aliasbackfill::Outcome)],
+) -> Vec<String> {
+    let linked: HashSet<&PathBuf> = out
+        .iter()
+        .filter(|(_, o)| matches!(o, aliasbackfill::Outcome::Linked(_)))
+        .map(|(p, _)| p)
+        .collect();
+    if linked.is_empty() {
+        return Vec::new();
+    }
+    let mut names: Vec<String> = zips
+        .iter()
+        .filter(|z| linked.contains(&z.path))
+        .map(|z| z.tech_name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Run the catalog-link backfill on the blocking pool without holding up the caller (a scan or
+/// an update check): its links arrive through `catalog:linked`.
+fn spawn_alias_backfill(app: tauri::AppHandle, zips: Vec<aliasbackfill::LibraryZip>) {
+    if zips.is_empty() {
+        return;
+    }
+    tauri::async_runtime::spawn_blocking(move || backfill_catalog_links(&app, &zips));
 }
 
 /// What a scan reads, and the one folder whose `organized` manifest it may rewrite.
@@ -2284,6 +2388,28 @@ struct LocalMod {
     /// The mod's file, for a catalog alias (#386). Absent: joined by techName only.
     #[serde(default)]
     path: Option<String>,
+    /// The file's size and modified time when the library scan read it, so the catalog-link
+    /// backfill (#402) only takes the file the scan saw.
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    mtime_ms: Option<u64>,
+}
+
+/// The mods in an update check's list as the catalog-link backfill takes them: those with a
+/// file, with the size and modified time the scan saw (a file that has changed since then is
+/// left to a run after the next scan).
+fn local_zips(mods: &[LocalMod]) -> Vec<aliasbackfill::LibraryZip> {
+    mods.iter()
+        .filter_map(|m| {
+            Some(aliasbackfill::LibraryZip {
+                path: PathBuf::from(m.path.as_deref()?),
+                tech_name: m.tech_name.clone(),
+                size: m.size?,
+                mtime_ms: m.mtime_ms?,
+            })
+        })
+        .collect()
 }
 
 #[derive(serde::Serialize)]
@@ -2326,9 +2452,16 @@ impl CatalogUpdate {
 async fn catalog_check_updates(
     app: tauri::AppHandle,
     mods: Vec<LocalMod>,
+    link_catalog: Option<bool>,
 ) -> Result<Vec<CatalogUpdate>, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<CatalogUpdate>, String> {
         let base = siloapi_base(&app)?;
+        // An update check of the library (not the drawer's own) also links the zips Silo
+        // installed under another name before it kept catalog links (#402). It runs beside this
+        // check, not before it; the Updates list asks again for the mods it links.
+        if link_catalog == Some(true) {
+            spawn_alias_backfill(app.clone(), local_zips(&mods));
+        }
         // A zip Silo installed from a catalog entry under another name is looked up as that
         // entry (#386); a file is hashed only when an alias of its size is recorded for its name.
         // A mod whose link can't be checked, or whose linked entry can't be fetched, gets a
@@ -2894,16 +3027,30 @@ fn library_write() -> Result<std::sync::MutexGuard<'static, ()>, String> {
 fn library_write_within(
     max: std::time::Duration,
 ) -> Result<std::sync::MutexGuard<'static, ()>, String> {
-    let guard = wait_for_library(max, || {
-        ensure_not_self_updating()?;
-        ensure_no_move()?;
-        if move_in_progress() {
-            return Err("Finish or cancel the archive move first.".into());
-        }
-        Ok(())
-    })?;
+    let guard = wait_for_library(max, library_writable)?;
     settle_updates_locked()?;
     Ok(guard)
+}
+
+/// Whether a library write may start: Silo isn't installing its own update and no archive move
+/// is starting or running.
+fn library_writable() -> Result<(), String> {
+    ensure_not_self_updating()?;
+    ensure_no_move()?;
+    if move_in_progress() {
+        return Err("Finish or cancel the archive move first.".into());
+    }
+    Ok(())
+}
+
+/// The library lock for recording a catalog link (#402), waiting at most `max`: the same lock
+/// and the same refusals as `library_write_within`, without its settling of half-finished mod
+/// updates. A link record only writes the database (for bytes the backfill just hashed and
+/// re-checks unchanged), so it needs no file recovery, and settling takes no time limit.
+fn catalog_link_write_within(
+    max: std::time::Duration,
+) -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    wait_for_library(max, library_writable)
 }
 
 /// Set while Silo installs its own update (`set_self_updating`): library writes and archive
@@ -7898,6 +8045,53 @@ fn hold_quit() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_backfill_tells_the_window_each_linked_mod_once() {
+        use crate::aliasbackfill::{LibraryZip, Outcome};
+        let zip = |p: &str, t: &str| LibraryZip {
+            path: PathBuf::from(p),
+            tech_name: t.into(),
+            size: 1,
+            mtime_ms: 1,
+        };
+        let zips = [
+            zip("a/FS25_X.zip", "FS25_X"),
+            zip("b/FS25_X.zip", "FS25_X"),
+            zip("a/FS25_Y.zip", "FS25_Y"),
+        ];
+        let out = [
+            (PathBuf::from("a/FS25_X.zip"), Outcome::Linked("c".into())),
+            (PathBuf::from("b/FS25_X.zip"), Outcome::Linked("c".into())),
+            (
+                PathBuf::from("a/FS25_Y.zip"),
+                Outcome::Retry("later".into()),
+            ),
+        ];
+        assert_eq!(super::linked_tech_names(&zips, &out), ["FS25_X"]);
+        assert!(super::linked_tech_names(&zips, &out[2..]).is_empty());
+    }
+
+    #[test]
+    fn an_update_check_hands_the_backfill_the_file_the_scan_read() {
+        let m = |size, mtime_ms| super::LocalMod {
+            tech_name: "FS25_FieldToDoList".into(),
+            version: Some("1.0".into()),
+            path: Some("C:/mods/FS25_FieldToDoList.zip".into()),
+            size,
+            mtime_ms,
+        };
+        let zips = super::local_zips(&[m(Some(9), Some(77)), m(None, Some(77)), m(Some(9), None)]);
+        // Only a mod with the scan's size and time is taken, keyed on them (never on what the
+        // file has now): a file changed since the scan waits for the next scan's look.
+        assert_eq!(zips.len(), 1);
+        assert_eq!((zips[0].size, zips[0].mtime_ms), (9, 77));
+        let none = super::LocalMod {
+            path: None,
+            ..m(Some(9), Some(77))
+        };
+        assert!(super::local_zips(&[none]).is_empty());
+    }
+
     use super::{
         archive_holds_mods, build_gh_scope, cancel_falls_back, fence_problems,
         foreign_mods_problem, move_outcome, move_outcome_level, move_problems, overlap_problems,

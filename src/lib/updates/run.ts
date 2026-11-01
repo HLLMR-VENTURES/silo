@@ -15,7 +15,19 @@ export interface CheckMod {
   title?: string | null;
   path: string;
   version?: string | null;
+  /** The file's size and modified time when the scan read `version` (#402). */
+  size?: number;
+  mtimeMs?: number;
 }
+
+/** A mod as the catalog check asks about it. */
+export type CatalogAsk = {
+  techName: string;
+  version?: string;
+  path?: string;
+  size?: number;
+  mtimeMs?: number;
+};
 
 /** A linked GitHub repo (the drawer's "Source & updates"). */
 export interface LinkedRepo {
@@ -32,7 +44,7 @@ export interface ExplainedError {
 }
 
 export interface CheckDeps {
-  catalog: (mods: { techName: string; version?: string; path?: string }[]) => Promise<CatalogUpdate[]>;
+  catalog: (mods: CatalogAsk[]) => Promise<CatalogUpdate[]>;
   checkRepo: (owner: string, repo: string, current: string) => Promise<UpdateInfo>;
   /** Log the failure and word it (inlineError + formatDetail). */
   explain: (e: unknown, op: string) => ExplainedError;
@@ -85,6 +97,123 @@ async function checkLinked(
   }
 }
 
+/** Mods Silo linked to their catalog entries (#402) whose rows are owed a refresh, in the
+ *  folder (generation) the check that asked about them was of. */
+export interface HeldRefresh {
+  gen: number;
+  names: string[];
+}
+
+/**
+ * Which of the mods Silo just linked in the background (`linked`, techNames; #402) the Updates
+ * list refreshes, and when: now, or once nothing keeps a check from starting (a check running,
+ * an update installing). Only mods a check the user allowed asked about in this folder: the
+ * running one (its snapshot, and only while it's of this folder) or else the last one (failed
+ * or not). Mods added since, of another folder, or never asked about aren't sent anywhere.
+ */
+export function linkRefresh(s: {
+  linked: string[];
+  gen: number;
+  running: { gen: number; asked: ReadonlySet<string> } | null;
+  lastAsked: ReadonlySet<string> | undefined;
+  blocked: boolean;
+}): { when: "now" | "after" | "no"; names: string[] } {
+  const pool = s.running
+    ? s.running.gen === s.gen
+      ? s.running.asked
+      : undefined
+    : s.lastAsked;
+  const names = pool ? [...new Set(s.linked.filter((n) => pool.has(n)))] : [];
+  if (names.length === 0) return { when: "no", names };
+  return { when: s.running || s.blocked ? "after" : "now", names };
+}
+
+/** `held` with `names` for folder `gen` added (a refresh held for another folder is replaced). */
+export function holdRefresh(
+  held: HeldRefresh | null,
+  gen: number,
+  names: string[],
+): HeldRefresh {
+  const before = held && held.gen === gen ? held.names : [];
+  return { gen, names: [...new Set([...before, ...names])] };
+}
+
+/**
+ * The held refresh that may run now (`run`), and what stays held. One held for another folder
+ * is dropped, never run in this one.
+ */
+export function heldRefresh(
+  held: HeldRefresh | null,
+  gen: number,
+  busy: boolean,
+): { run: string[] | null; held: HeldRefresh | null } {
+  if (!held || held.gen !== gen) return { run: null, held: null };
+  return busy ? { run: null, held } : { run: held.names, held: null };
+}
+
+/**
+ * The library entries a link refresh asks about: those of `names` not `leftOut` (left out of
+ * update checks, or updated since the last scan that worked). The same rule picks the entries
+ * its answer is compared with, so a mod left out meanwhile never makes the two differ.
+ */
+export function refreshTargets<M extends { techName: string }>(
+  names: string[],
+  mods: M[],
+  leftOut: (techName: string) => boolean,
+): M[] {
+  const want = new Set(names);
+  return mods.filter((m) => want.has(m.techName) && !leftOut(m.techName));
+}
+
+/**
+ * After a scan that worked, the updates it read: those installed (`installed`, techName to the
+ * update's number) before it started (`scanFrom`, the count then) are dropped. One installed
+ * while it ran stays: that scan may have read the old file.
+ */
+export function releaseInstalled(
+  installed: Map<string, number>,
+  scanFrom: number,
+): void {
+  for (const [techName, n] of installed) {
+    if (n <= scanFrom) installed.delete(techName);
+  }
+}
+
+/** Which file each of `mods` is (path, size, modified time, version), by techName. */
+export function fileStamps(
+  mods: {
+    techName: string;
+    path: string;
+    size?: number;
+    mtimeMs?: number;
+    version?: string | null;
+  }[],
+): Map<string, string> {
+  return new Map(
+    mods.map((m) => [
+      m.techName,
+      JSON.stringify([m.path, m.size, m.mtimeMs, m.version ?? null]),
+    ]),
+  );
+}
+
+/** Whether two `fileStamps` name the same files. */
+export function sameStamps(
+  a: Map<string, string>,
+  b: Map<string, string>,
+): boolean {
+  return a.size === b.size && [...a].every(([k, v]) => b.get(k) === v);
+}
+
+/** The Updates rows with those of `names` replaced by `fresh` (a refresh of just those mods). */
+export function mergeRows(
+  rows: UpdateRow[],
+  fresh: UpdateRow[],
+  names: ReadonlySet<string>,
+): UpdateRow[] {
+  return [...rows.filter((r) => !names.has(r.techName)), ...fresh];
+}
+
 /**
  * Check the library: one catalog request for every mod (GitHub and ModHub alike), then each
  * linked GitHub repo directly.
@@ -103,8 +232,15 @@ export async function runUpdateCheck(
 
   try {
     const catalog = await deps.catalog(
-      // The file, so a mod Silo installed under another name finds its catalog entry (#386).
-      mods.map((m) => ({ techName: m.techName, version: m.version ?? undefined, path: m.path })),
+      // The file, so a mod Silo installed under another name finds its catalog entry (#386),
+      // and the size and time the version was read at, for linking older such installs (#402).
+      mods.map((m) => ({
+        techName: m.techName,
+        version: m.version ?? undefined,
+        path: m.path,
+        size: m.size,
+        mtimeMs: m.mtimeMs,
+      })),
     );
     for (const c of catalog) {
       const m = byTech.get(c.techName);

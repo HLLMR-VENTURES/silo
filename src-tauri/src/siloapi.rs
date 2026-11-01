@@ -349,6 +349,117 @@ fn lookup_one(base: &str, tech_names: &[&str]) -> Result<Vec<LookupResult>, Stri
     Ok(parsed.results)
 }
 
+/// SiloAPI's `POST /mods/by-hash` accepts at most this many hashes per request.
+pub const BY_HASH_BATCH: usize = 100;
+
+/// One catalog build whose whole-zip SHA-256 is the one asked about (`POST /mods/by-hash`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HashMatch {
+    /// The catalog entry's id.
+    pub id: String,
+    #[serde(default)]
+    pub tech_name: Option<String>,
+    /// The version the build is stored under.
+    pub version: String,
+    pub source: String,
+    /// The file name the build downloads as.
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub download_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HashResult {
+    sha256: String,
+    /// Required: an answer without it says nothing about the hash, not "no build".
+    matches: Vec<HashMatch>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ByHashResponse {
+    results: Vec<HashResult>,
+}
+
+/// Every catalog build whose whole-zip SHA-256 is one of `hashes` (lowercase hex), by hash: one
+/// consistent answer per request (silo-api#39). Every hash asked has an entry, empty when no
+/// build has it. `Ok(None)` when the catalog has no such route yet (404: a server from before
+/// it). An answer that leaves out a hash asked about is an error, never "no match".
+pub fn by_hash(
+    base: &str,
+    hashes: &[String],
+) -> Result<Option<std::collections::HashMap<String, Vec<HashMatch>>>, String> {
+    let mut asked: Vec<String> = hashes.iter().map(|h| h.to_ascii_lowercase()).collect();
+    asked.sort();
+    asked.dedup();
+    let mut out = std::collections::HashMap::new();
+    for batch in asked.chunks(BY_HASH_BATCH) {
+        match by_hash_one(base, batch)? {
+            Some(found) => out.extend(found),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(out))
+}
+
+fn by_hash_one(
+    base: &str,
+    hashes: &[String],
+) -> Result<Option<std::collections::HashMap<String, Vec<HashMatch>>>, String> {
+    let resp = match crate::net::catalog()
+        .post(&format!("{}/mods/by-hash", base.trim_end_matches('/')))
+        .header("Content-Type", "application/json")
+        .send_json_checked(serde_json::json!({ "hashes": hashes }))
+    {
+        Ok(r) => r,
+        Err(HttpError::Status(404, _)) => return Ok(None),
+        Err(e) => return Err(catalog_err(e)),
+    };
+    let resp = crate::net::refuse_redirect(resp).map_err(not_answering)?;
+    // Read at most BY_HASH_LIMIT bytes: a longer answer is an error, never a cut-short list.
+    let mut body = Vec::new();
+    crate::net::RespExt::into_reader(resp)
+        .take(BY_HASH_LIMIT + 1)
+        .read_to_end(&mut body)
+        .map_err(|e| e.to_string())?;
+    let parsed = by_hash_parse(&body)?;
+    by_hash_answer(hashes, parsed)
+}
+
+/// The most bytes a `by-hash` answer may have (some thousands of builds for a run's files).
+const BY_HASH_LIMIT: u64 = 1 << 20;
+
+/// A `by-hash` answer's body read: an error when it's over [`BY_HASH_LIMIT`] or not the shape.
+fn by_hash_parse(body: &[u8]) -> Result<ByHashResponse, String> {
+    if body.len() as u64 > BY_HASH_LIMIT {
+        return Err("Silo's catalog sent too long an answer.".into());
+    }
+    serde_json::from_slice(body).map_err(|e| format!("Failed to read JSON: {e}"))
+}
+
+/// The answer to one `by-hash` request for `hashes`, by hash. An error when it leaves out one
+/// asked about, answers one not asked, or answers one twice.
+fn by_hash_answer(
+    hashes: &[String],
+    parsed: ByHashResponse,
+) -> Result<Option<std::collections::HashMap<String, Vec<HashMatch>>>, String> {
+    let mut out = std::collections::HashMap::new();
+    for r in parsed.results {
+        let h = r.sha256.to_ascii_lowercase();
+        if !hashes.contains(&h) {
+            return Err("Silo's catalog answered about a file it wasn't asked about.".into());
+        }
+        if out.insert(h, r.matches).is_some() {
+            return Err("Silo's catalog answered twice about one file.".into());
+        }
+    }
+    if hashes.iter().any(|h| !out.contains_key(h)) {
+        return Err("Silo's catalog left a file out of its answer.".into());
+    }
+    Ok(Some(out))
+}
+
 /// Catalog categories with counts (whole catalog, most-populated first).
 pub fn categories(base: &str) -> Result<Vec<CategoryCount>, String> {
     let resp = get(&format!("{}/categories", base.trim_end_matches('/')))?;
@@ -910,6 +1021,147 @@ mod tests {
             let (_, version) = pick_download(&d, Some("github")).unwrap();
             assert_eq!(version, None, "{blank:?}");
         }
+    }
+
+    const H1: &str = "d1b428b296f93906ad8a297e07726f3fe7f70c1828452909791b0b8cf798be18";
+    const H2: &str = "ee6c655fe2e61d2dc0a19b14884ac316c802f106c1729d85a31095ba2450643c";
+
+    /// Answer one request on a local port with (status line, body); the base to ask and the
+    /// request line plus body that came in.
+    fn serve_once(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = s.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&req).to_string();
+                if let Some(at) = text.find("\r\n\r\n") {
+                    let len = text
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if req.len() >= at + 4 + len {
+                        break;
+                    }
+                }
+            }
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = s.write_all(resp.as_bytes());
+            String::from_utf8_lossy(&req).to_string()
+        });
+        (base, handle)
+    }
+
+    #[test]
+    fn by_hash_asks_once_for_every_hash_and_reads_each_answer() {
+        let body = r#"{"results":[
+            {"sha256":"d1b428b296f93906ad8a297e07726f3fe7f70c1828452909791b0b8cf798be18","matches":[
+              {"id":"cat-todo","techName":"FS25_ToDo","version":"v0.1.0.17","source":"github",
+               "fileName":"FS25_FieldToDoList.zip","downloadUrl":"https://github.com/k/r/releases/download/v1/FS25_FieldToDoList.zip"}]},
+            {"sha256":"ee6c655fe2e61d2dc0a19b14884ac316c802f106c1729d85a31095ba2450643c","matches":[]}]}"#;
+        let (base, server) = serve_once("200 OK", body);
+        let asked = [H1.to_uppercase(), H2.to_string(), H1.to_string()];
+        let got = by_hash(&base, &asked).unwrap().unwrap();
+        let req = server.join().unwrap();
+        assert!(req.starts_with("POST /mods/by-hash "), "{req}");
+        // Each hash once, lowercase, in one request.
+        assert!(
+            req.contains(&format!(r#"{{"hashes":["{H1}","{H2}"]}}"#)),
+            "{req}"
+        );
+        assert_eq!(got[H1].len(), 1);
+        assert_eq!(got[H1][0].id, "cat-todo");
+        assert_eq!(
+            got[H1][0].file_name.as_deref(),
+            Some("FS25_FieldToDoList.zip")
+        );
+        assert!(got[H2].is_empty());
+    }
+
+    #[test]
+    fn by_hash_on_a_catalog_without_the_route_is_none_not_an_error() {
+        let (base, server) = serve_once(
+            "404 Not Found",
+            r#"{"message":"Route POST:/mods/by-hash not found"}"#,
+        );
+        assert_eq!(by_hash(&base, &[H1.to_string()]).unwrap(), None);
+        server.join().unwrap();
+        // Any other failure is an error.
+        let (base, server) = serve_once("500 Internal Server Error", "{}");
+        assert!(by_hash(&base, &[H1.to_string()]).is_err());
+        server.join().unwrap();
+        // So is an answer in another shape.
+        let (base, server) = serve_once("200 OK", r#"{"mods":[]}"#);
+        assert!(by_hash(&base, &[H1.to_string()]).is_err());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_by_hash_answer_too_long_is_an_error_not_a_shorter_list() {
+        let padding = " ".repeat(BY_HASH_LIMIT as usize);
+        let long = format!(r#"{{"results":[{{"sha256":"{H1}","matches":[]}}]}}{padding}"#);
+        assert!(by_hash_parse(long.as_bytes()).is_err());
+        let fits = format!(r#"{{"results":[{{"sha256":"{H1}","matches":[]}}]}}"#);
+        assert!(by_hash_parse(fits.as_bytes()).is_ok()); // Over the wire too: the whole answer is refused.
+        let body: &'static str = Box::leak(long.into_boxed_str());
+        let (base, server) = serve_once("200 OK", body);
+        assert!(by_hash(&base, &[H1.to_string()]).is_err());
+        let _ = server.join();
+    }
+
+    #[test]
+    fn a_by_hash_answer_must_cover_exactly_the_hashes_asked() {
+        let parse = |json: &str| -> ByHashResponse { serde_json::from_str(json).unwrap() };
+        let asked = [H1.to_string(), H2.to_string()];
+        let one = format!(r#"{{"results":[{{"sha256":"{H1}","matches":[]}}]}}"#);
+        assert!(
+            by_hash_answer(&asked, parse(&one)).is_err(),
+            "a hash left out"
+        );
+        let extra = format!(
+            r#"{{"results":[{{"sha256":"{H1}","matches":[]}},{{"sha256":"{H2}","matches":[]}},{{"sha256":"{}","matches":[]}}]}}"#,
+            "0".repeat(64)
+        );
+        assert!(
+            by_hash_answer(&asked, parse(&extra)).is_err(),
+            "a hash not asked"
+        );
+        let twice = format!(
+            r#"{{"results":[{{"sha256":"{H1}","matches":[]}},{{"sha256":"{H2}","matches":[]}},{{"sha256":"{H1}","matches":[]}}]}}"#
+        );
+        assert!(
+            by_hash_answer(&asked, parse(&twice)).is_err(),
+            "a hash answered twice"
+        );
+        let both = format!(
+            r#"{{"results":[{{"sha256":"{}","matches":[]}},{{"sha256":"{H2}","matches":[]}}]}}"#,
+            H1.to_uppercase()
+        );
+        let got = by_hash_answer(&asked, parse(&both)).unwrap().unwrap();
+        assert!(got[H1].is_empty() && got[H2].is_empty());
+        // A result without its matches doesn't read as "no build".
+        let bare = format!(r#"{{"results":[{{"sha256":"{H1}"}}]}}"#);
+        assert!(serde_json::from_str::<ByHashResponse>(&bare).is_err());
     }
 
     #[test]

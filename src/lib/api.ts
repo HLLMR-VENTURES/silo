@@ -349,8 +349,22 @@ export function onRelinkProgress(cb: (done: number, total: number) => void): Pro
   return listen<[number, number]>("relink-progress", (e) => cb(e.payload[0], e.payload[1]));
 }
 
-export function scanMods(roots?: string[]): Promise<ScanResult> {
-  return invoke<ScanResult>("scan_mods", { roots: roots ?? null });
+/** `linkCatalog`: afterwards, link zips Silo installed under another name before it kept
+ *  catalog links (#402). It asks the catalog about some mod names, so only with the user's
+ *  leave (the startup update check). */
+export function scanMods(
+  roots?: string[],
+  linkCatalog = false,
+): Promise<ScanResult> {
+  return invoke<ScanResult>("scan_mods", { roots: roots ?? null, linkCatalog });
+}
+
+/** Silo linked library mods (these techNames) to their catalog entries in the background
+ *  (#402). A link is for a file name and its bytes, so it holds for every copy of them. */
+export function onCatalogLinked(
+  handler: (techNames: string[]) => void,
+): Promise<UnlistenFn> {
+  return listen<string[]>("catalog:linked", (e) => handler(e.payload));
 }
 
 /** Drop the scan cache so the next scan re-parses & re-categorizes every mod. */
@@ -714,12 +728,28 @@ export function onInstallProgress(
 }
 
 /** Check the whole library against the catalog in one request (by tech name). `path` (the
- *  mod's file) lets a zip Silo installed under another name find its entry (#386). */
+ *  mod's file) lets a zip Silo installed under another name find its entry (#386).
+ *  `linkCatalog`: first link such zips installed before Silo kept catalog links (#402); the
+ *  Updates check does, the drawer's own check doesn't. */
 export function catalogCheckUpdates(
-  mods: { techName: string; version?: string; path?: string }[],
+  mods: {
+    techName: string;
+    version?: string;
+    path?: string;
+    size?: number;
+    mtimeMs?: number;
+  }[],
+  linkCatalog = false,
 ): Promise<CatalogUpdate[]> {
   return invoke<CatalogUpdate[]>("catalog_check_updates", {
-    mods: mods.map((m) => ({ techName: m.techName, version: m.version ?? null, path: m.path ?? null })),
+    mods: mods.map((m) => ({
+      techName: m.techName,
+      version: m.version ?? null,
+      path: m.path ?? null,
+      size: m.size ?? null,
+      mtimeMs: m.mtimeMs ?? null,
+    })),
+    linkCatalog,
   });
 }
 

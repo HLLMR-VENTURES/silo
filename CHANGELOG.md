@@ -53,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   making, such as ones from older versions of Silo or your own files in `backups`, are left
   where they are and noted in the log. A temporary link Silo makes while finishing an
   interrupted update is now noted too, so it's cleaned up if Silo stops partway. (#400)
+- A mod Silo installed from Browse under a file name that isn't its catalog name, before Silo
+  started remembering which catalog entry such a file came from, is now linked to its entry
+  when you check for updates (or after a scan, if Silo checks at startup), provided exactly one
+  catalog entry published those exact bytes under that file name. You no longer have to remove
+  it and install it again to get its drawer details, update checks and **Verify integrity**.
+  This needs Silo's catalog to look mods up by their files, which it doesn't yet; until then
+  nothing changes. (#402)
 - Clicking **Connect**, **Cancel** or **Disconnect** for GitHub in quick succession now always
   reaches Silo in the order you clicked. Before, cancelling a sign-in and connecting or
   disconnecting right after could arrive the other way round. (#403)
@@ -110,9 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   integrity** compares it with the published build, instead of saying it isn't in Silo's
   catalog. Silo remembers the exact file it installed, still never renames it, and drops the
   link if a different build replaces that file. Updating the mod in Silo with a newer release
-  of the same file keeps the link; when Silo can't confirm that, the update says so. A mod
-  installed this way before this version isn't linked until you remove it and install it from
-  Browse again. (#386)
+  of the same file keeps the link; when Silo can't confirm that, the update says so. (#386)
 - When a mod's drawer can't reach Silo's catalog, it now says so, instead of saying the mod
   isn't in the catalog. (#386)
 - Updating a mod from GitHub no longer saves a release file that has a different name (say
