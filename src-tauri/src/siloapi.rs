@@ -234,12 +234,21 @@ struct LookupResponse {
 }
 
 fn get(url: &str) -> Result<ureq::Response, String> {
-    crate::net::api().get(url).call().map_err(|e| match e {
-        ureq::Error::Status(code, _) => format!(
-            "Silo's catalog isn't answering right now (error {code}). Try again in a few minutes."
-        ),
+    let resp = crate::net::catalog().get(url).call().map_err(catalog_err)?;
+    crate::net::refuse_redirect(resp).map_err(not_answering)
+}
+
+/// A catalog request's error as text.
+fn catalog_err(e: ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(code, _) => not_answering(code),
         other => format!("Silo can't reach its catalog right now: {other}"),
-    })
+    }
+}
+
+/// The catalog answered with `code` (an error, or a redirect Silo doesn't follow).
+fn not_answering(code: u16) -> String {
+    format!("Silo's catalog isn't answering right now (error {code}). Try again in a few minutes.")
 }
 
 /// Search/list the catalog. `query`/`category` are optional filters.
@@ -326,16 +335,12 @@ fn lookup_batches(tech_names: &[String]) -> Vec<Vec<&str>> {
 }
 
 fn lookup_one(base: &str, tech_names: &[&str]) -> Result<Vec<LookupResult>, String> {
-    let resp = crate::net::api()
+    let resp = crate::net::catalog()
         .post(&format!("{}/mods/lookup", base.trim_end_matches('/')))
         .set("Content-Type", "application/json")
         .send_json(ureq::json!({ "techNames": tech_names }))
-        .map_err(|e| match e {
-            ureq::Error::Status(code, _) => format!(
-                "Silo's catalog isn't answering right now (error {code}). Try again in a few minutes."
-            ),
-            other => format!("Silo can't reach its catalog right now: {other}"),
-        })?;
+        .map_err(catalog_err)?;
+    let resp = crate::net::refuse_redirect(resp).map_err(not_answering)?;
     let parsed: LookupResponse = resp.into_json().map_err(|e| e.to_string())?;
     Ok(parsed.results)
 }
@@ -419,13 +424,14 @@ pub struct CanonicalManifest {
 /// hashed build for that version (404) — that's an "unverified", not an error.
 pub fn manifest(base: &str, id: &str, version: &str) -> Result<Option<CanonicalManifest>, String> {
     let url = manifest_url(base, id, version)?;
-    match crate::net::api().get(url.as_str()).call() {
-        Ok(resp) => resp.into_json().map(Some).map_err(|e| e.to_string()),
+    match crate::net::catalog().get(url.as_str()).call() {
+        Ok(resp) => crate::net::refuse_redirect(resp)
+            .map_err(not_answering)?
+            .into_json()
+            .map(Some)
+            .map_err(|e| e.to_string()),
         Err(ureq::Error::Status(404, _)) => Ok(None),
-        Err(ureq::Error::Status(code, _)) => Err(format!(
-            "Silo's catalog isn't answering right now (error {code}). Try again in a few minutes."
-        )),
-        Err(other) => Err(format!("Silo can't reach its catalog right now: {other}")),
+        Err(e) => Err(catalog_err(e)),
     }
 }
 

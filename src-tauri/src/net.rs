@@ -8,8 +8,9 @@
 //! Also home to the shared HTTP agents: every native request goes through one of them, so each
 //! has connect/read timeouts and Silo's User-Agent.
 //!
-//! - `api()` talks only to fixed hosts (api.github.com, the catalog base). It keeps ureq's
-//!   redirect handling, which GitHub's API uses for renamed repos.
+//! - `api()` talks only to GitHub's API. It keeps ureq's redirect handling, which GitHub's API
+//!   uses for renamed repos.
+//! - `catalog()` talks only to the catalog base and follows no redirects.
 //! - `download()` and `guarded_api()` fetch URLs the catalog or GitHub handed us. They are
 //!   HTTPS-only, follow no redirects on their own (use [`get_guarded`], which checks every
 //!   hop), and resolve names through [`public_addrs`], so a public-looking name that resolves
@@ -18,7 +19,7 @@
 use std::io;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use url::{Host, Url};
 
 /// The User-Agent every native request sends (GitHub rejects requests without one).
@@ -59,23 +60,31 @@ pub(crate) fn build_agent(
     agent_builder(connect, read, overall).build()
 }
 
-/// Build an agent for URLs Silo didn't choose itself: HTTPS only, no automatic redirects
-/// (follow them with [`get_guarded`]), and a resolver that never hands ureq an address the
-/// guard refuses.
+/// An agent for URLs Silo didn't choose itself, used only through [`get_guarded`]: HTTPS only,
+/// no automatic redirects, and a resolver that never hands ureq an address the guard refuses.
+/// `overall` caps the whole fetch, every redirect included.
+pub struct GuardedAgent {
+    agent: ureq::Agent,
+    overall: Option<Duration>,
+}
+
+/// Build a [`GuardedAgent`] with [`agent_builder`]'s connect / read timeouts.
 pub(crate) fn build_guarded_agent(
     connect: Duration,
     read: Duration,
     overall: Option<Duration>,
-) -> ureq::Agent {
-    agent_builder(connect, read, overall)
+) -> GuardedAgent {
+    let agent = agent_builder(connect, read, None)
         .https_only(true)
         .redirects(0)
         .resolver(|netloc: &str| public_addrs(netloc, system_lookup))
-        .build()
+        .build();
+    GuardedAgent { agent, overall }
 }
 
-/// For API calls to fixed hosts (GitHub's API, the catalog): a request that hasn't finished
-/// in 60 s fails. Never give it a URL from the catalog or the webview; use `guarded_api()`.
+/// For API calls to GitHub's API: a request that hasn't finished in 60 s fails. Follows
+/// redirects (GitHub's API uses them for renamed repos). Never give it a URL from the catalog
+/// or the webview; use `guarded_api()`.
 pub fn api() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
@@ -87,10 +96,36 @@ pub fn api() -> &'static ureq::Agent {
     })
 }
 
-/// `api()`'s timeouts, guarded (see [`build_guarded_agent`]): for small fetches of URLs the
-/// catalog or GitHub handed us (catalog images, a gist's raw file). Use with [`get_guarded`].
-pub fn guarded_api() -> &'static ureq::Agent {
+/// For calls to Silo's catalog: `api()`'s timeouts, but no redirects. The catalog never
+/// redirects, so a redirect means something is wrong and is not followed (see
+/// [`refuse_redirect`]). No address filter: the base is fixed in release builds, and a
+/// developer's catalog can be on localhost.
+pub fn catalog() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        agent_builder(
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+            Some(Duration::from_secs(60)),
+        )
+        .redirects(0)
+        .build()
+    })
+}
+
+/// A response from an agent with redirects off, refused when it is a redirect (3xx), which
+/// such an agent returns as a success.
+pub(crate) fn refuse_redirect(resp: ureq::Response) -> Result<ureq::Response, u16> {
+    match resp.status() {
+        300..=399 => Err(resp.status()),
+        _ => Ok(resp),
+    }
+}
+
+/// `api()`'s timeouts, guarded (see [`GuardedAgent`]): for small fetches of URLs the catalog
+/// or GitHub handed us (catalog images, a gist's raw file). Use with [`get_guarded`].
+pub fn guarded_api() -> &'static GuardedAgent {
+    static AGENT: OnceLock<GuardedAgent> = OnceLock::new();
     AGENT.get_or_init(|| {
         build_guarded_agent(
             Duration::from_secs(10),
@@ -100,10 +135,10 @@ pub fn guarded_api() -> &'static ureq::Agent {
     })
 }
 
-/// For file downloads (mods, updates), guarded (see [`build_guarded_agent`]): no overall cap
-/// (large mods), but a stalled read fails after 30 s. Use with [`get_guarded`].
-pub fn download() -> &'static ureq::Agent {
-    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+/// For file downloads (mods, updates), guarded (see [`GuardedAgent`]): no overall cap (large
+/// mods), but a stalled read fails after 30 s. Use with [`get_guarded`].
+pub fn download() -> &'static GuardedAgent {
+    static AGENT: OnceLock<GuardedAgent> = OnceLock::new();
     AGENT
         .get_or_init(|| build_guarded_agent(Duration::from_secs(10), Duration::from_secs(30), None))
 }
@@ -153,15 +188,25 @@ impl std::fmt::Display for FetchError {
 /// GET `url` with a guarded agent, following up to [`MAX_REDIRECTS`] redirects by hand.
 /// `check` runs on the first URL and on every redirect target before anything is sent there.
 /// `auth` (an `Authorization` value) is sent only to the first URL's origin, never across
-/// hosts or schemes.
+/// hosts or schemes. The agent's overall cap counts from the first request, so redirects
+/// don't extend it; it covers reading the final body too.
 pub(crate) fn get_guarded(
-    agent: &ureq::Agent,
+    g: &GuardedAgent,
     url: &str,
     check: &dyn Fn(&Url) -> Result<(), String>,
     auth: Option<&str>,
 ) -> Result<ureq::Response, FetchError> {
+    let deadline = g.overall.map(|d| Instant::now() + d);
     follow_redirects(url, check, |u, same_origin| {
-        let mut req = agent.get(u.as_str());
+        let mut req = g.agent.get(u.as_str());
+        if let Some(d) = deadline {
+            let left = d.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                let timed_out = io::Error::new(io::ErrorKind::TimedOut, "the request timed out");
+                return Err(Box::new(timed_out.into()));
+            }
+            req = req.timeout(left);
+        }
         if let (Some(a), true) = (auth, same_origin) {
             req = req.set("Authorization", a);
         }
@@ -463,6 +508,15 @@ mod tests {
     }
 
     #[test]
+    fn a_catalog_redirect_is_refused() {
+        for status in [301, 302, 303, 307, 308] {
+            let resp = reply(status, Some("http://192.168.1.1/")).unwrap();
+            assert_eq!(refuse_redirect(resp).unwrap_err(), status);
+        }
+        assert!(refuse_redirect(reply(200, None).unwrap()).is_ok());
+    }
+
+    #[test]
     fn the_first_url_is_checked_too() {
         let (res, sent) = run_chain("http://10.0.0.1/a.zip", vec![]);
         assert!(res.is_err());
@@ -509,54 +563,104 @@ mod tests {
         let agent =
             build_guarded_agent(Duration::from_millis(500), Duration::from_millis(500), None);
         // Plain http is refused before any connection.
-        let http = agent.get("http://127.0.0.1:9/").call().unwrap_err();
+        let http = agent.agent.get("http://127.0.0.1:9/").call().unwrap_err();
         assert_eq!(http.kind(), ureq::ErrorKind::InsecureRequestHttpsOnly);
         // https to a loopback address is refused by the resolver, before any connection.
-        let lo = agent.get("https://127.0.0.1:9/").call().unwrap_err();
+        let lo = agent.agent.get("https://127.0.0.1:9/").call().unwrap_err();
         assert_eq!(lo.kind(), ureq::ErrorKind::Dns);
+    }
+
+    /// Serve up to `max` requests on `listener`, answering each after `delay` with a 302 to
+    /// `location`. The thread returns how many it answered, once no request comes for 2 s.
+    fn serve_redirects(
+        listener: std::net::TcpListener,
+        max: usize,
+        delay: Duration,
+        location: String,
+    ) -> std::thread::JoinHandle<usize> {
+        use std::io::{Read, Write};
+        std::thread::spawn(move || {
+            let mut served = 0;
+            while served < max {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let Some(mut s) = accept_within(&listener, deadline) else {
+                    break;
+                };
+                let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut req = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => req.extend_from_slice(&buf[..n]),
+                    }
+                }
+                std::thread::sleep(delay);
+                let head = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {location}\r\n\
+                     Content-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = s.write_all(head.as_bytes());
+                served += 1;
+            }
+            served
+        })
+    }
+
+    /// The guarded agents refuse loopback outright, so the tests against a local server drive
+    /// the same loop with a plain agent that, like them, doesn't follow redirects, and a
+    /// check that allows this loopback server (and still refuses every private address).
+    fn loopback_guarded(overall: Option<Duration>) -> GuardedAgent {
+        let agent = agent_builder(Duration::from_millis(500), Duration::from_millis(500), None)
+            .redirects(0)
+            .build();
+        GuardedAgent { agent, overall }
+    }
+
+    fn allow_loopback(u: &Url) -> Result<(), String> {
+        validate_outbound_url(u.as_str(), true).map(drop)
     }
 
     #[test]
     fn a_real_redirect_to_a_private_address_is_not_followed() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        // Answer one request with a redirect to a LAN address.
-        let server = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            let Some(mut s) = accept_within(&listener, deadline) else {
-                return;
-            };
-            let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
-            let mut req = Vec::new();
-            let mut buf = [0u8; 1024];
-            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
-                match s.read(&mut buf) {
-                    Ok(0) | Err(_) => return,
-                    Ok(n) => req.extend_from_slice(&buf[..n]),
-                }
-            }
-            let _ = s.write_all(
-                b"HTTP/1.1 302 Found\r\nLocation: http://192.168.1.1/\r\n\
-                  Content-Length: 0\r\nConnection: close\r\n\r\n",
-            );
-        });
-        // The guarded agents refuse loopback outright, so drive the same loop with a plain
-        // agent that, like them, doesn't follow redirects, and a check that allows this
-        // loopback test server (and still refuses every private address).
-        let agent = agent_builder(Duration::from_millis(500), Duration::from_millis(500), None)
-            .redirects(0)
-            .build();
+        let server = serve_redirects(listener, 1, Duration::ZERO, "http://192.168.1.1/".into());
         let res = get_guarded(
-            &agent,
+            &loopback_guarded(None),
             &format!("http://{addr}/a.zip"),
-            &|u| validate_outbound_url(u.as_str(), true).map(drop),
+            &allow_loopback,
             None,
         );
-        server.join().unwrap();
+        assert_eq!(server.join().unwrap(), 1);
         let err = res.unwrap_err().to_string();
         assert!(err.contains("refused a redirect"), "{err}");
+    }
+
+    #[test]
+    fn redirects_share_one_overall_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Each hop takes 300 ms: under the 700 ms cap on its own, but not all of them together.
+        let server = serve_redirects(
+            listener,
+            MAX_REDIRECTS + 1,
+            Duration::from_millis(300),
+            format!("http://{addr}/next"),
+        );
+        let start = Instant::now();
+        let res = get_guarded(
+            &loopback_guarded(Some(Duration::from_millis(700))),
+            &format!("http://{addr}/a.zip"),
+            &allow_loopback,
+            None,
+        );
+        let took = start.elapsed();
+        let served = server.join().unwrap();
+        let err = res.unwrap_err();
+        assert!(matches!(err, FetchError::Http(_)), "{err}");
+        assert!(served < MAX_REDIRECTS, "served {served}");
+        assert!(took < Duration::from_millis(1500), "took {took:?}");
     }
 
     /// Accept one connection, giving up at `deadline` so a test server thread always ends.
