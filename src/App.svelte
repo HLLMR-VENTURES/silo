@@ -1010,8 +1010,11 @@
           true,
         );
         if (filed === null) return null; // refused, and said why: nothing changed
-        // Its rescan is skipped if another scan began meanwhile: that one must land first too.
-        if (!(await settleScanOrRefuse())) return stopped();
+        // Its rescan is skipped if a scan queued behind the filing started first. That one began
+        // after the filing (none ran when it started, and none starts while a write is held), so
+        // it reads what filing left: wait for it however long it takes, rather than judge from
+        // the optimistic set (a mod filing couldn't link back would look still on).
+        await waitWhile(() => scanning);
       }
     }
     // Whatever is still active and can't be parked (folder mods, a zip that couldn't be filed)
