@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counting mods that load their materials from a script too, and names the mods adding the most.
   **Last run** lists the materials the game skipped. (#341)
 
+### Fixed
+
+- When Silo has to copy a mod into your mods folder (a cloud-synced Documents folder, or a
+  library on another drive), it now builds the copy under a hidden temporary name and only puts
+  it in place once it's complete. Before, a copy that stopped part-way (a full disk, a file that
+  wouldn't read, Silo closed mid-copy) stayed in the mods folder under the mod's real name, and
+  the game loaded the broken mod. A leftover temporary copy is cleared the next time Silo
+  updates your active mods. (#343)
+- Moving a mod to another drive (Organize, Flatten) now writes the copy to disk before deleting
+  the original, so a power cut right after the move can't lose the mod. (#343)
+
 ## [1.0.3] - 2026-10-29
 
 The library database moves to version 3 (one added column, for the per-mod update switch). Silo
