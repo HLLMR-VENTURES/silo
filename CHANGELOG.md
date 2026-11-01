@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counting mods that load their materials from a script too, and names the mods adding the most.
   **Last run** lists the materials the game skipped. (#341)
 
+### Fixed
+
+- On Linux, Silo didn't notice Farming Simulator 25 running under Proton, so it let you move
+  your mods archive or change game and mod settings while the game was open. It now waits for
+  the game to close, as it does on Windows and macOS. (#345)
+- Silo now finds the game, and shows the **Play** button, when the Steam client is installed on
+  a drive other than C: (Windows), and when FS25 runs through Proton, including Flatpak Steam
+  (Linux). (#346)
+
 ## [1.0.3] - 2026-10-29
 
 The library database moves to version 3 (one added column, for the per-mod update switch). Silo
