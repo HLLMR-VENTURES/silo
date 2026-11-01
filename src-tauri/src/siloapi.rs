@@ -6,6 +6,7 @@
 //! URL is overridable via the `siloapi_base` app_setting so a developer can point it at their
 //! own SiloAPI; release builds always use `DEFAULT_BASE` (see `effective_siloapi_base`).
 
+use crate::net::{CallExt, HttpError, RespExt, SendExt};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
@@ -233,15 +234,18 @@ struct LookupResponse {
     results: Vec<LookupResult>,
 }
 
-fn get(url: &str) -> Result<ureq::Response, String> {
-    let resp = crate::net::catalog().get(url).call().map_err(catalog_err)?;
+fn get(url: &str) -> Result<crate::net::Response, String> {
+    let resp = crate::net::catalog()
+        .get(url)
+        .call_checked()
+        .map_err(catalog_err)?;
     crate::net::refuse_redirect(resp).map_err(not_answering)
 }
 
 /// A catalog request's error as text.
-fn catalog_err(e: ureq::Error) -> String {
+fn catalog_err(e: HttpError) -> String {
     match e {
-        ureq::Error::Status(code, _) => not_answering(code),
+        HttpError::Status(code, _) => not_answering(code),
         other => format!("Silo can't reach its catalog right now: {other}"),
     }
 }
@@ -337,8 +341,8 @@ fn lookup_batches(tech_names: &[String]) -> Vec<Vec<&str>> {
 fn lookup_one(base: &str, tech_names: &[&str]) -> Result<Vec<LookupResult>, String> {
     let resp = crate::net::catalog()
         .post(&format!("{}/mods/lookup", base.trim_end_matches('/')))
-        .set("Content-Type", "application/json")
-        .send_json(ureq::json!({ "techNames": tech_names }))
+        .header("Content-Type", "application/json")
+        .send_json_checked(serde_json::json!({ "techNames": tech_names }))
         .map_err(catalog_err)?;
     let resp = crate::net::refuse_redirect(resp).map_err(not_answering)?;
     let parsed: LookupResponse = resp.into_json().map_err(|e| e.to_string())?;
@@ -424,13 +428,13 @@ pub struct CanonicalManifest {
 /// hashed build for that version (404) — that's an "unverified", not an error.
 pub fn manifest(base: &str, id: &str, version: &str) -> Result<Option<CanonicalManifest>, String> {
     let url = manifest_url(base, id, version)?;
-    match crate::net::catalog().get(url.as_str()).call() {
+    match crate::net::catalog().get(url.as_str()).call_checked() {
         Ok(resp) => crate::net::refuse_redirect(resp)
             .map_err(not_answering)?
             .into_json()
             .map(Some)
             .map_err(|e| e.to_string()),
-        Err(ureq::Error::Status(404, _)) => Ok(None),
+        Err(HttpError::Status(404, _)) => Ok(None),
         Err(e) => Err(catalog_err(e)),
     }
 }

@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counting mods that load their materials from a script too, and names the mods adding the most.
   **Last run** lists the materials the game skipped. (#341)
 
+### Changed
+
+- Updated the HTTP library Silo uses to talk to GitHub, its catalog and download hosts (ureq 3).
+  Requests, timeouts, redirects and error messages work as before. (#315)
+
 ### Fixed
 
 - When you switch mods folders, **Point Farming Simulator 25 at this folder too?** now has

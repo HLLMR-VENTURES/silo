@@ -6,7 +6,8 @@
 //! an internal service.
 //!
 //! Also home to the shared HTTP agents: every native request goes through one of them, so each
-//! has connect/read timeouts and Silo's User-Agent.
+//! has connect/read timeouts and Silo's User-Agent, and none uses a proxy from the environment
+//! (a proxy would resolve names itself, out of the guard's sight).
 //!
 //! - `api()` talks only to GitHub's API. It keeps ureq's redirect handling, which GitHub's API
 //!   uses for renamed repos.
@@ -15,11 +16,22 @@
 //!   HTTPS-only, follow no redirects on their own (use [`get_guarded`], which checks every
 //!   hop), and resolve names through [`public_addrs`], so a public-looking name that resolves
 //!   to a private address is refused and the address that was checked is the one connected to.
+//!
+//! Every agent hands back 4xx/5xx answers as responses (ureq's `http_status_as_error` is off),
+//! and Silo sends requests only through [`CallExt`] / [`SendExt`], which turn those answers
+//! into [`HttpError::Status`] with the response kept, so callers can still read its headers
+//! and body.
 
-use std::io;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::io::{self, Read};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+use ureq::config::{Config, ConfigBuilder};
+use ureq::http::Uri;
+use ureq::typestate::{AgentScope, WithBody, WithoutBody};
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
+use ureq::{Agent, RequestBuilder, ResponseExt};
 use url::{Host, Url};
 
 /// The User-Agent every native request sends (GitHub rejects requests without one).
@@ -33,64 +45,96 @@ pub const USER_AGENT: &str = concat!(
 /// (`github.com` → `release-assets.githubusercontent.com`), or two when the repo was renamed.
 pub(crate) const MAX_REDIRECTS: usize = 5;
 
-/// An agent builder with connect / read / write timeouts and an optional overall cap, so a
-/// silent or stalled server makes the request fail instead of hanging forever.
-fn agent_builder(
+/// Most redirects `api()` follows on its own. ureq 2 (`redirects(5)`) errored on the fifth
+/// redirect, i.e. followed four; ureq 3 follows `max_redirects` and errors on the next.
+const API_MAX_REDIRECTS: u32 = 4;
+
+/// Largest body [`RespExt::into_string`] reads (ureq 2's `into_string` limit).
+const STRING_LIMIT: u64 = 10 * 1024 * 1024;
+
+/// A response from one of Silo's agents.
+pub type Response = ureq::http::Response<ureq::Body>;
+
+/// An agent config with connect / per-read / per-write timeouts and an optional overall cap, so
+/// a silent or stalled server makes the request fail instead of hanging forever. No proxy from
+/// the environment, and 4xx/5xx come back as responses (see the module docs).
+fn agent_config(
     connect: Duration,
     read: Duration,
     overall: Option<Duration>,
-) -> ureq::AgentBuilder {
-    let mut b = ureq::AgentBuilder::new()
-        .timeout_connect(connect)
-        .timeout_read(read)
-        .timeout_write(read)
-        .user_agent(USER_AGENT);
-    if let Some(t) = overall {
-        b = b.timeout(t);
-    }
-    b
+) -> ConfigBuilder<AgentScope> {
+    Agent::config_builder()
+        .timeout_connect(Some(connect))
+        .timeout_per_read(Some(read))
+        .timeout_per_write(Some(read))
+        .timeout_global(overall)
+        .user_agent(USER_AGENT)
+        .proxy(None)
+        .http_status_as_error(false)
 }
 
-/// Build an agent with [`agent_builder`]'s timeouts.
-pub(crate) fn build_agent(
-    connect: Duration,
-    read: Duration,
-    overall: Option<Duration>,
-) -> ureq::Agent {
-    agent_builder(connect, read, overall).build()
+/// An agent from `config` that resolves names with [`SiloResolver`].
+fn agent_with(config: Config, public_only: bool) -> Agent {
+    Agent::with_parts(
+        config,
+        DefaultConnector::default(),
+        SiloResolver { public_only },
+    )
+}
+
+/// Build an agent with [`agent_config`]'s timeouts, following no redirects.
+pub(crate) fn build_agent(connect: Duration, read: Duration, overall: Option<Duration>) -> Agent {
+    agent_with(
+        agent_config(connect, read, overall)
+            .max_redirects(0)
+            .build(),
+        false,
+    )
 }
 
 /// An agent for URLs Silo didn't choose itself, used only through [`get_guarded`]: HTTPS only,
 /// no automatic redirects, and a resolver that never hands ureq an address the guard refuses.
 /// `overall` caps the whole fetch, every redirect included, from connecting to reading the
-/// body. The system's DNS lookup can't be interrupted by it (nor by ureq's own overall
-/// timeout), though time spent there still uses up the cap.
+/// body. ureq stops waiting for a slow DNS lookup when the cap runs out (the lookup thread is
+/// left to finish on its own); time spent there uses up the cap.
 pub struct GuardedAgent {
-    agent: ureq::Agent,
+    agent: Agent,
     overall: Option<Duration>,
 }
 
-/// Build a [`GuardedAgent`] with [`agent_builder`]'s connect / read timeouts.
+/// Build a [`GuardedAgent`] with [`agent_config`]'s connect / read timeouts.
 pub(crate) fn build_guarded_agent(
     connect: Duration,
     read: Duration,
     overall: Option<Duration>,
 ) -> GuardedAgent {
-    let agent = agent_builder(connect, read, None)
+    let config = agent_config(connect, read, None)
         .https_only(true)
-        .redirects(0)
-        .resolver(|netloc: &str| public_addrs(netloc, system_lookup))
+        .max_redirects(0)
         .build();
-    GuardedAgent { agent, overall }
+    GuardedAgent {
+        agent: agent_with(config, true),
+        overall,
+    }
+}
+
+/// `api()`'s agent with these timeouts: follows up to [`API_MAX_REDIRECTS`] redirects.
+fn build_api_agent(connect: Duration, read: Duration, overall: Option<Duration>) -> Agent {
+    agent_with(
+        agent_config(connect, read, overall)
+            .max_redirects(API_MAX_REDIRECTS)
+            .build(),
+        false,
+    )
 }
 
 /// For API calls to GitHub's API: a request that hasn't finished in 60 s fails. Follows
 /// redirects (GitHub's API uses them for renamed repos). Never give it a URL from the catalog
 /// or the webview; use `guarded_api()`.
-pub fn api() -> &'static ureq::Agent {
-    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+pub fn api() -> &'static Agent {
+    static AGENT: OnceLock<Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        build_agent(
+        build_api_agent(
             Duration::from_secs(10),
             Duration::from_secs(30),
             Some(Duration::from_secs(60)),
@@ -102,24 +146,22 @@ pub fn api() -> &'static ureq::Agent {
 /// redirects, so a redirect means something is wrong and is not followed (see
 /// [`refuse_redirect`]). No address filter: the base is fixed in release builds, and a
 /// developer's catalog can be on localhost.
-pub fn catalog() -> &'static ureq::Agent {
-    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+pub fn catalog() -> &'static Agent {
+    static AGENT: OnceLock<Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        agent_builder(
+        build_agent(
             Duration::from_secs(10),
             Duration::from_secs(30),
             Some(Duration::from_secs(60)),
         )
-        .redirects(0)
-        .build()
     })
 }
 
 /// A response from an agent with redirects off, refused when it is a redirect (3xx), which
 /// such an agent returns as a success.
-pub(crate) fn refuse_redirect(resp: ureq::Response) -> Result<ureq::Response, u16> {
-    match resp.status() {
-        300..=399 => Err(resp.status()),
+pub(crate) fn refuse_redirect(resp: Response) -> Result<Response, u16> {
+    match resp.status().as_u16() {
+        s @ 300..=399 => Err(s),
         _ => Ok(resp),
     }
 }
@@ -145,10 +187,74 @@ pub fn download() -> &'static GuardedAgent {
         .get_or_init(|| build_guarded_agent(Duration::from_secs(10), Duration::from_secs(30), None))
 }
 
-/// The system resolver (what ureq uses by default).
-fn system_lookup(netloc: &str) -> io::Result<Vec<SocketAddr>> {
-    netloc.to_socket_addrs().map(Iterator::collect)
+/// Name resolution for every agent: the system resolver (ureq's default, which also honours
+/// the request's timeouts), with a failed lookup reported as [`DnsFailed`]. With
+/// `public_only`, only the addresses [`public_addrs`] keeps are handed to ureq, which
+/// connects to nothing else.
+#[derive(Debug)]
+struct SiloResolver {
+    public_only: bool,
 }
+
+impl Resolver for SiloResolver {
+    fn resolve(
+        &self,
+        uri: &Uri,
+        config: &Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let found = DefaultResolver::default().resolve(uri, config, timeout);
+        let netloc = || {
+            uri.scheme()
+                .zip(uri.authority())
+                .and_then(|(s, a)| DefaultResolver::host_and_port(s, a))
+                .unwrap_or_default()
+        };
+        let found = match found {
+            Ok(found) => found,
+            Err(ureq::Error::Io(e)) => return Err(DnsFailed::error(netloc(), e)),
+            Err(ureq::Error::HostNotFound) => {
+                let e = io::Error::new(io::ErrorKind::NotFound, "no address found");
+                return Err(DnsFailed::error(netloc(), e));
+            }
+            // A timeout, a bad URI: ureq's own error.
+            Err(e) => return Err(e),
+        };
+        if !self.public_only {
+            return Ok(found);
+        }
+        let netloc = netloc();
+        let kept = public_addrs(&netloc, |_| Ok(found.to_vec()))
+            .map_err(|e| DnsFailed::error(netloc.clone(), e))?;
+        let mut out = self.empty();
+        for a in kept {
+            out.push(a);
+        }
+        Ok(out)
+    }
+}
+
+/// A name lookup that failed or found no address Silo may use (ureq 2's "Dns Failed"). Carried
+/// in `ureq::Error::Other`.
+#[derive(Debug)]
+pub(crate) struct DnsFailed {
+    netloc: String,
+    source: io::Error,
+}
+
+impl DnsFailed {
+    pub(crate) fn error(netloc: String, source: io::Error) -> ureq::Error {
+        ureq::Error::Other(Box::new(DnsFailed { netloc, source }))
+    }
+}
+
+impl std::fmt::Display for DnsFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "resolve dns name '{}': {}", self.netloc, self.source)
+    }
+}
+
+impl std::error::Error for DnsFailed {}
 
 /// Resolve `netloc` (`host:port`) with `lookup` and keep only the addresses the guard allows,
 /// so a public name that resolves to 10.x / 192.168.x / 169.254.x / loopback can't be
@@ -170,11 +276,271 @@ pub(crate) fn public_addrs(
     Ok(kept)
 }
 
-/// Why a guarded fetch failed: ureq's own error (a status or transport failure), or a URL the
+/// A failed request: the server answered 4xx/5xx (ureq 2's `Error::Status`), or there was no
+/// usable answer (ureq 2's `Error::Transport`).
+#[derive(Debug)]
+pub enum HttpError {
+    Status(u16, Box<StatusError>),
+    Transport(Box<TransportError>),
+}
+
+/// A 4xx/5xx answer, kept whole so its headers and body can be read.
+#[derive(Debug)]
+pub struct StatusError {
+    url: String,
+    resp: Response,
+}
+
+impl StatusError {
+    /// The URL that answered (after any redirects `api()` followed).
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// A response header, when present and valid text.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.resp.header(name)
+    }
+
+    pub fn into_response(self) -> Response {
+        self.resp
+    }
+}
+
+/// A request that got no usable answer, with the URL it was for when known.
+#[derive(Debug)]
+pub struct TransportError {
+    url: Option<String>,
+    error: ureq::Error,
+}
+
+impl TransportError {
+    pub fn error(&self) -> &ureq::Error {
+        &self.error
+    }
+
+    /// The request was refused before it was sent because a header was malformed. Such an
+    /// error never quotes the header (http's error text has no value in it).
+    pub fn is_bad_header(&self) -> bool {
+        matches!(&self.error, ureq::Error::Http(h) if is_header_error(h))
+    }
+}
+
+fn is_header_error(h: &ureq::http::Error) -> bool {
+    h.is::<ureq::http::header::InvalidHeaderValue>()
+        || h.is::<ureq::http::header::InvalidHeaderName>()
+}
+
+impl HttpError {
+    /// A 4xx/5xx answer from `url`.
+    pub(crate) fn status(url: impl Into<String>, resp: Response) -> HttpError {
+        HttpError::Status(
+            resp.status().as_u16(),
+            Box::new(StatusError {
+                url: url.into(),
+                resp,
+            }),
+        )
+    }
+
+    /// A failure with no usable answer.
+    pub(crate) fn transport(url: Option<String>, error: ureq::Error) -> HttpError {
+        HttpError::Transport(Box::new(TransportError { url, error }))
+    }
+}
+
+/// ureq 2's label for a kind of failure, which Silo's error texts (and `error::classify`) have
+/// always carried.
+fn transport_label(e: &ureq::Error) -> Option<&'static str> {
+    use ureq::Error as E;
+    Some(match e {
+        E::Other(o) if o.is::<DnsFailed>() => "Dns Failed",
+        E::HostNotFound => "Dns Failed",
+        E::Io(_) | E::Timeout(_) | E::Rustls(_) | E::Tls(_) => "Network Error",
+        E::ConnectionFailed => "Connection Failed",
+        E::RequireHttpsOnly(_) => "Insecure request attempted with https_only set",
+        E::TooManyRedirects => "Too Many Redirects",
+        E::Http(h) if is_header_error(h) => "Bad Header",
+        E::Http(_) | E::BadUri(_) => "Bad URL",
+        E::ConnectProxyFailed(_) => "Proxy failed to connect",
+        E::InvalidProxyUrl => "Malformed proxy",
+        _ => return None,
+    })
+}
+
+impl std::fmt::Display for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // ureq 2's wording: "<url>: status code 404".
+            HttpError::Status(code, s) => write!(f, "{}: status code {code}", s.url),
+            HttpError::Transport(t) => {
+                if let Some(u) = &t.url {
+                    write!(f, "{u}: ")?;
+                }
+                if let Some(label) = transport_label(&t.error) {
+                    write!(f, "{label}: ")?;
+                }
+                match &t.error {
+                    ureq::Error::Io(e) => write!(f, "{e}"),
+                    ureq::Error::Timeout(which) => write!(f, "timed out ({which})"),
+                    ureq::Error::Other(o) => write!(f, "{o}"),
+                    e => write!(f, "{e}"),
+                }
+            }
+        }
+    }
+}
+
+impl std::error::Error for HttpError {}
+
+/// `r` with a 4xx/5xx answer turned into [`HttpError::Status`], as ureq 2 did.
+fn checked(url: Option<String>, r: Result<Response, ureq::Error>) -> Result<Response, HttpError> {
+    match r {
+        Ok(resp) if resp.status().as_u16() >= 400 => {
+            let url = resp.get_uri().to_string();
+            Err(HttpError::status(url, resp))
+        }
+        Ok(resp) => Ok(resp),
+        Err(e) => Err(HttpError::transport(url, e)),
+    }
+}
+
+/// The request's URL (for error texts), or the error for a header ureq 2 would have refused
+/// to send: one with a byte outside visible ASCII, space and tab. ureq 3 lets through bytes
+/// 0x80-0xFF in most headers (and refuses them in `Authorization` only once it is sending);
+/// this keeps ureq 2's rule, checked before anything is sent.
+fn prepare<B>(req: &RequestBuilder<B>) -> Result<Option<String>, HttpError> {
+    let url = req.uri_ref().map(Uri::to_string);
+    let bad = req.headers_ref().is_some_and(|h| {
+        h.values().any(|v| {
+            !v.as_bytes()
+                .iter()
+                .all(|b| matches!(b, b' ' | b'\t' | 0x21..=0x7e))
+        })
+    });
+    if bad {
+        let invalid = ureq::http::HeaderValue::from_bytes(b"\n").unwrap_err();
+        let e = ureq::Error::Http(ureq::http::Error::from(invalid));
+        return Err(HttpError::transport(url, e));
+    }
+    Ok(url)
+}
+
+/// Send a request that has no body. Every bodiless request Silo makes goes through this.
+pub trait CallExt {
+    fn call_checked(self) -> Result<Response, HttpError>;
+}
+
+impl CallExt for RequestBuilder<WithoutBody> {
+    fn call_checked(self) -> Result<Response, HttpError> {
+        let url = prepare(&self)?;
+        checked(url, self.call())
+    }
+}
+
+/// Send a request with a body (POST / PUT / PATCH). Every such request Silo makes goes through
+/// one of these.
+pub trait SendExt {
+    fn send_json_checked(self, data: impl serde::Serialize) -> Result<Response, HttpError>;
+    fn send_form_checked(self, form: &[(&str, &str)]) -> Result<Response, HttpError>;
+    /// No body, sent with `Content-Length: 0`.
+    fn send_empty_checked(self) -> Result<Response, HttpError>;
+}
+
+/// `req` with `Content-Type: value` unless it already has a content type (ureq 2's rule).
+fn default_content_type(req: RequestBuilder<WithBody>, value: &str) -> RequestBuilder<WithBody> {
+    let has = req
+        .headers_ref()
+        .is_some_and(|h| h.contains_key(ureq::http::header::CONTENT_TYPE));
+    if has {
+        req
+    } else {
+        req.header(ureq::http::header::CONTENT_TYPE, value)
+    }
+}
+
+impl SendExt for RequestBuilder<WithBody> {
+    /// Compact JSON with `Content-Type: application/json`, as ureq 2 sent it (ureq 3's own
+    /// `send_json` pretty-prints and adds `; charset=utf-8`).
+    fn send_json_checked(self, data: impl serde::Serialize) -> Result<Response, HttpError> {
+        let url = prepare(&self)?;
+        let bytes = match serde_json::to_vec(&data) {
+            Ok(b) => b,
+            Err(e) => return Err(HttpError::transport(url, ureq::Error::Json(e))),
+        };
+        let req = default_content_type(self, "application/json");
+        checked(url, req.send(&bytes[..]))
+    }
+
+    /// `application/x-www-form-urlencoded`, encoded the way ureq 2 did (the url crate's form
+    /// serializer; ureq 3 uses a different escape set).
+    fn send_form_checked(self, form: &[(&str, &str)]) -> Result<Response, HttpError> {
+        let url = prepare(&self)?;
+        let encoded = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(form)
+            .finish();
+        let req = default_content_type(self, "application/x-www-form-urlencoded");
+        checked(url, req.send(encoded.as_bytes()))
+    }
+
+    fn send_empty_checked(self) -> Result<Response, HttpError> {
+        let url = prepare(&self)?;
+        checked(url, self.send_empty())
+    }
+}
+
+/// ureq 2's response conveniences, with ureq 2's limits.
+pub trait RespExt {
+    /// A header's value, when present and valid text.
+    fn header(&self, name: &str) -> Option<&str>;
+    /// The body as text (invalid UTF-8 replaced), refused over 10 MB.
+    fn into_string(self) -> io::Result<String>;
+    /// The body parsed as JSON. No size limit, as in ureq 2.
+    fn into_json<T: serde::de::DeserializeOwned>(self) -> io::Result<T>;
+    /// The body as a reader. No size limit: callers bound what they read.
+    fn into_reader(self) -> ureq::BodyReader<'static>;
+}
+
+impl RespExt for Response {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers().get(name).and_then(|v| v.to_str().ok())
+    }
+
+    fn into_string(self) -> io::Result<String> {
+        let mut buf = Vec::new();
+        self.into_reader()
+            .take(STRING_LIMIT + 1)
+            .read_to_end(&mut buf)?;
+        if buf.len() as u64 > STRING_LIMIT {
+            return Err(io::Error::other("response too big for into_string"));
+        }
+        Ok(String::from_utf8_lossy(&buf).into_owned())
+    }
+
+    fn into_json<T: serde::de::DeserializeOwned>(self) -> io::Result<T> {
+        let reader = io::BufReader::new(self.into_reader());
+        serde_json::from_reader(reader).map_err(|e| {
+            if e.io_error_kind() == Some(io::ErrorKind::TimedOut) {
+                return io::Error::new(io::ErrorKind::TimedOut, e.to_string());
+            }
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to read JSON: {e}"),
+            )
+        })
+    }
+
+    fn into_reader(self) -> ureq::BodyReader<'static> {
+        // `limit(u64::MAX)`: ureq's `Body::into_reader` is documented as unlimited; say so.
+        self.into_body().into_with_config().limit(u64::MAX).reader()
+    }
+}
+
+/// Why a guarded fetch failed: an HTTP failure (a status or transport failure), or a URL the
 /// guard refused (the first one or a redirect).
 #[derive(Debug)]
 pub enum FetchError {
-    Http(Box<ureq::Error>),
+    Http(HttpError),
     Refused(String),
 }
 
@@ -197,22 +563,22 @@ pub(crate) fn get_guarded(
     url: &str,
     check: &dyn Fn(&Url) -> Result<(), String>,
     auth: Option<&str>,
-) -> Result<ureq::Response, FetchError> {
+) -> Result<Response, FetchError> {
     let deadline = g.overall.map(|d| Instant::now() + d);
     follow_redirects(url, check, |u, same_origin| {
         let mut req = g.agent.get(u.as_str());
         if let Some(d) = deadline {
             let left = d.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                let timed_out = io::Error::new(io::ErrorKind::TimedOut, "the request timed out");
-                return Err(Box::new(timed_out.into()));
+                let timed_out = ureq::Error::Timeout(ureq::Timeout::Global);
+                return Err(HttpError::transport(Some(u.to_string()), timed_out));
             }
-            req = req.timeout(left);
+            req = req.config().timeout_global(Some(left)).build();
         }
         if let (Some(a), true) = (auth, same_origin) {
-            req = req.set("Authorization", a);
+            req = req.header("Authorization", a);
         }
-        req.call().map_err(Box::new)
+        req.call_checked()
     })
 }
 
@@ -227,8 +593,8 @@ pub(crate) fn public_https(url: &Url) -> Result<(), String> {
 fn follow_redirects(
     start: &str,
     check: &dyn Fn(&Url) -> Result<(), String>,
-    mut send: impl FnMut(&Url, bool) -> Result<ureq::Response, Box<ureq::Error>>,
-) -> Result<ureq::Response, FetchError> {
+    mut send: impl FnMut(&Url, bool) -> Result<Response, HttpError>,
+) -> Result<Response, FetchError> {
     let first = Url::parse(start).map_err(|_| FetchError::Refused("not a valid URL".into()))?;
     check(&first).map_err(FetchError::Refused)?;
     let origin = first.origin();
@@ -236,7 +602,7 @@ fn follow_redirects(
     let mut hops = 0;
     loop {
         let resp = send(&url, url.origin() == origin).map_err(FetchError::Http)?;
-        match resp.status() {
+        match resp.status().as_u16() {
             301 | 302 | 303 | 307 | 308 => {}
             // 300 / 304 / 305 and the like: nothing to follow, and no body to use.
             s @ 300..=399 => {
@@ -428,16 +794,19 @@ mod tests {
         assert!(validate_outbound_url("https://192.168.0.2/x", true).is_err());
     }
 
+    /// A canned response with `status`, the given headers and `body`.
+    fn canned(status: u16, headers: &[(&str, &str)], body: &[u8]) -> Response {
+        let mut b = ureq::http::Response::builder().status(status);
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        b.body(ureq::Body::builder().data(body.to_vec())).unwrap()
+    }
+
     /// A canned response with `status` and, when given, a `Location` header.
-    fn reply(status: u16, location: Option<&str>) -> Result<ureq::Response, Box<ureq::Error>> {
-        let loc = location
-            .map(|l| format!("Location: {l}\r\n"))
-            .unwrap_or_default();
-        Ok(
-            format!("HTTP/1.1 {status} X\r\n{loc}Content-Length: 0\r\n\r\n")
-                .parse::<ureq::Response>()
-                .unwrap(),
-        )
+    fn reply(status: u16, location: Option<&str>) -> Result<Response, HttpError> {
+        let loc: Vec<(&str, &str)> = location.map(|l| ("Location", l)).into_iter().collect();
+        Ok(canned(status, &loc, b""))
     }
 
     /// Run `follow_redirects` from `start` against canned replies (in order), recording each
@@ -453,7 +822,7 @@ mod tests {
             let (status, loc) = replies.next().expect("more requests than replies");
             reply(status, loc)
         })
-        .map(|r| r.status())
+        .map(|r| r.status().as_u16())
         .map_err(|e| e.to_string());
         (res, sent)
     }
@@ -602,16 +971,364 @@ mod tests {
         assert!(failed.is_err());
     }
 
+    /// The transport error inside `e`.
+    fn transport(e: HttpError) -> Box<TransportError> {
+        match e {
+            HttpError::Transport(t) => t,
+            HttpError::Status(s, _) => panic!("expected a transport error, got status {s}"),
+        }
+    }
+
     #[test]
     fn the_guarded_agent_refuses_http_and_private_addresses() {
         let agent =
             build_guarded_agent(Duration::from_millis(500), Duration::from_millis(500), None);
         // Plain http is refused before any connection.
-        let http = agent.agent.get("http://127.0.0.1:9/").call().unwrap_err();
-        assert_eq!(http.kind(), ureq::ErrorKind::InsecureRequestHttpsOnly);
-        // https to a loopback address is refused by the resolver, before any connection.
-        let lo = agent.agent.get("https://127.0.0.1:9/").call().unwrap_err();
-        assert_eq!(lo.kind(), ureq::ErrorKind::Dns);
+        let http = transport(
+            agent
+                .agent
+                .get("http://127.0.0.1:9/")
+                .call_checked()
+                .unwrap_err(),
+        );
+        assert!(
+            matches!(http.error(), ureq::Error::RequireHttpsOnly(_)),
+            "{:?}",
+            http.error()
+        );
+        // https to a loopback address is refused by the resolver, before any connection: the
+        // only address it has isn't public.
+        for target in [
+            "https://127.0.0.1:9/",
+            "https://[::1]:9/",
+            "https://localhost:9/",
+        ] {
+            let e = agent.agent.get(target).call_checked().unwrap_err();
+            let text = e.to_string();
+            let lo = transport(e);
+            assert!(
+                matches!(lo.error(), ureq::Error::Other(o) if o.is::<DnsFailed>()),
+                "{target}: {:?}",
+                lo.error()
+            );
+            assert!(text.contains("Dns Failed"), "{text}");
+            assert!(text.contains("no public address"), "{text}");
+        }
+    }
+
+    #[test]
+    fn no_agent_takes_a_proxy_or_turns_statuses_into_bare_errors() {
+        // A proxy resolves names itself, past the guard's resolver, and ureq 3 reads one from
+        // the environment by default. ureq 2 (no `proxy-from-env` feature) never did.
+        let agents = [
+            ("api", api()),
+            ("catalog", catalog()),
+            ("guarded_api", &guarded_api().agent),
+            ("download", &download().agent),
+        ];
+        for (name, a) in agents {
+            let c = a.config();
+            assert!(c.proxy().is_none(), "{name} has a proxy");
+            assert!(!c.http_status_as_error(), "{name}");
+            assert_eq!(
+                c.timeouts().connect,
+                Some(Duration::from_secs(10)),
+                "{name}"
+            );
+            assert_eq!(
+                c.timeout_per_read(),
+                Some(Duration::from_secs(30)),
+                "{name}"
+            );
+            assert_eq!(
+                c.timeout_per_write(),
+                Some(Duration::from_secs(30)),
+                "{name}"
+            );
+        }
+        assert_eq!(api().config().max_redirects(), API_MAX_REDIRECTS);
+        assert_eq!(
+            api().config().timeouts().global,
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(catalog().config().max_redirects(), 0);
+        assert_eq!(
+            catalog().config().timeouts().global,
+            Some(Duration::from_secs(60))
+        );
+        for g in [guarded_api(), download()] {
+            assert!(g.agent.config().https_only());
+            assert_eq!(g.agent.config().max_redirects(), 0);
+            // The overall cap is applied per fetch by `get_guarded`, not by the agent.
+            assert_eq!(g.agent.config().timeouts().global, None);
+        }
+        assert_eq!(guarded_api().overall, Some(Duration::from_secs(60)));
+        assert_eq!(download().overall, None);
+    }
+
+    /// One canned answer per connection, in order, each request's head and body recorded. The
+    /// thread returns what it received, once no request comes for 2 s.
+    fn serve(
+        listener: std::net::TcpListener,
+        answers: Vec<String>,
+    ) -> std::thread::JoinHandle<Vec<String>> {
+        use std::io::Write;
+        std::thread::spawn(move || {
+            let mut got = Vec::new();
+            for answer in answers {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let Some(mut s) = accept_within(&listener, deadline) else {
+                    break;
+                };
+                got.push(read_request(&mut s));
+                let _ = s.write_all(answer.as_bytes());
+            }
+            got
+        })
+    }
+
+    /// One request's head plus its body (as far as `Content-Length` says), as text.
+    fn read_request(s: &mut std::net::TcpStream) -> String {
+        let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut req = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+            match s.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => req.extend_from_slice(&buf[..n]),
+            }
+        }
+        let text = String::from_utf8_lossy(&req).to_string();
+        let head_len = text.find("\r\n\r\n").map_or(text.len(), |i| i + 4);
+        let want = text
+            .lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.eq_ignore_ascii_case("content-length")
+                    .then(|| v.trim().parse::<usize>().ok())?
+            })
+            .unwrap_or(0);
+        while req.len() < head_len + want {
+            match s.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => req.extend_from_slice(&buf[..n]),
+            }
+        }
+        String::from_utf8_lossy(&req).to_string()
+    }
+
+    fn answer(status: &str, headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn quick_agent() -> Agent {
+        build_agent(Duration::from_millis(500), Duration::from_millis(500), None)
+    }
+
+    #[test]
+    fn an_error_status_comes_back_with_its_response() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve(
+            listener,
+            vec![
+                answer(
+                    "403 Forbidden",
+                    "x-ratelimit-remaining: 0\r\n",
+                    "{\"message\":\"API rate limit exceeded\"}",
+                ),
+                answer("500 Internal Server Error", "", "oops"),
+                answer("200 OK", "", "fine"),
+            ],
+        );
+        let url = format!("http://{addr}/x");
+        let e = quick_agent().get(&url).call_checked().unwrap_err();
+        assert_eq!(e.to_string(), format!("{url}: status code 403"));
+        let HttpError::Status(403, s) = e else {
+            panic!("expected a 403, got {e}");
+        };
+        assert_eq!(s.url(), url);
+        assert_eq!(s.header("x-ratelimit-remaining"), Some("0"));
+        let body = s.into_response().into_string().unwrap();
+        assert!(body.contains("rate limit"), "{body}");
+        // A 5xx is an error too, and a 2xx is not.
+        let e = quick_agent().get(&url).call_checked().unwrap_err();
+        assert!(matches!(e, HttpError::Status(500, _)), "{e}");
+        let ok = quick_agent().get(&url).call_checked().unwrap();
+        assert_eq!(ok.into_string().unwrap(), "fine");
+        assert_eq!(server.join().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn an_error_status_ends_a_guarded_fetch() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve(listener, vec![answer("404 Not Found", "", "")]);
+        let res = get_guarded(
+            &loopback_guarded(None),
+            &format!("http://{addr}/a.zip"),
+            &allow_loopback,
+            None,
+        );
+        assert_eq!(server.join().unwrap().len(), 1);
+        assert!(
+            matches!(res, Err(FetchError::Http(HttpError::Status(404, _)))),
+            "{:?}",
+            res.map(|r| r.status())
+        );
+    }
+
+    #[test]
+    fn the_api_agent_follows_four_redirects_without_the_token() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hop = |n: usize| answer("302 Found", &format!("Location: http://{addr}/{n}\r\n"), "");
+        let mut answers: Vec<String> = (1..=4).map(hop).collect();
+        answers.push(answer("200 OK", "", "{\"ok\":true}"));
+        let server = serve(listener, answers);
+        let agent = build_api_agent(Duration::from_millis(500), Duration::from_millis(500), None);
+        let resp = agent
+            .get(&format!("http://{addr}/0"))
+            .header("Authorization", "Bearer ghp_TESTtest0123456789")
+            .call_checked()
+            .unwrap();
+        let v: serde_json::Value = resp.into_json().unwrap();
+        assert_eq!(v["ok"], true);
+        let got = server.join().unwrap();
+        assert_eq!(got.len(), 5);
+        assert!(got[0].contains("ghp_TESTtest0123456789"));
+        // ureq 2 and 3 both drop Authorization on every redirect (RedirectAuthHeaders::Never).
+        for later in &got[1..] {
+            assert!(
+                !later.to_ascii_lowercase().contains("authorization"),
+                "{later}"
+            );
+        }
+
+        // A fifth redirect is too many.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hop = |n: usize| answer("302 Found", &format!("Location: http://{addr}/{n}\r\n"), "");
+        let server = serve(listener, (1..=5).map(hop).collect());
+        let e = agent
+            .get(&format!("http://{addr}/0"))
+            .call_checked()
+            .unwrap_err();
+        assert!(
+            matches!(&e, HttpError::Transport(t) if matches!(t.error(), ureq::Error::TooManyRedirects)),
+            "{e}"
+        );
+        assert!(e.to_string().contains("Too Many Redirects"), "{e}");
+        assert_eq!(server.join().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn bodiless_writes_send_content_length_zero_once() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve(
+            listener,
+            vec![
+                answer("204 No Content", "", ""),
+                answer("204 No Content", "", ""),
+            ],
+        );
+        let url = format!("http://{addr}/user/starred/o/r");
+        quick_agent()
+            .put(&url)
+            .header("Content-Length", "0")
+            .send_empty_checked()
+            .unwrap();
+        quick_agent()
+            .delete(&url)
+            .header("Content-Length", "0")
+            .call_checked()
+            .unwrap();
+        for req in server.join().unwrap() {
+            let lower = req.to_ascii_lowercase();
+            assert_eq!(lower.matches("content-length: 0").count(), 1, "{req}");
+            assert!(!lower.contains("transfer-encoding"), "{req}");
+        }
+    }
+
+    #[test]
+    fn json_and_form_bodies_are_sent_as_before() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve(
+            listener,
+            vec![answer("200 OK", "", "{}"), answer("200 OK", "", "{}")],
+        );
+        let url = format!("http://{addr}/x");
+        quick_agent()
+            .post(&url)
+            .send_json_checked(serde_json::json!({ "files": { "a b": { "content": "c" } } }))
+            .unwrap();
+        quick_agent()
+            .post(&url)
+            .header("Accept", "application/json")
+            .send_form_checked(&[("client_id", "abc"), ("scope", "read:user public_repo")])
+            .unwrap();
+        let got = server.join().unwrap();
+        let json = got[0].to_ascii_lowercase();
+        assert!(
+            json.contains("content-type: application/json\r\n"),
+            "{json}"
+        );
+        assert!(
+            got[0].ends_with("{\"files\":{\"a b\":{\"content\":\"c\"}}}"),
+            "{}",
+            got[0]
+        );
+        let form = got[1].to_ascii_lowercase();
+        assert!(
+            form.contains("content-type: application/x-www-form-urlencoded"),
+            "{form}"
+        );
+        assert!(form.contains("user-agent: silo/"), "{form}");
+        assert!(
+            got[1].ends_with("client_id=abc&scope=read%3Auser+public_repo"),
+            "{}",
+            got[1]
+        );
+    }
+
+    #[test]
+    fn body_helpers_keep_ureq_2_limits() {
+        const MB10: usize = 10 * 1024 * 1024;
+        // into_string: up to 10 MB, invalid UTF-8 replaced; more is refused.
+        let exact = canned(200, &[], &vec![b'a'; MB10]);
+        assert_eq!(exact.into_string().unwrap().len(), MB10);
+        let over = canned(200, &[], &vec![b'a'; MB10 + 1]);
+        assert!(over.into_string().is_err());
+        let bad = canned(200, &[], b"caf\xe9");
+        assert_eq!(bad.into_string().unwrap(), "caf\u{fffd}");
+        // into_json: no limit (ureq 3's read_json stops at 10 MB).
+        let big = format!("\"{}\"", "a".repeat(MB10 + 10));
+        let s: String = canned(200, &[], big.as_bytes()).into_json().unwrap();
+        assert_eq!(s.len(), MB10 + 10);
+        let e = canned(200, &[], b"{nope")
+            .into_json::<serde_json::Value>()
+            .unwrap_err();
+        assert!(e.to_string().starts_with("Failed to read JSON"), "{e}");
+        // into_reader: no limit either.
+        let mut n = 0;
+        let mut r = canned(200, &[], &vec![0u8; MB10 + 1]).into_reader();
+        let mut buf = [0u8; 65536];
+        loop {
+            match r.read(&mut buf).unwrap() {
+                0 => break,
+                k => n += k,
+            }
+        }
+        assert_eq!(n, MB10 + 1);
+        // header(): case-insensitive, None when absent.
+        let h = canned(200, &[("X-OAuth-Scopes", "gist, repo")], b"");
+        assert_eq!(h.header("x-oauth-scopes"), Some("gist, repo"));
+        assert_eq!(h.header("retry-after"), None);
     }
 
     /// Serve up to `max` requests on `listener`, answering each after `delay` with a 302 to
@@ -622,7 +1339,7 @@ mod tests {
         delay: Duration,
         location: String,
     ) -> std::thread::JoinHandle<usize> {
-        use std::io::{Read, Write};
+        use std::io::Write;
         std::thread::spawn(move || {
             let mut served = 0;
             while served < max {
@@ -655,10 +1372,10 @@ mod tests {
     /// the same loop with a plain agent that, like them, doesn't follow redirects, and a
     /// check that allows this loopback server (and still refuses every private address).
     fn loopback_guarded(overall: Option<Duration>) -> GuardedAgent {
-        let agent = agent_builder(Duration::from_millis(500), Duration::from_millis(500), None)
-            .redirects(0)
-            .build();
-        GuardedAgent { agent, overall }
+        GuardedAgent {
+            agent: quick_agent(),
+            overall,
+        }
     }
 
     fn allow_loopback(u: &Url) -> Result<(), String> {
@@ -703,6 +1420,7 @@ mod tests {
         let served = server.join().unwrap();
         let err = res.unwrap_err();
         assert!(matches!(err, FetchError::Http(_)), "{err}");
+        assert!(err.to_string().contains("timed out"), "{err}");
         assert!(served < MAX_REDIRECTS, "served {served}");
         assert!(took < Duration::from_millis(1500), "took {took:?}");
     }
@@ -746,17 +1464,18 @@ mod tests {
         });
         let agent = build_agent(Duration::from_millis(500), Duration::from_millis(500), None);
         let start = std::time::Instant::now();
-        let res = agent.get(&format!("http://{addr}/")).call();
+        let res = agent.get(&format!("http://{addr}/")).call_checked();
         let took = start.elapsed();
         let _ = done_tx.send(());
         hold.join().unwrap();
-        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
         assert!(took < Duration::from_secs(5), "took {took:?}");
     }
 
     #[test]
     fn a_slow_but_steady_download_is_not_cut_off() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
         const BODY: &[u8] = b"abcdefgh";
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -795,12 +1514,46 @@ mod tests {
         let start = std::time::Instant::now();
         let body = agent
             .get(&format!("http://{addr}/"))
-            .call()
+            .call_checked()
             .map_err(|e| e.to_string())
             .and_then(|r| r.into_string().map_err(|e| e.to_string()));
         let took = start.elapsed();
         server.join().unwrap();
         assert_eq!(body.as_deref(), Ok("abcdefgh"));
         assert!(took >= Duration::from_millis(1000), "took {took:?}");
+    }
+
+    #[test]
+    fn a_body_that_stalls_mid_download_times_out() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        // Send the head and part of the body, then go quiet (but keep the socket open).
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let Some(mut s) = accept_within(&listener, deadline) else {
+                return;
+            };
+            let _ = read_request(&mut s);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nabc");
+            let _ = s.flush();
+            let _ = done_rx.recv_timeout(Duration::from_secs(10));
+        });
+        let agent = build_agent(Duration::from_millis(500), Duration::from_millis(500), None);
+        let start = std::time::Instant::now();
+        let resp = agent
+            .get(&format!("http://{addr}/"))
+            .call_checked()
+            .unwrap();
+        let mut body = Vec::new();
+        let res = resp.into_reader().read_to_end(&mut body);
+        let took = start.elapsed();
+        let _ = done_tx.send(());
+        server.join().unwrap();
+        let err = res.unwrap_err();
+        assert!(err.to_string().contains("timeout"), "{err}");
+        assert!(took < Duration::from_secs(5), "took {took:?}");
     }
 }
