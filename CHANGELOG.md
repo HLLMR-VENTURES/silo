@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Saving a mod's settings or a game settings form changes only the values you edited. Before,
+  every other value in the file was rewritten too, so a line break or tab stored in one turned
+  into a space, and a value Silo couldn't read was saved empty. (#354)
+- Typing a value for a game setting stored as an empty tag (`<name/>`) now saves it. Before,
+  the editor said "Saved" and nothing changed; a setting that isn't in the file now shows an
+  error instead. (#354)
+- A savegame whose `careerSavegame.xml` is cut off or damaged now shows as unreadable in
+  **Mod sets → Savegames**, and **Use this save's mods** is off for it. Before, it listed only the
+  mods read before the damage (or none), and using it switched to that partial set. (#354)
+- The raw XML editor no longer saves an attribute without quotes (`value=5`), the same attribute
+  twice, or an entity like `&nbsp;` that the game can't read. (#354)
+- Text written as CDATA in a savegame, game settings file or store item is now read instead of
+  being skipped. (#354)
 - Fewer false conflict warnings. Two maps no longer show as a **Problem** or **Review** for
   adding the same brand, shop category, control action or fill type: the game loads only the map
   your savegame uses, so they never meet. A map still conflicts with a non-map mod that adds the
@@ -59,6 +72,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Moving a mod to another drive (Organize, Flatten) now writes the copy to disk before deleting
   the original, so a power cut right after the move can't lose the mod. (#343)
 - Folder mods can no longer make Silo read files outside the mod's own folder.
+- Turning on a mod whose name in your mods folder is taken by a different build now tells you
+  so, by file name, instead of quietly skipping it. And if Silo closed between putting a mod in
+  your mods folder and noting it as on, turning it on again now marks it on (and parking a mod
+  that's already gone marks it off). (#356)
+- **A different build is in your mods folder** now compares each file only with the copy Silo
+  filed for that mod. Before, a second file of the same name in another category, or a file you
+  put in the archive yourself, could be listed there, and then **Use this version** answered
+  "Not a Silo-managed mod". (#356)
+- The integrity check no longer reports **Modified**, with no changed files listed, for a mod
+  zip whose file names start with `././`. (#356)
+- Resuming a paused archive move now compares a folder mod's files byte for byte before
+  deleting the original. Before, an edit made while the move was paused that kept every file's
+  size was deleted with the original. (#356)
+- Moving your archive now stops with "Silo can't read …" when one of its category folders can't
+  be opened, instead of moving the rest and leaving that folder's unrecorded mods behind in an
+  archive Silo no longer looks at. (#356)
 - Mod downloads, updates and catalog images now check every redirect, not just the first
   address: Silo won't follow one to plain `http` or to an address on your own network, and it
   refuses a web address whose name points at your own network. GitHub downloads work as
