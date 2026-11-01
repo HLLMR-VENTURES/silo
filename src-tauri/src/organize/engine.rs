@@ -1,0 +1,458 @@
+//! The layout engine: organize (file mods into the archive), activate (`set_active`), and
+//! flatten back to a vanilla mods folder, with the archive cleanup they share.
+
+use super::*;
+
+/// Dry run: which mods in `source` (the flat mods folder, or the archive's top level when
+/// adopting) would move into `<archive>/<Category>/`.
+pub fn plan_organize(source: &Path, mods: &[ModInput]) -> Vec<PlannedMove> {
+    let mut plan = Vec::new();
+    for m in mods {
+        let from = source.join(&m.file_name);
+        // Only plan mods that are actually sitting in the source folder right now.
+        if !from.exists() {
+            continue;
+        }
+        plan.push(PlannedMove {
+            tech_name: m.tech_name.clone(),
+            file_name: m.file_name.clone(),
+            category: m.category.clone(),
+            rel_from: m.file_name.clone(),
+            rel_to: format!("{ARCHIVE}/{}/{}", sanitize(&m.category), m.file_name),
+        });
+    }
+    plan
+}
+
+/// Move mods from `source` (the flat mods folder, or the archive's top level when adopting)
+/// into `<archive>/<Category>/` and record the manifest. Mods already recorded (organized)
+/// are skipped.
+pub fn apply_organize(
+    conn: &Connection,
+    layout: &Layout,
+    source: &Path,
+    mods: &[ModInput],
+) -> Report {
+    let root = &layout.mods;
+    let key = crate::modsroot::canonical_key(root);
+    let mut rep = Report::default();
+    let already: HashSet<String> = db::load_organized(conn, &key)
+        .into_iter()
+        .map(|r| r.tech_name)
+        .collect();
+
+    for m in mods {
+        if already.contains(&m.tech_name) {
+            rep.skipped += 1;
+            continue;
+        }
+        // file_name drives every join below — it must be a plain basename, never a path.
+        if let Err(e) = crate::paths::safe_file_name(&m.file_name) {
+            rep.errors.push(format!("{}: {e}", m.tech_name));
+            continue;
+        }
+        let from = source.join(&m.file_name);
+        if !from.exists() {
+            rep.skipped += 1;
+            continue;
+        }
+        let dir = archive_dir(&layout.archive, &m.category);
+        let to = dir.join(&m.file_name);
+        // Adopting a folder mod named like its category would move it into itself.
+        if to.starts_with(&from) {
+            rep.errors.push(format!(
+                "{}: {} would be filed inside itself, so Silo left it untouched.",
+                m.tech_name, m.file_name
+            ));
+            rep.skipped += 1;
+            continue;
+        }
+        // Never overwrite: a rename replaces an existing destination, and whatever sits there
+        // (another build, the user's own file) may be the only copy.
+        if to.symlink_metadata().is_ok() {
+            rep.errors.push(format!(
+                "{}: {} already exists in the archive, so Silo left both untouched.",
+                m.tech_name, m.file_name
+            ));
+            rep.skipped += 1;
+            continue;
+        }
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            rep.errors
+                .push(format!("{}: mkdir {}: {e}", m.tech_name, dir.display()));
+            continue;
+        }
+        // Manifest-first: record the row BEFORE moving the file. If the DB write fails we
+        // never move, so we can't leave a file orphaned in the archive (which flatten
+        // would later be unable to tell from junk). If the move then fails, roll the row
+        // back. This holds under normal errors; a HARD crash between the row write and the
+        // move can still leave a row with no archived file and the original still in the
+        // root. That window is made non-destructive on the read side: flatten/set_active
+        // never remove a root entry unless the archived copy exists behind it, so the only
+        // copy is never deleted. (A journalled, startup-reconciled operation log would close
+        // the window entirely — tracked as a follow-up.)
+        let row = OrganizedRow {
+            tech_name: m.tech_name.clone(),
+            file_name: m.file_name.clone(),
+            kind: m.kind.clone(),
+            category: m.category.clone(),
+            subcategory: m.subcategory.clone(),
+            active: false,
+        };
+        if let Err(e) = db::upsert_organized(conn, &key, &row) {
+            rep.errors.push(format!("{}: manifest: {e}", m.tech_name));
+            continue;
+        }
+        match move_path(&from, &to) {
+            Ok(()) => {
+                rep.changed += 1;
+                // Keep what the scan already knows about this mod, so the rescan after filing
+                // doesn't parse it again (#322). Best effort: a miss only costs a fresh parse.
+                let _ = db::move_cache_row(conn, &from.to_string_lossy(), &to.to_string_lossy());
+            }
+            Err(e) => {
+                // Roll back the row we just wrote — nothing was moved.
+                let _ = db::delete_organized(conn, &key, &m.tech_name);
+                rep.errors.push(format!("{}: move: {e}", m.tech_name));
+            }
+        }
+    }
+    rep
+}
+
+/// Reconcile the flat-root projection to exactly `active`: link the ones that
+/// should be active, remove links for the ones that shouldn't.
+pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) -> Report {
+    let root = &layout.mods;
+    let key = crate::modsroot::canonical_key(root);
+    let mut rep = Report::default();
+    let mut policy = LinkPolicy::new(layout);
+    for row in db::load_organized(conn, &key) {
+        let link = root.join(&row.file_name);
+        let src = archive_path(&layout.archive, &row.category, &row.file_name);
+        let want = active.contains(&row.tech_name);
+        sweep_copy_temp(&link);
+        // A link into a folder that's gone (a re-pointed archive's old drive) would otherwise
+        // count as "already linked" and the mod could never be activated or parked again.
+        let stale = match remove_dangling_link(&link) {
+            Ok(removed) => removed,
+            Err(e) => {
+                rep.errors
+                    .push(format!("{}: remove stale link: {e}", row.tech_name));
+                continue;
+            }
+        };
+        if stale {
+            db::forget_projection(conn, &key, &row.file_name);
+            if !want {
+                if let Err(e) = db::set_organized_active(conn, &key, &row.tech_name, false) {
+                    rep.errors.push(format!("{}: manifest: {e}", row.tech_name));
+                }
+                rep.changed += 1;
+                continue;
+            }
+        }
+        // Only a confirmed absence counts as "nothing there": a slot that can't be looked at may
+        // still hold the projection, so it's reported and left (flag and record) as it is.
+        let linked = match link.symlink_metadata() {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                rep.errors.push(format!(
+                    "{}: can't check {}: {e}",
+                    row.tech_name,
+                    link.display()
+                ));
+                continue;
+            }
+        };
+
+        if want && !linked {
+            match make_link(&src, &link, &row.kind, &mut policy) {
+                Ok(()) => {
+                    // Record the projection's identity so a later deactivate can confirm it's
+                    // ours (and skip the content hash). Zips only — dir projections are
+                    // identified structurally (junction / marker), cheaply.
+                    if row.kind == "zip" {
+                        if let Some((size, mtime)) = file_stats(&link) {
+                            db::record_projection(conn, &key, &row.file_name, size, mtime);
+                        }
+                    }
+                    if let Err(e) = db::set_organized_active(conn, &key, &row.tech_name, true) {
+                        rep.errors.push(format!("{}: manifest: {e}", row.tech_name));
+                    }
+                    rep.changed += 1;
+                }
+                Err(e) => rep.errors.push(format!("{}: link: {e}", row.tech_name)),
+            }
+        } else if !want && linked {
+            // Two guards before removing anything from the root:
+            //  1. The archived copy must exist behind it — a root entry with no archive is the
+            //     only copy (e.g. a crash between manifest-write and move), never delete it.
+            //  2. The entry must PROVABLY be Silo's projection. FAST path: its (size, mtime)
+            //     still match what we recorded when we wrote it → our own untouched copy, no
+            //     hash needed. Otherwise fall back to the careful structural/content check.
+            //     If the user swapped in their own file at that name, neither matches — leave it.
+            if !src.exists() {
+                rep.errors.push(format!(
+                    "{}: there's no copy in your library archive, so Silo kept the file in your mods folder. It won't delete the only copy.",
+                    row.tech_name
+                ));
+                rep.skipped += 1;
+            } else if !(matches_provenance(conn, &key, &link, &row.file_name)
+                || is_silo_projection(&link, &src, &row.kind))
+            {
+                rep.errors.push(format!(
+                    "{}: the file in your mods folder isn't the one Silo linked (did you replace it?), so Silo left it alone.",
+                    row.tech_name
+                ));
+                rep.skipped += 1;
+            } else {
+                match clear_projection(&link, &src, root) {
+                    Ok(kept) => {
+                        if let Some(kept) = kept {
+                            rep.notices
+                                .push(kept_copy_notice(&row.file_name, &kept, false));
+                        }
+                        db::forget_projection(conn, &key, &row.file_name);
+                        if let Err(e) = db::set_organized_active(conn, &key, &row.tech_name, false)
+                        {
+                            rep.errors.push(format!("{}: manifest: {e}", row.tech_name));
+                        }
+                        rep.changed += 1;
+                    }
+                    Err(e) => rep.errors.push(format!("{}: {e}", row.tech_name)),
+                }
+            }
+        } else if want {
+            // Already something at the mod's name. Same two checks as deactivate: Silo's own
+            // projection gets its flag (and zip record) reconciled — a crash between linking and
+            // recording leaves `active = false` behind; anything else is reported, never replaced.
+            if !src.exists() {
+                // No archived copy: the entry may be the only copy (a crash mid-organize). Leave it.
+                rep.skipped += 1;
+            } else if matches_provenance(conn, &key, &link, &row.file_name) {
+                mark_active(conn, &key, &row, &mut rep);
+            } else if is_silo_projection(&link, &src, &row.kind) {
+                if row.kind == "zip" {
+                    note_zip_projection(conn, &key, &row.file_name, &link);
+                }
+                mark_active(conn, &key, &row, &mut rep);
+            } else {
+                rep.errors.push(format!(
+                    "{}: {} in your mods folder isn't Silo's copy of this mod, so Silo left it there and the game loads that file instead. Pick which build to keep in Diagnose → Problems.",
+                    row.tech_name, row.file_name
+                ));
+                rep.skipped += 1;
+            }
+        } else {
+            // Nothing at the name and not wanted: a crash between linking or unlinking and
+            // recording can leave `active = true`, or a gone projection's record, behind. The
+            // record must never vouch for a file put at that name later. (Read first: most parked
+            // mods have none, and a delete per mod would be a write per mod on every call.)
+            if db::projection_stats(conn, &key, &row.file_name).is_some() {
+                db::forget_projection(conn, &key, &row.file_name);
+            }
+            if row.active {
+                match db::set_organized_active(conn, &key, &row.tech_name, false) {
+                    Ok(()) => rep.changed += 1,
+                    Err(e) => rep.errors.push(format!("{}: manifest: {e}", row.tech_name)),
+                }
+            } else {
+                rep.skipped += 1;
+            }
+        }
+    }
+    rep
+}
+
+/// A wanted mod's slot already holds Silo's projection: record it as active if it isn't yet
+/// (counted as a change), otherwise it's simply already in place (skipped).
+fn mark_active(conn: &Connection, key: &str, row: &OrganizedRow, rep: &mut Report) {
+    if row.active {
+        rep.skipped += 1;
+        return;
+    }
+    match db::set_organized_active(conn, key, &row.tech_name, true) {
+        Ok(()) => rep.changed += 1,
+        Err(e) => rep.errors.push(format!("{}: manifest: {e}", row.tech_name)),
+    }
+}
+
+/// A plain file's `(size, mtime_ms)`, or `None` for a symlink/junction (identified structurally,
+/// not by provenance) or an unreadable path.
+pub(crate) fn file_stats(path: &Path) -> Option<(u64, i64)> {
+    let m = std::fs::symlink_metadata(path).ok()?;
+    if m.file_type().is_symlink() {
+        return None;
+    }
+    let mtime = m
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as i64;
+    Some((m.len(), mtime))
+}
+
+/// Fast, hash-free ownership check: the flat file is provably Silo's own untouched projection if
+/// its current `(size, mtime)` still match what we recorded when we wrote it. A file the user
+/// swapped in has a different mtime and won't match — so it's never wrongly treated as ours.
+pub(super) fn matches_provenance(
+    conn: &Connection,
+    key: &str,
+    link: &Path,
+    file_name: &str,
+) -> bool {
+    let Some((size, mtime)) = db::projection_stats(conn, key, file_name) else {
+        return false;
+    };
+    matches!(file_stats(link), Some((s, m)) if s == size && m == mtime)
+}
+
+/// Restore a vanilla flat `mods/`: remove every Silo link, move archived files back
+/// to the root, remove only empty archive directories (never an unrecognized file), and
+/// clear the manifest.
+pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
+    let root = &layout.mods;
+    let key = crate::modsroot::canonical_key(root);
+    let mut rep = Report::default();
+    let mut categories: HashSet<String> = HashSet::new();
+    for row in db::load_organized(conn, &key) {
+        categories.insert(row.category.clone());
+        let link = root.join(&row.file_name);
+        let src = archive_path(&layout.archive, &row.category, &row.file_name);
+
+        if src.exists() {
+            // A stale link (its target gone) holds nothing: drop it, then restore as usual.
+            if let Err(e) = remove_dangling_link(&link) {
+                rep.errors
+                    .push(format!("{}: remove stale link: {e}", row.tech_name));
+                continue;
+            }
+            let occupied = link.symlink_metadata().is_ok();
+            // If a file occupies the root slot but it isn't Silo's projection (the user swapped
+            // their own build in), don't remove it and don't overwrite it with the archived
+            // copy — leave both in place and report the anomaly for the user to resolve.
+            if occupied && !is_silo_projection(&link, &src, &row.kind) {
+                rep.errors.push(format!(
+                    "{}: the file in your mods folder isn't the one Silo linked, so Silo left it and the copy in your library archive alone.",
+                    row.tech_name
+                ));
+                rep.skipped += 1;
+                continue;
+            }
+            // Normal restore: drop our projection to free the slot, then move the archived
+            // original back into the root.
+            let mut kept = None;
+            if occupied {
+                match clear_projection(&link, &src, root) {
+                    Ok(k) => kept = k,
+                    Err(e) => {
+                        rep.errors.push(format!("{}: {e}", row.tech_name));
+                        continue;
+                    }
+                }
+            }
+            let restored = move_path(&src, &link);
+            if let Some(kept) = &kept {
+                rep.notices
+                    .push(kept_copy_notice(&row.file_name, kept, restored.is_ok()));
+            }
+            if let Err(e) = restored {
+                rep.errors.push(format!("{}: restore: {e}", row.tech_name));
+                continue;
+            }
+        } else if link.exists() {
+            // A file sits in the root slot but there is NO archived copy behind it. That is
+            // the original, not a projection (a projection always has an archive) — this is
+            // exactly the state a crash between the manifest write and the move leaves. Never
+            // delete it: keep the file, drop the stale manifest row.
+            rep.errors.push(format!(
+                "{}: there's no copy in your library archive, so Silo kept the file in your mods folder.",
+                row.tech_name
+            ));
+        }
+        // else: neither archive nor root file — nothing to restore; just clear the row.
+        if let Err(e) = db::delete_organized(conn, &key, &row.tech_name) {
+            rep.errors.push(format!("{}: manifest: {e}", row.tech_name));
+            continue;
+        }
+        rep.changed += 1;
+    }
+    // A user-chosen archive is the user's folder: remove only the category folders Silo filed
+    // into (and only when empty), never recurse, and don't report their other content.
+    if !layout.archive_is_default() {
+        remove_empty_category_dirs(&layout.archive, &categories);
+        return rep;
+    }
+    // The default archive is Silo's own. NEVER `remove_dir_all` it — that would destroy any
+    // file we don't have a manifest row for (e.g. a mod whose manifest write failed on a
+    // crash). Remove only provably-empty directories, and surface anything left untouched.
+    match cleanup_empty_archive(&layout.archive, true) {
+        Ok(leftover) => {
+            for p in leftover {
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
+                rep.errors.push(format!(
+                    "Silo kept an unrecognized file in your library archive: {}. Nothing was deleted.",
+                    name.unwrap_or_else(|| p.display().to_string())
+                ));
+            }
+        }
+        Err(e) => rep.errors.push(format!("archive cleanup: {e}")),
+    }
+    rep
+}
+
+/// Remove each category folder Silo filed into under `archive`, but only if it is empty.
+/// Never recurses, never touches anything else, and reports nothing — for an archive folder
+/// the user chose, whose other content is theirs.
+pub(crate) fn remove_empty_category_dirs(archive: &Path, categories: &HashSet<String>) {
+    for cat in categories {
+        // `remove_dir` refuses a non-empty folder, which is exactly the guard we want.
+        let _ = std::fs::remove_dir(archive_dir(archive, cat));
+    }
+}
+
+/// Remove empty directories under `archive` bottom-up. NEVER deletes a file or a
+/// non-empty directory — any file the manifest didn't restore is left in place and
+/// returned so the caller can tell the user. This is the guard against the flatten
+/// step eating an untracked mod. `archive` itself is removed (when empty) only if
+/// `remove_root` — a user-chosen archive folder is never removed.
+pub(crate) fn cleanup_empty_archive(
+    archive: &Path,
+    remove_root: bool,
+) -> std::io::Result<Vec<PathBuf>> {
+    let mut leftover = Vec::new();
+    if !archive.exists() {
+        return Ok(leftover);
+    }
+    // Returns true if `dir` is empty once processing finishes. At the top level, Silo's own
+    // archive note (`relocate::ARCHIVE_NOTE`) counts as absent.
+    fn walk(dir: &Path, top: bool, leftover: &mut Vec<PathBuf>) -> std::io::Result<bool> {
+        let mut empty = true;
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            // Use symlink semantics: never follow/recurse a link.
+            if entry.file_type()?.is_dir() {
+                if walk(&path, false, leftover)? {
+                    let _ = std::fs::remove_dir(&path);
+                } else {
+                    empty = false;
+                }
+            } else if top && entry.file_name() == crate::relocate::ARCHIVE_NOTE {
+                continue;
+            } else {
+                leftover.push(path);
+                empty = false;
+            }
+        }
+        Ok(empty)
+    }
+    if walk(archive, true, &mut leftover)? && remove_root {
+        let _ = std::fs::remove_file(archive.join(crate::relocate::ARCHIVE_NOTE));
+        let _ = std::fs::remove_dir(archive);
+    }
+    Ok(leftover)
+}
