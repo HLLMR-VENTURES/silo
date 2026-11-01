@@ -649,3 +649,93 @@ fn network_paths_are_recognised() {
     assert!(!is_network_path("/home/me/mods"));
     assert!(!is_network_path(r"\\?\UN"));
 }
+
+/// A projection that falls back to a full copy asks the policy's room check first; a "no"
+/// stops it before anything is made (#394). Inside a Mac App Store container a folder mod is
+/// always a copy (a container path is a Unix path).
+#[cfg(unix)]
+#[test]
+fn a_copy_that_wont_fit_is_refused_before_it_starts() {
+    let base = temp_dir_for("noroomcopy");
+    let mods = base.join("Library/Containers/fs25/mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    let layout = Layout::default_for(&mods);
+    let src = base.join("FS25_D");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+    let asked = std::cell::Cell::new(0);
+    let refuse = |s: &Path, entry: &Path| -> std::io::Result<()> {
+        asked.set(asked.get() + 1);
+        assert_eq!(s, src.as_path());
+        assert_eq!(entry, mods.join("FS25_D").as_path());
+        Err(std::io::Error::other(NoRoom("no room".into())))
+    };
+    let mut policy = LinkPolicy::new(&layout).with_room_check(&refuse);
+    let e = make_link(&src, &mods.join("FS25_D"), "dir", &mut policy).unwrap_err();
+    assert_eq!(no_room(&e), Some("no room"));
+    assert_eq!(asked.get(), 1);
+    assert!(
+        mods.join("FS25_D").symlink_metadata().is_err(),
+        "nothing made"
+    );
+    assert_eq!(std::fs::read_dir(&mods).unwrap().count(), 0, "no temp left");
+    // Room: the copy is made.
+    let fine = |_: &Path, _: &Path| -> std::io::Result<()> { Ok(()) };
+    let mut policy = LinkPolicy::new(&layout).with_room_check(&fine);
+    make_link(&src, &mods.join("FS25_D"), "dir", &mut policy).unwrap();
+    assert!(mods.join("FS25_D/modDesc.xml").is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The zip fallback copy asks too, and only the copy: a hardlink or symlink costs no room.
+#[test]
+fn only_the_zip_fallback_copy_asks_for_room() {
+    let base = temp_dir_for("noroomzip");
+    let src = base.join("a.zip");
+    std::fs::write(&src, b"PK").unwrap();
+    let refused = |_: &Path, _: &Path| Err(std::io::Error::from_raw_os_error(396));
+    let no = |_: &Path, _: &Path| -> std::io::Result<()> {
+        Err(std::io::Error::other(NoRoom("full".into())))
+    };
+    let e = link_zip_or(
+        &src,
+        &base.join("l.zip"),
+        || false,
+        refused,
+        refused,
+        |s, l| {
+            no(s, l)?;
+            copy_new(s, l)
+        },
+    )
+    .unwrap_err();
+    assert_eq!(no_room(&e), Some("full"));
+    assert!(!base.join("l.zip").exists());
+    link_zip_or(
+        &src,
+        &base.join("h.zip"),
+        || false,
+        |s, l| std::fs::hard_link(s, l),
+        refused,
+        |_, _| panic!("a hardlink needs no copy"),
+    )
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The folder fallback copy asks for room; a link that works needs none.
+#[test]
+fn only_the_folder_fallback_copy_asks_for_room() {
+    let base = temp_dir_for("noroomdir");
+    let src = base.join("FS25_D");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+    let refused = |_: &Path, _: &Path| Err(std::io::Error::from_raw_os_error(1));
+    let e = link_dir_or(&src, &base.join("l"), refused, |_, _| {
+        Err(std::io::Error::other(NoRoom("full".into())))
+    })
+    .unwrap_err();
+    assert_eq!(no_room(&e), Some("full"));
+    assert!(base.join("l").symlink_metadata().is_err());
+    let _ = std::fs::remove_dir_all(&base);
+}

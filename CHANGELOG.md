@@ -41,6 +41,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Switching mods folders now clears messages about the folder you left. (#396)
+- Moving your library archive, organizing, re-linking mods in your mods folder and mod
+  updates no longer delete Silo's temporary files just by their name. Each temporary file now
+  has a name of its own, and Silo only removes one once it has checked that it isn't the only
+  copy of anything. If Silo stopped partway through deleting a mod's old copy and the new copy
+  was then lost, resuming the move now puts the old copy back instead of deleting it. Before a
+  move deletes a mod's old copy, it now compares every byte of the new copy and makes sure the
+  new copy is saved to disk. Temporary files left by older versions of Silo are left where they
+  are and noted in the log. (#394)
+- When a move re-points a folder mod's link in your mods folder, the new link is made first and
+  then swapped in, so the mod is never without a link on macOS and Linux. On Windows the old link
+  still goes first; if Silo stops in between, resuming the move makes the link again. (#394)
+- A move now checks that each mod's new copy is a real file or folder, not a link, before it
+  calls the move finished. (#394)
+- A move now checks free space before each copy, and pauses with a message saying how much room
+  it needs before the drive fills up. Free some space, then resume. (#394)
+- After you move your library archive somewhere else (for example back to the default), Silo
+  removes its own small `.silo-archive.json` note from the old folder once that folder holds no
+  mods. The folder and anything else in it stay. (#394)
 - With a mod map that adds many material types, the ground-pile check no longer treats the
   base-game maps as uncertain too: each map is judged on whether its own material types fit.
   (#392)

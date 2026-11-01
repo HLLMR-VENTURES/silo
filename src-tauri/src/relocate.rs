@@ -7,6 +7,7 @@
 
 use crate::db::{self, OrganizedRow};
 use crate::organize::{self, Layout, LinkPolicy};
+use crate::scratch::{self, Journal};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
@@ -17,10 +18,11 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 /// Suffix of an in-flight copy. `scan` skips entries ending in it — keep the two in step.
-const TMP_SUFFIX: &str = ".silo-move-tmp";
+/// Each copy's name is its own (`scratch::unique_beside`), recorded before it's made.
+const TMP_SUFFIX: &str = scratch::MOVE_TMP;
 /// Suffix of an old copy being deleted (renamed first, so a half-deleted folder never keeps the
 /// mod's real name). `scan` skips it too.
-const OLD_SUFFIX: &str = ".silo-move-old";
+const OLD_SUFFIX: &str = scratch::MOVE_OLD;
 /// Temp sibling for an atomic link replacement in the mods folder (organize's, already skipped
 /// by `scan`).
 const RELINK_SUFFIX: &str = organize::RELINK_SUFFIX;
@@ -170,6 +172,8 @@ pub struct Progress {
 enum StepErr {
     /// A pause/cancel request or the game starting — handle it at the boundary, then retry.
     Interrupted,
+    /// A copy wouldn't fit on its drive (checked before it starts): the move pauses, saying so.
+    NoRoom(String),
     Failed(String),
 }
 
@@ -190,15 +194,6 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
         (same_file::Handle::from_path(a), same_file::Handle::from_path(b)),
         (Ok(x), Ok(y)) if x == y
     )
-}
-
-/// `p` with `suffix` appended to its file name.
-fn suffixed(p: &Path, suffix: &str) -> PathBuf {
-    let name = p
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    p.with_file_name(format!("{name}{suffix}"))
 }
 
 /// Size of a mod on disk (file, or a folder recursively). Never follows links.
@@ -227,7 +222,7 @@ fn link_inside(p: &Path) -> String {
     )
 }
 
-/// Copy a file in chunks, giving up (and deleting the partial) when `abort()` turns true. The
+/// Copy a file in chunks, giving up (the caller removes the partial) when `abort()` turns true. The
 /// copy keeps the original's modified time, so a moved mod keeps its date (and the scan cache,
 /// keyed by path+mtime+size, isn't fooled into thinking it changed).
 fn copy_file_abortable(src: &Path, dst: &Path, abort: &dyn Fn() -> bool) -> Result<(), StepErr> {
@@ -238,8 +233,7 @@ fn copy_file_abortable(src: &Path, dst: &Path, abort: &dyn Fn() -> bool) -> Resu
     let mut buf = vec![0u8; 1 << 20];
     loop {
         if abort() {
-            drop(w);
-            let _ = std::fs::remove_file(dst);
+            // The partial copy is the caller's to clean up, once it's proven redundant.
             return Err(StepErr::Interrupted);
         }
         let n = r.read(&mut buf).map_err(io)?;
@@ -376,23 +370,65 @@ fn place(tmp: &Path, dst: &Path, kind: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Copy `src` to a temp sibling of `dst`, verify the temp against `src`, then place it. A
-/// failure only ever deletes the temp — never a file at the real name.
+/// Copy `src` to a temp sibling of `dst`, verify the temp against `src`, then place it. The temp
+/// has a name of its own, recorded in the scratch journal before it's made and made exclusively
+/// (never over anything); a failure only ever removes that temp — never a file at the real
+/// name, nor anything Silo didn't make. A copy that wouldn't fit on `dst`'s drive stops before
+/// it starts (`StepErr::NoRoom`).
 fn copy_verify_place(
+    env: &Env,
     src: &Path,
     dst: &Path,
     kind: &str,
     abort: &dyn Fn() -> bool,
 ) -> Result<(), StepErr> {
+    env.room(size_of(src), dst).map_err(StepErr::NoRoom)?;
     if let Some(p) = dst.parent() {
         std::fs::create_dir_all(p).map_err(|e| StepErr::Failed(format!("copy: {e}")))?;
     }
-    let tmp = suffixed(dst, TMP_SUFFIX);
-    let _ = remove_any(&tmp);
+    let journal = env.journal();
+    let tmp = scratch::begin(
+        &journal,
+        scratch::Role::MoveTmp,
+        dst,
+        TMP_SUFFIX,
+        src,
+        dst,
+        kind,
+    )
+    .map_err(|e| StepErr::Failed(format!("copy: {e}")))?;
+    // Made exclusively: something already at this new name isn't Silo's and is left alone.
+    let made = if kind == "dir" {
+        std::fs::create_dir(&tmp)
+    } else {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map(drop)
+    };
+    if let Err(e) = made {
+        journal.forget(&tmp);
+        return Err(StepErr::Failed(format!("copy: {e}")));
+    }
     let res = copy_to_temp_and_place(src, &tmp, dst, kind, abort);
     if res.is_err() {
-        let _ = remove_any(&tmp);
+        // Removed only while the original still holds every byte of it (the original could
+        // have changed mid-copy); otherwise kept and recorded for a later sweep.
+        scratch::discard(
+            Some(&journal),
+            &scratch::Entry {
+                path: tmp.clone(),
+                role: scratch::Role::MoveTmp,
+                from: src.to_path_buf(),
+                to: dst.to_path_buf(),
+                kind: kind.to_string(),
+            },
+        );
     }
+    // Placed (renamed, or hardlinked and dropped) or removed: the record goes. A temp still
+    // there stays recorded for `scratch::sweep_where`.
+    scratch::settle(&journal, &tmp);
     res
 }
 
@@ -416,15 +452,85 @@ fn copy_to_temp_and_place(
     place(tmp, dst, kind).map_err(StepErr::Failed)
 }
 
-/// Delete a moved mod's old copy: rename it aside first (same folder, so the mod's name is gone
-/// at once), then remove the renamed copy. A crash mid-delete leaves only an `OLD_SUFFIX` entry,
-/// which `clean_temps` removes on the next start.
-fn delete_source(src: &Path) -> Result<(), String> {
-    let old = suffixed(src, OLD_SUFFIX);
-    remove_any(&old).map_err(|e| format!("remove old copy: {e}"))?;
-    std::fs::rename(src, &old).map_err(|e| format!("remove old copy: {e}"))?;
-    remove_any(&old).map_err(|e| format!("remove old copy: {e}"))?;
+/// Delete a moved mod's old copy `src`, now that `replacement` holds it: rename it aside to a
+/// new name of its own (recorded in the scratch journal first, never over anything), so the
+/// mod's name is gone at once; check `replacement` is still in place against it; only then
+/// remove it. If the check fails it's put back under its name. A crash mid-delete leaves only
+/// the recorded old copy, which `scratch::sweep_where` removes on the next start once
+/// `replacement` verifies against it (a zip whose replacement is gone is put back instead).
+fn delete_source(
+    env: &Env,
+    src: &Path,
+    replacement: &Path,
+    root: &Path,
+    kind: &str,
+) -> Result<(), StepErr> {
+    let fail = |e: String| StepErr::Failed(format!("remove old copy: {e}"));
+    // The replacement's placement is on disk first: a power cut can't keep the delete without
+    // the copy.
+    make_durable(replacement, root).map_err(|e| fail(e.to_string()))?;
+    let journal = env.journal();
+    let old = scratch::begin(
+        &journal,
+        scratch::Role::MoveOld,
+        src,
+        OLD_SUFFIX,
+        src,
+        replacement,
+        kind,
+    )
+    .map_err(fail)?;
+    if let Err(e) = crate::paths::rename_no_replace(src, &old) {
+        journal.forget(&old);
+        return Err(fail(e.to_string()));
+    }
+    // The last look before the old copy goes: the replacement is still the real thing and
+    // holds the same bytes (every file's SHA-256, not just sizes).
+    let checked = still_there(&old, replacement, kind).and_then(|()| {
+        match verify(&old, replacement, kind, Check::Contents) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(StepErr::Failed(format!(
+                "move: {} and {} no longer match, so Silo kept both. Check them, then resume.",
+                src.display(),
+                replacement.display()
+            ))),
+            Err(e) => Err(StepErr::Failed(e)),
+        }
+    });
+    if let Err(e) = checked {
+        if crate::paths::rename_no_replace(&old, src).is_ok() {
+            journal.forget(&old);
+        }
+        return Err(e);
+    }
+    let removed = remove_any(&old);
+    scratch::settle(&journal, &old);
+    removed.map_err(|e| fail(e.to_string()))?;
     crate::fslog::changed("delete-moved", src);
+    Ok(())
+}
+
+/// Flush a placed copy and every folder entry its placement made to disk: inside a folder mod,
+/// up to the archive `root`, and every folder above it (the move may have created the archive
+/// folder itself, and folders above it).
+fn make_durable(p: &Path, root: &Path) -> std::io::Result<()> {
+    fn subdirs(dir: &Path) -> std::io::Result<()> {
+        for e in std::fs::read_dir(dir)? {
+            let e = e?;
+            if e.file_type()?.is_dir() {
+                subdirs(&e.path())?;
+                organize::sync_dir(&e.path())?;
+            }
+        }
+        Ok(())
+    }
+    if p.symlink_metadata()?.is_dir() {
+        subdirs(p)?;
+    }
+    organize::sync_placement(p, Some(root))?;
+    for dir in root.ancestors().skip(1) {
+        organize::sync_dir(dir)?;
+    }
     Ok(())
 }
 
@@ -443,16 +549,16 @@ fn repoint(
     src: &Path,
     dst: &Path,
     policy: &mut LinkPolicy,
-) -> Result<(), String> {
+) -> Result<(), StepErr> {
     if !row.active {
         return Ok(());
     }
     let link = env.mods.join(&row.file_name);
     let Ok(meta) = link.symlink_metadata() else {
-        organize::make_link(dst, &link, &row.kind, policy).map_err(|e| format!("relink: {e}"))?;
+        organize::make_link(dst, &link, &row.kind, policy).map_err(relink_err)?;
         // A link that reaches nothing is left as it is (removing it could race whatever
         // replaces it); the retry checks it again before the old copy may go.
-        reaches_the_copy(&link, &row.kind)?;
+        reaches_the_copy(&link, &row.kind).map_err(StepErr::Failed)?;
         env.note_projection(row, &link);
         return Ok(());
     };
@@ -465,44 +571,41 @@ fn repoint(
         // the mod's standalone copy, with no second copy made in the mods folder (and its date
         // kept). `check_move` counts the same cases.
         if row.kind != "dir" && meta.is_file() && same_file(&link, src) && !policy.can_only_copy() {
-            let linked = organize::replace_zip_link_if_linkable(&link, dst, policy)
-                .map_err(|e| format!("relink: {e}"))?;
+            let linked =
+                organize::replace_zip_link_if_linkable(&link, dst, policy).map_err(relink_err)?;
             if linked {
                 env.note_projection(row, &link);
             }
         }
         return Ok(());
     }
-    if !stale_symlink(&link, src).map_err(|e| format!("relink: {e}"))? {
+    if !stale_symlink(&link, src).map_err(relink_err)? {
         // Already pointing at the new copy (a step that stopped after re-linking, now retried):
         // it must still reach it before the old copy may go. Any other link isn't ours.
         if stale_symlink(&link, dst).unwrap_or(false) {
-            return reaches_the_copy(&link, &row.kind);
+            return reaches_the_copy(&link, &row.kind).map_err(StepErr::Failed);
         }
         return Ok(());
     }
     if row.kind == "dir" {
-        // A dangling dir link can't report itself as a dir on Windows, so `remove_link` may pick
-        // `remove_file`; `remove_dir` then removes the link itself (it is a link, never a folder).
-        // `remove_link` logs its own success; only the fallback needs a line here.
-        organize::remove_link(&link)
-            .or_else(|_| {
-                std::fs::remove_dir(&link)?;
-                crate::fslog::changed("unlink", &link);
-                Ok::<(), std::io::Error>(())
-            })
-            .map_err(|e| format!("relink: {e}"))?;
-        if let Err(e) = organize::make_link(dst, &link, &row.kind, policy) {
-            if src.exists() {
-                let _ = organize::make_link(src, &link, &row.kind, policy);
-            }
-            return Err(format!("relink: {e}"));
-        }
+        // The new link is made beside the old one, then renamed over it where the OS allows
+        // (atomic); elsewhere the old one goes first and a crash between heals on Resume (the
+        // missing link is made again). See `organize::replace_dir_link`.
+        organize::replace_dir_link(&link, dst, src, policy).map_err(relink_err)?;
         // A link that reaches nothing is left as it is (removing it could race whatever
         // replaces it); the step stops before the old copy goes, and the retry checks again.
-        return reaches_the_copy(&link, &row.kind);
+        return reaches_the_copy(&link, &row.kind).map_err(StepErr::Failed);
     }
     replace_zip_link(env, row, &link, dst, policy)
+}
+
+/// A relink's I/O error as a step error: a copy that wouldn't fit (`organize::NoRoom`) pauses
+/// the move; anything else fails the step.
+fn relink_err(e: std::io::Error) -> StepErr {
+    match organize::no_room(&e) {
+        Some(why) => StepErr::NoRoom(why.to_string()),
+        None => StepErr::Failed(format!("relink: {e}")),
+    }
 }
 
 /// A symlink entry `link` that `repoint` makes again: it points at `src`, the copy being moved
@@ -597,9 +700,9 @@ fn replace_zip_link(
     link: &Path,
     dst: &Path,
     policy: &mut LinkPolicy,
-) -> Result<(), String> {
-    organize::replace_zip_link(link, dst, policy).map_err(|e| format!("relink: {e}"))?;
-    reaches_the_copy(link, &row.kind)?;
+) -> Result<(), StepErr> {
+    organize::replace_zip_link(link, dst, policy).map_err(relink_err)?;
+    reaches_the_copy(link, &row.kind).map_err(StepErr::Failed)?;
     env.note_projection(row, link);
     Ok(())
 }
@@ -635,11 +738,7 @@ fn right_kind(m: &std::fs::Metadata, kind: &str) -> bool {
 /// client, say) stops the step with both kept. An observation, not a lock: an identical-size
 /// swap in between isn't caught.
 fn still_there(old: &Path, new: &Path, kind: &str) -> Result<(), StepErr> {
-    let real = |p: &Path| {
-        p.symlink_metadata()
-            .ok()
-            .filter(|m| !m.file_type().is_symlink() && right_kind(m, kind))
-    };
+    let real = |p: &Path| real_copy(p, kind);
     let Some(n) = real(new) else {
         return Err(StepErr::Failed(format!(
             "move: the new copy at {} is gone, so Silo kept the original. Check that folder, then resume.",
@@ -662,14 +761,54 @@ fn still_there(old: &Path, new: &Path, kind: &str) -> Result<(), StepErr> {
     }
 }
 
-/// What a step needs from the run: the DB (to save the marker) and the mods folder.
+/// `p`'s own metadata when it is itself (not a link) a copy of the mod's kind: a file for a zip,
+/// a folder for a folder mod. What "the copy is there" means wherever a copy is about to be
+/// trusted (`still_there`, the end-of-move check).
+fn real_copy(p: &Path, kind: &str) -> Option<std::fs::Metadata> {
+    p.symlink_metadata()
+        .ok()
+        .filter(|m| !m.file_type().is_symlink() && right_kind(m, kind))
+}
+
+/// What a step needs from the run: the DB (to save the marker, and the scratch journal), the
+/// mods folder, and free space per drive (`RunCtx::free_space`).
 struct Env<'a> {
     conn: &'a Connection,
     mods: &'a Path,
     mods_key: &'a str,
+    free_space: &'a dyn Fn(&Path) -> Option<u64>,
 }
 
 impl Env<'_> {
+    /// Where this run records its scratch entries.
+    fn journal(&self) -> scratch::DbJournal<'_> {
+        scratch::DbJournal(self.conn)
+    }
+
+    /// A copy of `bytes` can be made at `at` (on its drive, plus the 1 GB margin the move's
+    /// check keeps) — or the plain-words reason it can't. Free space Silo can't read never
+    /// blocks.
+    fn room(&self, bytes: u64, at: &Path) -> Result<(), String> {
+        let Some(dir) = at
+            .ancestors()
+            .skip(1)
+            .find(|a| a.symlink_metadata().is_ok())
+        else {
+            return Ok(());
+        };
+        match short_of(bytes, (self.free_space)(dir)) {
+            Some(s) => Err(format!(
+                "Not enough free space on the drive with {} to copy {}: {s}. Free up some \
+                 space, then resume.",
+                dir.display(),
+                at.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            )),
+            None => Ok(()),
+        }
+    }
+
     fn save(&self, m: &MoveMarker) -> Result<(), StepErr> {
         save_marker(self.conn, self.mods_key, m).map_err(StepErr::Failed)
     }
@@ -717,6 +856,36 @@ fn occupied(at: &Path) -> StepErr {
     ))
 }
 
+/// A step stops while the scratch journal still holds an old copy of this mod (either of its
+/// two places) that the sweep kept: renamed aside, its replacement then failed to verify
+/// against it (changed or damaged while Silo was stopped). That old copy may be the only intact
+/// one, so the move can't count the mod as moved, or copy the other one back over it, until
+/// the user has looked at both. The journal decides, not a fresh look: an entry the sweep kept
+/// because its folder couldn't be reached still counts if another mod's step has since made
+/// that folder again.
+fn unresolved_old(env: &Env, a: &Path, b: &Path) -> Result<(), StepErr> {
+    let kept: Vec<PathBuf> = env
+        .journal()
+        .entries()
+        .into_iter()
+        .filter(|e| e.role == scratch::Role::MoveOld && (e.from == a || e.from == b))
+        .map(|e| e.path)
+        .collect();
+    match kept.first() {
+        None => Ok(()),
+        // Not where it was kept: its folder was moved or can't be reached, so it can't be checked.
+        Some(k) if !exists(k) => Err(StepErr::Failed(format!(
+            "move: Silo kept an earlier copy of this mod at {}, but it can't be found there now. Reconnect or put back that folder, then resume.",
+            k.display()
+        ))),
+        Some(k) => Err(StepErr::Failed(format!(
+            "move: Silo kept an earlier copy of this mod at {} because the copy at {} no longer matches it. Check both, keep the right one under the mod's name, then resume.",
+            k.display(),
+            if exists(b) { b } else { a }.display()
+        ))),
+    }
+}
+
 /// One mod, `from` → `to`. Idempotent. The mod is recorded in `moved` before its copy starts
 /// (and un-recorded if the copy isn't placed), so a destination counts as Silo's only when it is
 /// recorded — and even then it must verify against the original. Anything else at the
@@ -732,16 +901,13 @@ fn forward_one(
     let dst = organize::archive_path(&marker.to, &row.category, &row.file_name);
     let tech = row.tech_name.as_str();
     let ours = marker.moved.iter().any(|t| t == tech);
+    unresolved_old(env, &src, &dst)?;
     let has_src = exists(&src);
     if has_src {
         refuse_link(&src)?;
     }
     match (has_src, exists(&dst)) {
-        (false, false) => {
-            return Err(StepErr::Failed(
-                "move: the archived copy is missing from both locations".into(),
-            ))
-        }
+        (false, false) => return Err(missing_both(env, "move", &src, &dst)),
         (false, true) => {
             if !ours {
                 return Err(StepErr::Failed(format!(
@@ -749,7 +915,7 @@ fn forward_one(
                     dst.display()
                 )));
             }
-            repoint(env, row, &src, &dst, policy).map_err(StepErr::Failed)?;
+            repoint(env, row, &src, &dst, policy)?;
             return Ok(Step::AlreadyDone);
         }
         (true, true) => {
@@ -774,7 +940,7 @@ fn forward_one(
                 }
             }
             env.record(marker, tech)?;
-            if let Err(e) = copy_verify_place(&src, &dst, &row.kind, abort) {
+            if let Err(e) = copy_verify_place(env, &src, &dst, &row.kind, abort) {
                 env.unrecord(marker, tech)?;
                 return Err(e);
             }
@@ -783,12 +949,12 @@ fn forward_one(
     if abort() {
         return Err(StepErr::Interrupted);
     }
-    repoint(env, row, &src, &dst, policy).map_err(StepErr::Failed)?;
+    repoint(env, row, &src, &dst, policy)?;
     if abort() {
         return Err(StepErr::Interrupted);
     }
     still_there(&src, &dst, &row.kind)?;
-    delete_source(&src).map_err(StepErr::Failed)?;
+    delete_source(env, &src, &dst, &marker.to, &row.kind)?;
     Ok(Step::Moved)
 }
 
@@ -802,18 +968,23 @@ fn back_one(
 ) -> Result<Step, StepErr> {
     let src = organize::archive_path(&marker.to, &row.category, &row.file_name);
     let home = organize::archive_path(&marker.from, &row.category, &row.file_name);
+    unresolved_old(env, &src, &home)?;
     let has_src = exists(&src);
     if has_src {
         refuse_link(&src)?;
     }
     match (has_src, exists(&home)) {
-        (false, false) => {
-            return Err(StepErr::Failed(
-                "move back: the archived copy is missing from both locations".into(),
-            ))
-        }
+        (false, false) => return Err(missing_both(env, "move back", &src, &home)),
         (false, true) => {
-            repoint(env, row, &src, &home, policy).map_err(StepErr::Failed)?;
+            // Home must be the copy itself before the mod stops being Silo's to move back: a
+            // link at its name isn't it (the same check the end of the move makes).
+            if real_copy(&home, &row.kind).is_none() {
+                return Err(StepErr::Failed(format!(
+                    "move back: {} isn't the mod's copy (it's a link or something else). Check it, then resume.",
+                    home.display()
+                )));
+            }
+            repoint(env, row, &src, &home, policy)?;
             env.unrecord(marker, &row.tech_name)?;
             return Ok(Step::AlreadyDone);
         }
@@ -822,47 +993,66 @@ fn back_one(
                 return Err(occupied(&home));
             }
         }
-        (true, false) => copy_verify_place(&src, &home, &row.kind, abort)?,
+        (true, false) => copy_verify_place(env, &src, &home, &row.kind, abort)?,
     }
     if abort() {
         return Err(StepErr::Interrupted);
     }
-    repoint(env, row, &src, &home, policy).map_err(StepErr::Failed)?;
+    repoint(env, row, &src, &home, policy)?;
     if abort() {
         return Err(StepErr::Interrupted);
     }
     still_there(&src, &home, &row.kind)?;
-    delete_source(&src).map_err(StepErr::Failed)?;
+    delete_source(env, &src, &home, &marker.from, &row.kind)?;
     env.unrecord(marker, &row.tech_name)?;
     Ok(Step::Moved)
 }
 
-/// Delete stale scratch entries left by a crash under each category folder of `archive`: a
-/// move's temp and half-deleted old copies, and an interrupted cross-drive organize's
-/// `.{name}.silo-tmp` (its original is only removed after the temp is renamed into place, so a
-/// leftover temp is never the only copy). Only those names (`is_move_scratch`) are touched —
-/// never a mod update's leftovers, whose `-old` file may be the only copy of a mod; the move
-/// holds the library lock, so no organize is writing one right now.
-fn clean_temps(archive: &Path) {
-    if let Ok(cats) = std::fs::read_dir(archive) {
-        for c in cats.flatten() {
-            if !c.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            if let Ok(es) = std::fs::read_dir(c.path()) {
-                for e in es.flatten() {
-                    if is_move_scratch(&e.file_name().to_string_lossy()) {
-                        let _ = remove_any(&e.path());
-                    }
+/// "The archived copy is missing from both locations", naming any copy Silo kept that may be an
+/// earlier copy of it: a recorded scratch entry that couldn't be proven safe to remove, or an
+/// older version's leftover (`scratch::kept_for`), so the user can find it.
+fn missing_both(env: &Env, what: &str, a: &Path, b: &Path) -> StepErr {
+    let kept = scratch::kept_for(&env.journal(), &[a, b]);
+    let mut msg = format!("{what}: the archived copy is missing from both locations");
+    if !kept.is_empty() {
+        let list: Vec<String> = kept.iter().map(|p| p.display().to_string()).collect();
+        msg.push_str(&format!(
+            ". Silo kept what may be an earlier copy at {}. Check it, then resume.",
+            list.join(", ")
+        ));
+    }
+    StepErr::Failed(msg)
+}
+
+/// Before a run: clear what the scratch journal proves redundant (`scratch::sweep_where`: only
+/// recorded entries, each checked first), then log scratch-like names under each category
+/// folder of both archives and in the mods folder that aren't recorded — an older version's
+/// leftovers, or not Silo's at all. Those are left in place, never deleted by name.
+fn sweep_scratch(env: &Env, marker: &MoveMarker) {
+    let journal = env.journal();
+    scratch::sweep_where(&journal, &|e| {
+        e.role == scratch::Role::RelinkTmp
+            || scratch::inside(&e.path, &marker.from)
+            || scratch::inside(&e.path, &marker.to)
+    });
+    for archive in [&marker.from, &marker.to] {
+        if let Ok(cats) = std::fs::read_dir(archive) {
+            for c in cats.flatten() {
+                if c.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    scratch::log_unrecorded(&journal, &c.path(), &is_move_scratch);
                 }
             }
         }
     }
+    scratch::log_unrecorded(&journal, env.mods, &|n: &str| {
+        n.to_lowercase().ends_with(RELINK_SUFFIX)
+    });
 }
 
-/// A move's own scratch names, plus relink temps and organize's `.{name}.silo-tmp`: safe to
-/// delete after a crash. Unlike `scan::is_silo_temp`, never a mod update's `.silo-update.part`
-/// or `.silo-update-old` (`update::recover_interrupted` deals with those).
+/// A move's own scratch names, plus relink temps and organize's `.{name}.silo-tmp`: what
+/// `sweep_scratch` logs when unrecorded (it never deletes by name). Unlike
+/// `scan::is_silo_temp`, never a mod update's `.silo-update.part` or `.silo-update-old`
+/// (`update::recover_interrupted` deals with those).
 fn is_move_scratch(name: &str) -> bool {
     let l = name.to_lowercase();
     l.ends_with(TMP_SUFFIX)
@@ -877,8 +1067,16 @@ fn is_move_scratch(name: &str) -> bool {
 /// - forward: any previous version still set aside (moving around it would leave it behind);
 /// - back (a cancel): only one whose mod is missing. Otherwise the mod is in place and nothing
 ///   deletes the leftover, so the cancel must be able to finish and give the library back.
-fn settle_updates(mods: &Path, marker: &MoveMarker, direction: Direction) -> Option<String> {
+fn settle_updates(env: &Env, marker: &MoveMarker, direction: Direction) -> Option<String> {
+    let mods = env.mods;
     let mut all = crate::update::Recovery::default();
+    // Recovery re-links like the move does: its temps recorded, a fallback copy checked for
+    // room first (a short drive leaves the update set aside, which pauses the move, saying so).
+    let journal = env.journal();
+    let room = |src: &Path, entry: &Path| {
+        env.room(size_of(src), entry)
+            .map_err(|why| std::io::Error::other(organize::NoRoom(why)))
+    };
     for archive in [&marker.from, &marker.to] {
         let layout = Layout {
             mods: mods.to_path_buf(),
@@ -891,7 +1089,9 @@ fn settle_updates(mods: &Path, marker: &MoveMarker, direction: Direction) -> Opt
         let r = crate::update::settle(
             &dirs,
             mods,
-            &mut LinkPolicy::new(&layout),
+            &mut LinkPolicy::new(&layout)
+                .with_journal(&journal)
+                .with_room_check(&room),
             crate::update::Attempt::UserAsked,
         );
         for n in &r.notices {
@@ -912,19 +1112,6 @@ fn settle_updates(mods: &Path, marker: &MoveMarker, direction: Direction) -> Opt
         None
     } else {
         Some(crate::update::leftover_message(&all, blocking))
-    }
-}
-
-/// Delete a stale `RELINK_SUFFIX` temp left by a crash mid-relink next to each library zip's
-/// mods-folder name (only those names — never anything else in the mods folder). The temp is a
-/// link or copy Silo made; the real entry was never replaced by it. Folders are left alone (a
-/// relink temp is only ever a file or a link).
-fn clean_relink_temps(mods: &Path, rows: &[OrganizedRow]) {
-    for r in rows.iter().filter(|r| r.kind != "dir") {
-        let tmp = suffixed(&mods.join(&r.file_name), RELINK_SUFFIX);
-        if tmp.symlink_metadata().is_ok_and(|m| !m.is_dir()) {
-            let _ = std::fs::remove_file(&tmp);
-        }
     }
 }
 
@@ -1064,6 +1251,27 @@ pub(crate) fn note_archive(mods: &Path, archive: Option<&Path>) {
                 crate::fslog::changed("remove-note", &note);
             }
         }
+    }
+}
+
+/// The note Silo wrote in a folder it no longer uses as this mods folder's archive (a finished
+/// move away from it, a cancelled move into it, or a re-point away from an empty archive). Nothing reads it any more: rediscovery
+/// starts from the mods folder's own note (`rediscover_archive`), which now names another
+/// archive or is gone, and a folder picked as an archive again gets a fresh note
+/// (`note_archive`). So it's removed (#394), but only when it is Silo's note naming this mods
+/// folder, and only once the folder holds no mods Silo filed (`filed_mods`, which must read the
+/// folder). The folder and everything else in it are left as they are.
+pub(crate) fn retire_note(left: &Path, mods: &Path) {
+    let ours = read_note(left)
+        .and_then(|n| n.mods_folder)
+        .is_some_and(|m| crate::modsroot::same_folder(&m, mods));
+    if !ours || !filed_mods(left).is_ok_and(|v| v.is_empty()) {
+        return;
+    }
+    let note = left.join(ARCHIVE_NOTE);
+    match std::fs::remove_file(&note) {
+        Ok(()) => crate::fslog::changed("remove-note", &note),
+        Err(e) => log::warn!("couldn't remove {}: {e}", note.display()),
     }
 }
 
@@ -1288,6 +1496,9 @@ pub struct RunCtx<'a> {
     /// Pause/cancel requests (`requests()` in production; tests pass their own).
     pub request: &'a AtomicU8,
     pub progress: &'a mut dyn FnMut(&Progress),
+    /// Free bytes on the drive holding a folder (`organize::mount_of` in production), asked
+    /// before each copy; `None` (unknown) never blocks.
+    pub free_space: &'a dyn Fn(&Path) -> Option<u64>,
 }
 
 /// Throttled "has FS25 started?" that stays true once seen, so the boundary after an aborted
@@ -1345,7 +1556,7 @@ fn pause(env: &Env, mut marker: MoveMarker) -> Result<Option<MoveMarker>, String
 
 fn failed(e: StepErr) -> String {
     match e {
-        StepErr::Failed(s) => s,
+        StepErr::Failed(s) | StepErr::NoRoom(s) => s,
         StepErr::Interrupted => "interrupted".into(),
     }
 }
@@ -1367,7 +1578,13 @@ pub fn start(ctx: &mut RunCtx, from: PathBuf, to: PathBuf) -> Result<Option<Move
     let marker = MoveMarker::new(from, to);
     // Before any marker exists: a leftover that can't be put away refuses the move outright,
     // so it can never leave an unfinished move (which blocks every library change) behind.
-    if let Some(reason) = settle_updates(ctx.mods, &marker, Direction::Forward) {
+    let env = Env {
+        conn: ctx.conn,
+        mods: ctx.mods,
+        mods_key: ctx.mods_key,
+        free_space: ctx.free_space,
+    };
+    if let Some(reason) = settle_updates(&env, &marker, Direction::Forward) {
         return Err(reason);
     }
     run_locked(ctx, &held, marker)
@@ -1410,6 +1627,7 @@ fn run_locked(
         conn: ctx.conn,
         mods: ctx.mods,
         mods_key: ctx.mods_key,
+        free_space: ctx.free_space,
     };
     // Not reset here: a pause/cancel sent after the caller took its lock (before this point)
     // must be honored at the first boundary. The command layer clears stale requests when it
@@ -1419,13 +1637,11 @@ fn run_locked(
     marker.pause_reason = None;
     marker.errors.clear();
     save_marker(env.conn, env.mods_key, &marker)?;
-    if let Some(reason) = settle_updates(env.mods, &marker, marker.direction) {
+    if let Some(reason) = settle_updates(&env, &marker, marker.direction) {
         marker.pause_reason = Some(reason);
         return pause(&env, marker);
     }
-    clean_temps(&marker.from);
-    clean_temps(&marker.to);
-    clean_relink_temps(env.mods, &db::load_organized(env.conn, env.mods_key));
+    sweep_scratch(&env, &marker);
 
     if marker.direction == Direction::Forward {
         let rows = db::load_organized(env.conn, env.mods_key);
@@ -1482,7 +1698,16 @@ fn run_locked(
             mods: env.mods.to_path_buf(),
             archive: dst_root.clone(),
         };
-        let mut policy = LinkPolicy::new(&layout);
+        // Relink temps are recorded in the journal, and a copy into the mods folder (where a
+        // link can't be made) is checked for room first, like every archive copy.
+        let journal = env.journal();
+        let room = |src: &Path, entry: &Path| {
+            env.room(size_of(src), entry)
+                .map_err(|why| std::io::Error::other(organize::NoRoom(why)))
+        };
+        let mut policy = LinkPolicy::new(&layout)
+            .with_journal(&journal)
+            .with_room_check(&room);
         let sizes: Vec<u64> = rows
             .iter()
             .map(|r| {
@@ -1521,6 +1746,11 @@ fn run_locked(
             match step {
                 // Handle the request / game at the boundary, then retry this same mod.
                 Err(StepErr::Interrupted) => continue,
+                // Nothing of this mod was copied: pause before the drive fills up.
+                Err(StepErr::NoRoom(why)) => {
+                    marker.pause_reason = Some(why);
+                    return pause(&env, marker);
+                }
                 Err(e) => marker
                     .errors
                     .push(format!("{}: {}", row.tech_name, failed(e))),
@@ -1547,7 +1777,8 @@ fn run_locked(
             for r in &rows {
                 let s = organize::archive_path(&src_root, &r.category, &r.file_name);
                 let d = organize::archive_path(&dst_root, &r.category, &r.file_name);
-                if !exists(&d) || exists(&s) {
+                // The copy itself, of the mod's kind: a link at its name doesn't count.
+                if real_copy(&d, &r.kind).is_none() || exists(&s) {
                     marker.errors.push(format!(
                         "{}: not fully moved. {} should exist and {} shouldn't",
                         r.tech_name,
@@ -1564,6 +1795,16 @@ fn run_locked(
         }
         if !marker.errors.is_empty() {
             return pause(&env, marker);
+        }
+        // The folder being left gets no more mods: its archive note goes now, while the marker
+        // still exists, so a crash here is finished by Resume (`retire_note` is idempotent).
+        let leaving_default = Layout {
+            mods: env.mods.to_path_buf(),
+            archive: src_root.clone(),
+        }
+        .archive_is_default();
+        if !leaving_default {
+            retire_note(&src_root, env.mods);
         }
         // Finished: switch the setting (only on a completed forward move) and clear the marker
         // together, then tidy the folder we left.
@@ -1731,6 +1972,7 @@ mod tests {
             conn: &f.conn,
             mods: &f.mods,
             mods_key: &f.key,
+            free_space: &|_| None,
         }
     }
 
@@ -1808,6 +2050,7 @@ mod tests {
             game_check_interval: Duration::ZERO,
             request,
             progress,
+            free_space: &|_| None,
         }
     }
 
@@ -2401,6 +2644,7 @@ mod tests {
         let mut m = marker(&f);
         // A placed and recorded, then the crash hit mid-delete: only the renamed old copy is left.
         copy_verify_place(
+            &env(&f),
             &zip_at(&f.old, "FS25_A"),
             &zip_at(&f.new, "FS25_A"),
             "zip",
@@ -2408,17 +2652,465 @@ mod tests {
         )
         .unwrap();
         env(&f).record(&mut m, &a.tech_name).unwrap();
-        let old_name = f.old.join("Tools/FS25_A.zip.silo-move-old");
-        std::fs::rename(zip_at(&f.old, "FS25_A"), &old_name).unwrap();
+        // The old copy renamed aside under a recorded name, as `delete_source` does.
+        let src = zip_at(&f.old, "FS25_A");
+        let old_name = recorded_old(&f, &src, &zip_at(&f.new, "FS25_A"), "zip");
+        std::fs::rename(&src, &old_name).unwrap();
         m.paused = true;
         save_marker(&f.conn, &f.key, &m).unwrap();
         assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
-        assert!(!old_name.exists(), "the leftover old copy is cleaned up");
+        assert!(!old_name.exists(), "the recorded old copy is cleaned up");
+        assert!(env(&f).journal().entries().is_empty());
         assert!(zip_at(&f.new, "FS25_A").exists() && zip_at(&f.new, "FS25_B").exists());
         assert_eq!(
             setting(&f).as_deref(),
             Some(f.new.to_string_lossy().as_ref())
         );
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// Record an old copy of `src` the way `delete_source` does, before it's renamed aside.
+    fn recorded_old(f: &Fx, src: &Path, replacement: &Path, kind: &str) -> PathBuf {
+        scratch::begin(
+            &env(f).journal(),
+            scratch::Role::MoveOld,
+            src,
+            OLD_SUFFIX,
+            src,
+            replacement,
+            kind,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_older_versions_old_copy_is_left_in_place() {
+        let f = fx("legacyold");
+        let a = add_zip(&f, "FS25_A", false);
+        let mut m = marker(&f);
+        copy_verify_place(
+            &env(&f),
+            &zip_at(&f.old, "FS25_A"),
+            &zip_at(&f.new, "FS25_A"),
+            "zip",
+            &|| false,
+        )
+        .unwrap();
+        env(&f).record(&mut m, &a.tech_name).unwrap();
+        // An older Silo crashed mid-delete: its fixed name, never recorded.
+        let legacy = f.old.join("Tools/FS25_A.zip.silo-move-old");
+        std::fs::rename(zip_at(&f.old, "FS25_A"), &legacy).unwrap();
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
+        assert_eq!(
+            std::fs::read(&legacy).unwrap(),
+            b"PK\x03\x04 FS25_A",
+            "never deleted by name"
+        );
+        assert!(zip_at(&f.new, "FS25_A").exists());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// #394's crash: the original was renamed aside, Silo stopped, and the new copy was then
+    /// lost. Resume puts the old copy (now the only one) back and moves it again.
+    #[test]
+    fn the_only_copy_left_aside_by_a_crash_is_put_back_and_moved_again() {
+        let f = fx("onlycopy");
+        let a = add_zip(&f, "FS25_A", false);
+        let mut m = marker(&f);
+        let (src, dst) = (zip_at(&f.old, "FS25_A"), zip_at(&f.new, "FS25_A"));
+        copy_verify_place(&env(&f), &src, &dst, "zip", &|| false).unwrap();
+        env(&f).record(&mut m, &a.tech_name).unwrap();
+        let old_name = recorded_old(&f, &src, &dst, "zip");
+        std::fs::rename(&src, &old_name).unwrap();
+        std::fs::remove_file(&dst).unwrap(); // the new copy is lost
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"PK\x03\x04 FS25_A");
+        assert!(!old_name.exists() && !src.exists());
+        assert!(env(&f).journal().entries().is_empty());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// A crash mid-copy leaves a recorded partial temp: Resume removes it (the original is still
+    /// there) and copies again.
+    #[test]
+    fn a_partial_copy_left_by_a_crash_is_swept_and_redone() {
+        let f = fx("partialtmp");
+        let a = add_zip(&f, "FS25_A", false);
+        let mut m = marker(&f);
+        let (src, dst) = (zip_at(&f.old, "FS25_A"), zip_at(&f.new, "FS25_A"));
+        env(&f).record(&mut m, &a.tech_name).unwrap();
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        let tmp = scratch::begin(
+            &env(&f).journal(),
+            scratch::Role::MoveTmp,
+            &dst,
+            TMP_SUFFIX,
+            &src,
+            &dst,
+            "zip",
+        )
+        .unwrap();
+        std::fs::write(&tmp, b"PK").unwrap();
+        // An older version's temp beside it: left alone.
+        let legacy = suffixed_for_tests(&dst, TMP_SUFFIX);
+        std::fs::write(&legacy, b"PK").unwrap();
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
+        assert!(!tmp.exists());
+        assert!(legacy.exists());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"PK\x03\x04 FS25_A");
+        assert!(env(&f).journal().entries().is_empty());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    fn suffixed_for_tests(p: &Path, suffix: &str) -> PathBuf {
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        p.with_file_name(format!("{name}{suffix}"))
+    }
+
+    /// Every temp a move makes goes again: none is left recorded, and none at the old fixed
+    /// names.
+    #[test]
+    fn a_move_leaves_no_scratch_and_no_records() {
+        let f = fx("noscratch");
+        add_zip(&f, "FS25_A", false);
+        add_hardlinked(&f, "FS25_B");
+        assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
+        assert!(env(&f).journal().entries().is_empty());
+        for dir in [f.new.join("Tools"), f.mods.clone()] {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                assert!(
+                    !crate::scan::is_silo_temp(&n),
+                    "{n} left in {}",
+                    dir.display()
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_copy_that_wont_fit_pauses_before_it_starts_and_resume_finishes() {
+        let f = fx("noroom");
+        add_zip(&f, "FS25_A", false);
+        let _turn = RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let req = AtomicU8::new(0);
+        let mut quiet = |_: &Progress| {};
+        let full = |_: &Path| Some(10u64);
+        let mut ctx = RunCtx {
+            free_space: &full,
+            ..ctx_for(&f, &|| false, &req, &mut quiet)
+        };
+        let paused = start(&mut ctx, f.old.clone(), f.new.clone())
+            .unwrap()
+            .unwrap();
+        let reason = paused.pause_reason.unwrap_or_default();
+        assert!(reason.contains("Not enough free space"), "{reason}");
+        assert!(paused.errors.is_empty() && paused.moved.is_empty());
+        assert!(zip_at(&f.old, "FS25_A").exists());
+        assert!(
+            !f.new.join("Tools").exists()
+                || std::fs::read_dir(f.new.join("Tools"))
+                    .unwrap()
+                    .next()
+                    .is_none()
+        );
+        assert!(env(&f).journal().entries().is_empty());
+        // Room again: the move picks up where it paused.
+        let roomy = |_: &Path| Some(u64::MAX / 2);
+        let mut quiet = |_: &Progress| {};
+        let mut ctx = RunCtx {
+            free_space: &roomy,
+            ..ctx_for(&f, &|| false, &req, &mut quiet)
+        };
+        assert!(resume(&mut ctx).unwrap().is_none());
+        assert!(zip_at(&f.new, "FS25_A").exists() && !zip_at(&f.old, "FS25_A").exists());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_relink_copy_that_wont_fit_pauses_the_move() {
+        let e = std::io::Error::other(organize::NoRoom("no room".into()));
+        assert_eq!(relink_err(e), StepErr::NoRoom("no room".into()));
+        let e = std::io::Error::other("denied");
+        assert_eq!(relink_err(e), StepErr::Failed("relink: denied".into()));
+    }
+
+    /// The end-of-move check wants the copy itself: a link at the new copy's name isn't it.
+    #[test]
+    fn a_link_at_the_new_copys_name_doesnt_finish_the_move() {
+        let f = fx("donelink");
+        let a = add_zip(&f, "FS25_A", false);
+        let mut m = marker(&f);
+        let (src, dst) = (zip_at(&f.old, "FS25_A"), zip_at(&f.new, "FS25_A"));
+        let elsewhere = f.base.join("elsewhere.zip");
+        std::fs::rename(&src, &elsewhere).unwrap();
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        if organize::symlink_file(&elsewhere, &dst).is_err() {
+            // No symlinks here (Windows without Developer Mode): nothing to test.
+            let _ = std::fs::remove_dir_all(&f.base);
+            return;
+        }
+        env(&f).record(&mut m, &a.tech_name).unwrap();
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        let out = run_with(&f, Op::Resume, &|| false).unwrap().unwrap();
+        assert!(
+            out.errors.iter().any(|e| e.contains("not fully moved")),
+            "{:?}",
+            out.errors
+        );
+        assert!(setting(&f).is_none(), "the setting isn't switched");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// Windows' folder re-point removes the old link before renaming the new one in: a crash
+    /// between leaves the link missing and the new link at its recorded temp. Resume makes the
+    /// link again and sweeps the temp.
+    #[test]
+    fn a_folder_link_lost_mid_repoint_heals_on_resume() {
+        let f = fx("dirgap");
+        let src = f.old.join("Tools/FS25_D");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        let r = row("FS25_D", "FS25_D", "dir", true);
+        db::upsert_organized(&f.conn, &f.key, &r).unwrap();
+        let mut m = marker(&f);
+        let dst = f.new.join("Tools/FS25_D");
+        copy_verify_place(&env(&f), &src, &dst, "dir", &|| false).unwrap();
+        env(&f).record(&mut m, "FS25_D").unwrap();
+        let layout = dest(&f);
+        let link = f.mods.join("FS25_D");
+        let tmp = scratch::begin(
+            &env(&f).journal(),
+            scratch::Role::RelinkTmp,
+            &link,
+            RELINK_SUFFIX,
+            &dst,
+            &link,
+            "dir",
+        )
+        .unwrap();
+        organize::make_link(&dst, &tmp, "dir", &mut LinkPolicy::new(&layout)).unwrap();
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
+        assert!(link.join("modDesc.xml").is_file(), "the link is made again");
+        assert_eq!(
+            std::fs::canonicalize(&link).unwrap(),
+            std::fs::canonicalize(&dst).unwrap()
+        );
+        assert!(
+            tmp.symlink_metadata().is_err(),
+            "the recorded temp is swept"
+        );
+        assert!(dst.join("modDesc.xml").is_file() && !src.exists());
+        assert!(env(&f).journal().entries().is_empty());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn the_old_archives_note_goes_once_a_move_leaves_it_empty() {
+        let f = fx("oldnote");
+        // Start from a custom archive with Silo's notes, then move back to the default.
+        let custom = f.base.join("custom");
+        let default = f.old.clone();
+        let r = add_zip(&f, "FS25_A", false);
+        assert!(
+            run_with(&f, Op::StartTo(default.clone(), custom.clone()), &|| false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(custom.join(ARCHIVE_NOTE).is_file() && f.mods.join(ARCHIVE_NOTE).is_file());
+        std::fs::write(custom.join("my notes.txt"), b"mine").unwrap();
+        assert!(
+            run_with(&f, Op::StartTo(custom.clone(), default.clone()), &|| false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !custom.join(ARCHIVE_NOTE).exists(),
+            "Silo's note is removed"
+        );
+        assert!(
+            custom.join("my notes.txt").is_file(),
+            "nothing else is touched"
+        );
+        assert!(custom.is_dir(), "the folder the user chose stays");
+        assert!(!f.mods.join(ARCHIVE_NOTE).exists());
+        assert!(organize::archive_path(&default, &r.category, &r.file_name).exists());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn an_old_archives_note_stays_while_it_holds_a_mod_or_names_another_folder() {
+        let f = fx("oldnotekept");
+        let left = f.base.join("left");
+        std::fs::create_dir_all(left.join("Tools")).unwrap();
+        note_archive(&f.mods, Some(&left));
+        std::fs::write(left.join("Tools/FS25_Unknown.zip"), b"PK").unwrap();
+        retire_note(&left, &f.mods);
+        assert!(left.join(ARCHIVE_NOTE).is_file(), "it still holds a mod");
+        std::fs::remove_file(left.join("Tools/FS25_Unknown.zip")).unwrap();
+        retire_note(&left, &f.base.join("another-mods"));
+        assert!(
+            left.join(ARCHIVE_NOTE).is_file(),
+            "names another mods folder"
+        );
+        std::fs::write(left.join(ARCHIVE_NOTE), b"the user's own file").unwrap();
+        retire_note(&left, &f.mods);
+        assert_eq!(
+            std::fs::read(left.join(ARCHIVE_NOTE)).unwrap(),
+            b"the user's own file"
+        );
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// The last look before an old copy goes compares bytes, not sizes: a replacement swapped
+    /// for different bytes of the same length (a sync client, say) keeps the original.
+    #[test]
+    fn a_same_size_swap_of_the_new_copy_keeps_the_original() {
+        let f = fx("samesize");
+        add_zip(&f, "FS25_A", false);
+        let (src, dst) = (zip_at(&f.old, "FS25_A"), zip_at(&f.new, "FS25_A"));
+        copy_verify_place(&env(&f), &src, &dst, "zip", &|| false).unwrap();
+        let same_len = vec![b'X'; std::fs::metadata(&src).unwrap().len() as usize];
+        std::fs::remove_file(&dst).unwrap();
+        std::fs::write(&dst, &same_len).unwrap();
+        let e = delete_source(&env(&f), &src, &dst, &f.new, "zip").unwrap_err();
+        assert!(failed(e).contains("no longer match"));
+        assert_eq!(std::fs::read(&src).unwrap(), b"PK FS25_A");
+        assert!(env(&f).journal().entries().is_empty());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// Cancel → Resume: a mod whose home copy was swapped for a link stays Silo's to move back
+    /// (never un-recorded), so the cancel can't finish around it.
+    #[test]
+    fn a_link_at_home_never_finishes_a_cancel() {
+        let f = fx("homelink");
+        let a = add_zip(&f, "FS25_A", false);
+        let mut m = marker(&f);
+        let home = zip_at(&f.old, "FS25_A");
+        let elsewhere = f.base.join("elsewhere.zip");
+        std::fs::rename(&home, &elsewhere).unwrap();
+        if organize::symlink_file(&elsewhere, &home).is_err() {
+            // No symlinks here (Windows without Developer Mode): nothing to test.
+            let _ = std::fs::remove_dir_all(&f.base);
+            return;
+        }
+        env(&f).record(&mut m, &a.tech_name).unwrap();
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        for op in [Op::Cancel, Op::Resume] {
+            let out = run_with(&f, op, &|| false).unwrap().unwrap();
+            assert!(out.paused, "never finished");
+            assert_eq!(
+                out.moved,
+                vec!["FS25_A".to_string()],
+                "still Silo's to move back"
+            );
+        }
+        assert!(load_marker(&f.conn, &f.key).is_some());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// A crash after the old copy was renamed aside, then the new copy was damaged while Silo
+    /// was stopped: the old copy is kept (it doesn't verify against the new one), and neither
+    /// Resume nor Cancel can finish around it.
+    #[test]
+    fn a_kept_old_copy_stops_resume_and_cancel() {
+        let f = fx("keptold");
+        let a = add_zip(&f, "FS25_A", false);
+        let mut m = marker(&f);
+        let (src, dst) = (zip_at(&f.old, "FS25_A"), zip_at(&f.new, "FS25_A"));
+        copy_verify_place(&env(&f), &src, &dst, "zip", &|| false).unwrap();
+        env(&f).record(&mut m, &a.tech_name).unwrap();
+        let old_name = recorded_old(&f, &src, &dst, "zip");
+        std::fs::rename(&src, &old_name).unwrap();
+        std::fs::remove_file(&dst).unwrap();
+        std::fs::write(&dst, b"PK truncated").unwrap(); // damaged while Silo was stopped
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        for op in [Op::Resume, Op::Cancel, Op::Resume] {
+            let out = run_with(&f, op, &|| false).unwrap().unwrap();
+            assert!(
+                out.errors
+                    .iter()
+                    .any(|e| e.contains(&old_name.display().to_string())),
+                "{:?}",
+                out.errors
+            );
+            assert!(setting(&f).is_none(), "never finished");
+        }
+        assert_eq!(std::fs::read(&old_name).unwrap(), b"PK FS25_A");
+        assert!(
+            !src.exists(),
+            "the damaged copy wasn't moved back over the name"
+        );
+        // The old archive goes out of reach: the kept copy still stops the move.
+        let aside = f.base.join("archive-aside");
+        std::fs::rename(&f.old, &aside).unwrap();
+        let out = run_with(&f, Op::Resume, &|| false).unwrap().unwrap();
+        assert!(
+            out.errors
+                .iter()
+                .any(|e| e.contains(&old_name.display().to_string())),
+            "{:?}",
+            out.errors
+        );
+        assert!(setting(&f).is_none(), "never finished");
+        std::fs::rename(&aside, &f.old).unwrap();
+        assert_eq!(std::fs::read(&old_name).unwrap(), b"PK FS25_A");
+        // The user keeps the right one under the mod's name: the cancel then finishes.
+        std::fs::rename(&old_name, &src).unwrap();
+        std::fs::remove_file(&dst).unwrap();
+        assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
+        assert_eq!(std::fs::read(&src).unwrap(), b"PK FS25_A");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_kept_old_copy_still_stops_a_cancel_after_another_mod_remakes_its_folder() {
+        let f = fx("keptoldtwo");
+        let a = add_zip(&f, "FS25_A", false);
+        let b = add_zip(&f, "FS25_B", false);
+        let mut m = marker(&f);
+        // A finished moving.
+        let (a_src, a_dst) = (zip_at(&f.old, "FS25_A"), zip_at(&f.new, "FS25_A"));
+        copy_verify_place(&env(&f), &a_src, &a_dst, "zip", &|| false).unwrap();
+        env(&f).record(&mut m, &a.tech_name).unwrap();
+        std::fs::remove_file(&a_src).unwrap();
+        // B's old copy was set aside, then its new copy was damaged while Silo was stopped.
+        let (b_src, b_dst) = (zip_at(&f.old, "FS25_B"), zip_at(&f.new, "FS25_B"));
+        copy_verify_place(&env(&f), &b_src, &b_dst, "zip", &|| false).unwrap();
+        env(&f).record(&mut m, &b.tech_name).unwrap();
+        let old_name = recorded_old(&f, &b_src, &b_dst, "zip");
+        std::fs::rename(&b_src, &old_name).unwrap();
+        std::fs::remove_file(&b_dst).unwrap();
+        std::fs::write(&b_dst, b"PK truncated").unwrap();
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        // The old archive goes out of reach; the cancel moves A home, making the folder again.
+        let aside = f.base.join("archive-aside");
+        std::fs::rename(&f.old, &aside).unwrap();
+        let out = run_with(&f, Op::Cancel, &|| false).unwrap().unwrap();
+        assert!(
+            out.errors
+                .iter()
+                .any(|e| e.contains(&old_name.display().to_string())),
+            "{:?}",
+            out.errors
+        );
+        assert!(a_src.exists(), "A came home");
+        assert!(!b_src.exists(), "the damaged B wasn't copied home");
+        assert!(setting(&f).is_none(), "never finished");
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
@@ -2579,6 +3271,7 @@ mod tests {
         let mut m = marker(&f);
         // Placed and recorded, then the crash: the entry still hardlinks the old copy.
         copy_verify_place(
+            &env(&f),
             &zip_at(&f.old, "FS25_A"),
             &zip_at(&f.new, "FS25_A"),
             "zip",
@@ -2586,9 +3279,21 @@ mod tests {
         )
         .unwrap();
         env(&f).record(&mut m, "FS25_A").unwrap();
-        // …and a half-made relink temp from the attempt that never got renamed.
-        let tmp = f.mods.join("FS25_A.zip.silo-relink-tmp");
-        std::fs::write(&tmp, b"partial").unwrap();
+        // …a relink temp from the attempt that never got renamed (recorded, a copy of the new
+        // copy), and an older version's fixed-name temp.
+        let tmp = scratch::begin(
+            &env(&f).journal(),
+            scratch::Role::RelinkTmp,
+            &flat,
+            RELINK_SUFFIX,
+            &zip_at(&f.new, "FS25_A"),
+            &flat,
+            "zip",
+        )
+        .unwrap();
+        std::fs::write(&tmp, b"PK\x03\x04 FS25_A").unwrap();
+        let legacy = f.mods.join("FS25_A.zip.silo-relink-tmp");
+        std::fs::write(&legacy, b"partial").unwrap();
         m.paused = true;
         save_marker(&f.conn, &f.key, &m).unwrap();
         assert!(
@@ -2598,7 +3303,8 @@ mod tests {
         assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
         assert!(same_file(&flat, &zip_at(&f.new, "FS25_A")));
         assert_eq!(std::fs::read(&flat).unwrap(), b"PK\x03\x04 FS25_A");
-        assert!(!tmp.exists());
+        assert!(!tmp.exists(), "the recorded temp is swept");
+        assert!(legacy.exists(), "an older version's temp is left in place");
         assert!(!zip_at(&f.old, "FS25_A").exists());
         let _ = std::fs::remove_dir_all(&f.base);
     }
@@ -2609,6 +3315,7 @@ mod tests {
         let flat = add_hardlinked(&f, "FS25_A");
         let mut m = marker(&f);
         copy_verify_place(
+            &env(&f),
             &zip_at(&f.old, "FS25_A"),
             &zip_at(&f.new, "FS25_A"),
             "zip",
@@ -2768,7 +3475,8 @@ mod tests {
         }
         let layout = dest(&f);
         let mut pol = LinkPolicy::decided_for_tests(&layout, true, true, false);
-        let e = repoint(&env(&f), &r, &zip_at(&f.old, "FS25_A"), &dst, &mut pol).unwrap_err();
+        let e =
+            failed(repoint(&env(&f), &r, &zip_at(&f.old, "FS25_A"), &dst, &mut pol).unwrap_err());
         assert!(
             e.contains("couldn't open the mod through its new link"),
             "{e}"
@@ -2878,17 +3586,29 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_relink_temp_in_the_mods_folder_is_cleaned_at_start() {
+    fn an_older_relink_temp_is_left_and_a_recorded_one_is_swept_at_start() {
         let f = fx("relinktmp");
         add_zip(&f, "FS25_A", false); // parked: its step never touches the mods folder
-        let tmp = f.mods.join("FS25_A.zip.silo-relink-tmp");
-        std::fs::write(&tmp, b"PK\x03\x04 FS25_A").unwrap();
-        // Not one of the library's names: left alone.
-        let other = f.mods.join("FS25_Other.zip.silo-relink-tmp");
-        std::fs::write(&other, b"?").unwrap();
+                                      // The fixed name older versions used: Silo can't prove it made it.
+        let legacy = f.mods.join("FS25_A.zip.silo-relink-tmp");
+        std::fs::write(&legacy, b"PK\x03\x04 FS25_A").unwrap();
+        // A recorded one, a hardlink of the archived copy: provably redundant.
+        let flat = f.mods.join("FS25_A.zip");
+        let archived = zip_at(&f.old, "FS25_A");
+        let tmp = scratch::begin(
+            &env(&f).journal(),
+            scratch::Role::RelinkTmp,
+            &flat,
+            RELINK_SUFFIX,
+            &archived,
+            &flat,
+            "zip",
+        )
+        .unwrap();
+        std::fs::hard_link(&archived, &tmp).unwrap();
         assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
         assert!(!tmp.exists());
-        assert!(other.exists());
+        assert!(legacy.exists());
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
@@ -2934,7 +3654,7 @@ mod tests {
     }
 
     #[test]
-    fn organize_temps_are_not_unknown_mods_and_a_move_cleans_them() {
+    fn organize_temps_are_not_unknown_mods_and_a_move_leaves_them() {
         let f = fx("orgtemp");
         let r = add_zip(&f, "FS25_A", false);
         // A cross-volume organize's leftovers: a zip temp and a folder temp with a modDesc.
@@ -2947,7 +3667,8 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
-        assert!(!zip_tmp.exists() && !dir_tmp.exists());
+        // Unrecorded: logged and left in place, never deleted by name (#394).
+        assert!(zip_tmp.exists() && dir_tmp.join("modDesc.xml").exists());
         assert!(zip_at(&f.new, "FS25_A").exists());
         let _ = std::fs::remove_dir_all(&f.base);
     }

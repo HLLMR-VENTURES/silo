@@ -5,14 +5,34 @@ use super::*;
 
 // ── filesystem primitives ──
 
-/// A hidden temp sibling of `to` (`.{name}.silo-tmp`, which scans skip), where a cross-drive
-/// move or a copy projection is built before it's placed at `to`.
+/// A new hidden temp sibling of `to` (`.{name}.<token>.silo-tmp`, which scans skip), where a
+/// cross-drive move or a copy projection is built before it's placed at `to`. A name of its
+/// own each time (#394): nothing is ever removed at it before use, and a leftover from an
+/// older version (`.{name}.silo-tmp`) is never touched.
 pub(super) fn tmp_sibling(to: &Path) -> PathBuf {
     let name = to
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "x".into());
-    to.with_file_name(format!(".{name}.silo-tmp"))
+    crate::scratch::unique_beside(&to.with_file_name(format!(".{name}")), ".silo-tmp")
+}
+
+/// Remove the temp `tmp` a copy of `src` just made, after a failure — only once it's proven
+/// redundant: every byte it holds is still in `src` (`scratch::redundant_copy`). One that
+/// isn't (the source changed or went while it was copied) is kept and logged.
+pub(super) fn discard_copy(tmp: &Path, src: &Path) {
+    if tmp.symlink_metadata().is_err() {
+        return;
+    }
+    if crate::scratch::redundant_copy(tmp, src) {
+        let _ = remove_path(tmp);
+    } else {
+        log::warn!(
+            "kept {}: it may hold the only copy of what was at {}",
+            tmp.display(),
+            src.display()
+        );
+    }
 }
 
 /// Remove a path whatever it is (file/dir/link), treating "not found" as success.
@@ -39,6 +59,16 @@ pub(crate) fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
 /// [`move_path`], logged as `action` (`backup` for an update's previous version), so each move
 /// is one log line that says what it was for.
 pub(crate) fn move_path_as(from: &Path, to: &Path, action: &str) -> std::io::Result<()> {
+    move_path_checked(from, to, action, None)
+}
+
+/// [`move_path_as`], asking `room` (`LinkPolicy::room_check`) before a cross-drive copy starts.
+pub(crate) fn move_path_checked(
+    from: &Path,
+    to: &Path,
+    action: &str,
+    room: Option<RoomCheck>,
+) -> std::io::Result<()> {
     // The nearest folder above `to` that already exists: every folder made below it is a new
     // name a cross-drive move flushes before deleting its source.
     let anchor = to
@@ -53,7 +83,10 @@ pub(crate) fn move_path_as(from: &Path, to: &Path, action: &str) -> std::io::Res
         // A rename that failed for another reason would fail the copy's final delete the same
         // way, after the copy was placed: two copies, or a half-deleted folder mod.
         Err(e) if !crosses_drives(&e) => return Err(e),
-        Err(_) => copy_then_remove(from, to, anchor.as_deref())?,
+        Err(_) => {
+            check_room(room, from, to)?;
+            copy_then_remove(from, to, anchor.as_deref())?
+        }
     }
     crate::fslog::moved(action, from, to);
     Ok(())
@@ -78,30 +111,38 @@ pub(super) fn copy_then_remove(
     anchor: Option<&Path>,
 ) -> std::io::Result<()> {
     let tmp = tmp_sibling(to);
-    remove_path(&tmp)?; // clear any stale temp from a prior aborted run
     let is_dir = from.is_dir();
     // Every copied file is flushed before the temp is placed, and the placement before `from`
-    // is removed: a power cut can't leave the delete on disk without the copy.
+    // is removed: a power cut can't leave the delete on disk without the copy. The temp is
+    // made exclusively (a folder with `create_dir`, a file by `copy_file_synced`).
     let copied = if is_dir {
-        copy_dir_all(from, &tmp)
+        std::fs::create_dir(&tmp).and_then(|()| copy_dir_all(from, &tmp))
     } else {
         copy_file_synced(from, &tmp)
     };
     if let Err(e) = copied.and_then(|()| place_new(&tmp, to)) {
-        let _ = remove_path(&tmp);
+        discard_copy(&tmp, from);
         return Err(e);
     }
+    // Undo a placement only while `from` still holds every byte of it.
     let undo = |e: std::io::Error| {
-        let _ = remove_path(to);
+        discard_copy(to, from);
         e
     };
     sync_placement(to, anchor).map_err(undo)?;
+    // The original goes only once the placed copy holds the same bytes.
+    if !crate::scratch::held_by(from, to) {
+        return Err(std::io::Error::other(format!(
+            "the copy at {} doesn't match {}, so Silo kept both",
+            to.display(),
+            from.display()
+        )));
+    }
     if !is_dir {
         return std::fs::remove_file(from).map_err(undo);
     }
     let aside = aside_sibling(from);
-    let _ = remove_path(&aside);
-    std::fs::rename(from, &aside).map_err(undo)?;
+    crate::paths::rename_no_replace(from, &aside).map_err(undo)?;
     if let Err(e) = std::fs::remove_dir_all(&aside) {
         // The mod is in place at `to` and gone from its old name; only the hidden leftover
         // remains (scans skip it, and the next archive move clears it).
@@ -110,14 +151,15 @@ pub(super) fn copy_then_remove(
     Ok(())
 }
 
-/// `.{name}.silo-move-old` beside `p`: where a folder waits to be deleted after a cross-drive
-/// copy (a Silo temp name, so scans skip it).
+/// A new `.{name}.<token>.silo-move-old` beside `p`: where a folder waits to be deleted after a
+/// cross-drive copy (a Silo temp name, so scans skip it). A name of its own each time, so
+/// nothing is removed at it first.
 pub(super) fn aside_sibling(p: &Path) -> PathBuf {
     let name = p
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "x".into());
-    p.with_file_name(format!(".{name}.silo-move-old"))
+    crate::scratch::unique_beside(&p.with_file_name(format!(".{name}")), ".silo-move-old")
 }
 
 /// Copy `src` to a **new** file `dst`: refuses (AlreadyExists) rather than replacing an
@@ -139,9 +181,8 @@ pub(super) fn copy_new_with(
         return Err(std::io::ErrorKind::AlreadyExists.into());
     }
     let tmp = tmp_sibling(dst);
-    remove_path(&tmp)?; // a stale temp from a copy that was cut off
     if let Err(e) = write(src, &tmp).and_then(|()| place_new(&tmp, dst)) {
-        let _ = remove_path(&tmp);
+        discard_copy(&tmp, src);
         return Err(e);
     }
     crate::fslog::moved("copy", src, dst);
@@ -204,7 +245,7 @@ fn flush_file(p: &Path) -> std::io::Result<()> {
 /// included), then on Unix every folder from the one holding `to` up to `anchor`, the nearest
 /// one that existed before the move (`move_path_as` may have created the folders below it,
 /// e.g. a new archive category). Without an anchor, only the folder holding `to`.
-fn sync_placement(to: &Path, anchor: Option<&Path>) -> std::io::Result<()> {
+pub(crate) fn sync_placement(to: &Path, anchor: Option<&Path>) -> std::io::Result<()> {
     if to.symlink_metadata()?.is_dir() {
         sync_dir(to)?;
     } else {
@@ -240,7 +281,7 @@ pub(super) fn place_new(tmp: &Path, dst: &Path) -> std::io::Result<()> {
     if !tmp.symlink_metadata()?.is_dir() {
         match std::fs::hard_link(tmp, dst) {
             Ok(()) => {
-                // A leftover second name holds no extra data; the next activation sweeps it.
+                // A leftover second name (it couldn't be dropped) holds no extra data.
                 let _ = std::fs::remove_file(tmp);
                 return Ok(());
             }
@@ -266,7 +307,7 @@ pub(super) fn place_new(tmp: &Path, dst: &Path) -> std::io::Result<()> {
 /// own flush doesn't cover its name; a filesystem that can't flush a folder (`EINVAL`,
 /// unsupported) is let through, any other failure is returned. On Windows it's best effort:
 /// the folder is flushed through a backup-semantics handle where NTFS allows it.
-pub(super) fn sync_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::ErrorKind::{InvalidInput, Unsupported};
@@ -287,19 +328,6 @@ pub(super) fn sync_dir(dir: &Path) -> std::io::Result<()> {
             let _ = d.sync_all();
         }
         Ok(())
-    }
-}
-
-/// Remove the Silo temp a copy into `link` left when it was cut off (Silo closed or crashed
-/// mid-copy). Scans already skip it; this frees the space. The name is Silo's own
-/// (`.{name}.silo-tmp`), so nothing else puts anything there.
-pub(super) fn sweep_copy_temp(link: &Path) {
-    let tmp = tmp_sibling(link);
-    if tmp.symlink_metadata().is_err() {
-        return;
-    }
-    if let Err(e) = remove_path(&tmp) {
-        log::warn!("couldn't remove the leftover {}: {e}", tmp.display());
     }
 }
 

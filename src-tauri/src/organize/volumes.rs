@@ -6,27 +6,49 @@ use super::*;
 /// Whether the flat root supports hardlinks. Cloud-sync providers (OneDrive, Google Drive,
 /// Proton Drive) present `Documents` as on-demand placeholders and reject hardlinks with
 /// `ERROR_CLOUD_FILE_INCOMPATIBLE_HARDLINKS` (os error 396); Silo falls back to copy-projections
-/// there. Cheap probe: write a tiny temp file and try to hardlink it beside itself.
+/// there. Cheap probe: make a new empty probe file (a name of its own, created exclusively, so
+/// nothing is removed at it first, #394) and try to hardlink it beside itself. Only what the
+/// probe made is removed.
 pub fn supports_hardlinks(root: &Path) -> bool {
-    let a = root.join(HARDLINK_PROBE);
-    let b = root.join(format!("{HARDLINK_PROBE}.link"));
-    let _ = std::fs::remove_file(&a);
-    let _ = std::fs::remove_file(&b);
-    if std::fs::write(&a, b"silo").is_err() {
+    let Some(a) = create_probe_named(root, probe_names(HARDLINK_PROBE)) else {
         return false; // can't write a probe — don't attempt links we can't clean up
+    };
+    let name = a
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let b = root.join(format!("{name}.link"));
+    let r = std::fs::hard_link(&a, &b);
+    if r.is_ok() {
+        let _ = std::fs::remove_file(&b);
     }
-    let ok = std::fs::hard_link(&a, &b).is_ok();
     let _ = std::fs::remove_file(&a);
-    let _ = std::fs::remove_file(&b);
-    ok
+    r.is_ok()
+}
+
+/// A name a link probe could have made: `<prefix>-<pid>-<seq>` (`probe_names`, the folder probe
+/// with `-dir` after the prefix), optionally with `.link`.
+fn probe_shaped(name: &str) -> bool {
+    let name = name.strip_suffix(".link").unwrap_or(name);
+    let rest = [HARDLINK_PROBE, SYMLINK_PROBE]
+        .iter()
+        .find_map(|p| name.strip_prefix(p))
+        .map(|r| r.strip_prefix("-dir").unwrap_or(r));
+    let Some(rest) = rest.and_then(|r| r.strip_prefix('-')) else {
+        return false;
+    };
+    let mut parts = rest.split('-');
+    let num =
+        |s: Option<&str>| s.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+    num(parts.next()) && num(parts.next()) && parts.next().is_none()
 }
 
 /// Whether a folder link from the mods folder into the archive can be made here, the way
 /// `make_link` makes one (`link_dir_native`: a symlink, or on Windows a junction, which a FAT
 /// or exFAT mods folder or a network archive refuses): an empty probe folder in `archive`
 /// linked into `mods`, both removed again. `Some(worked)`, or `None` when no probe could be
-/// made. Never creates `mods` or `archive`; a crash's leftovers are swept by
-/// `sweep_link_probes`.
+/// made. Never creates `mods` or `archive`; a crash's leftovers are left in place and logged
+/// (`log_stale_link_probes`).
 pub(crate) fn dir_links_between(mods: &Path, archive: &Path) -> Option<bool> {
     use std::io::ErrorKind::AlreadyExists;
     if !archive.is_dir() || !mods.is_dir() {
@@ -146,38 +168,33 @@ pub fn supports_symlinks(layout: &Layout) -> bool {
     probe_link(&layout.mods, &layout.archive, SYMLINK_PROBE, symlink_file) == Some(true)
 }
 
-/// Remove link probes (`HARDLINK_PROBE*`, `SYMLINK_PROBE*`) a crash left in `dir`, when older
-/// than `min_age` (a probe running right now is younger). Only those names, only files or
-/// links — never a folder or anything else. The caller holds the library lock.
-pub(crate) fn sweep_link_probes(dir: &Path, min_age: std::time::Duration) {
+/// Log link probes a crash left in `dir` (older than `min_age`; a probe running right now is
+/// younger). They're left in place: a name, an age and an empty file prove nothing about who
+/// made them (#394). Each probe makes its own unique name and removes only what it made, so a
+/// leftover never gets in a later probe's way, and holds no data (an empty file, a link, an
+/// empty folder). The caller holds the library lock.
+pub(crate) fn log_stale_link_probes(dir: &Path, min_age: std::time::Duration) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
     let now = std::time::SystemTime::now();
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().to_lowercase();
-        if !(name.starts_with(HARDLINK_PROBE) || name.starts_with(SYMLINK_PROBE)) {
+        if !probe_shaped(&name) {
             continue;
         }
-        let Ok(meta) = e.path().symlink_metadata() else {
-            continue;
-        };
-        let old = meta
-            .modified()
+        let old = e
+            .path()
+            .symlink_metadata()
             .ok()
+            .and_then(|m| m.modified().ok())
             .and_then(|m| now.duration_since(m).ok())
             .is_some_and(|age| age >= min_age);
-        if !old {
-            continue;
-        }
-        // A probe folder (`dir_links_between`) only while empty; a link of either kind.
-        let removed = if meta.is_dir() {
-            std::fs::remove_dir(e.path())
-        } else {
-            remove_probe_link(&e.path())
-        };
-        if removed.is_ok() {
-            crate::fslog::changed("remove-stale-probe", &e.path());
+        if old {
+            log::info!(
+                "left {} in place: it looks like a link probe a crash left behind",
+                e.path().display()
+            );
         }
     }
 }

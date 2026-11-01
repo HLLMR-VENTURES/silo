@@ -164,16 +164,21 @@ fn a_read_only_file_still_copies_and_flushes_and_keeps_its_flag() {
     assert!(copy_file_synced(&src, &dst).is_err());
     set_readonly(&dst, false);
 
-    // A cut-off folder copy's temp holding a read-only file is still cleared, and the
-    // next copy lands.
+    // An older version's cut-off folder copy (its fixed temp name) holding a read-only file
+    // is left alone (#394), and the next copy lands beside it.
     let folder = base.join("FS25_Dir");
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::copy(&src, folder.join("modDesc.xml")).unwrap();
     let dst = base.join("mods").join("FS25_Dir");
-    std::fs::create_dir_all(tmp_sibling(&dst)).unwrap();
-    std::fs::copy(&src, tmp_sibling(&dst).join("modDesc.xml")).unwrap();
+    let legacy = base.join("mods").join(".FS25_Dir.silo-tmp");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::copy(&src, legacy.join("modDesc.xml")).unwrap();
     copy_dir_projection(&folder, &dst).unwrap();
-    assert!(tmp_sibling(&dst).symlink_metadata().is_err());
+    assert!(
+        legacy.join("modDesc.xml").is_file(),
+        "never removed by name"
+    );
+    set_readonly(&legacy.join("modDesc.xml"), false);
     assert!(is_silo_projection(&dst, &folder, "dir"));
     set_readonly(&src, false);
     set_readonly(&folder.join("modDesc.xml"), false);
@@ -254,7 +259,7 @@ fn a_move_never_replaces_what_is_at_its_destination() {
 }
 
 #[test]
-fn a_cut_off_copy_temp_is_swept_and_the_next_activation_projects_the_mod() {
+fn a_cut_off_copy_temp_is_left_and_the_next_activation_projects_the_mod() {
     let base = temp_dir_for("copytemp_sweep");
     let conn = db::open(&base.join("silo.db")).unwrap();
     let mods = base.join("mods");
@@ -277,8 +282,9 @@ fn a_cut_off_copy_temp_is_swept_and_the_next_activation_projects_the_mod() {
         db::upsert_organized(&conn, &key, &row).unwrap();
     }
     // What Silo closing mid-copy leaves: half-written temps, nothing at the real names.
-    let zip_tmp = tmp_sibling(&mods.join("FS25_A.zip"));
-    let dir_tmp = tmp_sibling(&mods.join("FS25_D"));
+    // (An older version's fixed names: Silo can't prove it made them, so they stay, #394.)
+    let zip_tmp = mods.join(".FS25_A.zip.silo-tmp");
+    let dir_tmp = mods.join(".FS25_D.silo-tmp");
     std::fs::write(&zip_tmp, b"PK half").unwrap();
     std::fs::create_dir_all(&dir_tmp).unwrap();
     std::fs::write(dir_tmp.join("modDesc.xml"), b"<mod").unwrap();
@@ -289,7 +295,7 @@ fn a_cut_off_copy_temp_is_swept_and_the_next_activation_projects_the_mod() {
     let rep = set_active(&conn, &layout, &on);
     assert!(rep.errors.is_empty(), "{:?}", rep.errors);
     assert_eq!(rep.changed, 2);
-    assert!(zip_tmp.symlink_metadata().is_err() && dir_tmp.symlink_metadata().is_err());
+    assert!(zip_tmp.is_file() && dir_tmp.join("modDesc.xml").is_file());
     assert_eq!(
         std::fs::read(mods.join("FS25_A.zip")).unwrap(),
         b"PK\x03\x04 whole"

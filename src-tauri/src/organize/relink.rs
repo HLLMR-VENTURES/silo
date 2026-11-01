@@ -63,6 +63,10 @@ pub(super) fn relink_with(
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut rep = RelinkReport::default();
+    // Relink temps an earlier relink or move left behind (a crash): only recorded ones, each
+    // proven redundant first. A move's own scratch is that move's to sweep.
+    let journal = crate::scratch::DbJournal(conn);
+    crate::scratch::sweep_where(&journal, &|e| e.role == crate::scratch::Role::RelinkTmp);
     // Nothing can be linked: report the situation cleanly instead of one failure per mod.
     let hardlinks = match mode {
         RelinkMode::Hardlink => true,
@@ -115,7 +119,7 @@ pub(super) fn relink_with(
             }
         }
         match same_bytes(&flat, &src) {
-            Ok(true) => match relink_over(&src, &flat, hardlinks) {
+            Ok(true) => match relink_over(&src, &flat, hardlinks, Some(&journal)) {
                 Ok(()) => {
                     rep.upgraded += 1;
                     rep.reclaimed_bytes += fmeta.len();
@@ -158,65 +162,205 @@ fn same_bytes(a: &Path, b: &Path) -> std::io::Result<bool> {
 }
 
 /// Atomically replace `flat` with a hardlink (`hard`) or symlink to `src`. Link a temp sibling
-/// in the same directory (a failure leaves `flat` untouched), then rename over `flat`.
-fn relink_over(src: &Path, flat: &Path, hard: bool) -> std::io::Result<()> {
-    let tmp = relink_tmp(flat);
-    let _ = std::fs::remove_file(&tmp);
-    if hard {
-        std::fs::hard_link(src, &tmp)?;
+/// in the same directory (a failure leaves `flat` untouched), then rename over `flat`. The temp
+/// has a name of its own, recorded in `journal` first (see [`begin_relink_tmp`]).
+fn relink_over(
+    src: &Path,
+    flat: &Path,
+    hard: bool,
+    journal: Option<&dyn crate::scratch::Journal>,
+) -> std::io::Result<()> {
+    let tmp = begin_relink_tmp(journal, flat, src, "zip")?;
+    let made = if hard {
+        std::fs::hard_link(src, &tmp)
     } else {
-        symlink_file(src, &tmp)?;
+        symlink_file(src, &tmp)
+    };
+    if let Err(e) = made {
+        abandon_relink_tmp(journal, &tmp);
+        return Err(e);
     }
     match std::fs::rename(&tmp, flat) {
         Ok(()) => {
+            settle_relink_tmp(journal, &tmp);
             crate::fslog::moved("link", src, flat);
             Ok(())
         }
         Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
+            discard_relink_tmp(journal, &tmp, src, "zip");
             Err(e)
         }
     }
 }
 
-/// Temp sibling for an atomic link replacement in the mods folder. `scan` skips it, and an
-/// archive move clears stale ones.
-pub(crate) const RELINK_SUFFIX: &str = ".silo-relink-tmp";
+/// Suffix of a relink temp in the mods folder. `scan` skips it.
+pub(crate) const RELINK_SUFFIX: &str = crate::scratch::RELINK_TMP;
 
-fn relink_tmp(link: &Path) -> PathBuf {
-    let name = link
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "mod".into());
-    link.with_file_name(format!("{name}{RELINK_SUFFIX}"))
+/// A new relink temp beside `link` (`<name>.<token>.silo-relink-tmp`), recorded in `journal`
+/// (when there is one) before anything is made there, so a temp a crash leaves behind can be
+/// proven Silo's and swept (`scratch::sweep_where`). Never removed by name: the name is new, and
+/// every way it's made (`hard_link`, a symlink, a junction, `copy_new`) refuses to replace
+/// anything. A journal that can't record stops the relink before it starts.
+fn begin_relink_tmp(
+    journal: Option<&dyn crate::scratch::Journal>,
+    link: &Path,
+    from: &Path,
+    kind: &str,
+) -> std::io::Result<PathBuf> {
+    use crate::scratch::{begin, unique_beside, Role, RELINK_TMP};
+    match journal {
+        Some(j) => begin(j, Role::RelinkTmp, link, RELINK_TMP, from, link, kind)
+            .map_err(std::io::Error::other),
+        None => Ok(unique_beside(link, RELINK_TMP)),
+    }
+}
+
+/// Making the temp failed: nothing at it is Silo's, so the record goes and nothing is removed.
+fn abandon_relink_tmp(journal: Option<&dyn crate::scratch::Journal>, tmp: &Path) {
+    if let Some(j) = journal {
+        j.forget(tmp);
+    }
+}
+
+/// The temp was renamed into place (or is otherwise gone): drop its record.
+fn settle_relink_tmp(journal: Option<&dyn crate::scratch::Journal>, tmp: &Path) {
+    if let Some(j) = journal {
+        crate::scratch::settle(j, tmp);
+    }
+}
+
+/// Remove a temp Silo just made (a link to `from`, or a copy of it), with the same proof a
+/// sweep needs (`scratch::discard`): a link holds no data; a copy goes only while `from` still
+/// holds every byte of it. Anything else is kept, and stays recorded for a later sweep.
+fn discard_relink_tmp(
+    journal: Option<&dyn crate::scratch::Journal>,
+    tmp: &Path,
+    from: &Path,
+    kind: &str,
+) {
+    let e = crate::scratch::Entry {
+        path: tmp.to_path_buf(),
+        role: crate::scratch::Role::RelinkTmp,
+        from: from.to_path_buf(),
+        to: tmp.to_path_buf(),
+        kind: kind.to_string(),
+    };
+    crate::scratch::discard(journal, &e);
 }
 
 /// Atomically swap a zip's mods-folder entry `link` for a new link to `dst` (hardlink →
-/// symlink → copy, per `policy`): make the link at a `RELINK_SUFFIX` temp sibling, then rename
-/// it over `link`. At every point `link` is either the old working entry or the new one; a crash
-/// leaves at most the temp, which the next attempt replaces (and `scan` skips).
+/// symlink → copy, per `policy`): make the link at a new temp sibling (`begin_relink_tmp`,
+/// recorded in the policy's journal), then rename it over `link`. At every point `link` is
+/// either the old working entry or the new one; a crash leaves at most the recorded temp, which
+/// `scratch::sweep_where` removes once it's proven a link or a copy of `dst` (and `scan` skips).
 pub(crate) fn replace_zip_link(
     link: &Path,
     dst: &Path,
     policy: &mut LinkPolicy,
 ) -> std::io::Result<()> {
-    let tmp = relink_tmp(link);
-    let _ = remove_path(&tmp);
-    make_link(dst, &tmp, "zip", policy)?;
+    let journal = policy.journal();
+    let tmp = begin_relink_tmp(journal, link, dst, "zip")?;
+    if let Err(e) = make_link(dst, &tmp, "zip", policy) {
+        abandon_relink_tmp(journal, &tmp);
+        return Err(e);
+    }
     // A new entry that reaches no file (the copy went while it was linked) never replaces the
     // working one.
     if !std::fs::metadata(&tmp).is_ok_and(|m| m.is_file()) {
-        let _ = remove_path(&tmp);
+        discard_relink_tmp(journal, &tmp, dst, "zip");
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "the new copy of the mod isn't there",
         ));
     }
-    std::fs::rename(&tmp, link).inspect_err(|_| {
-        let _ = remove_path(&tmp);
-    })?;
+    if let Err(e) = std::fs::rename(&tmp, link) {
+        discard_relink_tmp(journal, &tmp, dst, "zip");
+        return Err(e);
+    }
+    settle_relink_tmp(journal, &tmp);
     crate::fslog::moved("move", &tmp, link);
     Ok(())
+}
+
+/// Re-point a folder mod's mods-folder link `link` at `dst` (#394): make the new link (or a
+/// marked copy, per `make_link`) at a new temp sibling, check it reaches a folder, then rename
+/// it over `link`. Where the OS renames a link over a link (Unix symlinks) that's atomic: `link`
+/// is always the old link or the new one. Where it won't (Windows can't rename over a folder
+/// link or junction, and a marked copy is a real folder), the old link is removed first and the
+/// temp renamed into its place, as before: a crash in between leaves the mod's link missing
+/// while both copies are kept, and resuming the move makes it again (a missing entry is
+/// re-linked before the old copy may go). If the new entry can't be placed, the old link is put
+/// back (when `old` is still there). Only a link is ever removed at `link` (`remove_link`,
+/// which also accepts Silo's untouched marked copy).
+pub(crate) fn replace_dir_link(
+    link: &Path,
+    dst: &Path,
+    old: &Path,
+    policy: &mut LinkPolicy,
+) -> std::io::Result<()> {
+    let journal = policy.journal();
+    let tmp = begin_relink_tmp(journal, link, dst, "dir")?;
+    if let Err(e) = make_link(dst, &tmp, "dir", policy) {
+        abandon_relink_tmp(journal, &tmp);
+        return Err(e);
+    }
+    if !std::fs::metadata(&tmp).is_ok_and(|m| m.is_dir()) {
+        discard_relink_tmp(journal, &tmp, dst, "dir");
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the new copy of the mod isn't there",
+        ));
+    }
+    let is_link = |p: &Path| {
+        p.symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+    };
+    let link_is_link = is_link(link);
+    // Renaming never follows either link: it replaces `link` itself, or fails.
+    if is_link(&tmp) && link_is_link && rename_dir_link(&tmp, link).is_ok() {
+        settle_relink_tmp(journal, &tmp);
+        crate::fslog::moved("link", dst, link);
+        return Ok(());
+    }
+    // A dangling dir link can't report itself as a dir on Windows, so `remove_link` may pick
+    // `remove_file`; `remove_dir` then removes the link itself (it is a link, never a folder).
+    let unlinked = remove_link(link).or_else(|e| {
+        if !link_is_link {
+            return Err(e);
+        }
+        std::fs::remove_dir(link)?;
+        crate::fslog::changed("unlink", link);
+        Ok(())
+    });
+    if let Err(e) = unlinked {
+        discard_relink_tmp(journal, &tmp, dst, "dir");
+        return Err(e);
+    }
+    match crate::paths::rename_no_replace(&tmp, link) {
+        Ok(()) => {
+            settle_relink_tmp(journal, &tmp);
+            crate::fslog::moved("link", dst, link);
+            Ok(())
+        }
+        Err(e) => {
+            discard_relink_tmp(journal, &tmp, dst, "dir");
+            if old.exists() {
+                let _ = make_link(old, link, "dir", policy);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Rename the folder link `tmp` over the folder link `link`, replacing it in one step. Unix:
+/// `rename` replaces a symlink atomically. Windows won't replace a folder link (or junction)
+/// by rename, so it isn't tried there: `replace_dir_link` falls back.
+fn rename_dir_link(tmp: &Path, link: &Path) -> std::io::Result<()> {
+    if cfg!(unix) {
+        std::fs::rename(tmp, link)
+    } else {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
 }
 
 /// `replace_zip_link`, but only for a real link: a hardlink to `dst`, else a symlink where
@@ -231,19 +375,22 @@ pub(crate) fn replace_zip_link_if_linkable(
     dst: &Path,
     policy: &mut LinkPolicy,
 ) -> std::io::Result<bool> {
+    let journal = policy.journal();
     replace_zip_link_if_linkable_with(
         link,
         dst,
+        journal,
         || policy.allow_symlink(),
         |s, l| std::fs::hard_link(s, l),
         symlink_file,
     )
 }
 
-/// `replace_zip_link_if_linkable` with the link strategies injected (tests).
+/// `replace_zip_link_if_linkable` with the journal and link strategies injected (tests).
 pub(super) fn replace_zip_link_if_linkable_with(
     link: &Path,
     dst: &Path,
+    journal: Option<&dyn crate::scratch::Journal>,
     allow_symlink: impl FnOnce() -> bool,
     hard: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
     soft: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
@@ -254,28 +401,33 @@ pub(super) fn replace_zip_link_if_linkable_with(
     if !reaches_a_file(dst) {
         return Err(gone());
     }
-    let tmp = relink_tmp(link);
-    let _ = remove_path(&tmp);
+    let tmp = begin_relink_tmp(journal, link, dst, "zip")?;
     let linked = match hard(dst, &tmp) {
-        Ok(()) => true,
-        Err(e) if matches!(e.kind(), AlreadyExists | NotFound) => return Err(e),
+        Ok(()) => Ok(true),
+        Err(e) if matches!(e.kind(), AlreadyExists | NotFound) => Err(e),
         Err(_) if allow_symlink() => match soft(dst, &tmp) {
-            Ok(()) => true,
-            Err(e) if e.kind() == AlreadyExists => return Err(e),
-            Err(_) => false,
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == AlreadyExists => Err(e),
+            Err(_) => Ok(false),
         },
-        Err(_) => false,
+        Err(_) => Ok(false),
     };
-    if !linked {
-        return Ok(false);
+    match linked {
+        Ok(true) => {}
+        other => {
+            abandon_relink_tmp(journal, &tmp);
+            return other;
+        }
     }
     if !reaches_a_file(&tmp) {
-        let _ = remove_path(&tmp);
+        discard_relink_tmp(journal, &tmp, dst, "zip");
         return Err(gone());
     }
-    std::fs::rename(&tmp, link).inspect_err(|_| {
-        let _ = remove_path(&tmp);
-    })?;
+    if let Err(e) = std::fs::rename(&tmp, link) {
+        discard_relink_tmp(journal, &tmp, dst, "zip");
+        return Err(e);
+    }
+    settle_relink_tmp(journal, &tmp);
     crate::fslog::moved("link", dst, link);
     if !reaches_a_file(link) {
         return Err(gone());
