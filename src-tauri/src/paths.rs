@@ -767,18 +767,24 @@ mod tests {
     fn a_junction_in_the_mod_folder_is_not_followed() {
         let (base, root) = link_fixture("silo_member_junction");
         let up = root.join("up");
-        let made = std::process::Command::new("cmd")
-            .arg("/C")
-            .arg("mklink")
-            .arg("/J")
-            .arg(&up)
-            .arg(&base)
-            .output()
-            .unwrap();
-        assert!(made.status.success(), "mklink /J failed: {made:?}");
+        crate::organize::junction_to(&base, &up).unwrap();
         assert!(up.join("outside.xml").is_file(), "the junction works");
         assert!(open_inside(&root, "up/outside.xml").is_none());
         std::fs::remove_dir(&up).unwrap(); // the junction only, not what it points at
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A folder mod Silo put in `mods/` as a junction still has its own files read.
+    #[cfg(windows)]
+    #[test]
+    fn a_mod_folder_reached_through_a_junction_still_opens() {
+        let (base, root) = link_fixture("silo_member_projected");
+        std::fs::create_dir_all(root.join("xml")).unwrap();
+        std::fs::write(root.join("xml").join("store.xml"), "<x/>").unwrap();
+        let projected = base.join("FS25_A_projected");
+        crate::organize::junction_to(&root, &projected).unwrap();
+        assert!(open_inside(&projected, "xml/store.xml").is_some());
+        std::fs::remove_dir(&projected).unwrap();
         let _ = std::fs::remove_dir_all(&base);
     }
 
