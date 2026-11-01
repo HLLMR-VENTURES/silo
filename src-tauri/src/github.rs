@@ -1010,6 +1010,36 @@ pub fn read_repo_file(
     path: &str,
     token: Option<&str>,
 ) -> Result<String, String> {
+    repo_file_request(owner, repo, path, token)?
+        .call()
+        .map_err(gh_err)?
+        .into_string()
+        .map_err(|e| e.to_string())
+}
+
+/// `read_repo_file`, but a file that isn't there (404, which an empty repo also answers) is
+/// `Ok(None)`: for asking whether a repo holds a file at all, where only other failures are
+/// errors.
+pub fn read_repo_file_if_present(
+    owner: &str,
+    repo: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Result<Option<String>, String> {
+    match repo_file_request(owner, repo, path, token)?.call() {
+        Ok(resp) => resp.into_string().map(Some).map_err(|e| e.to_string()),
+        Err(ureq::Error::Status(404, _)) => Ok(None),
+        Err(e) => Err(gh_err(e)),
+    }
+}
+
+/// The GET for a repo file's raw bytes (see `read_repo_file`).
+fn repo_file_request(
+    owner: &str,
+    repo: &str,
+    path: &str,
+    token: Option<&str>,
+) -> Result<ureq::Request, String> {
     check_repo(owner, repo)?;
     let url = contents_url(owner, repo, path)?;
     let mut req = crate::net::api()
@@ -1018,10 +1048,7 @@ pub fn read_repo_file(
     if let Some(t) = token {
         req = req.set("Authorization", &format!("Bearer {t}"));
     }
-    req.call()
-        .map_err(gh_err)?
-        .into_string()
-        .map_err(|e| e.to_string())
+    Ok(req)
 }
 
 /// A repo we created — the fields Collections needs.
@@ -1152,6 +1179,32 @@ pub fn put_repo_file(
     content: &str,
     message: &str,
 ) -> Result<(), String> {
+    write_repo_file(token, owner, repo, path, content, message, true)
+}
+
+/// `put_repo_file` that only ever creates: it never sends an existing file's sha, so GitHub
+/// refuses (422) instead of replacing a file someone else wrote meanwhile. For a new
+/// collection's list, which must never overwrite a link already handed out (#355).
+pub fn create_repo_file(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    path: &str,
+    content: &str,
+    message: &str,
+) -> Result<(), String> {
+    write_repo_file(token, owner, repo, path, content, message, false)
+}
+
+fn write_repo_file(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    path: &str,
+    content: &str,
+    message: &str,
+    replace: bool,
+) -> Result<(), String> {
     use base64::Engine;
     check_repo(owner, repo)?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
@@ -1162,8 +1215,10 @@ pub fn put_repo_file(
     });
     // Creating a file needs no sha; *replacing* an existing one requires its current blob
     // sha, or GitHub 422s. Best-effort lookup — absent (new file / empty repo) → create.
-    if let Some(sha) = repo_file_sha(token, owner, repo, path) {
-        body["sha"] = serde_json::Value::String(sha);
+    if replace {
+        if let Some(sha) = repo_file_sha(token, owner, repo, path) {
+            body["sha"] = serde_json::Value::String(sha);
+        }
     }
     crate::net::api()
         .put(contents_url(owner, repo, path)?.as_str())

@@ -4376,7 +4376,7 @@ async fn collection_export(
                 .unwrap_or_default();
             let page_url = collection::repo_page_url(&owner, &rname);
             let readme = collection::readme(&coll, &page_url, &repo.html_url);
-            github::put_repo_file(
+            github::create_repo_file(
                 &token,
                 &owner,
                 &rname,
@@ -4645,50 +4645,75 @@ struct CollectionSummary {
     can_delete: bool,
 }
 
-/// The "Your collections" list, and what's missing from it when one of the two listings failed.
+/// The "Your collections" list, and what's missing from it when part of it couldn't be read.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CollectionList {
     items: Vec<CollectionSummary>,
-    /// Set when only one listing (gists or repos) could be read: the list is partial.
+    /// Set when the list is partial: a listing (gists or repos) or some collections couldn't
+    /// be read.
     warning: Option<String>,
 }
 
+/// One listing's collections, and how many it found but couldn't read (a request that failed,
+/// not a file that's absent or isn't a collection, which are simply not collections).
+#[derive(Default)]
+struct Listing {
+    items: Vec<CollectionSummary>,
+    unreadable: usize,
+}
+
 /// Merge the gist and repo listings (#355). Both failed: the error, so a broken token or an
-/// outage never shows as "nothing shared yet". One failed: what the other found, plus a warning.
+/// outage never shows as "nothing shared yet". One failed, or some collections couldn't be
+/// read: what was found, plus a warning.
 fn merge_collection_listings(
-    gists: Result<Vec<CollectionSummary>, String>,
-    repos: Result<Vec<CollectionSummary>, String>,
+    gists: Result<Listing, String>,
+    repos: Result<Listing, String>,
 ) -> Result<CollectionList, String> {
-    let (mut items, warning) = match (gists, repos) {
+    let mut warnings: Vec<String> = Vec::new();
+    let (gists, repos) = match (gists, repos) {
         (Err(g), Err(_)) => return Err(g),
-        (Ok(g), Err(e)) => (
-            g,
-            Some(format!(
+        (Ok(g), Err(e)) => {
+            warnings.push(format!(
                 "Silo couldn't list your public GitHub repositories, so links shared that way \
                  aren't shown. ({e})"
-            )),
-        ),
-        (Err(e), Ok(r)) => (
-            r,
-            Some(format!(
-                "Silo couldn't list your unlisted links on GitHub, so they aren't shown. ({e})"
-            )),
-        ),
-        (Ok(mut g), Ok(r)) => {
-            g.extend(r);
-            (g, None)
+            ));
+            (g, Listing::default())
         }
+        (Err(e), Ok(r)) => {
+            warnings.push(format!(
+                "Silo couldn't list your unlisted links on GitHub, so they aren't shown. ({e})"
+            ));
+            (Listing::default(), r)
+        }
+        (Ok(g), Ok(r)) => (g, r),
     };
+    let unreadable = gists.unreadable + repos.unreadable;
+    if unreadable > 0 {
+        warnings.push(format!(
+            "Silo couldn't read {unreadable} of your shared links, so {} shown. Try again in a \
+             moment.",
+            if unreadable == 1 {
+                "it isn't"
+            } else {
+                "they aren't"
+            }
+        ));
+    }
+    let mut items = gists.items;
+    items.extend(repos.items);
     // Newest first (gists and repos interleaved by creation time).
     items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    Ok(CollectionList { items, warning })
+    Ok(CollectionList {
+        items,
+        warning: (!warnings.is_empty()).then(|| warnings.join(" ")),
+    })
 }
 
 /// List the collections the user has published to their GitHub — secret gists (carrying the
-/// collection file) and `silo-`-prefixed public repos. Best-effort per item: one that fails
-/// to read or parse is skipped rather than failing the whole list. A listing call that fails
-/// is not skipped: see `merge_collection_listings`.
+/// collection file) and `silo-`-prefixed public repos. A repo without the collection file, or
+/// a file that doesn't parse, is skipped (not a collection). A request that fails is not
+/// skipped silently: see `merge_collection_listings`.
 #[tauri::command]
 async fn collections_list(app: tauri::AppHandle) -> Result<CollectionList, String> {
     let db = db_path(&app)?;
@@ -4698,13 +4723,19 @@ async fn collections_list(app: tauri::AppHandle) -> Result<CollectionList, Strin
             .ok_or_else(|| "Connect your GitHub account first.".to_string())?;
 
         let gists = github::list_user_gists(&token).map(|gists| {
-            let mut out = Vec::new();
+            let mut out = Listing::default();
             for g in gists {
                 if !g.filenames.iter().any(|f| f == collection::FILE_NAME) {
                     continue;
                 }
-                if let Ok(coll) = read_collection_json(&g.id, Some(&token)) {
-                    out.push(CollectionSummary {
+                // The listing says the file is there, so a failed read is a real failure.
+                let Ok(json) = github::read_gist_file(&g.id, collection::FILE_NAME, Some(&token))
+                else {
+                    out.unreadable += 1;
+                    continue;
+                };
+                if let Ok(coll) = collection::parse(&json) {
+                    out.items.push(CollectionSummary {
                         kind: "gist".into(),
                         reference: g.id.clone(),
                         name: coll.name,
@@ -4720,15 +4751,27 @@ async fn collections_list(app: tauri::AppHandle) -> Result<CollectionList, Strin
         });
 
         let repos = github::list_owned_repos(&token).map(|repos| {
-            let mut out = Vec::new();
+            let mut out = Listing::default();
             for r in repos {
                 if !r.name.starts_with("silo-") {
                     continue;
                 }
-                if let Ok(coll) = read_collection_json(&r.full_name, Some(&token)) {
-                    let (owner, rname) =
-                        r.full_name.split_once('/').unwrap_or(("", r.name.as_str()));
-                    out.push(CollectionSummary {
+                let (owner, rname) = r.full_name.split_once('/').unwrap_or(("", r.name.as_str()));
+                let json = match github::read_repo_file_if_present(
+                    owner,
+                    rname,
+                    collection::FILE_NAME,
+                    Some(&token),
+                ) {
+                    Ok(Some(json)) => json,
+                    Ok(None) => continue, // a silo- repo that isn't a collection
+                    Err(_) => {
+                        out.unreadable += 1;
+                        continue;
+                    }
+                };
+                if let Ok(coll) = collection::parse(&json) {
+                    out.items.push(CollectionSummary {
                         kind: "repo".into(),
                         reference: r.full_name.clone(),
                         name: coll.name,
@@ -8150,7 +8193,9 @@ mod tests {
 /// Collections and Multiplayer check reporting (#355).
 #[cfg(test)]
 mod collection_reporting_tests {
-    use super::{merge_collection_listings, repo_upload_failed, unpinned_names, CollectionSummary};
+    use super::{
+        merge_collection_listings, repo_upload_failed, unpinned_names, CollectionSummary, Listing,
+    };
     use crate::collection::CollectionMod;
 
     fn summary(reference: &str, created_at: &str) -> CollectionSummary {
@@ -8166,6 +8211,13 @@ mod collection_reporting_tests {
         }
     }
 
+    fn found(items: Vec<CollectionSummary>) -> Result<Listing, String> {
+        Ok(Listing {
+            items,
+            unreadable: 0,
+        })
+    }
+
     #[test]
     fn both_listings_failing_is_an_error_not_an_empty_list() {
         let r = merge_collection_listings(
@@ -8178,7 +8230,7 @@ mod collection_reporting_tests {
     #[test]
     fn one_listing_failing_gives_a_partial_list_and_a_warning() {
         let r = merge_collection_listings(
-            Ok(vec![summary("g1", "2026-01-01")]),
+            found(vec![summary("g1", "2026-01-01")]),
             Err("rate limit".into()),
         )
         .unwrap();
@@ -8187,7 +8239,7 @@ mod collection_reporting_tests {
 
         let r = merge_collection_listings(
             Err("offline".into()),
-            Ok(vec![summary("o/silo-x", "2026-01-01")]),
+            found(vec![summary("o/silo-x", "2026-01-01")]),
         )
         .unwrap();
         assert_eq!(r.items.len(), 1);
@@ -8197,13 +8249,29 @@ mod collection_reporting_tests {
     #[test]
     fn both_listings_merge_newest_first_with_no_warning() {
         let r = merge_collection_listings(
-            Ok(vec![summary("old", "2026-01-01")]),
-            Ok(vec![summary("new", "2026-02-01")]),
+            found(vec![summary("old", "2026-01-01")]),
+            found(vec![summary("new", "2026-02-01")]),
         )
         .unwrap();
         assert!(r.warning.is_none());
         let refs: Vec<&str> = r.items.iter().map(|c| c.reference.as_str()).collect();
         assert_eq!(refs, ["new", "old"]);
+    }
+
+    /// Both listings worked but a collection they found couldn't be fetched: a warning, so an
+    /// empty result never reads as "nothing shared yet".
+    #[test]
+    fn a_collection_that_couldnt_be_read_is_a_warning() {
+        let r = merge_collection_listings(
+            Ok(Listing {
+                items: vec![],
+                unreadable: 1,
+            }),
+            found(vec![]),
+        )
+        .unwrap();
+        assert!(r.items.is_empty());
+        assert!(r.warning.as_deref().unwrap().contains("couldn't read 1"));
     }
 
     #[test]
