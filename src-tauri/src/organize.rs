@@ -345,7 +345,20 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
                 continue;
             }
         }
-        let linked = link.symlink_metadata().is_ok();
+        // Only a confirmed absence counts as "nothing there": a slot that can't be looked at may
+        // still hold the projection, so it's reported and left (flag and record) as it is.
+        let linked = match link.symlink_metadata() {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                rep.errors.push(format!(
+                    "{}: can't check {}: {e}",
+                    row.tech_name,
+                    link.display()
+                ));
+                continue;
+            }
+        };
 
         if want && !linked {
             match make_link(&src, &link, &row.kind, &mut policy) {
@@ -404,11 +417,59 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
                     Err(e) => rep.errors.push(format!("{}: {e}", row.tech_name)),
                 }
             }
+        } else if want {
+            // Already something at the mod's name. Same two checks as deactivate: Silo's own
+            // projection gets its flag (and zip record) reconciled — a crash between linking and
+            // recording leaves `active = false` behind; anything else is reported, never replaced.
+            if !src.exists() {
+                // No archived copy: the entry may be the only copy (a crash mid-organize). Leave it.
+                rep.skipped += 1;
+            } else if matches_provenance(conn, &key, &link, &row.file_name) {
+                mark_active(conn, &key, &row, &mut rep);
+            } else if is_silo_projection(&link, &src, &row.kind) {
+                if row.kind == "zip" {
+                    note_zip_projection(conn, &key, &row.file_name, &link);
+                }
+                mark_active(conn, &key, &row, &mut rep);
+            } else {
+                rep.errors.push(format!(
+                    "{}: {} in your mods folder isn't Silo's copy of this mod, so Silo left it there and the game loads that file instead. Pick which build to keep in Diagnose → Problems.",
+                    row.tech_name, row.file_name
+                ));
+                rep.skipped += 1;
+            }
         } else {
-            rep.skipped += 1;
+            // Nothing at the name and not wanted: a crash between linking or unlinking and
+            // recording can leave `active = true`, or a gone projection's record, behind. The
+            // record must never vouch for a file put at that name later. (Read first: most parked
+            // mods have none, and a delete per mod would be a write per mod on every call.)
+            if db::projection_stats(conn, &key, &row.file_name).is_some() {
+                db::forget_projection(conn, &key, &row.file_name);
+            }
+            if row.active {
+                match db::set_organized_active(conn, &key, &row.tech_name, false) {
+                    Ok(()) => rep.changed += 1,
+                    Err(e) => rep.errors.push(format!("{}: manifest: {e}", row.tech_name)),
+                }
+            } else {
+                rep.skipped += 1;
+            }
         }
     }
     rep
+}
+
+/// A wanted mod's slot already holds Silo's projection: record it as active if it isn't yet
+/// (counted as a change), otherwise it's simply already in place (skipped).
+fn mark_active(conn: &Connection, key: &str, row: &OrganizedRow, rep: &mut Report) {
+    if row.active {
+        rep.skipped += 1;
+        return;
+    }
+    match db::set_organized_active(conn, key, &row.tech_name, true) {
+        Ok(()) => rep.changed += 1,
+        Err(e) => rep.errors.push(format!("{}: manifest: {e}", row.tech_name)),
+    }
 }
 
 /// A plain file's `(size, mtime_ms)`, or `None` for a symlink/junction (identified structurally,
@@ -1973,64 +2034,45 @@ fn mod_version(path: &Path, kind: &str) -> Option<String> {
 pub fn detect_foreign_projections(conn: &Connection, layout: &Layout) -> Vec<ForeignFile> {
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
-    let archive = layout.archive.clone();
-    if !archive.is_dir() {
-        return Vec::new();
-    }
-    // Map each organized mod's file name → its archived path (archive/<Category>/<name>).
-    let mut archived: std::collections::HashMap<std::ffi::OsString, PathBuf> =
-        std::collections::HashMap::new();
-    if let Ok(cats) = std::fs::read_dir(&archive) {
-        for cat in cats.flatten() {
-            if cat.path().is_dir() {
-                if let Ok(entries) = std::fs::read_dir(cat.path()) {
-                    for m in entries.flatten() {
-                        archived.insert(m.file_name(), m.path());
-                    }
-                }
-            }
-        }
-    }
-
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return out;
-    };
-    for e in entries.flatten() {
-        let name = e.file_name();
-        if name == ARCHIVE || name == "backups" {
+    // Only organized mods count, each at its recorded archive path: a loose zip with no row is
+    // an ordinary "unorganized" mod (Organize handles it), and an unmanaged file that happens to
+    // sit in an archive folder is no one's counterpart. The manifest, not a directory listing,
+    // decides which archived copy a name belongs to.
+    for row in db::load_organized(conn, &key) {
+        if row.file_name.eq_ignore_ascii_case(ARCHIVE)
+            || row.file_name.eq_ignore_ascii_case("backups")
+        {
             continue;
         }
-        // Only a name that maps to an organized mod counts — a plain loose zip with no archived
-        // counterpart is an ordinary "unorganized" mod (Organize handles it), not a mismatch.
-        let Some(src) = archived.get(&name) else {
-            continue;
-        };
-        let link = e.path();
-        let kind = if src.is_dir() { "dir" } else { "zip" };
-        let file_name = name.to_string_lossy().into_owned();
+        let link = root.join(&row.file_name);
+        if link.symlink_metadata().is_err() {
+            continue; // parked: nothing at the mod's name
+        }
+        let src = archive_path(&layout.archive, &row.category, &row.file_name);
+        if src.symlink_metadata().is_err() {
+            continue; // no archived copy to compare against (or to restore)
+        }
+        let kind = row.kind.as_str();
         // Fast path: provenance match → provably ours, no hash. Else the careful check (which
         // hashes a copy). Either way, (re)record provenance for a confirmed zip so the next scan
         // — and any deactivate — is O(1) instead of re-hashing gigabytes.
-        if matches_provenance(conn, &key, &link, &file_name) || is_silo_projection(&link, src, kind)
+        if matches_provenance(conn, &key, &link, &row.file_name)
+            || is_silo_projection(&link, &src, kind)
         {
             if kind == "zip" {
                 if let Some((size, mtime)) = file_stats(&link) {
-                    db::record_projection(conn, &key, &file_name, size, mtime);
+                    db::record_projection(conn, &key, &row.file_name, size, mtime);
                 }
             }
             continue;
         }
-        let tech_name = file_name
-            .strip_suffix(".zip")
-            .unwrap_or(&file_name)
-            .to_string();
         out.push(ForeignFile {
-            tech_name,
-            file_name,
-            kind: kind.to_string(),
             flat_version: mod_version(&link, kind),
-            managed_version: mod_version(src, kind),
+            managed_version: mod_version(&src, kind),
+            tech_name: row.tech_name,
+            file_name: row.file_name,
+            kind: row.kind,
         });
     }
     out
@@ -2425,6 +2467,7 @@ mod tests {
         std::fs::create_dir_all(&cat).unwrap();
         let src = cat.join("FS25_Foo.zip");
         std::fs::write(&src, b"the real archived mod bytes").unwrap();
+        organize_row(&conn, &root, "FS25_Foo", "Vehicles", false);
 
         // Nothing in the flat root → nothing flagged.
         assert!(detect_foreign_projections(&conn, &Layout::default_for(&root)).is_empty());
@@ -2453,6 +2496,195 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Record `FS25_<tech>.zip` as organized under `category` in `root`'s manifest.
+    fn organize_row(conn: &Connection, root: &Path, tech: &str, category: &str, active: bool) {
+        let key = crate::modsroot::canonical_key(root);
+        db::upsert_organized(
+            conn,
+            &key,
+            &OrganizedRow {
+                tech_name: tech.into(),
+                file_name: format!("{tech}.zip"),
+                kind: "zip".into(),
+                category: category.into(),
+                subcategory: None,
+                active,
+            },
+        )
+        .unwrap();
+    }
+
+    // The manifest decides which archived copy a mods-folder name is compared with: a second
+    // file of the same name in another category, or an unmanaged file in an archive folder, is
+    // never anyone's counterpart.
+    #[test]
+    fn detect_foreign_compares_with_the_recorded_archive_copy_only() {
+        let root = std::env::temp_dir().join(format!("silo_foreign_rows_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let archive = root.join(ARCHIVE);
+        for c in ["Vehicles", "Tools", "Misc"] {
+            std::fs::create_dir_all(archive.join(c)).unwrap();
+        }
+        let conn = db::open(&root.join("silo.db")).unwrap();
+        let layout = Layout::default_for(&root);
+        std::fs::write(archive.join("Vehicles/FS25_Foo.zip"), b"the managed build").unwrap();
+        std::fs::write(archive.join("Tools/FS25_Foo.zip"), b"a stray second copy").unwrap();
+        organize_row(&conn, &root, "FS25_Foo", "Vehicles", true);
+
+        // A copy of the stray (not the recorded) archive file is foreign.
+        let flat = root.join("FS25_Foo.zip");
+        std::fs::write(&flat, b"a stray second copy").unwrap();
+        let found = detect_foreign_projections(&conn, &layout);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].file_name, "FS25_Foo.zip");
+
+        // A copy of the recorded archive file is Silo's projection.
+        std::fs::write(&flat, b"the managed build").unwrap();
+        assert!(detect_foreign_projections(&conn, &layout).is_empty());
+
+        // An unmanaged file in an archive folder has no row, so its mods-folder twin isn't
+        // flagged (Adopt would only answer "Not a Silo-managed mod").
+        std::fs::write(archive.join("Misc/FS25_Loose.zip"), b"unmanaged").unwrap();
+        std::fs::write(root.join("FS25_Loose.zip"), b"something else").unwrap();
+        assert!(detect_foreign_projections(&conn, &layout).is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A crash between projecting a mod and recording it leaves Silo's projection in place with
+    // `active = false`; the next activation recognises it and fixes the flag (and the record).
+    #[test]
+    fn activation_adopts_silos_own_unrecorded_projection() {
+        let base = std::env::temp_dir().join(format!("silo_act_own_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join(ARCHIVE).join("Vehicles")).unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
+        let layout = Layout::default_for(&base);
+        let src = base.join(ARCHIVE).join("Vehicles/FS25_Foo.zip");
+        std::fs::write(&src, b"PK\x03\x04 the archived build").unwrap();
+        organize_row(&conn, &base, "FS25_Foo", "Vehicles", false);
+        // A byte-identical copy (the cross-drive projection), with no projection record.
+        let flat = base.join("FS25_Foo.zip");
+        std::fs::copy(&src, &flat).unwrap();
+        assert!(db::projection_stats(&conn, &key, "FS25_Foo.zip").is_none());
+
+        let on: HashSet<String> = ["FS25_Foo".to_string()].into_iter().collect();
+        let rep = set_active(&conn, &layout, &on);
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+        assert_eq!(rep.changed, 1);
+        assert!(
+            db::load_organized(&conn, &key)[0].active,
+            "the flag is fixed"
+        );
+        assert!(
+            matches_provenance(&conn, &key, &flat, "FS25_Foo.zip"),
+            "the projection is recorded, so later checks need no hash"
+        );
+
+        // Nothing left to reconcile.
+        let rep = set_active(&conn, &layout, &on);
+        assert_eq!((rep.changed, rep.skipped), (0, 1));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // A different build at a wanted mod's name is reported by name, never counted as active, and
+    // never touched.
+    #[test]
+    fn activation_reports_a_foreign_file_in_the_mods_slot() {
+        let base = std::env::temp_dir().join(format!("silo_act_foreign_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join(ARCHIVE).join("Vehicles")).unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
+        let layout = Layout::default_for(&base);
+        std::fs::write(
+            base.join(ARCHIVE).join("Vehicles/FS25_Foo.zip"),
+            b"PK\x03\x04 the archived build",
+        )
+        .unwrap();
+        organize_row(&conn, &base, "FS25_Foo", "Vehicles", false);
+        let flat = base.join("FS25_Foo.zip");
+        std::fs::write(&flat, b"PK\x03\x04 the user's other build").unwrap();
+
+        let on: HashSet<String> = ["FS25_Foo".to_string()].into_iter().collect();
+        let rep = set_active(&conn, &layout, &on);
+        assert_eq!(rep.errors.len(), 1);
+        assert!(rep.errors[0].contains("FS25_Foo.zip"), "{:?}", rep.errors);
+        assert_eq!(rep.changed, 0);
+        assert!(!db::load_organized(&conn, &key)[0].active);
+        assert_eq!(
+            std::fs::read(&flat).unwrap(),
+            b"PK\x03\x04 the user's other build"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // The other half of an interrupted park: the link is gone but the row still says active.
+    #[test]
+    fn a_parked_mod_still_marked_active_is_reconciled() {
+        let base = std::env::temp_dir().join(format!("silo_act_stale_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join(ARCHIVE).join("Vehicles")).unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
+        std::fs::write(base.join(ARCHIVE).join("Vehicles/FS25_Foo.zip"), b"PK").unwrap();
+        organize_row(&conn, &base, "FS25_Foo", "Vehicles", true);
+        db::record_projection(&conn, &key, "FS25_Foo.zip", 2, 1);
+
+        let rep = set_active(&conn, &Layout::default_for(&base), &HashSet::new());
+        assert_eq!(rep.changed, 1);
+        assert!(!db::load_organized(&conn, &key)[0].active);
+        assert!(
+            db::projection_stats(&conn, &key, "FS25_Foo.zip").is_none(),
+            "the gone projection's record is dropped"
+        );
+        assert!(!base.join("FS25_Foo.zip").exists());
+
+        // An inactive row can keep a record too (a crash after linking, before the flag, then
+        // the file removed): dropped all the same, and nothing counted as changed.
+        db::record_projection(&conn, &key, "FS25_Foo.zip", 2, 1);
+        let rep = set_active(&conn, &Layout::default_for(&base), &HashSet::new());
+        assert_eq!((rep.changed, rep.skipped), (0, 1));
+        assert!(db::projection_stats(&conn, &key, "FS25_Foo.zip").is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // A slot that can't be looked at isn't "nothing there": the flag and record stay as they are.
+    #[cfg(unix)]
+    #[test]
+    fn a_slot_that_cant_be_checked_is_reported_not_reconciled() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("silo_act_unreadable_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        std::fs::create_dir_all(mods.join(ARCHIVE).join("Vehicles")).unwrap();
+        std::fs::write(mods.join(ARCHIVE).join("Vehicles/FS25_Foo.zip"), b"PK").unwrap();
+        std::fs::write(mods.join("FS25_Foo.zip"), b"PK").unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&mods);
+        organize_row(&conn, &mods, "FS25_Foo", "Vehicles", true);
+        db::record_projection(&conn, &key, "FS25_Foo.zip", 2, 1);
+        std::fs::set_permissions(&mods, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if mods.join("FS25_Foo.zip").symlink_metadata().is_ok() {
+            // Running as root: permissions don't stop the look, so there's nothing to test.
+            std::fs::set_permissions(&mods, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        let rep = set_active(&conn, &Layout::default_for(&mods), &HashSet::new());
+        std::fs::set_permissions(&mods, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(rep.errors.len(), 1, "{:?}", rep.errors);
+        assert_eq!(rep.changed, 0);
+        assert!(db::load_organized(&conn, &key)[0].active);
+        assert!(db::projection_stats(&conn, &key, "FS25_Foo.zip").is_some());
+        assert!(mods.join("FS25_Foo.zip").exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     // A copy-projection deactivates via the provenance fast-path (no hash) once recorded, and a
