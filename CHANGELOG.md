@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counting mods that load their materials from a script too, and names the mods adding the most.
   **Last run** lists the materials the game skipped. (#341)
 
+### Fixed
+
+- **Connecting GitHub** no longer quietly saves your token in Silo's database when your system's
+  credential store refuses it. Silo now says the store couldn't save it, and only uses the
+  database on systems that have no credential store at all. (#349)
+- **Disconnecting GitHub** now tells you when your system's credential store kept the token,
+  instead of showing you as disconnected while Silo still used it. (#349)
+- **Disconnect** now also cancels a GitHub sign-in that's still waiting for its code, so
+  approving it later can't reconnect the account. (#349)
+- **Update checks** now treat a prerelease such as `1.2.3-rc.1` as older than `1.2.3`, and ignore
+  build tags such as `+build.5`. (#349)
+- A repository set to **Ignore** on GitHub no longer shows as watched. (#349)
+
 ## [1.0.3] - 2026-10-29
 
 The library database moves to version 3 (one added column, for the per-mod update switch). Silo

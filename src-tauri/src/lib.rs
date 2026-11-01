@@ -1416,6 +1416,8 @@ async fn gh_logout(app: tauri::AppHandle) -> Result<(), String> {
     let db = db_path(&app)?;
     off_main(move || {
         let conn = db::open(&db)?;
+        // When the keychain keeps the token, say so and stay "Connected as …": every later
+        // GitHub call would still use it, so showing the account as disconnected would be wrong.
         secrets::set(&conn, "gh_token", None)?;
         db::set_app_setting(&conn, "gh_user", None)?;
         db::set_app_setting(&conn, "gh_scopes", None)?;

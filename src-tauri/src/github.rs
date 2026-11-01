@@ -147,24 +147,66 @@ pub fn latest_release(owner: &str, repo: &str, token: Option<&str>) -> Result<Re
 }
 
 /// Compare a release tag against the installed version, tolerating a leading `v`
-/// and `.`/`-`/`+` separators.
+/// and `.`/`_` separators. Semver-style suffixes count the way semver says: `+build`
+/// metadata is ignored, and a `-prerelease` sorts before the same version without one
+/// (`1.2.3-rc.1` < `1.2.3`). Dotted-numeric modDesc versions (`1.0.0.0`) compare part by part.
 pub fn is_newer(latest_tag: &str, current: &str) -> bool {
-    let norm = |s: &str| {
-        s.trim_start_matches(['v', 'V'])
-            .split(['.', '-', '+', '_'])
-            .filter_map(|p| p.parse::<u64>().ok())
-            .collect::<Vec<u64>>()
-    };
-    let a = norm(latest_tag);
-    let b = norm(current);
-    for i in 0..a.len().max(b.len()) {
-        let x = a.get(i).copied().unwrap_or(0);
-        let y = b.get(i).copied().unwrap_or(0);
+    let (a_core, a_pre) = split_version(latest_tag);
+    let (b_core, b_pre) = split_version(current);
+    for i in 0..a_core.len().max(b_core.len()) {
+        let x = a_core.get(i).copied().unwrap_or(0);
+        let y = b_core.get(i).copied().unwrap_or(0);
         if x != y {
             return x > y;
         }
     }
-    false
+    match (a_pre, b_pre) {
+        (None, Some(_)) => true, // the release, over its own prerelease
+        (Some(a), Some(b)) => prerelease_cmp(a, b) == std::cmp::Ordering::Greater,
+        _ => false,
+    }
+}
+
+/// A version's numeric parts and its `-prerelease` suffix, with any `+build` metadata dropped.
+/// Parts that aren't numbers are skipped, as they always were.
+fn split_version(s: &str) -> (Vec<u64>, Option<&str>) {
+    let s = s.trim().trim_start_matches(['v', 'V']);
+    let s = s.split_once('+').map_or(s, |(v, _build)| v);
+    let (core, pre) = match s.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (s, None),
+    };
+    let nums = core
+        .split(['.', '_'])
+        .filter_map(|p| p.parse::<u64>().ok())
+        .collect();
+    (nums, pre)
+}
+
+/// Semver prerelease order: dot-separated identifiers left to right, numbers numerically and
+/// below words, words by ASCII; when one runs out first, the shorter sorts lower.
+fn prerelease_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ai = a.split('.');
+    let mut bi = b.split('.');
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let o = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(m), Ok(n)) => m.cmp(&n),
+                    (Ok(_), Err(_)) => Ordering::Less,
+                    (Err(_), Ok(_)) => Ordering::Greater,
+                    (Err(_), Err(_)) => x.cmp(y),
+                };
+                if o != Ordering::Equal {
+                    return o;
+                }
+            }
+        }
+    }
 }
 
 /// Check a repo and compare to the installed version.
@@ -587,13 +629,29 @@ pub fn star_state(owner: &str, repo: &str, token: &str) -> Result<bool, String> 
     present_check(api_url(&["user", "starred", owner, repo])?.as_str(), token)
 }
 
-/// GET /repos/{owner}/{repo}/subscription — 200 watching, 404 not.
+/// GET /repos/{owner}/{repo}/subscription — 404 not watching. A 200 is a subscription record,
+/// which also exists when the user set the repo to Ignore on github.com, so read its flags.
 pub fn watch_state(owner: &str, repo: &str, token: &str) -> Result<bool, String> {
     check_repo(owner, repo)?;
-    present_check(
-        api_url(&["repos", owner, repo, "subscription"])?.as_str(),
-        token,
-    )
+    let url = api_url(&["repos", owner, repo, "subscription"])?;
+    match crate::net::api()
+        .get(url.as_str())
+        .set("Accept", "application/vnd.github+json")
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+    {
+        Ok(resp) => {
+            let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+            Ok(watching_from(&v))
+        }
+        Err(ureq::Error::Status(404, _)) => Ok(false),
+        Err(e) => Err(gh_err(e)),
+    }
+}
+
+/// Whether a subscription record means "watching": subscribed and not ignored.
+fn watching_from(v: &serde_json::Value) -> bool {
+    v["subscribed"].as_bool().unwrap_or(false) && !v["ignored"].as_bool().unwrap_or(false)
 }
 
 /// PUT/DELETE /user/starred/{owner}/{repo}. Needs `public_repo` (OAuth) or a PAT with
@@ -1189,6 +1247,61 @@ mod tests {
         assert!(!is_newer("1.0.0.0", "1.0.0.0"));
         assert!(!is_newer("1.0", "1.0.0.1"));
         assert!(is_newer("v8.1.0.3", "8.1.0.2"));
+    }
+
+    #[test]
+    fn version_compare_dotted_numeric_unchanged() {
+        assert!(!is_newer("1.0.0.0", "1.0.0.1"));
+        assert!(is_newer("1.0.0.1", "1.0.0.0"));
+        assert!(!is_newer("1.0.0", "1.0.0.0")); // missing parts count as 0
+        assert!(!is_newer("1.0.0.0", "1.0.0"));
+        assert!(is_newer("1.10.0.0", "1.9.0.0")); // numerically, not as text
+        assert!(is_newer("V1.0.0.1", "1.0.0.0"));
+        assert!(is_newer("1_0_1", "1.0.0")); // `_` still separates
+        assert!(!is_newer("", "1.0.0.0"));
+        assert!(is_newer("1.0.0.0", ""));
+    }
+
+    #[test]
+    fn version_compare_prerelease_and_build() {
+        // A prerelease is older than its release.
+        assert!(is_newer("v1.2.3", "1.2.3-rc.1"));
+        assert!(!is_newer("1.2.3-rc.1", "1.2.3"));
+        // ...but newer than the version before.
+        assert!(is_newer("1.2.3-rc.1", "1.2.2"));
+        assert!(!is_newer("1.2.2", "1.2.3-rc.1"));
+        // Prereleases order among themselves the semver way.
+        assert!(is_newer("1.2.3-rc.2", "1.2.3-rc.1"));
+        assert!(is_newer("1.2.3-rc.10", "1.2.3-rc.9"));
+        assert!(is_newer("1.2.3-rc", "1.2.3-beta"));
+        assert!(is_newer("1.2.3-alpha.1", "1.2.3-alpha"));
+        assert!(is_newer("1.2.3-alpha", "1.2.3-1"));
+        assert!(!is_newer("1.2.3-rc.1", "1.2.3-rc.1"));
+        // Build metadata is ignored.
+        assert!(!is_newer("1.2.3+build.7", "1.2.3"));
+        assert!(!is_newer("1.2.3", "1.2.3+build.7"));
+        assert!(!is_newer("1.2.3+b2", "1.2.3+b1"));
+        assert!(is_newer("1.2.4+b1", "1.2.3+b9"));
+        assert!(is_newer("1.2.3", "1.2.3-rc.1+b5"));
+        assert!(!is_newer("v1.2.3-rc.1+b5", "1.2.3"));
+    }
+
+    #[test]
+    fn ignored_subscription_is_not_watching() {
+        use serde_json::json;
+        assert!(watching_from(
+            &json!({ "subscribed": true, "ignored": false })
+        ));
+        assert!(!watching_from(
+            &json!({ "subscribed": false, "ignored": true })
+        ));
+        assert!(!watching_from(
+            &json!({ "subscribed": true, "ignored": true })
+        ));
+        assert!(!watching_from(
+            &json!({ "subscribed": false, "ignored": false })
+        ));
+        assert!(!watching_from(&json!({})));
     }
 
     // ── Update identity guard ──
