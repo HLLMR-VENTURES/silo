@@ -283,36 +283,69 @@ pub struct PollResult {
     pub error: Option<String>,
 }
 
-/// Orders device-flow sign-ins against Disconnect. A poll takes a ticket when it starts and may
-/// store its token only while no sign-out has happened since; both run under one lock, so a
-/// sign-in the user approved just before clicking Disconnect can't land after it.
-pub struct SignOutGate(std::sync::Mutex<u64>);
+/// Orders sign-ins against Disconnect. A sign-in takes a ticket when it starts (a device flow:
+/// when its code is requested) and may store its token only while no sign-out has happened
+/// since; both run under one lock, so a sign-in the user approved just before clicking
+/// Disconnect can't land after it, however late its poll runs.
+pub struct SignOutGate(std::sync::Mutex<GateState>);
+
+struct GateState {
+    sign_outs: u64,
+    /// Device codes handed out, with the ticket each was issued under (newest last).
+    flows: Vec<(String, u64)>,
+}
+
+/// Device codes remembered at once; older ones are long expired (GitHub's last 15 minutes).
+const MAX_FLOWS: usize = 8;
 
 impl SignOutGate {
     pub const fn new() -> Self {
-        Self(std::sync::Mutex::new(0))
+        Self(std::sync::Mutex::new(GateState {
+            sign_outs: 0,
+            flows: Vec::new(),
+        }))
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, u64> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, GateState> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Note when a sign-in starts.
     pub fn ticket(&self) -> u64 {
-        *self.lock()
+        self.lock().sign_outs
+    }
+
+    /// Remember the ticket a device flow started under, for its polls.
+    pub fn remember_flow(&self, device_code: &str, ticket: u64) {
+        let mut g = self.lock();
+        g.flows.retain(|(c, _)| c != device_code);
+        g.flows.push((device_code.to_string(), ticket));
+        let excess = g.flows.len().saturating_sub(MAX_FLOWS);
+        g.flows.drain(..excess);
+    }
+
+    /// The ticket a device flow started under; None for a code from before a sign-out (or one
+    /// Silo never issued).
+    pub fn flow_ticket(&self, device_code: &str) -> Option<u64> {
+        let g = self.lock();
+        g.flows
+            .iter()
+            .find(|(c, _)| c == device_code)
+            .map(|(_, t)| *t)
     }
 
     /// Run `store` only if no sign-out happened since `ticket`; None (and nothing ran) when one
     /// did.
     pub fn store_if_current<T>(&self, ticket: u64, store: impl FnOnce() -> T) -> Option<T> {
         let g = self.lock();
-        (*g == ticket).then(store)
+        (g.sign_outs == ticket).then(store)
     }
 
     /// Sign out: every sign-in already started loses its right to store, then `clear` runs.
     pub fn sign_out<T>(&self, clear: impl FnOnce() -> T) -> T {
         let mut g = self.lock();
-        *g += 1;
+        g.sign_outs += 1;
+        g.flows.clear();
         clear()
     }
 }
@@ -1385,6 +1418,30 @@ mod tests {
         assert!(is_newer("1.2.4+b1", "1.2.3+b9"));
         assert!(is_newer("1.2.3", "1.2.3-rc.1+b5"));
         assert!(!is_newer("v1.2.3-rc.1+b5", "1.2.3"));
+    }
+
+    #[test]
+    fn a_device_flow_keeps_the_ticket_it_started_under() {
+        let gate = SignOutGate::new();
+        gate.remember_flow("code-1", gate.ticket());
+        // A sign-out forgets its flows: a poll that only runs afterwards finds no ticket.
+        gate.sign_out(|| ());
+        assert_eq!(gate.flow_ticket("code-1"), None);
+        // Remembered under a ticket from before the sign-out: storing is refused.
+        let stale = 0;
+        gate.remember_flow("code-2", stale);
+        assert_eq!(gate.store_if_current(stale, || ()), None);
+        // A new flow after the sign-out works; unknown codes have no ticket.
+        gate.remember_flow("code-3", gate.ticket());
+        let t = gate.flow_ticket("code-3").unwrap();
+        assert_eq!(gate.store_if_current(t, || "stored"), Some("stored"));
+        assert_eq!(gate.flow_ticket("never-issued"), None);
+        // Only the newest few are kept.
+        for i in 0..20 {
+            gate.remember_flow(&format!("c{i}"), gate.ticket());
+        }
+        assert!(gate.flow_ticket("c19").is_some());
+        assert!(gate.flow_ticket("c0").is_none());
     }
 
     #[test]

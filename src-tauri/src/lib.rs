@@ -514,11 +514,15 @@ async fn gh_device_start(
     // sharing. GitHub accumulates scopes across authorizations, so the caller requests
     // the union of what it already holds plus the new capability.
     let scope = build_gh_scope(write.unwrap_or(false), gist.unwrap_or(false));
+    // The flow's polls store only if no Disconnect happened since this point.
+    let ticket = GH_SIGN_OUTS.ticket();
     tauri::async_runtime::spawn_blocking(move || -> Result<github::DeviceCode, String> {
         let conn = db::open(&db)?;
         let cid = effective_client_id(&conn)
             .ok_or_else(|| "No GitHub OAuth App Client ID configured".to_string())?;
-        github::device_start(&cid, &scope)
+        let dc = github::device_start(&cid, &scope)?;
+        GH_SIGN_OUTS.remember_flow(&dc.device_code, ticket);
+        Ok(dc)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -537,16 +541,28 @@ fn build_gh_scope(write: bool, gist: bool) -> String {
     scopes.join(" ")
 }
 
-/// Disconnect vs. a device-flow poll that's still out (see `github::SignOutGate`).
+/// Disconnect vs. a sign-in that's still out (see `github::SignOutGate`).
 static GH_SIGN_OUTS: github::SignOutGate = github::SignOutGate::new();
+
+/// A poll's answer for a device flow that a Disconnect ended: nothing was stored.
+fn signed_out_poll() -> github::PollResult {
+    github::PollResult {
+        status: "expired".into(),
+        token: None,
+        scope: None,
+        error: None,
+    }
+}
 
 #[tauri::command]
 async fn gh_device_poll(
     app: tauri::AppHandle,
     device_code: String,
 ) -> Result<github::PollResult, String> {
-    // Taken as the request arrives, before any waiting: a Disconnect after this point wins.
-    let ticket = GH_SIGN_OUTS.ticket();
+    // The ticket the flow started under: a Disconnect since then wins, however late this runs.
+    let Some(ticket) = GH_SIGN_OUTS.flow_ticket(&device_code) else {
+        return Ok(signed_out_poll());
+    };
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<github::PollResult, String> {
         let conn = db::open(&db)?;
@@ -569,15 +585,8 @@ async fn gh_device_poll(
                 });
                 match stored {
                     Some(r) => r?,
-                    // Disconnected while this poll was out: the sign-in is dropped.
-                    None => {
-                        return Ok(github::PollResult {
-                            status: "expired".into(),
-                            token: None,
-                            scope: None,
-                            error: None,
-                        })
-                    }
+                    // Disconnected while this flow was out: the sign-in is dropped.
+                    None => return Ok(signed_out_poll()),
                 }
             }
         }

@@ -72,7 +72,11 @@ fn keychain_distrusted(conn: &Connection, key: &str) -> bool {
     db::get_app_setting(conn, &distrust_key(key)).is_some()
 }
 
+/// Set or clear the marker. Clearing one that isn't set writes nothing, so it can't fail.
 fn set_distrust(conn: &Connection, key: &str, on: bool) -> Result<(), String> {
+    if !on && !keychain_distrusted(conn, key) {
+        return Ok(());
+    }
     db::set_app_setting(conn, &distrust_key(key), on.then_some("1"))
 }
 
@@ -90,9 +94,10 @@ fn get_with(conn: &Connection, key: &str, keychain: Option<&keyring::Entry>) -> 
     if let Some(row) = db::get_app_setting(conn, key) {
         // Best-effort promotion into the keychain, then drop the plaintext copy AND VACUUM so
         // the token isn't left carve-able in the DB's free pages (SQLite doesn't zero deletes).
+        // The marker goes first: a row dropped while it stayed would make the next read delete
+        // the keychain copy just written.
         if let Some(e) = keychain {
-            if e.set_password(&row).is_ok() {
-                let _ = set_distrust(conn, key, false);
+            if e.set_password(&row).is_ok() && set_distrust(conn, key, false).is_ok() {
                 let _ = db::set_app_setting(conn, key, None);
                 db::vacuum(conn);
             }
@@ -112,9 +117,9 @@ fn get_with(conn: &Connection, key: &str, keychain: Option<&keyring::Entry>) -> 
 /// Shown when the keychain refused to store a token on a machine that has one.
 const SAVE_FAILED: &str = "Silo couldn't save the token in your system's credential store. \
      If it's locked, unlock it and try again.";
-/// Shown when there's no usable keychain but an older token in it couldn't be removed.
+/// Shown when there's no usable keychain but it may hold an older token Silo couldn't remove.
 const STALE_COPY: &str = "Silo couldn't save the token: your system's credential store \
-     can't be used right now, and it still holds an older token Silo couldn't remove. \
+     can't be used right now, and Silo couldn't clear an older token from it. \
      Unlock it and try again.";
 /// Shown when disconnecting couldn't delete the keychain copy (Silo has stopped using it).
 pub(crate) const REMOVE_FAILED: &str = "Silo couldn't remove the token from your system's \
@@ -170,20 +175,32 @@ fn save(
             // Ensure it isn't also left behind in SQLite from a prior build.
             clear_fallback(conn, key)
         }
-        Err(err) if no_keychain_service(&err) && !probe() => {
-            // No usable keychain (e.g. a Linux box without Secret Service): keep the feature
-            // working via SQLite; the keychain_available warning covers this. A locked or
-            // access-denied store isn't this case: that's an error below. An older token still
-            // in the keychain must go first, or a later read could pick it up for an account
-            // the user no longer has connected; one Silo can't even see is distrusted.
-            match clear_keychain(e) {
-                Cleared::Kept => {
-                    log::warn!("{key}: no usable keychain, and its old copy wouldn't delete");
+        // No usable keychain (e.g. a Linux box without Secret Service): keep the feature working
+        // via SQLite; the keychain_available warning covers this. Only when the store fails at
+        // the platform level for the write, a read and the probe: a store that answers at all
+        // (an entry, "no entry", locked, access denied) exists, so its failure is an error.
+        Err(err)
+            if no_keychain_service(&err)
+                && keychain_copy(e) == KeychainCopy::NoService
+                && !probe() =>
+        {
+            // An older copy must go first, or a later read could pick it up for an account the
+            // user no longer has connected. When the delete fails the same way, nothing answers;
+            // any copy Silo can't see is distrusted until it can be deleted.
+            match e.delete_credential() {
+                Err(d) if no_keychain_service(&d) => {}
+                Ok(()) | Err(keyring::Error::NoEntry) => {
+                    log::warn!(
+                        "{key}: the keychain refused the write but answered a delete: {err}"
+                    );
+                    return Err(SAVE_FAILED.into());
+                }
+                Err(d) => {
+                    log::warn!("{key}: no usable keychain, and its old copy wouldn't delete: {d}");
                     return Err(STALE_COPY.into());
                 }
-                Cleared::Gone => set_distrust(conn, key, false)?,
-                Cleared::NoService => set_distrust(conn, key, true)?,
             }
+            set_distrust(conn, key, true)?;
             log::warn!("{key}: no usable keychain ({err}); storing it in the database");
             db::set_app_setting(conn, key, Some(v))
         }
@@ -475,6 +492,10 @@ mod tests {
         });
         set_with(&conn, KEY, Some("new"), Some(&k.entry()), NO_KEYCHAIN).unwrap();
         assert_eq!(row(&conn).as_deref(), Some("new"));
+        assert!(
+            keychain_distrusted(&conn, KEY),
+            "a copy it couldn't see is distrusted"
+        );
         // No keychain entry at all (demo profile) stores the row too.
         let conn = mem_db();
         set_with(&conn, KEY, Some("demo"), None, NO_KEYCHAIN).unwrap();
@@ -497,31 +518,28 @@ mod tests {
     }
 
     #[test]
-    fn the_fallback_removes_an_older_keychain_copy_first() {
+    fn a_store_that_answers_is_an_error_not_a_fallback() {
+        // The write fails at the platform level, but a read answers (a token, or no entry): the
+        // store exists. The older copy stays, so the account still connected keeps working.
+        for stored in [Some("other-account"), None] {
+            let conn = mem_db();
+            let k = FakeKeychain::with(|s| {
+                s.stored = stored.map(String::from);
+                s.set_fails = Some(Fail::Platform);
+            });
+            let e = set_with(&conn, KEY, Some("new"), Some(&k.entry()), NO_KEYCHAIN);
+            assert_eq!(e, Err(SAVE_FAILED.to_string()));
+            assert_eq!(row(&conn), None);
+            assert_eq!(k.stored().as_deref(), stored);
+        }
+        // Unreadable, but a delete answers: an error too.
         let conn = mem_db();
         let k = FakeKeychain::with(|s| {
-            s.stored = Some("other-account".into());
             s.set_fails = Some(Fail::Platform);
-        });
-        set_with(&conn, KEY, Some("new"), Some(&k.entry()), NO_KEYCHAIN).unwrap();
-        assert_eq!(k.stored(), None);
-        assert_eq!(row(&conn).as_deref(), Some("new"));
-        assert_eq!(
-            get_with(&conn, KEY, Some(&k.entry())).as_deref(),
-            Some("new")
-        );
-    }
-
-    #[test]
-    fn the_fallback_refuses_when_an_older_copy_survives() {
-        let conn = mem_db();
-        let k = FakeKeychain::with(|s| {
-            s.stored = Some("other-account".into());
-            s.set_fails = Some(Fail::Platform);
-            s.delete_fails = Some(Fail::Platform);
+            s.get_fails = Some(Fail::Platform);
         });
         let e = set_with(&conn, KEY, Some("new"), Some(&k.entry()), NO_KEYCHAIN);
-        assert_eq!(e, Err(STALE_COPY.to_string()));
+        assert_eq!(e, Err(SAVE_FAILED.to_string()));
         assert_eq!(row(&conn), None);
     }
 
@@ -643,6 +661,30 @@ mod tests {
         assert_eq!(
             get_with(&conn, KEY, Some(&k.entry())).as_deref(),
             Some("account-c")
+        );
+    }
+
+    #[test]
+    fn a_failed_marker_clear_never_costs_the_promoted_token() {
+        // A fallback row with the marker set; the keychain works again, but the database won't
+        // take the marker change. The row must stay, or the next read would delete the token.
+        let conn = mem_db();
+        db::set_app_setting(&conn, KEY, Some("row")).unwrap();
+        set_distrust(&conn, KEY, true).unwrap();
+        let sql = format!(
+            "CREATE TRIGGER no_unmark BEFORE DELETE ON app_setting WHEN old.key = '{}' BEGIN SELECT RAISE(FAIL, 'busy'); END",
+            distrust_key(KEY)
+        );
+        conn.execute_batch(&sql).unwrap();
+        let k = FakeKeychain::default();
+        assert_eq!(
+            get_with(&conn, KEY, Some(&k.entry())).as_deref(),
+            Some("row")
+        );
+        assert_eq!(row(&conn).as_deref(), Some("row"));
+        assert_eq!(
+            get_with(&conn, KEY, Some(&k.entry())).as_deref(),
+            Some("row")
         );
     }
 
