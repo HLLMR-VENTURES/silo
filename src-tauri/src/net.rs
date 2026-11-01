@@ -63,8 +63,8 @@ pub(crate) fn build_agent(
 /// An agent for URLs Silo didn't choose itself, used only through [`get_guarded`]: HTTPS only,
 /// no automatic redirects, and a resolver that never hands ureq an address the guard refuses.
 /// `overall` caps the whole fetch, every redirect included, from connecting to reading the
-/// body; the system's DNS lookup isn't interruptible and isn't counted (ureq's own overall
-/// timeout doesn't cover it either).
+/// body. The system's DNS lookup can't be interrupted by it (nor by ureq's own overall
+/// timeout), though time spent there still uses up the cap.
 pub struct GuardedAgent {
     agent: ureq::Agent,
     overall: Option<Duration>,
@@ -191,7 +191,7 @@ impl std::fmt::Display for FetchError {
 /// `check` runs on the first URL and on every redirect target before anything is sent there.
 /// `auth` (an `Authorization` value) is sent only to the first URL's origin, never across
 /// hosts or schemes. The agent's overall cap counts from the first request, so redirects
-/// don't extend it; it covers reading the final body too (not DNS, see [`GuardedAgent`]).
+/// don't extend it; it covers reading the final body too (see [`GuardedAgent`] for DNS).
 pub(crate) fn get_guarded(
     g: &GuardedAgent,
     url: &str,
