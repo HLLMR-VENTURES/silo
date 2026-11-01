@@ -283,7 +283,7 @@ describe("updateFromCurrent and remove", () => {
       expect.objectContaining({ message: "Saved your current mods to Harvest 2026." }),
     );
     expect(t.store.sets.map((s) => s.id)).toEqual([2]);
-    expect(t.store.lastApplied?.id).not.toBe(1);
+    expect(t.store.state.kind).toBe("none");
   });
 
   it("never writes your edits into an automatic set", async () => {

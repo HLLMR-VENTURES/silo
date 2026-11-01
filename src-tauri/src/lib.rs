@@ -1113,7 +1113,26 @@ fn cached_image_ok(s: &str) -> bool {
     };
     base64::engine::general_purpose::STANDARD
         .decode(payload)
-        .is_ok_and(|b| b.len() >= MIN_CACHED_IMAGE_BYTES)
+        .is_ok_and(|b| b.len() >= MIN_CACHED_IMAGE_BYTES && image_looks_whole(&b))
+}
+
+/// Pure: whether image bytes end the way their format says a whole file ends (PNG's `IEND`
+/// chunk, JPEG's end-of-image marker, GIF's trailer, WebP's RIFF length), so a cut-off file isn't
+/// taken for an image. A format it doesn't know passes.
+fn image_looks_whole(b: &[u8]) -> bool {
+    const PNG_END: [u8; 8] = [0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82];
+    if b.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        b.ends_with(&PNG_END)
+    } else if b.starts_with(&[0xFF, 0xD8]) {
+        b.ends_with(&[0xFF, 0xD9])
+    } else if b.starts_with(b"GIF8") {
+        b.ends_with(&[0x3B])
+    } else if b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP") {
+        let size = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
+        size.checked_add(8) == Some(b.len())
+    } else {
+        true
+    }
 }
 
 /// The cached thumbnail at `file`, or `None` when there is none or it isn't usable
@@ -2446,8 +2465,15 @@ fn rediscovered_archive_fits(
 static MODS_ROOT_RESOLVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Resolve the live mods folder, publish it (and its archive) as the trusted write roots, and
-/// describe it.
+/// describe it. Callers hold the library lock (or run before anything can write: startup), so
+/// the trusted roots never change under a write.
 fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
+    resolve_mods_root(conn, true)
+}
+
+/// `compute_mods_root_status`, publishing only when `publish` (else it just describes what it
+/// would publish).
+fn resolve_mods_root(conn: &rusqlite::Connection, publish: bool) -> ModsRootStatus {
     let _resolving = MODS_ROOT_RESOLVE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2493,7 +2519,9 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
         && r.source == modsroot::Source::Default
         && loc.as_ref().map(|l| l.user_dir.is_dir()).unwrap_or(false);
     // The folder FS25 reads counts as a known mods folder for every overlap check.
-    modsroot::set_game_reads(r.game_reads.clone());
+    if publish {
+        modsroot::set_game_reads(r.game_reads.clone());
+    }
     let (active, blocked) = match r.path.as_deref() {
         Some(p) if available => match resolve_layout(
             conn,
@@ -2517,7 +2545,9 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
         .and_then(|b| b.conflict.as_ref())
         .map(|c| c.to_string_lossy().into_owned());
     // Together, so no command sees "no layout" without its reason.
-    modsroot::publish(active, blocked);
+    if publish {
+        modsroot::publish(active, blocked);
+    }
 
     let current_key = r.path.as_ref().map(|p| modsroot::canonical_key(p));
     let mut paths: Vec<PathBuf> =
@@ -2577,10 +2607,36 @@ async fn mods_root_status(app: tauri::AppHandle) -> Result<ModsRootStatus, Strin
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db::open(&db)?;
-        Ok(compute_mods_root_status(&conn))
+        // A refresh can pick up a change of FS25's own folder setting, so it publishes only
+        // under the library lock, like a switch.
+        let lock = status_publish_lock();
+        if lock.is_none() {
+            log::info!("mods folder status read while the library is busy; not republished");
+        }
+        Ok(resolve_mods_root(&conn, lock.is_some()))
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// The library lock for a status refresh: waits behind an ordinary write (up to `LIBRARY_WAIT`)
+/// but not behind an archive move, which republishes the layout itself when it ends. Doesn't
+/// move the epoch on: a refresh that finds the same folder changes nothing a scan relies on,
+/// and a scan's manifest is keyed by the folder it scanned. `None` when the lock isn't had.
+fn status_publish_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
+    let start = std::time::Instant::now();
+    loop {
+        if move_in_progress() {
+            return None;
+        }
+        if let Some(guard) = lock_result(LIBRARY_WRITE.try_lock()) {
+            return Some(guard);
+        }
+        if start.elapsed() >= LIBRARY_WAIT {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 /// The library lock for a command that switches (or re-publishes) the mods folder: no write may
@@ -6431,18 +6487,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A small real image encoded as `format`.
+    fn image_bytes(format: image::ImageFormat) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(8, 8, image::Rgb([200, 30, 30]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, format).unwrap();
+        out.into_inner()
+    }
+
     #[test]
     fn only_a_real_image_data_url_is_a_usable_cached_thumbnail() {
         use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode([7u8; 64]);
+        let enc = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let png = image_bytes(image::ImageFormat::Png);
+        let jpeg = image_bytes(image::ImageFormat::Jpeg);
+        let b64 = enc(&png);
         assert!(super::cached_image_ok(&format!(
             "data:image/png;base64,{b64}"
         )));
+        assert!(super::cached_image_ok(&format!(
+            "data:image/jpeg;base64,{}",
+            enc(&jpeg)
+        )));
+        // GIF and WebP are told whole by their trailer and RIFF length.
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend([0u8; 20]);
+        gif.push(0x3B);
+        assert!(super::image_looks_whole(&gif));
+        assert!(!super::image_looks_whole(&gif[..gif.len() - 1]));
+        let mut webp = b"RIFF".to_vec();
+        webp.extend(24u32.to_le_bytes());
+        webp.extend(b"WEBP");
+        webp.extend([0u8; 20]);
+        assert!(super::image_looks_whole(&webp));
+        assert!(!super::image_looks_whole(&webp[..webp.len() - 4]));
         for bad in [
             String::new(),
             "data:image/png;base64,".into(),
             // Cut off mid-write: not valid base64 any more.
             format!("data:image/png;base64,{}", &b64[..b64.len() - 3]),
+            // Cut off on a four-character boundary: valid base64 of part of the file.
+            format!("data:image/png;base64,{}", &b64[..b64.len() / 8 * 4]),
+            format!("data:image/jpeg;base64,{}", enc(&jpeg[..jpeg.len() - 30])),
             // Too small to be an image.
             "data:image/png;base64,AAAA".into(),
             format!("data:text/html;base64,{b64}"),
@@ -6459,8 +6545,8 @@ mod tests {
         let dir = base.join("catalog_images");
         let file = dir.join("abc");
         let good = format!(
-            "data:image/jpeg;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode([1u8; 40])
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(image_bytes(image::ImageFormat::Png))
         );
         // Nothing cached yet; an empty fetch isn't cached at all.
         assert_eq!(super::read_cached_image(&file), None);
