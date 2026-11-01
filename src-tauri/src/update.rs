@@ -686,15 +686,30 @@ pub(crate) fn prune_backups(
             false => {}
         }
     }
-    let surplus = proven.len().saturating_sub(keep);
-    for e in proven.into_iter().take(surplus) {
+    if proven.len() <= keep {
+        // Nothing to prune: nothing is hashed.
+        return unrecorded;
+    }
+    // Newest first: the `keep` newest that still hold their recorded bytes stay; only older
+    // ones go, each checked again right before. One whose bytes changed is left in place and
+    // no longer counts, so it never stands in for an intact one.
+    let changed = |e: &scratch::Entry| {
+        log::warn!(
+            "left {} in place: it no longer holds the backup Silo made there",
+            e.path.display()
+        );
+        journal.forget(&e.path);
+    };
+    let mut kept = 0;
+    for e in proven.into_iter().rev() {
         let p = &e.path;
-        if !e.made.as_ref().is_some_and(|m| m.holds_same_bytes(p)) {
-            log::warn!(
-                "left {} in place: it no longer holds the backup Silo made there",
-                p.display()
-            );
-            journal.forget(p);
+        let intact = e.made.as_ref().is_some_and(|m| m.holds_same_bytes(p));
+        if !intact {
+            changed(&e);
+            continue;
+        }
+        if kept < keep {
+            kept += 1;
             continue;
         }
         match std::fs::remove_file(p) {
@@ -1187,19 +1202,32 @@ mod tests {
         )
     }
 
+    /// A download of `dest` that wrote `bytes` into its part, recorded in `db`, then stopped as a
+    /// crash would. Returns the part.
+    fn crashed_download(dest: &Path, db: &Path, bytes: &[u8]) -> PathBuf {
+        let claim = crate::claim_part_at(dest, &part_path(dest), PART_SUFFIX, Some(db)).unwrap();
+        {
+            let mut f = claim.create().unwrap();
+            std::io::Write::write_all(&mut f, bytes).unwrap();
+            std::io::Write::flush(&mut f).unwrap();
+        }
+        let part = claim.path().to_path_buf();
+        claim.crash();
+        part
+    }
+
     #[test]
     fn a_recorded_part_a_crash_left_is_swept() {
         let mods = fresh("recover_part_recorded");
         let layout = Layout::default_for(&mods);
         let dest = mods.join("FS25_A.zip");
         make_mod_zip(&dest, "A", "1.0.0.0");
-        let part = scratch::unique_beside(&dest, PART_SUFFIX);
-        let journal = scratch::tests::MemJournal::default();
-        journal.record(&part_entry(&part, &dest, None)).unwrap();
-        std::fs::write(&part, b"half a download").unwrap();
-        let made = scratch::Made::of(&part);
-        assert!(made.is_some());
-        journal.record(&part_entry(&part, &dest, made)).unwrap();
+        let db = mods.join("silo.db");
+        // Several chunks, the last one short: every length the download reached is provable.
+        let part = crashed_download(&dest, &db, b"half a download, cut off by a crash");
+        let conn = crate::db::open(&db).unwrap();
+        let journal = scratch::DbJournal(&conn);
+        assert_eq!(journal.entries().len(), 1);
 
         let r = settle_with(&mods, &layout, &journal);
 
@@ -1207,7 +1235,43 @@ mod tests {
         assert!(journal.entries().is_empty(), "and its record goes");
         assert!(r.unrecorded.is_empty(), "{r:?}");
         assert_eq!(version_of(&dest).as_deref(), Some("1.0.0.0"));
+        drop(conn);
         let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_crashed_part_holding_bytes_silo_didnt_write_is_left() {
+        // #400: the part is Silo's file, but its bytes must be what Silo wrote. Changed in
+        // place (same length), or longer than any length Silo recorded (a tail it can't prove,
+        // as a crash inside a write leaves), it's left in place and its record dropped.
+        for case in ["in place", "tail"] {
+            let mods = fresh(&format!("recover_part_changed_{}", case.replace(' ', "_")));
+            let layout = Layout::default_for(&mods);
+            let dest = mods.join("FS25_A.zip");
+            let db = mods.join("silo.db");
+            let part = crashed_download(&dest, &db, b"0123456789abcdef");
+            let mut f = std::fs::OpenOptions::new().write(true).open(&part).unwrap();
+            if case == "in place" {
+                std::io::Write::write_all(&mut f, b"USER").unwrap();
+            } else {
+                std::io::Seek::seek(&mut f, std::io::SeekFrom::End(0)).unwrap();
+                std::io::Write::write_all(&mut f, b"xyz").unwrap();
+            }
+            drop(f);
+            let want = std::fs::read(&part).unwrap();
+            let conn = crate::db::open(&db).unwrap();
+            let journal = scratch::DbJournal(&conn);
+
+            settle_with(&mods, &layout, &journal);
+
+            assert_eq!(std::fs::read(&part).unwrap(), want, "{case}");
+            assert!(
+                journal.entries().is_empty(),
+                "{case}: the record proves nothing now"
+            );
+            drop(conn);
+            let _ = std::fs::remove_dir_all(&mods);
+        }
     }
 
     #[test]
@@ -1608,6 +1672,47 @@ mod tests {
             assert!(!journal.entries().iter().any(|e| e.path == first));
             let _ = std::fs::remove_dir_all(&mods);
         }
+    }
+
+    #[test]
+    fn a_changed_newer_backup_never_stands_in_for_an_intact_one() {
+        // #400: three recorded backups; the newest is rewritten in place at the same length
+        // with its last-change time put back. The next update keeps all three intact ones (the
+        // changed one no longer counts) and leaves the changed one where it is.
+        let mods = fresh("prune_changed_newest");
+        let journal = scratch::tests::MemJournal::default();
+        let dest = mods.join("FS25_A.zip");
+        make_mod_zip(&dest, "A", "1.0.0.0");
+        let made: Vec<PathBuf> = (2..=4)
+            .map(|v| update_to(&dest, &mods, &format!("{v}.0.0.0"), &journal))
+            .collect();
+        let newest = &made[2];
+        let was = std::fs::metadata(newest).unwrap().modified().unwrap();
+        let other = vec![b'u'; std::fs::metadata(newest).unwrap().len() as usize];
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(newest)
+            .unwrap();
+        std::io::Write::write_all(&mut f, &other).unwrap();
+        f.set_modified(was).unwrap();
+        drop(f);
+
+        let fourth = update_to(&dest, &mods, "5.0.0.0", &journal);
+
+        assert_eq!(
+            std::fs::read(newest).unwrap(),
+            other,
+            "the changed one stays"
+        );
+        for b in [&made[0], &made[1], &fourth] {
+            assert!(b.exists(), "{b:?} is intact and among the newest three");
+        }
+        let recorded: Vec<PathBuf> = journal.entries().into_iter().map(|e| e.path).collect();
+        assert_eq!(
+            recorded,
+            vec![made[0].clone(), made[1].clone(), fourth.clone()]
+        );
+        let _ = std::fs::remove_dir_all(&mods);
     }
 
     #[test]

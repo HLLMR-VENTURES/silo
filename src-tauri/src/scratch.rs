@@ -86,6 +86,19 @@ pub(crate) struct Made {
     /// The bytes' SHA-256 (an update backup's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// A download's part: the last lengths it was written to, with the SHA-256 of its bytes at
+    /// each (`PartFile`). A part holds only what Silo wrote while its length is one of these
+    /// and its bytes hash to it ([`Made::holds_written`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub written: Vec<Written>,
+}
+
+/// A length a download's part was written to, and the SHA-256 of its bytes then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Written {
+    pub len: u64,
+    pub sha256: String,
 }
 
 fn nanos(t: std::io::Result<std::time::SystemTime>) -> Option<u64> {
@@ -108,6 +121,7 @@ impl Made {
             size: m.len(),
             modified: nanos(m.modified()),
             sha256: None,
+            written: Vec::new(),
         })
     }
 
@@ -139,6 +153,21 @@ impl Made {
     /// The same file, unchanged since (same size, same last change).
     pub(crate) fn unchanged(&self, other: &Made) -> bool {
         self.same_file(other) && self.size == other.size && self.modified == other.modified
+    }
+
+    /// The file at `p` is this one (the same file, read without following a link) and holds
+    /// exactly what Silo wrote into it: its length is one recorded in `written` and its bytes
+    /// hash to that length's SHA-256, unchanged while they were read. Never without `written`.
+    pub(crate) fn holds_written(&self, p: &Path) -> bool {
+        let Some(before) = Made::of(p).filter(|now| self.same_file(now)) else {
+            return false;
+        };
+        let Some(w) = self.written.iter().find(|w| w.len == before.size) else {
+            return false;
+        };
+        let sha = crate::provenance::sha256_file(p);
+        let after = Made::of(p);
+        sha.is_ok_and(|sha| sha == w.sha256) && after.is_some_and(|a| before.unchanged(&a))
     }
 
     /// The file at `p` is this one, unchanged, holding the recorded bytes (when a SHA-256 was
@@ -599,10 +628,13 @@ pub(crate) enum Swept {
 ///   back under its name (`from`) when that's free; a folder (perhaps half-deleted) is kept.
 ///
 /// - `Part`: the very file the claim made (`made`: the same file number and birth time, read
-///   without following a link), that no download running now claims
-///   (`crate::remove_unclaimed_part` holds the claims across the check and the removal). A
-///   recorded part nothing claims is a download that stopped (a crash, or a removal that
-///   failed). Any other file there is left in place and the record dropped (`Disowned`).
+///   without following a link), holding exactly what the download wrote (its length is one it
+///   recorded writing to, and its bytes hash to that: `Made::holds_written`), that no download
+///   running now claims (`crate::remove_unclaimed_part` holds the claims across the check and
+///   the removal). A recorded part nothing claims is a download that stopped (a crash, or a
+///   removal that failed). Any other file there, or one with bytes Silo can't prove it wrote
+///   (changed since, or a write a crash cut off), is left in place and the record dropped
+///   (`Disowned`).
 ///
 /// Only the entries `which` picks are looked at (a relink pass sweeps relink temps; a move
 /// sweeps those and its own folders' move scratch, never an older move's). Update backups

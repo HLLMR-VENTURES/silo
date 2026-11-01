@@ -1792,6 +1792,8 @@ pub struct PartClaim {
     db: Option<PathBuf>,
     /// The file [`PartClaim::create`] made.
     made: std::sync::OnceLock<scratch::Made>,
+    /// What its [`PartFile`] has written so far.
+    written: std::sync::Mutex<Option<scratch::Written>>,
 }
 
 impl PartClaim {
@@ -1801,8 +1803,9 @@ impl PartClaim {
 
     /// Make the part file: a new file at the claim's own name, never one already there (a
     /// clash fails; nothing is removed or written into). Then note which file it is, in the
-    /// claim and in the journal, so only that file is ever removed.
-    pub fn create(&self) -> std::io::Result<std::fs::File> {
+    /// claim and in the journal, so only that file is ever removed. Every byte goes in through
+    /// the returned [`PartFile`].
+    pub fn create(&self) -> std::io::Result<PartFile<'_>> {
         if self.made.get().is_some() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
@@ -1813,35 +1816,158 @@ impl PartClaim {
             .write(true)
             .create_new(true)
             .open(&self.path)?;
-        let Some(made) = scratch::Made::of_file(&f) else {
+        use sha2::Digest;
+        let empty = scratch::Written {
+            len: 0,
+            sha256: format!("{:x}", sha2::Sha256::new().finalize()),
+        };
+        let mut out = PartFile {
+            claim: self,
+            file: f,
+            conn: None,
+            hasher: sha2::Sha256::new(),
+            buf: Vec::with_capacity(PART_CHUNK),
+            done: empty.clone(),
+        };
+        let Some(made) = scratch::Made::of_file(&out.file) else {
             // Nothing proves which file this is: it's never removed (logged when left).
             log::warn!("couldn't read which file {} is", self.path.display());
-            return Ok(f);
+            return Ok(out);
         };
-        let _ = self.made.set(made.clone());
+        let _ = self.made.set(made);
+        *self.written.lock().unwrap_or_else(|e| e.into_inner()) = Some(empty.clone());
         if let Some(db) = &self.db {
-            let noted = db::open(db).and_then(|conn| {
-                scratch::Journal::record(
-                    &scratch::DbJournal(&conn),
-                    &part_entry(&self.path, &self.dest, Some(made)),
-                )
-            });
-            if let Err(e) = noted {
-                // A part a crash then leaves is never removed (it proves nothing).
-                log::warn!(
-                    "couldn't note {} in the scratch journal: {e}",
-                    self.path.display()
-                );
+            match db::open(db) {
+                Ok(conn) => out.conn = Some(conn),
+                // The bytes can't be recorded: nothing is written (the download fails).
+                Err(e) => return Err(std::io::Error::other(e)),
             }
         }
-        Ok(f)
+        out.note(std::slice::from_ref(&empty))?;
+        Ok(out)
     }
 
-    /// The very file this claim made is still at its name.
+    /// The very file this claim made is still at its name, holding exactly what its
+    /// [`PartFile`] wrote (`scratch::Made::holds_written`).
     fn holds_its_part(&self) -> bool {
-        self.made
-            .get()
-            .is_some_and(|m| scratch::Made::of(&self.path).is_some_and(|now| m.same_file(&now)))
+        let written = self
+            .written
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match (self.made.get(), written) {
+            (Some(m), Some(w)) => scratch::Made {
+                written: vec![w],
+                ..m.clone()
+            }
+            .holds_written(&self.path),
+            _ => false,
+        }
+    }
+
+    /// Stop as a crash would: the claim goes, nothing is removed or forgotten (tests).
+    #[cfg(test)]
+    pub(crate) fn crash(self) {
+        PARTS_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|c| c.key != self.key);
+        std::mem::forget(self);
+    }
+}
+
+/// How many bytes a download writes at a time; each write is recorded first (`PartFile`).
+#[cfg(not(test))]
+const PART_CHUNK: usize = 4 << 20;
+#[cfg(test)]
+const PART_CHUNK: usize = 8;
+
+/// A download's part file (#400), made by [`PartClaim::create`]. Bytes are written in chunks of
+/// [`PART_CHUNK`]. Before each chunk goes in, the length and SHA-256 the part will have after it
+/// are recorded in the journal beside the ones it has now (`scratch::Written`), and a record
+/// that fails stops the download before the chunk is written. So a part a crash leaves holds
+/// only what Silo wrote exactly when its length is one of those two and its bytes hash to it
+/// (a crash inside a write leaves neither: it's left in place).
+pub struct PartFile<'c> {
+    claim: &'c PartClaim,
+    file: std::fs::File,
+    /// The journal's database (none without one: nothing recorded, tests).
+    conn: Option<rusqlite::Connection>,
+    /// The SHA-256 of every byte written so far.
+    hasher: sha2::Sha256,
+    buf: Vec<u8>,
+    done: scratch::Written,
+}
+
+impl PartFile<'_> {
+    /// Record `written` as what the part may hold.
+    fn note(&self, written: &[scratch::Written]) -> std::io::Result<()> {
+        let (Some(conn), Some(made)) = (&self.conn, self.claim.made.get()) else {
+            return Ok(());
+        };
+        let made = scratch::Made {
+            written: written.to_vec(),
+            ..made.clone()
+        };
+        scratch::Journal::record(
+            &scratch::DbJournal(conn),
+            &part_entry(&self.claim.path, &self.claim.dest, Some(made)),
+        )
+        .map_err(std::io::Error::other)
+    }
+
+    /// Write the buffered bytes, recorded first.
+    fn write_chunk(&mut self) -> std::io::Result<()> {
+        use sha2::Digest;
+        use std::io::Write;
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let mut next = self.hasher.clone();
+        next.update(&self.buf);
+        let after = scratch::Written {
+            len: self.done.len + self.buf.len() as u64,
+            sha256: format!("{:x}", next.clone().finalize()),
+        };
+        self.note(&[self.done.clone(), after.clone()])?;
+        self.file.write_all(&self.buf)?;
+        self.buf.clear();
+        self.hasher = next;
+        self.done = after.clone();
+        *self.claim.written.lock().unwrap_or_else(|e| e.into_inner()) = Some(after);
+        Ok(())
+    }
+
+    /// Write what's buffered and flush it to disk.
+    pub fn sync_all(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(self)?;
+        self.file.sync_all()
+    }
+}
+
+impl std::io::Write for PartFile<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let room = PART_CHUNK.saturating_sub(self.buf.len()).max(1);
+        let n = bytes.len().min(room);
+        self.buf.extend_from_slice(&bytes[..n]);
+        if self.buf.len() >= PART_CHUNK {
+            self.write_chunk()?;
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.write_chunk()?;
+        self.file.flush()
+    }
+}
+
+impl Drop for PartFile<'_> {
+    fn drop(&mut self) {
+        // Bytes still buffered go in (recorded first) so the part is what the download got.
+        if let Err(e) = self.write_chunk() {
+            log::warn!("couldn't finish writing {}: {e}", self.claim.path.display());
+        }
     }
 }
 
@@ -1863,15 +1989,15 @@ fn part_entry(
 
 impl Drop for PartClaim {
     fn drop(&mut self) {
-        // Only the very file this claim made (never through a link, never another file put
-        // at its name since).
+        // Only the very file this claim made, holding only what it wrote (never through a
+        // link, never another file put at its name since, never one changed since).
         if self.holds_its_part() {
             if let Err(e) = std::fs::remove_file(&self.path) {
                 log::warn!("couldn't remove {}: {e}", self.path.display());
             }
         } else if self.path.symlink_metadata().is_ok() {
             log::warn!(
-                "left {} in place: it isn't the file Silo's download made",
+                "left {} in place: it isn't the file Silo's download made, as it made it",
                 self.path.display()
             );
         }
@@ -2008,6 +2134,7 @@ pub(crate) fn claim_part_at(
         key,
         db: db.map(std::path::Path::to_path_buf),
         made: std::sync::OnceLock::new(),
+        written: std::sync::Mutex::new(None),
     };
     if let Some(db) = db {
         let journal_err = |e: String| {
@@ -2047,7 +2174,8 @@ pub(crate) enum PartSweep {
 }
 
 /// Remove a recorded part file (`scratch::Role::Part`) no download running now claims, while it
-/// is the very file Silo made there (`made`, read without following a link). The claim list
+/// is the very file Silo made there (`made`, read without following a link) holding exactly
+/// what Silo wrote (`scratch::Made::holds_written`). The claim list
 /// stays locked across the check and the removal, so a download can't claim it in between.
 pub(crate) fn remove_unclaimed_part(path: &std::path::Path, made: &scratch::Made) -> PartSweep {
     let held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
@@ -2058,7 +2186,7 @@ pub(crate) fn remove_unclaimed_part(path: &std::path::Path, made: &scratch::Made
     {
         return PartSweep::Claimed;
     }
-    if !scratch::Made::of(path).is_some_and(|now| made.same_file(&now)) {
+    if !made.holds_written(path) {
         return PartSweep::NotIt;
     }
     PartSweep::Removed(std::fs::remove_file(path))
@@ -9873,6 +10001,23 @@ mod tests {
         assert_eq!(std::fs::read(&taken).unwrap(), b"mine");
         drop(claim);
         assert!(!part.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_claim_never_removes_its_part_once_its_bytes_changed() {
+        // #400: dropping a claim removes its part only while it holds exactly what the
+        // download wrote; changed in place (same length) it stays.
+        let base = temp_base("claim_changed");
+        let dest = base.join("mods").join("FS25_Edit.zip");
+        let claim = super::claim_part(&dest, None).unwrap();
+        std::io::Write::write_all(&mut claim.create().unwrap(), b"download bytes").unwrap();
+        let at = claim.path().to_path_buf();
+        let mut f = std::fs::OpenOptions::new().write(true).open(&at).unwrap();
+        std::io::Write::write_all(&mut f, b"USER").unwrap();
+        drop(f);
+        drop(claim);
+        assert_eq!(std::fs::read(&at).unwrap(), b"USERload bytes");
         let _ = std::fs::remove_dir_all(&base);
     }
 
