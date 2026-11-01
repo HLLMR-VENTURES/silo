@@ -117,7 +117,10 @@ pub(crate) fn build_guarded_agent(
     read: Duration,
     overall: Option<Duration>,
 ) -> GuardedAgent {
-    let config = agent_config(connect, read, None, overall.is_some())
+    // The agent carries the overall cap too, so a fetch with no redirect needs no request-level
+    // override (ureq builds a fresh TLS config for every connection a request-level config
+    // makes); `get_guarded` still applies one deadline across redirects.
+    let config = agent_config(connect, read, overall, overall.is_some())
         .https_only(true)
         .max_redirects(0)
         .build();
@@ -806,6 +809,8 @@ pub(crate) fn get_guarded(
     auth: Option<&str>,
 ) -> Result<Response, FetchError> {
     let deadline = g.overall.map(|d| Instant::now() + d);
+    // The first request can run on the agent's own cap when that is this fetch's cap.
+    let mut first = g.agent.config().timeouts().global == g.overall;
     follow_redirects(url, check, |u, same_origin| {
         let mut req = g.agent.get(u.as_str());
         if let Some(d) = deadline {
@@ -814,8 +819,11 @@ pub(crate) fn get_guarded(
                 let timed_out = ureq::Error::Timeout(ureq::Timeout::Global);
                 return Err(HttpError::transport(Some(u.to_string()), timed_out));
             }
-            req = req.config().timeout_global(Some(left)).build();
+            if !first {
+                req = req.config().timeout_global(Some(left)).build();
+            }
         }
+        first = false;
         if let (Some(a), true) = (auth, same_origin) {
             req = req.header("Authorization", a);
         }
@@ -1295,8 +1303,8 @@ mod tests {
         for g in [guarded_api(), download()] {
             assert!(g.agent.config().https_only());
             assert_eq!(g.agent.config().max_redirects(), 0);
-            // The overall cap is applied per fetch by `get_guarded`, not by the agent.
-            assert_eq!(g.agent.config().timeouts().global, None);
+            // The agent's own cap is the fetch's; `get_guarded` carries it across redirects.
+            assert_eq!(g.agent.config().timeouts().global, g.overall);
         }
         assert_eq!(guarded_api().overall, Some(Duration::from_secs(60)));
         assert_eq!(download().overall, None);
