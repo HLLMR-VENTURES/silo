@@ -318,6 +318,8 @@
   // Epoch-ms of the last scan attempt — throttles the auto-rescan-on-focus so alt-tabbing
   // doesn't re-scan on every focus.
   let lastScanAt = 0;
+  /** Scans started so far: filing that waited checks no scan started meanwhile. */
+  let scansStarted = 0;
   /** The running scan's op (progress events report into it). */
   let scanOp: OpToken | null = null;
   let progress = $state({ done: 0, total: 0 });
@@ -1402,13 +1404,14 @@
     if (inputs.length === 0) return null;
     // A category pick still being saved decides where a mod goes: wait until none is, then file
     // by the categories as they are then (no await between that and taking the write), so one
-    // whose save failed isn't used (#358). If the folder changed or a scan started meanwhile,
-    // these inputs may be stale: refuse, as a busy library would.
+    // whose save failed isn't used (#358). If the folder changed or a scan started meanwhile
+    // (even one that has ended), these inputs may be stale: refuse, as a busy library would.
     if (serialPendingUnder("override:")) {
       const root = roots[0];
+      const scans = scansStarted;
       await serialDrained("override:");
       const moved = folderSwitches > 0 || roots[0] !== root;
-      if (moved || scanning) {
+      if (moved || scanning || scansStarted !== scans) {
         if (!opts.auto) refuse(moved ? FOLDER_SWITCH_WAIT : SCAN_WAIT);
         return null;
       }
@@ -2282,8 +2285,8 @@
       });
       dropToasts.push(t);
     }
-    // Older handles are of toasts long gone (they last 15 s): keep the list short.
-    if (dropToasts.length > 20) dropToasts.splice(0, dropToasts.length - 20);
+    // Keep the list short: the oldest offers go (taken down too, so none outlives a folder switch).
+    if (dropToasts.length > 20) for (const old of dropToasts.splice(0, dropToasts.length - 20)) old.dismiss();
   }
 
   // The opt-in startup check: once the first scan has filled the library (a queued or skipped
@@ -3287,6 +3290,7 @@
     const op = start(label ?? "Rescanning your library", { quiet: !label });
     scanOp = op;
     scanning = true;
+    scansStarted++;
     progress = { done: 0, total: 0 };
     let scanned = false;
     try {

@@ -87,3 +87,22 @@ export function afterSave(d: SettingsDrafts, fresh: SettingsFile[], path: string
     rawText: { ...d.rawText, [path]: rawEditedSince ? d.rawText[path] : read.raw },
   };
 }
+
+/**
+ * After a form save that was written but couldn't be read back: the file holds what was sent, so
+ * that is the saved value each field is compared with (an edit back to the old value while the
+ * write was out still reads as unsaved). Drafts are kept as they are.
+ * @param d the state now
+ * @param path the file that was saved
+ * @param sent that file's drafts when the save was sent
+ */
+export function markSent(d: SettingsDrafts, path: string, sent: SentDrafts): SettingsDrafts {
+  return {
+    ...d,
+    files: d.files.map((f) =>
+      f.path !== path
+        ? f
+        : { ...f, fields: f.fields.map((fld) => ({ ...fld, value: sent.values[fieldKey(path, fld.id)] ?? fld.value })) },
+    ),
+  };
+}

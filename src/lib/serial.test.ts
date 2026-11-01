@@ -56,13 +56,14 @@ describe("serial", () => {
     void serial("override:A", task(log, "a1", 10, true)).catch(() => {});
     void serial("override:A", task(log, "a2", 5)).catch(() => {});
     void serial("override:B", task(log, "b", 15)).catch(() => {});
-    const other = serial("curation:A", task(log, "c", 40));
+    let release!: () => void;
+    const other = serial("curation:A", () => new Promise<void>((r) => (release = r)));
     expect(serialPendingUnder("override:")).toBe(true);
-    await serialDrained("override:");
-    expect(log).toContain("end a2");
-    expect(log).toContain("end b");
-    expect(log).not.toContain("end c");
+    await serialDrained("override:"); // settles while the curation write is still held
+    expect(log).toEqual(expect.arrayContaining(["end a1", "end a2", "end b"]));
     expect(serialPendingUnder("override:")).toBe(false);
+    expect(serialPending("curation:A")).toBe(true);
+    release();
     await other;
   });
 

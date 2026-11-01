@@ -1,7 +1,7 @@
 // The Mod settings dialog's drafts (#358): saving one file keeps the other files' unsaved edits,
 // and an edit made while the write was out.
 import { describe, expect, it } from "vitest";
-import { afterSave, draftsOf, fieldKey, snapshotOf } from "./modSettingsDraft";
+import { afterSave, draftsOf, fieldKey, markSent, snapshotOf } from "./modSettingsDraft";
 import type { SettingsFile } from "./types";
 
 function file(path: string, values: string[], raw = `<raw ${path}/>`): SettingsFile {
@@ -79,5 +79,15 @@ describe("mod settings drafts", () => {
     clean.values[fieldKey("a.xml", 0)] = "2";
     const after2 = afterSave(clean, [file("a.xml", ["2"], "<v2/>")], "a.xml", snapshotOf(clean, "a.xml", false));
     expect(after2.rawText["a.xml"]).toBe("<v2/>");
+  });
+
+  it("a form save written but not read back: what was sent is the saved value, drafts stay", () => {
+    const d = draftsOf([file("a.xml", ["1", "5"])]);
+    d.values[fieldKey("a.xml", 0)] = "2";
+    const sent = snapshotOf(d, "a.xml", false);
+    d.values[fieldKey("a.xml", 0)] = "1"; // changed back while the write was out
+    const after = markSent(d, "a.xml", sent);
+    expect(after.files[0].fields.map((f) => f.value)).toEqual(["2", "5"]);
+    expect(after.values[fieldKey("a.xml", 0)]).toBe("1"); // so it reads as unsaved
   });
 });

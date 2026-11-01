@@ -13,7 +13,7 @@
   } from "../api";
   import type { SettingsFile, SettingsEdit } from "../types";
   import { isNumberText } from "../configSchemas";
-  import { afterSave, draftsOf, fieldKey, snapshotOf } from "../modSettingsDraft";
+  import { afterSave, draftsOf, fieldKey, markSent, snapshotOf } from "../modSettingsDraft";
 
   interface Props {
     modName: string;
@@ -99,6 +99,7 @@
       try {
         const fresh = await getModSettings(modName);
         if (!fresh.some((f) => f.path === path)) {
+          if (!wroteRaw) files = markSent({ files, values, rawText }, path, sent).files;
           error = "Silo saved this file but couldn't read it back. Close this and open the mod's settings again.";
           return "written";
         }
@@ -106,6 +107,7 @@
         ({ files, values, rawText } = afterSave({ files, values, rawText }, fresh, path, sent));
         formStale[path] = false;
       } catch (e) {
+        if (!wroteRaw) files = markSent({ files, values, rawText }, path, sent).files;
         error = inlineError(e, "Reading the mod's settings");
         return "written";
       }

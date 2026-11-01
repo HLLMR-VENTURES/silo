@@ -233,6 +233,21 @@ describe("ModSettings: raw XML saves (#358)", () => {
     expect(screen.queryByLabelText("Alpha")).toBeNull();
   });
 
+  it("a form save that can't be read back still counts what was sent as saved", async () => {
+    let finish!: () => void;
+    api.saveModSettings.mockReset().mockImplementationOnce(() => new Promise<void>((r) => (finish = r)));
+    api.getModSettings.mockReset().mockResolvedValueOnce(one("<a/>", ["Alpha"])).mockRejectedValueOnce("gone");
+    render(ModSettings, { modName: "FS25_X", title: "X", onClose: vi.fn() });
+    const alpha = await screen.findByLabelText("Alpha");
+    await fireEvent.input(alpha, { target: { value: "2" } });
+    const save = screen.getByRole("button", { name: "Save changes" });
+    await userEvent.setup().click(save);
+    await fireEvent.input(alpha, { target: { value: "1" } }); // back to the old value meanwhile
+    finish();
+    await waitFor(() => expect(api.getModSettings).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(save).toBeEnabled()); // 1 isn't what the file holds now (2)
+  });
+
   it("stays on Raw XML when the read-back doesn't list the file", async () => {
     api.getModSettings.mockReset().mockResolvedValueOnce(one("<a/>", ["Alpha"])).mockResolvedValueOnce([]);
     render(ModSettings, { modName: "FS25_X", title: "X", onClose: vi.fn() });
