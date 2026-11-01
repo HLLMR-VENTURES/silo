@@ -7,8 +7,9 @@
 //! * **Fallback** — on a machine with no working keychain (e.g. a headless Linux box),
 //!   we fall back to the SQLite setting so the feature still works. That's no worse than
 //!   before; everywhere with a keychain (all Windows/macOS, most Linux) is now secure.
-//!   Only "no usable store" errors that the probe confirms lead there; any other keychain
-//!   failure on save or disconnect is returned to the caller, never swallowed.
+//!   Only when every keychain call fails at the platform level (nothing answers) does it
+//!   lead there; any other keychain failure on save or disconnect is returned to the
+//!   caller, never swallowed.
 //!
 //! Only genuine secrets (e.g. `gh_token`) go through here. Non-secret flags like
 //! `gh_write` stay in `app_setting`.
@@ -30,9 +31,9 @@ fn entry(key: &str) -> Option<keyring::Entry> {
     keyring::Entry::new(SERVICE, key).ok()
 }
 
-/// Whether this machine has a working OS keychain. When false, connecting an account falls
-/// back to storing the token in the local SQLite DB (not OS-encrypted) — the UI surfaces a
-/// warning so the user can decide before connecting, rather than falling back silently.
+/// Whether this machine has a working OS keychain. When false, the UI warns before connecting:
+/// with no keychain service at all the token goes to the local SQLite DB (not OS-encrypted),
+/// and with a locked or refusing one connecting fails until the user fixes it.
 /// Does a full write→read→delete round-trip on a throwaway probe entry, since some platforms
 /// create an `Entry` fine but fail on the actual store.
 pub fn keychain_available() -> bool {
@@ -62,8 +63,8 @@ fn store_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// The (non-secret) setting that says the keychain may hold a copy of `key` that Silo must not
-/// use: one a disconnect couldn't delete, or one Silo couldn't see when it fell back to SQLite.
-/// Cleared once the keychain accepts a write or a delete again.
+/// use: one a disconnect couldn't confirm gone. (While a fallback row exists the row wins
+/// anyway.) Cleared once the keychain accepts a write or a delete again.
 fn distrust_key(key: &str) -> String {
     format!("{key}:keychain_distrusted")
 }
@@ -78,6 +79,26 @@ fn set_distrust(conn: &Connection, key: &str, on: bool) -> Result<(), String> {
         return Ok(());
     }
     db::set_app_setting(conn, &distrust_key(key), on.then_some("1"))
+}
+
+/// Whether this machine has no keychain service at all, as far as keyring can tell: a write to a
+/// throwaway entry fails at the platform level. Any other answer (it works, it's locked, access
+/// is denied) means a store exists, so a failure there is the user's to fix, not a reason to
+/// fall back to SQLite.
+fn keychain_missing() -> bool {
+    if crate::profile::active() {
+        return false;
+    }
+    let Ok(e) = keyring::Entry::new(SERVICE, "silo-keychain-probe") else {
+        return false;
+    };
+    match e.set_password("probe") {
+        Ok(()) => {
+            let _ = e.delete_credential();
+            false
+        }
+        Err(err) => no_keychain_service(&err),
+    }
 }
 
 /// Read a secret. A SQLite row wins over the keychain: every keychain write clears the row, and
@@ -129,7 +150,7 @@ pub(crate) const REMOVE_FAILED: &str = "Silo couldn't remove the token from your
 /// Store (`Some`) or clear (`None`) a secret. Keychain-primary; SQLite only when this machine
 /// has no usable keychain at all. Any other keychain failure is returned, never swallowed.
 pub fn set(conn: &Connection, key: &str, value: Option<&str>) -> Result<(), String> {
-    set_with(conn, key, value, entry(key).as_ref(), keychain_available)
+    set_with(conn, key, value, entry(key).as_ref(), keychain_missing)
 }
 
 /// Forget a secret (disconnect). Silo stops using it either way. Returns false when the
@@ -137,24 +158,24 @@ pub fn set(conn: &Connection, key: &str, value: Option<&str>) -> Result<(), Stri
 /// (then nothing changed).
 pub fn clear(conn: &Connection, key: &str) -> Result<bool, String> {
     let _held = store_lock();
-    clear_with(conn, key, entry(key).as_ref(), keychain_available)
+    clear_with(conn, key, entry(key).as_ref(), keychain_missing)
 }
 
-/// `set`, with the keychain entry and the "is there a working keychain?" probe passed in so
-/// tests can use fakes instead of the real store.
+/// `set`, with the keychain entry and the "is there no keychain service at all?" probe passed
+/// in so tests can use fakes instead of the real store.
 fn set_with(
     conn: &Connection,
     key: &str,
     value: Option<&str>,
     keychain: Option<&keyring::Entry>,
-    probe: impl Fn() -> bool,
+    missing: impl Fn() -> bool,
 ) -> Result<(), String> {
     let _held = store_lock();
     match (value, keychain) {
         // Demo profile, or no keychain backend at all.
         (Some(v), None) => db::set_app_setting(conn, key, Some(v)),
-        (Some(v), Some(e)) => save(conn, key, v, e, probe),
-        (None, keychain) => match clear_with(conn, key, keychain, probe)? {
+        (Some(v), Some(e)) => save(conn, key, v, e, missing),
+        (None, keychain) => match clear_with(conn, key, keychain, missing)? {
             true => Ok(()),
             false => Err(REMOVE_FAILED.to_string()),
         },
@@ -167,40 +188,42 @@ fn save(
     key: &str,
     v: &str,
     e: &keyring::Entry,
-    probe: impl Fn() -> bool,
+    missing: impl Fn() -> bool,
 ) -> Result<(), String> {
     match e.set_password(v) {
-        Ok(()) => {
-            set_distrust(conn, key, false)?;
-            // Ensure it isn't also left behind in SQLite from a prior build.
-            clear_fallback(conn, key)
-        }
+        Ok(()) => saved_to_keychain(conn, key),
         // No usable keychain (e.g. a Linux box without Secret Service): keep the feature working
-        // via SQLite; the keychain_available warning covers this. Only when the store fails at
-        // the platform level for the write, a read and the probe: a store that answers at all
-        // (an entry, "no entry", locked, access denied) exists, so its failure is an error.
+        // via SQLite; the keychain_available warning covers this. Only when the write, a read,
+        // the probe and the delete below all fail at the platform level: a store that answers
+        // at all (an entry, "no entry", locked, access denied) exists, so its failure is an
+        // error. The SQLite row then wins over any copy Silo can't see (`get`), and a
+        // disconnect that can't confirm that copy gone distrusts it.
         Err(err)
             if no_keychain_service(&err)
                 && keychain_copy(e) == KeychainCopy::NoService
-                && !probe() =>
+                && missing() =>
         {
             // An older copy must go first, or a later read could pick it up for an account the
-            // user no longer has connected. When the delete fails the same way, nothing answers;
-            // any copy Silo can't see is distrusted until it can be deleted.
+            // user no longer has connected.
             match e.delete_credential() {
                 Err(d) if no_keychain_service(&d) => {}
+                // The store came back mid-save: try the keychain once more.
                 Ok(()) | Err(keyring::Error::NoEntry) => {
-                    log::warn!(
-                        "{key}: the keychain refused the write but answered a delete: {err}"
-                    );
-                    return Err(SAVE_FAILED.into());
+                    return match e.set_password(v) {
+                        Ok(()) => saved_to_keychain(conn, key),
+                        Err(err) => {
+                            log::warn!(
+                                "{key}: the keychain answered, but refused the write: {err}"
+                            );
+                            Err(SAVE_FAILED.into())
+                        }
+                    };
                 }
                 Err(d) => {
                     log::warn!("{key}: no usable keychain, and its old copy wouldn't delete: {d}");
                     return Err(STALE_COPY.into());
                 }
             }
-            set_distrust(conn, key, true)?;
             log::warn!("{key}: no usable keychain ({err}); storing it in the database");
             db::set_app_setting(conn, key, Some(v))
         }
@@ -209,6 +232,13 @@ fn save(
             Err(SAVE_FAILED.into())
         }
     }
+}
+
+/// After a keychain write: that copy is trusted, and no plaintext copy stays behind (e.g. from
+/// a prior build).
+fn saved_to_keychain(conn: &Connection, key: &str) -> Result<(), String> {
+    set_distrust(conn, key, false)?;
+    clear_fallback(conn, key)
 }
 
 #[derive(Debug, PartialEq)]
@@ -240,7 +270,7 @@ fn clear_with(
     conn: &Connection,
     key: &str,
     keychain: Option<&keyring::Entry>,
-    probe: impl Fn() -> bool,
+    missing: impl Fn() -> bool,
 ) -> Result<bool, String> {
     let Some(e) = keychain else {
         clear_fallback(conn, key)?;
@@ -255,7 +285,7 @@ fn clear_with(
         cleared => {
             // Distrust before dropping the row, so a failure here leaves everything as it was.
             set_distrust(conn, key, true)?;
-            cleared == Cleared::NoService && had_row && !probe()
+            cleared == Cleared::NoService && had_row && missing()
         }
     };
     if !removed {
@@ -434,8 +464,9 @@ mod tests {
     }
 
     const KEY: &str = "silo_test_token";
-    const KEYCHAIN_WORKS: fn() -> bool = || true;
-    const NO_KEYCHAIN: fn() -> bool = || false;
+    /// Stand-ins for `keychain_missing`.
+    const KEYCHAIN_WORKS: fn() -> bool = || false;
+    const NO_KEYCHAIN: fn() -> bool = || true;
 
     fn mem_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -492,10 +523,6 @@ mod tests {
         });
         set_with(&conn, KEY, Some("new"), Some(&k.entry()), NO_KEYCHAIN).unwrap();
         assert_eq!(row(&conn).as_deref(), Some("new"));
-        assert!(
-            keychain_distrusted(&conn, KEY),
-            "a copy it couldn't see is distrusted"
-        );
         // No keychain entry at all (demo profile) stores the row too.
         let conn = mem_db();
         set_with(&conn, KEY, Some("demo"), None, NO_KEYCHAIN).unwrap();
@@ -532,15 +559,65 @@ mod tests {
             assert_eq!(row(&conn), None);
             assert_eq!(k.stored().as_deref(), stored);
         }
-        // Unreadable, but a delete answers: an error too.
+        // A store the probe finds (working, or locked) isn't missing either.
+        let conn = mem_db();
+        let k = FakeKeychain::with(|s| {
+            s.stored = Some("other-account".into());
+            s.set_fails = Some(Fail::Platform);
+            s.get_fails = Some(Fail::Platform);
+            s.delete_fails = Some(Fail::Platform);
+        });
+        let e = set_with(&conn, KEY, Some("new"), Some(&k.entry()), KEYCHAIN_WORKS);
+        assert_eq!(e, Err(SAVE_FAILED.to_string()));
+        assert_eq!(row(&conn), None);
+    }
+
+    #[test]
+    fn a_store_that_comes_back_mid_save_gets_the_token() {
+        // Write and read fail at the platform level, then the delete works: the store is back,
+        // so the token goes into it, not into SQLite.
         let conn = mem_db();
         let k = FakeKeychain::with(|s| {
             s.set_fails = Some(Fail::Platform);
             s.get_fails = Some(Fail::Platform);
         });
-        let e = set_with(&conn, KEY, Some("new"), Some(&k.entry()), NO_KEYCHAIN);
-        assert_eq!(e, Err(SAVE_FAILED.to_string()));
+        let entry = k.entry();
+        let recover = || {
+            let mut s = k.0.lock().unwrap();
+            s.set_fails = None;
+            s.get_fails = None;
+            true // the probe ran while it was still down
+        };
+        set_with(&conn, KEY, Some("new"), Some(&entry), recover).unwrap();
+        assert_eq!(k.stored().as_deref(), Some("new"));
         assert_eq!(row(&conn), None);
+    }
+
+    #[test]
+    fn a_rejected_fallback_write_leaves_the_old_keychain_token_usable() {
+        // Account A in the keychain, then nothing answers; storing B in SQLite fails.
+        let conn = mem_db();
+        conn.execute_batch(
+            "CREATE TRIGGER no_insert BEFORE INSERT ON app_setting \
+             BEGIN SELECT RAISE(FAIL, 'read-only'); END",
+        )
+        .unwrap();
+        let k = FakeKeychain::with(|s| {
+            s.stored = Some("account-a".into());
+            s.set_fails = Some(Fail::Platform);
+            s.get_fails = Some(Fail::Platform);
+            s.delete_fails = Some(Fail::Platform);
+        });
+        assert!(set_with(&conn, KEY, Some("account-b"), Some(&k.entry()), NO_KEYCHAIN).is_err());
+        // The service comes back: A is still there and still used.
+        *k.0.lock().unwrap() = FakeState {
+            stored: Some("account-a".into()),
+            ..FakeState::default()
+        };
+        assert_eq!(
+            get_with(&conn, KEY, Some(&k.entry())).as_deref(),
+            Some("account-a")
+        );
     }
 
     #[test]

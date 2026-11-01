@@ -181,8 +181,8 @@ fn split_version(s: &str) -> (Vec<u64>, Option<&str>) {
     };
     let cut = match s.split_once('-') {
         // A dotted version (`1.2.3-…`): semver, so everything after the first `-` is the
-        // prerelease (`1.2.3-1-alpha` is prerelease 1-alpha), unless it's all numbers.
-        Some((first, rest)) if first.contains('.') => (!numeric(rest)).then_some(first.len()),
+        // prerelease (`1.2.3-1-alpha` is prerelease 1-alpha, `1.2.3-1` prerelease 1).
+        Some((first, rest)) if first.contains('.') => (!rest.is_empty()).then_some(first.len()),
         // `-`-separated numbers (`1-2-4-rc.1`): the prerelease starts at the first part with a
         // word in it (rc.1), and the parts before it are the version (1.2.4).
         _ => {
@@ -1367,11 +1367,10 @@ mod tests {
         assert!(is_newer("1.10.0.0", "1.9.0.0")); // numerically, not as text
         assert!(is_newer("V1.0.0.1", "1.0.0.0"));
         assert!(is_newer("1_0_1", "1.0.0")); // `_` still separates
-                                             // All-numeric hyphen suffixes are still more version parts, not prereleases.
+                                             // Undotted, all-numeric hyphenated versions are still version parts, as before.
         assert!(is_newer("v1-2-4", "1.2.3"));
-        assert!(is_newer("1.0.0-2", "1.0.0-1"));
-        assert!(is_newer("1.0.0-1", "1.0.0"));
-        assert!(!is_newer("1.0.0", "1.0.0-0"));
+        assert!(is_newer("1-2-4", "1-2-3"));
+        assert!(!is_newer("1-2-3", "1.2.3"));
         // Mixed: hyphen-separated numbers, then a prerelease.
         assert!(is_newer("1-2-4-rc.1", "1.2.3"));
         assert!(is_newer("1-2-3", "1-2-3-rc.1"));
@@ -1403,6 +1402,11 @@ mod tests {
         assert!(is_newer("1.2.3-rc", "1.2.3-beta"));
         assert!(is_newer("1.2.3-alpha.1", "1.2.3-alpha"));
         assert!(is_newer("1.2.3-alpha.2", "1.2.3-alpha.1"));
+        // Numeric prereleases on a dotted version too.
+        assert!(is_newer("1.2.3", "1.2.3-1"));
+        assert!(!is_newer("1.2.3-1", "1.2.3"));
+        assert!(is_newer("1.0.0-2", "1.0.0-1"));
+        assert!(is_newer("1.2.3-alpha", "1.2.3-1"));
         assert!(!is_newer("1.2.3-rc.10", "1.2.3-rc.010"));
         assert!(!is_newer("1.2.3-rc.1", "1.2.3-rc.1"));
         // Numeric identifiers bigger than any integer type still sort below words, and by value.
