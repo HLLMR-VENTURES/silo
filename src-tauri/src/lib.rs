@@ -180,15 +180,15 @@ fn backfill_catalog_links(app: &tauri::AppHandle, zips: &[aliasbackfill::Library
     };
     let ran = (|| -> Result<Vec<String>, String> {
         let conn = db::open(&db_path(app)?)?;
-        if let Err(e) = db::prune_alias_checks(&conn) {
-            log::warn!("[catalog] couldn't tidy the link backfill's notes: {e}");
-        }
+        // A database too busy to tidy up is too busy for the run's notes too.
+        db::prune_alias_checks(&conn)
+            .map_err(|e| format!("couldn't tidy its notes, the database is busy: {e}"))?;
         let catalog = aliasbackfill::SiloApi {
             base: siloapi_base(app)?,
         };
         // A record waits for the library lock at most this long, and never past the run's time.
         let out = aliasbackfill::run(&conn, zips, &catalog, provenance::sha256_file, |left| {
-            library_write_within(left.min(ALIAS_BACKFILL_WAIT))
+            catalog_link_write_within(left.min(ALIAS_BACKFILL_WAIT))
         });
         let linked = linked_tech_names(zips, &out);
         if !out.is_empty() {
@@ -3027,16 +3027,30 @@ fn library_write() -> Result<std::sync::MutexGuard<'static, ()>, String> {
 fn library_write_within(
     max: std::time::Duration,
 ) -> Result<std::sync::MutexGuard<'static, ()>, String> {
-    let guard = wait_for_library(max, || {
-        ensure_not_self_updating()?;
-        ensure_no_move()?;
-        if move_in_progress() {
-            return Err("Finish or cancel the archive move first.".into());
-        }
-        Ok(())
-    })?;
+    let guard = wait_for_library(max, library_writable)?;
     settle_updates_locked()?;
     Ok(guard)
+}
+
+/// Whether a library write may start: Silo isn't installing its own update and no archive move
+/// is starting or running.
+fn library_writable() -> Result<(), String> {
+    ensure_not_self_updating()?;
+    ensure_no_move()?;
+    if move_in_progress() {
+        return Err("Finish or cancel the archive move first.".into());
+    }
+    Ok(())
+}
+
+/// The library lock for recording a catalog link (#402), waiting at most `max`: the same lock
+/// and the same refusals as `library_write_within`, without its settling of half-finished mod
+/// updates. A link record only writes the database (for bytes the backfill just hashed and
+/// re-checks unchanged), so it needs no file recovery, and settling takes no time limit.
+fn catalog_link_write_within(
+    max: std::time::Duration,
+) -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    wait_for_library(max, library_writable)
 }
 
 /// Set while Silo installs its own update (`set_self_updating`): library writes and archive

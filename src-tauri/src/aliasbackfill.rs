@@ -194,6 +194,30 @@ pub fn run_with<G>(
     lock: impl Fn(std::time::Duration) -> Result<G, String>,
     limits: Limits,
 ) -> Vec<(PathBuf, Outcome)> {
+    let out = run_bounded(conn, zips, catalog, hash, lock, limits);
+    // Back to the connection's usual wait for a busy database.
+    let _ = conn.busy_timeout(DB_WAIT);
+    out
+}
+
+/// rusqlite's own wait for a busy database, which `run_with` narrows to the run's time.
+const DB_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Let the next database write wait for a busy database no longer than the run has left (and
+/// not at all once it has none left: a free database still takes it at once).
+fn wait_at_most(conn: &Connection, until: std::time::Instant) {
+    let left = until.saturating_duration_since(std::time::Instant::now());
+    let _ = conn.busy_timeout(left.min(DB_WAIT));
+}
+
+fn run_bounded<G>(
+    conn: &Connection,
+    zips: &[LibraryZip],
+    catalog: &impl Catalog,
+    hash: impl Fn(&Path) -> Result<String, String>,
+    lock: impl Fn(std::time::Duration) -> Result<G, String>,
+    limits: Limits,
+) -> Vec<(PathBuf, Outcome)> {
     let until = std::time::Instant::now() + limits.time;
     let late = || std::time::Instant::now() >= until;
     let mut out = Vec::new();
@@ -289,6 +313,7 @@ pub fn run_with<G>(
             }
             notes.push((path_key(p.zip), check_of(p, p.sha(), decided)));
         }
+        wait_at_most(conn, until);
         if let Err(e) = db::note_alias_checks(conn, &notes) {
             log::warn!("[catalog] link backfill stopped: couldn't note what it looked up: {e}");
             retry_all(pending.iter().map(|p| p.zip), &e, &mut out);
@@ -339,6 +364,7 @@ pub fn run_with<G>(
             }
         }
     }
+    wait_at_most(conn, until);
     if let Err(e) = db::note_alias_checks(conn, &notes) {
         log::warn!("[catalog] link backfill stopped: couldn't note the files it hashed: {e}");
         retry_all(asked.iter().map(|(z, _)| *z), &e, &mut out);
@@ -370,23 +396,27 @@ pub fn run_with<G>(
             return out;
         }
     };
-    // Once the library lock couldn't be had, no further record waits for it this run.
-    let busy = std::cell::Cell::new(false);
+    // Once the library lock couldn't be had, or a record couldn't be written (a busy
+    // database), no further record is tried this run. A record's write waits for the database
+    // no longer than the run has left.
+    let stop = std::cell::Cell::new(false);
     let take = || -> Result<G, String> {
-        if busy.get() {
+        if stop.get() {
             return Err(LIBRARY_BUSY.to_string());
         }
         let left = until.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
             return Err(BUDGET_USED.to_string());
         }
-        lock(left).inspect_err(|_| busy.set(true))
+        let guard = lock(left).inspect_err(|_| stop.set(true))?;
+        wait_at_most(conn, until);
+        Ok(guard)
     };
     let mut decided = Vec::new();
     let mut outcomes = Vec::new();
     for (z, sha) in asked {
         let outcome = match found.get(&sha) {
-            Some(matches) => judge(conn, z, &sha, matches, &take),
+            Some(matches) => judge(conn, z, &sha, matches, &take, &stop),
             None => Outcome::Retry("Silo's catalog left this file out of its answer".to_string()),
         };
         log_outcome(z, &outcome);
@@ -403,8 +433,10 @@ pub fn run_with<G>(
         }
         outcomes.push((z.path.clone(), outcome));
     }
-    // What it decided, in one transaction. When that fails, those files are looked at again
-    // next time (a link recorded meanwhile is then found as already there).
+    // What it decided, in one transaction, waiting no longer than the run has left. When that
+    // fails, those files are looked at again next time (a link recorded meanwhile is then found
+    // as already there).
+    wait_at_most(conn, until);
     if let Err(e) = db::note_alias_checks(conn, &decided) {
         log::warn!(
             "[catalog] couldn't note what the link backfill decided, so it will look again: {e}"
@@ -448,6 +480,7 @@ fn judge<G>(
     sha: &str,
     matches: &[HashMatch],
     lock: &impl Fn() -> Result<G, String>,
+    stop: &std::cell::Cell<bool>,
 ) -> Outcome {
     let mut ids: Vec<&str> = matches.iter().map(|m| m.id.as_str()).collect();
     ids.sort_unstable();
@@ -468,7 +501,7 @@ fn judge<G>(
     if !catalogalias::needs_alias(file, build.tech_name.as_deref()) {
         return Outcome::OtherName;
     }
-    link(conn, z, sha, id, build, lock)
+    link(conn, z, sha, id, build, lock, stop)
 }
 
 /// Record the link an install would have, under the library lock, unless the file changed or
@@ -482,6 +515,7 @@ fn link<G>(
     id: &str,
     build: &HashMatch,
     lock: &impl Fn() -> Result<G, String>,
+    stop: &std::cell::Cell<bool>,
 ) -> Outcome {
     let _write = match lock() {
         Ok(g) => g,
@@ -493,7 +527,10 @@ fn link<G>(
     match catalogalias::recorded_entry(conn, &z.tech_name, sha) {
         Ok(Some(_)) => return Outcome::AlreadyLinked,
         Ok(None) => {}
-        Err(e) => return Outcome::Retry(e),
+        Err(e) => {
+            stop.set(true);
+            return Outcome::Retry(e);
+        }
     }
     let link = Link {
         catalog_id: id.to_string(),
@@ -502,7 +539,10 @@ fn link<G>(
     };
     match catalogalias::record(conn, &z.tech_name, sha, z.size, &link) {
         Ok(_) => Outcome::Linked(id.to_string()),
-        Err(e) => Outcome::Retry(e),
+        Err(e) => {
+            stop.set(true);
+            Outcome::Retry(e)
+        }
     }
 }
 
@@ -1254,25 +1294,149 @@ mod tests {
     #[test]
     fn files_with_a_noted_hash_rotate_too() {
         let (dir, conn) = setup("rotate_cached");
-        let (zips, mut fake) = many(&dir, 3);
+        let (zips, mut fake) = many(&dir, 4);
         fake.fail_by_hash = true;
+        // Every file already hashed, known lately not to be any entry's name, tried in order.
+        for (i, z) in zips.iter().enumerate() {
+            let check = db::AliasCheck {
+                size: z.size,
+                mtime_ms: z.mtime_ms,
+                sha256: Some(crate::provenance::sha256_file(&z.path).unwrap()),
+                unnamed_ms: Some(now_ms()),
+                decided: false,
+                attempted_ms: i as i64 + 1,
+            };
+            db::note_alias_check(&conn, &path_key(z), &check).unwrap();
+        }
         let two = Limits {
             max_hashed: 2,
             ..Limits::default()
         };
-        let hash = crate::provenance::sha256_file;
-        for _ in 0..3 {
-            run_with(&conn, &zips, &fake, hash, |_| Ok(()), two);
-        }
-        // Every file got its turn at the lookup, though each one failed.
-        let asked: HashSet<String> = fake
-            .asked_by_hash
-            .borrow()
+        let no_hashing =
+            |_: &Path| -> Result<String, String> { panic!("hashed a file with a noted hash") };
+        let batch = |n: usize| -> HashSet<String> {
+            fake.asked_by_hash.borrow()[n].iter().cloned().collect()
+        };
+        let shas: Vec<String> = zips
             .iter()
-            .flatten()
-            .cloned()
+            .map(|z| crate::provenance::sha256_file(&z.path).unwrap())
             .collect();
-        assert_eq!(asked.len(), 3, "{:?}", fake.asked_by_hash.borrow());
+        for _ in 0..2 {
+            run_with(&conn, &zips, &fake, no_hashing, |_| Ok(()), two);
+        }
+        assert_eq!(fake.asked_known.get(), 0, "no name asked again");
+        // The first batch is the two tried longest ago; the next, the other two.
+        assert_eq!(batch(0), HashSet::from([shas[0].clone(), shas[1].clone()]));
+        assert_eq!(batch(1), HashSet::from([shas[2].clone(), shas[3].clone()]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `Fake`, with another connection taking the database's write lock while the hash lookup
+    /// is out (and keeping it).
+    struct LocksDb<'a> {
+        fake: &'a Fake,
+        other: &'a Connection,
+    }
+
+    impl Catalog for LocksDb<'_> {
+        fn known_tech_names(&self, names: &[String]) -> Result<HashSet<String>, String> {
+            self.fake.known_tech_names(names)
+        }
+        fn by_hash(
+            &self,
+            hashes: &[String],
+        ) -> Result<Option<HashMap<String, Vec<HashMatch>>>, String> {
+            self.other.execute_batch("BEGIN IMMEDIATE").unwrap();
+            self.fake.by_hash(hashes)
+        }
+    }
+
+    #[test]
+    fn a_database_busy_while_recording_stops_the_records_after_one_wait() {
+        let (dir, conn) = setup("db_busy_records");
+        let (zips, fake) = many(&dir, 3);
+        let other = db::open(&dir.join("silo.db")).unwrap();
+        let catalog = LocksDb {
+            fake: &fake,
+            other: &other,
+        };
+        let short = Limits {
+            time: std::time::Duration::from_millis(300),
+            ..Limits::default()
+        };
+        let locks = Cell::new(0);
+        let lock = |_| -> Result<(), String> {
+            locks.set(locks.get() + 1);
+            Ok(())
+        };
+        let started = std::time::Instant::now();
+        let out = run_with(
+            &conn,
+            &zips,
+            &catalog,
+            crate::provenance::sha256_file,
+            lock,
+            short,
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(
+            out.iter().all(|(_, o)| matches!(o, Outcome::Retry(_))),
+            "{out:?}"
+        );
+        assert_eq!(locks.get(), 1, "one record tried, then none");
+        other.execute_batch("ROLLBACK").unwrap();
+        assert!(!zips.iter().any(|z| settled(&conn, z)));
+        // Free again: all three are linked.
+        let out = run(&conn, &zips, &fake, crate::provenance::sha256_file, |_| {
+            Ok(())
+        });
+        let linked = out
+            .iter()
+            .filter(|(_, o)| matches!(o, Outcome::Linked(_)))
+            .count();
+        assert_eq!(linked, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_name_answer_that_used_up_the_run_still_settles_the_mods_it_knows() {
+        let (dir, conn) = setup("late_known");
+        let (zips, mut fake) = many(&dir, 2);
+        fake.known.insert("FS25_File00".into());
+        fake.slow_known = std::time::Duration::from_millis(400);
+        let short = Limits {
+            time: std::time::Duration::from_millis(200),
+            ..Limits::default()
+        };
+        let out = run_with(
+            &conn,
+            &zips,
+            &fake,
+            crate::provenance::sha256_file,
+            |_| Ok(()),
+            short,
+        );
+        let of = |i: usize| {
+            out.iter()
+                .find(|(p, _)| *p == zips[i].path)
+                .unwrap()
+                .1
+                .clone()
+        };
+        assert_eq!(of(0), Outcome::InCatalog);
+        assert!(matches!(of(1), Outcome::Retry(_)));
+        assert!(settled(&conn, &zips[0]));
+        assert!(
+            fake.asked_by_hash.borrow().is_empty(),
+            "no request past the time"
+        );
+        let noted = db::alias_check(&conn, &path_key(&zips[1]))
+            .unwrap()
+            .unwrap();
+        assert!(
+            noted.unnamed_ms.is_some(),
+            "the next run hashes it without asking"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1320,15 +1484,23 @@ mod tests {
         let (dir, conn) = setup("db_busy");
         let (zips, mut fake) = many(&dir, 3);
         fake.known.insert("FS25_File00".into());
-        conn.busy_timeout(std::time::Duration::from_millis(100))
-            .unwrap();
-        // Another connection holds the database's write lock.
+        // Another connection holds the database's write lock. A write waits at most the run's
+        // time (here 300 ms), once.
         let other = db::open(&dir.join("silo.db")).unwrap();
         other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let short = Limits {
+            time: std::time::Duration::from_millis(300),
+            ..Limits::default()
+        };
         let started = std::time::Instant::now();
-        let out = run(&conn, &zips, &fake, crate::provenance::sha256_file, |_| {
-            Ok(())
-        });
+        let out = run_with(
+            &conn,
+            &zips,
+            &fake,
+            crate::provenance::sha256_file,
+            |_| Ok(()),
+            short,
+        );
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert!(
             out.iter().all(|(_, o)| matches!(o, Outcome::Retry(_))),
