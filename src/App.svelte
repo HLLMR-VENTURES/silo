@@ -783,7 +783,8 @@
     )
       return;
     try {
-      await launchGame();
+      // The profile shown is the one started, or none is (#387).
+      await launchGame(profileInUse(modsStatus));
       crashWatch.afterLaunch(); // look at the log when the game exits
     } catch (e) {
       reportError(e, "Launching the game");
@@ -2898,7 +2899,8 @@
       savegames = files.savegames;
       userDir = files.userDir;
       settingsModsSet = new Set(files.modsWithSettings);
-      shownProfile = profileInUse(modsStatus);
+      // Where these came from, as the backend read them (not the status this app holds).
+      shownProfile = files.profile;
     } catch (e) {
       if (gen === gameFilesGen) reportError(e, "Reading the game's files", { background: true });
     }
@@ -3037,9 +3039,11 @@
     }
   }
 
+  // Both may publish another folder (and its FS25 profile, #387): no crash look in between,
+  // like a switch.
   async function retryModsFolder() {
     try {
-      await applyModsStatus(await modsRootStatus());
+      await whileSwitchingFolder(async () => applyModsStatus(await modsRootStatus()));
     } catch (e) {
       reportError(e, "Checking the mods folder", { retry: retryModsFolder });
     }
@@ -3047,7 +3051,7 @@
 
   async function makeModsFolder() {
     try {
-      await applyModsStatus(await createModsFolder());
+      await whileSwitchingFolder(async () => applyModsStatus(await createModsFolder()));
     } catch (e) {
       reportError(e, "Creating the mods folder");
     }

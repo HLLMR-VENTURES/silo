@@ -495,6 +495,8 @@ export interface GameFiles {
   userDir: string | null;
   savegames: Savegame[];
   modsWithSettings: string[];
+  /** The FS25 profile they were read from; null for the main user folder. */
+  profile: string | null;
 }
 export function gameFiles(): Promise<GameFiles> {
   return invoke<GameFiles>("game_files");
@@ -917,8 +919,11 @@ export function detectGame(): Promise<GameInfo | null> {
   return invoke<GameInfo | null>("detect_game");
 }
 
-export function launchGame(): Promise<void> {
-  return invoke("launch_game");
+/** Start FS25. `expectedProfile`: the FS25 profile the app shows (null = the main one); the
+ *  launch is refused if Silo would start another (#387). Left out: no such check. */
+export function launchGame(expectedProfile?: string | null): Promise<void> {
+  if (expectedProfile === undefined) return invoke("launch_game");
+  return invoke("launch_game", { expectedProfile, checkProfile: true });
 }
 
 /** Prompt for a path and save text (used by the diagnostics report). */

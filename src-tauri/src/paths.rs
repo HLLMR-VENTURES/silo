@@ -201,7 +201,9 @@ pub fn guarded_xml_write(
     // Write to a temp sibling, flush, then atomically replace (rename replaces on all OSes).
     let tmp = dest.with_extension("xml.silo-tmp");
     let write = (|| -> Result<(), String> {
-        let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        // A new file, never one already there: an entry left at this name (even a link to a
+        // file elsewhere) is removed, not written through (#387).
+        let mut f = create_fresh(&tmp).map_err(|e| e.to_string())?;
         f.write_all(contents.as_bytes())
             .map_err(|e| e.to_string())?;
         f.sync_all().map_err(|e| e.to_string())?;
@@ -266,7 +268,13 @@ fn back_up_config(dest: &Path) -> Result<(), String> {
             std::fs::rename(&from, backup_slot(dest, n + 1)).map_err(abort)?;
         }
     }
-    std::fs::copy(dest, backup_slot(dest, 1)).map_err(abort)?;
+    // Into a new file, never through whatever is at `.bak` now (a dangling link included).
+    let slot = backup_slot(dest, 1);
+    match std::fs::remove_file(&slot) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(abort(e)),
+        _ => {}
+    }
+    copy_new(dest, &slot).map_err(abort)?;
     crate::fslog::moved("backup-config", dest, &backup_slot(dest, 1));
     Ok(())
 }
@@ -628,6 +636,33 @@ mod tests {
         ] {
             assert!(safe_file_name(ok).is_ok(), "should accept {ok:?}");
         }
+    }
+
+    /// A link left at the temp or backup name never carries the write to a file outside the
+    /// root (#387: a profile's config write must never reach the main user folder).
+    #[cfg(unix)]
+    #[test]
+    fn guarded_xml_write_never_writes_through_a_link_at_its_temp_or_backup_name() {
+        let base = std::env::temp_dir().join(format!("silo_cfg_link_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("profile");
+        std::fs::create_dir_all(&root).unwrap();
+        let sentinel = base.join("main-gameSettings.xml");
+        std::fs::write(&sentinel, "<main/>").unwrap();
+        let dest = root.join("game.xml");
+        std::fs::write(&dest, "<old/>").unwrap();
+        std::os::unix::fs::symlink(&sentinel, root.join("game.xml.silo-tmp")).unwrap();
+        // A dangling link at `.bak` (rotation only moves names that resolve).
+        std::os::unix::fs::symlink(base.join("nowhere.xml"), root.join("game.xml.bak")).unwrap();
+        guarded_xml_write(&[root.clone()], &dest, "<new/>").unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "<new/>");
+        assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "<main/>");
+        assert!(!base.join("nowhere.xml").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("game.xml.bak")).unwrap(),
+            "<old/>"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
