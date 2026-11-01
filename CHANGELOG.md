@@ -32,6 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a drive other than C: (Windows), and when FS25 runs through Proton, including Flatpak Steam
   (Linux). (#346)
 
+### Security
+
+- Release builds now use exactly the dependency versions in the committed lockfile, the ones the
+  security audit and the software bill of materials check. A release is refused unless its tag
+  matches the app version, and pre-release tags can no longer become a stable release. Each
+  installer is attested by the build job that made it, and the release fails if any download
+  differs from what was built. (#359)
+
 ## [1.0.3] - 2026-10-29
 
 The library database moves to version 3 (one added column, for the per-mod update switch). Silo
