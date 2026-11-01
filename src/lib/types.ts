@@ -151,6 +151,8 @@ export interface Savegame {
   /** When the game last saved it, as written in the save ("2026-08-02"), or null. */
   saveDate: string | null;
   mods: SaveMod[];
+  /** Why careerSavegame.xml couldn't be read (cut off, damaged, empty): then `mods` is empty. */
+  error?: string | null;
 }
 
 export interface ConflictInput {

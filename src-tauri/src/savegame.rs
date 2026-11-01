@@ -30,6 +30,10 @@ pub struct Savegame {
     /// When the game last saved it (`settings/saveDate`, e.g. "2026-08-02"), as the game wrote it.
     pub save_date: Option<String>,
     pub mods: Vec<SaveMod>,
+    /// Why `careerSavegame.xml` couldn't be read (cut off, damaged, empty), or `None`. An
+    /// unreadable save is still listed (and can be backed up), with no mods: a partial
+    /// list would make "Use this save's mods" switch to a partial set (#354).
+    pub error: Option<String>,
 }
 
 fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
@@ -43,8 +47,10 @@ fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
         })
 }
 
-/// Parse a `careerSavegame.xml` into name/map/mod-list.
-fn parse(xml: &str, index: u32, folder: &str) -> Savegame {
+/// Parse a `careerSavegame.xml` into name/map/mod-list. Fails, with a short reason, on any
+/// XML error or when the `<careerSavegame>` root is missing or never closed: the `<mod>`
+/// entries come last, so a cut-off file would otherwise yield a partial mod list.
+fn parse(xml: &str, index: u32, folder: &str) -> Result<Savegame, String> {
     let mut name = String::new();
     let mut map_title = None;
     let mut save_date = None;
@@ -53,6 +59,9 @@ fn parse(xml: &str, index: u32, folder: &str) -> Savegame {
     let mut reader = Reader::from_str(xml);
     let mut buf = Vec::new();
     let mut stack: Vec<String> = Vec::new();
+    // Whether the root element has opened, and whether it was `<careerSavegame>`.
+    let mut root: Option<bool> = None;
+    let cut_off = || "careerSavegame.xml is cut off or damaged".to_string();
 
     let handle_open = |e: &quick_xml::events::BytesStart, mods: &mut Vec<SaveMod>| {
         let local = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
@@ -94,16 +103,23 @@ fn parse(xml: &str, index: u32, folder: &str) -> Savegame {
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => return Err(cut_off()),
             Ok(Event::Start(e)) => {
                 take_text(&stack, &mut run);
                 let local = handle_open(&e, &mut mods);
+                if stack.is_empty() {
+                    root.get_or_insert(local == "careerSavegame");
+                }
                 stack.push(local); // real elements have a matching End
             }
             Ok(Event::Empty(e)) => {
                 // Self-closing (e.g. <mod .../>): handle attrs, don't push.
                 take_text(&stack, &mut run);
-                handle_open(&e, &mut mods);
+                let local = handle_open(&e, &mut mods);
+                if stack.is_empty() {
+                    root.get_or_insert(local == "careerSavegame");
+                }
             }
             Ok(Event::End(_)) => {
                 take_text(&stack, &mut run);
@@ -111,22 +127,56 @@ fn parse(xml: &str, index: u32, folder: &str) -> Savegame {
             }
             Ok(Event::Text(t)) => run.push_text(&t),
             Ok(Event::GeneralRef(r)) => run.push_ref(&r),
+            Ok(Event::CData(c)) => run.push_str(&String::from_utf8_lossy(&c)),
             _ => {}
         }
         buf.clear();
+    }
+    match root {
+        None => return Err("careerSavegame.xml is empty or has no savegame in it".into()),
+        Some(false) => return Err("careerSavegame.xml isn't a savegame file".into()),
+        Some(true) if !stack.is_empty() => return Err(cut_off()),
+        Some(true) => {}
     }
 
     if name.is_empty() {
         name = folder.to_string();
     }
-    Savegame {
+    Ok(Savegame {
         index,
         folder: folder.to_string(),
         name,
         map_title,
         save_date,
         mods,
+        error: None,
+    })
+}
+
+/// A save whose `careerSavegame.xml` couldn't be read: listed under its folder name, with
+/// no mods and the reason.
+fn unreadable(index: u32, folder: &str, why: String) -> Savegame {
+    Savegame {
+        index,
+        folder: folder.to_string(),
+        name: folder.to_string(),
+        map_title: None,
+        save_date: None,
+        mods: Vec::new(),
+        error: Some(why),
     }
+}
+
+/// Read and parse one save's `careerSavegame.xml`; `None` when the folder has none (it isn't
+/// a savegame). A file that exists but can't be read or parsed is an unreadable save.
+fn read_save(xml_path: &Path, index: u32, folder: &str) -> Option<Savegame> {
+    if !xml_path.is_file() {
+        return None;
+    }
+    let parsed = std::fs::read_to_string(xml_path)
+        .map_err(|_| "careerSavegame.xml couldn't be read".to_string())
+        .and_then(|xml| parse(&xml, index, folder));
+    Some(parsed.unwrap_or_else(|why| unreadable(index, folder, why)))
 }
 
 /// True when `p` is a directory itself, not a symlink or junction to one (links aren't followed).
@@ -155,10 +205,9 @@ pub fn list_savegames(user_dir: &Path) -> Vec<Savegame> {
             continue;
         };
         let xml_path = entry.path().join("careerSavegame.xml");
-        let Ok(xml) = std::fs::read_to_string(&xml_path) else {
-            continue;
-        };
-        out.push(parse(&xml, index, &folder));
+        if let Some(save) = read_save(&xml_path, index, &folder) {
+            out.push(save);
+        }
     }
     out.sort_by_key(|s| s.index);
     out
@@ -234,7 +283,7 @@ mod tests {
 
     #[test]
     fn parses_name_and_mods() {
-        let s = parse(SAMPLE, 1, "savegame1");
+        let s = parse(SAMPLE, 1, "savegame1").unwrap();
         assert_eq!(s.name, "My game save");
         assert_eq!(s.map_title.as_deref(), Some("Riverbend Springs"));
         assert_eq!(s.save_date.as_deref(), Some("2026-08-02"));
@@ -262,10 +311,95 @@ mod tests {
             <mapTitle>Hills &amp; Dales</mapTitle>
             <saveDate>2026-08-02</saveDate>
         </settings></careerSavegame>"#;
-        let s = parse(xml, 2, "savegame2");
+        let s = parse(xml, 2, "savegame2").unwrap();
         assert_eq!(s.name, "Elm & Ash Farm");
         assert_eq!(s.map_title.as_deref(), Some("Hills & Dales"));
         assert_eq!(s.save_date.as_deref(), Some("2026-08-02"));
+    }
+
+    /// A real-shaped careerSavegame.xml: BOM, declaration, the root's attributes, settings,
+    /// then the `<mod>` entries last, as FS25 writes it.
+    fn career(mods: usize) -> String {
+        let mut xml = String::from("\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<careerSavegame revision=\"2\" valid=\"true\">\n    <settings>\n        <savegameName>My game save</savegameName>\n        <mapTitle>Riverbend Springs</mapTitle>\n        <saveDate>2026-08-02</saveDate>\n    </settings>\n    <statistics>\n        <money>500000</money>\n    </statistics>\n");
+        for i in 0..mods {
+            xml.push_str(&format!("    <mod modName=\"FS25_mod{i}\" title=\"Mod &amp; {i}\" version=\"1.0.0.0\" required=\"true\" fileHash=\"h{i}\"/>\n"));
+        }
+        xml.push_str("</careerSavegame>\n");
+        xml
+    }
+
+    #[test]
+    fn parses_a_real_shaped_save() {
+        let s = parse(&career(3), 1, "savegame1").unwrap();
+        assert_eq!(s.name, "My game save");
+        assert_eq!(s.mods.len(), 3);
+        assert_eq!(s.mods[2].title.as_deref(), Some("Mod & 2"));
+        assert!(s.error.is_none());
+    }
+
+    /// #354: a file cut off anywhere (mid-tag, between mods, before the root closes) is a
+    /// failed parse, never a save with part of its mod list.
+    #[test]
+    fn a_truncated_save_fails_to_parse() {
+        let full = career(3);
+        let mod_start = full.find("<mod ").unwrap();
+        for cut in [
+            full.len() - 3,                           // inside </careerSavegame>
+            full.rfind("</careerSavegame>").unwrap(), // all mods, no root end
+            full.rfind("<mod ").unwrap(),             // between mods
+            mod_start + 20,                           // inside the first <mod
+            full.find("<statistics>").unwrap(),       // before any mod
+            full.find("<savegameName>").unwrap() + 5, // inside settings
+        ] {
+            let err = parse(&full[..cut], 1, "savegame1").unwrap_err();
+            assert!(err.contains("cut off"), "cut at {cut}: {err}");
+        }
+    }
+
+    #[test]
+    fn an_empty_or_foreign_file_fails_to_parse() {
+        for (xml, why) in [
+            ("", "empty"),
+            ("\u{feff}<?xml version=\"1.0\"?>\n", "empty"),
+            ("<x/>", "isn't a savegame"),
+            ("<game><mod modName=\"FS25_a\"/></game>", "isn't a savegame"),
+        ] {
+            let err = parse(xml, 1, "savegame1").unwrap_err();
+            assert!(err.contains(why), "{xml:?}: {err}");
+        }
+    }
+
+    /// #354: a name written as CDATA is read.
+    #[test]
+    fn reads_a_cdata_save_name() {
+        let xml = "<careerSavegame><settings><savegameName><![CDATA[Elm & Ash]]></savegameName></settings></careerSavegame>";
+        assert_eq!(parse(xml, 1, "savegame1").unwrap().name, "Elm & Ash");
+    }
+
+    /// #354: an unreadable save is listed (so it can still be backed up), with no mods and
+    /// the reason; a folder with no careerSavegame.xml isn't a save.
+    #[test]
+    fn an_unreadable_save_is_listed_with_its_reason() {
+        let root = std::env::temp_dir().join(format!("silo_sg_unreadable_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for n in 1..=3 {
+            std::fs::create_dir_all(root.join(format!("savegame{n}"))).unwrap();
+        }
+        let full = career(2);
+        std::fs::write(root.join("savegame1/careerSavegame.xml"), &full).unwrap();
+        let cut = &full[..full.rfind("<mod ").unwrap()];
+        std::fs::write(root.join("savegame2/careerSavegame.xml"), cut).unwrap();
+        // savegame3 has no careerSavegame.xml.
+
+        let saves = list_savegames(&root);
+        assert_eq!(saves.len(), 2);
+        assert_eq!(saves[0].mods.len(), 2);
+        assert!(saves[0].error.is_none());
+        assert_eq!(saves[1].folder, "savegame2");
+        assert!(saves[1].mods.is_empty(), "no partial mod list");
+        assert!(saves[1].error.as_deref().unwrap().contains("cut off"));
+        assert!(backup(&root, "savegame2").is_ok());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

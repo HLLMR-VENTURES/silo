@@ -75,10 +75,9 @@ fn element_slots(e: &BytesStart) -> Vec<Slot> {
     let mut raw: Vec<(String, String)> = Vec::new();
     for a in e.attributes().flatten() {
         let key = local(a.key.as_ref());
-        let val = a
-            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-            .map(|c| c.into_owned())
-            .unwrap_or_default();
+        // A value that can't be resolved (an undeclared entity) shows as written, not blank.
+        let val = crate::xmltext::attr_value(&a)
+            .unwrap_or_else(|| String::from_utf8_lossy(&a.value).into_owned());
         if key == "name" {
             name_label = Some(val.clone());
         }
@@ -146,51 +145,62 @@ pub fn parse(xml: &str) -> Vec<Field> {
     fields
 }
 
-fn edited_start<'a>(e: &BytesStart<'a>, base_id: usize, edits: &[Edit]) -> BytesStart<'a> {
-    let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
-    let mut out = BytesStart::new(name);
+/// `e` with the edits for its slots (field ids `base_id..`) applied. Only edited values
+/// change; every other attribute keeps its raw bytes (#354). Records each edit id it used.
+fn edited_start(
+    e: &BytesStart,
+    base_id: usize,
+    edits: &[Edit],
+    applied: &mut Vec<usize>,
+) -> Result<BytesStart<'static>, String> {
     // Which attrs are slots, in order, so we can map to ids.
     let slots = element_slots(e);
     let mut slot_i = 0usize;
-    for a in e.attributes().flatten() {
+    crate::xmltext::rebuild_attributes(e, |a| {
         let key = local(a.key.as_ref());
-        let orig = a
-            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-            .map(|c| c.into_owned())
-            .unwrap_or_default();
-        let is_slot = slots.get(slot_i).map(|s| s.attr == key).unwrap_or(false);
-        let value = if is_slot {
-            let this_id = base_id + slot_i;
-            slot_i += 1;
-            edits
-                .iter()
-                .find(|ed| ed.id == this_id)
-                .map(|ed| ed.value.clone())
-                .unwrap_or(orig)
-        } else {
-            orig
-        };
-        out.push_attribute((
-            String::from_utf8_lossy(a.key.as_ref()).as_ref(),
-            value.as_str(),
-        ));
-    }
-    out
+        if slots.get(slot_i).map(|s| s.attr != key).unwrap_or(true) {
+            return None;
+        }
+        let this_id = base_id + slot_i;
+        slot_i += 1;
+        let ed = edits.iter().find(|ed| ed.id == this_id)?;
+        applied.push(this_id);
+        Some(ed.value.clone())
+    })
 }
 
-/// Apply edits and return the new XML (values changed, structure preserved).
+/// The element as it should be written: rebuilt when one of its fields (ids `id..id + n`)
+/// is edited, otherwise exactly as read.
+fn element_out<'a>(
+    e: BytesStart<'a>,
+    id: usize,
+    n: usize,
+    edits: &[Edit],
+    applied: &mut Vec<usize>,
+) -> Result<BytesStart<'a>, String> {
+    if edits.iter().any(|ed| (id..id + n).contains(&ed.id)) {
+        edited_start(&e, id, edits, applied)
+    } else {
+        Ok(e)
+    }
+}
+
+/// Apply edits and return the new XML (values changed, structure preserved). An element
+/// with no edited field is written exactly as read. An edit whose field isn't in the file
+/// is an error, so a save never reports success for a value it didn't write.
 pub fn apply_edits(xml: &str, edits: &[Edit]) -> Result<String, String> {
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     let mut buf = Vec::new();
     let mut id = 0usize;
+    let mut applied: Vec<usize> = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Eof) => break,
             Err(e) => return Err(e.to_string()),
             Ok(Event::Start(e)) => {
                 let n = element_slots(&e).len();
-                let out = edited_start(&e, id, edits);
+                let out = element_out(e, id, n, edits, &mut applied)?;
                 id += n;
                 writer
                     .write_event(Event::Start(out))
@@ -198,7 +208,7 @@ pub fn apply_edits(xml: &str, edits: &[Edit]) -> Result<String, String> {
             }
             Ok(Event::Empty(e)) => {
                 let n = element_slots(&e).len();
-                let out = edited_start(&e, id, edits);
+                let out = element_out(e, id, n, edits, &mut applied)?;
                 id += n;
                 writer
                     .write_event(Event::Empty(out))
@@ -207,6 +217,9 @@ pub fn apply_edits(xml: &str, edits: &[Edit]) -> Result<String, String> {
             Ok(ev) => writer.write_event(ev).map_err(|e| e.to_string())?,
         }
         buf.clear();
+    }
+    if edits.iter().any(|ed| !applied.contains(&ed.id)) {
+        return Err("The settings file has changed since Silo read it, so nothing was saved. Close and reopen the settings, then try again.".into());
     }
     let bytes = writer.into_inner().into_inner();
     let mut s = String::from_utf8(bytes).map_err(|e| e.to_string())?;
@@ -336,5 +349,77 @@ mod tests {
         let f = parse(&out);
         assert_eq!(f[0].value, "5");
         assert_eq!(f[1].value, "false");
+    }
+
+    /// A real-shaped modSettings file (BOM, declaration, comment, single quotes, character
+    /// references, an entity nothing declares).
+    const REAL: &str = "\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<settings>\n    <!-- written by the mod -->\n    <setting name=\"ROLEPLAY_PAGER_ACTIVATED\" boolean=\"true\"/>\n    <setting name=\"PAGER_TEXT\" string=\"Line 1&#10;Line 2&#9;end\" note='say \"hi\"'/>\n    <setting name=\"ODD\" string=\"&custom;\" isSaved=\"true\"/>\n    <setting name=\"ROLEPLAY_PAGER_MAX_INTERVAL\" integer=\"1\"></setting>\n</settings>\n";
+
+    /// #354: editing one value leaves every other attribute's bytes alone: character
+    /// references stay references (not literal newlines that read back as spaces), and a
+    /// value that can't be resolved is kept, not blanked.
+    #[test]
+    fn editing_one_value_leaves_the_rest_of_the_file_byte_identical() {
+        let f = parse(REAL);
+        let max = f
+            .iter()
+            .find(|f| f.label == "ROLEPLAY_PAGER_MAX_INTERVAL")
+            .unwrap();
+        let out = apply_edits(
+            REAL,
+            &[Edit {
+                id: max.id,
+                value: "5".into(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            REAL.replace("integer=\"1\"", "integer=\"5\""),
+            "only the edited value changed"
+        );
+        // And the pager text still reads back with its newline and tab.
+        let f = parse(&out);
+        let text = f.iter().find(|f| f.label == "PAGER_TEXT").unwrap();
+        assert_eq!(text.value, "Line 1\nLine 2\tend");
+        let odd = f.iter().find(|f| f.label == "ODD").unwrap();
+        assert_eq!(odd.value, "&custom;", "shown as written, not blank");
+    }
+
+    /// #354: an edited value with whitespace is written as character references, so it
+    /// reads back exactly; its element's other attributes keep their raw bytes.
+    #[test]
+    fn an_edited_value_round_trips_tabs_and_newlines() {
+        let f = parse(REAL);
+        let text = f.iter().find(|f| f.label == "PAGER_TEXT").unwrap();
+        let out = apply_edits(
+            REAL,
+            &[Edit {
+                id: text.id,
+                value: "A & B\n\tC".into(),
+            }],
+        )
+        .unwrap();
+        assert!(
+            out.contains(r#"string="A &amp; B&#10;&#9;C" note="say &quot;hi&quot;""#),
+            "{out}"
+        );
+        let f = parse(&out);
+        let text = f.iter().find(|f| f.label == "PAGER_TEXT").unwrap();
+        assert_eq!(text.value, "A & B\n\tC");
+    }
+
+    /// An edit for a field that isn't in the file is an error, not a silent "saved".
+    #[test]
+    fn an_edit_that_matches_no_field_is_an_error() {
+        let err = apply_edits(
+            SAMPLE,
+            &[Edit {
+                id: 99,
+                value: "1".into(),
+            }],
+        )
+        .unwrap_err();
+        assert!(err.contains("nothing was saved"), "{err}");
     }
 }

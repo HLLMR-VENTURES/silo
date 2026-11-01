@@ -4951,9 +4951,10 @@ async fn save_mod_settings_raw(path: String, content: String) -> Result<(), Stri
 }
 
 /// Refuse text that isn't one well-formed XML document (parsed to the end: every tag closed
-/// and matched, one root element, nothing but whitespace or comments around it). The raw
-/// editor writes what the user typed, and a broken settings file makes the mod fall back to
-/// its defaults or fail to load.
+/// and matched, one root element, nothing but whitespace or comments around it; every
+/// attribute quoted and named once; only the five predefined entities and character
+/// references). The raw editor writes what the user typed, and a broken settings file makes
+/// the mod fall back to its defaults or fail to load.
 fn ensure_well_formed(xml: &str) -> Result<(), String> {
     use quick_xml::events::Event;
     let refuse = |why: String| {
@@ -4965,7 +4966,13 @@ fn ensure_well_formed(xml: &str) -> Result<(), String> {
     let mut depth = 0usize;
     let mut roots = 0usize;
     loop {
-        match reader.read_event() {
+        let event = reader.read_event();
+        if let Ok(Event::Start(e) | Event::Empty(e)) = &event {
+            if let Err(why) = xmltext::check_attributes(e) {
+                return refuse(format!("before byte {}: {why}", reader.buffer_position()));
+            }
+        }
+        match event {
             Err(e) => {
                 return refuse(format!("at byte {}: {e}", reader.error_position()));
             }
@@ -4983,6 +4990,11 @@ fn ensure_well_formed(xml: &str) -> Result<(), String> {
             }
             Ok(Event::GeneralRef(_) | Event::CData(_)) if depth == 0 => {
                 return refuse("text outside the root element".into());
+            }
+            Ok(Event::GeneralRef(r)) => {
+                if let Err(why) = xmltext::check_reference(&String::from_utf8_lossy(&r)) {
+                    return refuse(format!("before byte {}: {why}", reader.buffer_position()));
+                }
             }
             Ok(_) => {}
         }
@@ -5453,6 +5465,7 @@ mod tests {
             r#"<?xml version="1.0" encoding="utf-8"?><settings a="1"><x>2</x></settings>"#,
             "<!-- c --><settings/>\n",
             "  <settings>\n  <x>a &amp; b</x>\n</settings>  ",
+            r#"<settings><a v='say "hi"' w="&lt;&#10;&#x9;&quot;"/>&apos;&#233;</settings>"#,
         ] {
             assert!(super::ensure_well_formed(good).is_ok(), "{good}");
         }
@@ -5464,6 +5477,16 @@ mod tests {
             "just text",
             "<settings>a & b</settings>",
             "<settings/>trailing",
+            // #354: unquoted or duplicated attributes, and entities nothing declares.
+            "<settings><a value=5/></settings>",
+            r#"<settings><a value="5" value="6"/></settings>"#,
+            r#"<settings value="5" value="6"></settings>"#,
+            "<settings>&missing;</settings>",
+            r#"<settings><a v="&missing;"/></settings>"#,
+            r#"<settings><a v="a & b"/></settings>"#,
+            r#"<settings><a v="<"/></settings>"#,
+            "<settings>&#1;</settings>",
+            r#"<settings><a v="&#0;"/></settings>"#,
         ] {
             let e = super::ensure_well_formed(bad).unwrap_err();
             assert!(e.contains("didn't save it"), "{bad}: {e}");

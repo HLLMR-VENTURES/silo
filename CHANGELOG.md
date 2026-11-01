@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Saving a mod's settings or a game settings form changes only the values you edited. Before,
+  every other value in the file was rewritten too, so a line break or tab stored in one turned
+  into a space, and a value Silo couldn't read was saved empty. (#354)
+- Typing a value for a game setting stored as an empty tag (`<name/>`) now saves it. Before,
+  the editor said "Saved" and nothing changed; a setting that isn't in the file now shows an
+  error instead. (#354)
+- A savegame whose `careerSavegame.xml` is cut off or damaged now shows as unreadable in
+  **Mod sets → Savegames**, and **Use this save's mods** is off for it. Before, it listed only the
+  mods read before the damage (or none), and using it switched to that partial set. (#354)
+- The raw XML editor no longer saves an attribute without quotes (`value=5`), the same attribute
+  twice, or an entity like `&nbsp;` that the game can't read. (#354)
+- Text written as CDATA in a savegame, game settings file or store item is now read instead of
+  being skipped. (#354)
 - A mod set switch that fails (an unplugged library drive, say) no longer leaves the Library,
   **Play** and the multiplayer share list showing the new set while the game loads the old one.
   Silo reads your mods folder again before it lets go, and when nothing changed it doesn't save a
