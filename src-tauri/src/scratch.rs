@@ -86,9 +86,10 @@ pub(crate) struct Made {
     /// The bytes' SHA-256 (an update backup's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
-    /// A download's part: the last lengths it was written to, with the SHA-256 of its bytes at
-    /// each (`PartFile`). A part holds only what Silo wrote while its length is one of these
-    /// and its bytes hash to it ([`Made::holds_written`]).
+    /// A download's part: its length and SHA-256 before the chunk being written, then after it
+    /// (`PartFile`; only the first, before any chunk). A part holds only what Silo wrote while
+    /// its length is one of these and its bytes hash to it, or its length lies between the two
+    /// and its first bytes hash to the one before ([`Made::holds_written`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub written: Vec<Written>,
 }
@@ -156,18 +157,35 @@ impl Made {
     }
 
     /// The file at `p` is this one (the same file, read without following a link) and holds
-    /// exactly what Silo wrote into it: its length is one recorded in `written` and its bytes
-    /// hash to that length's SHA-256, unchanged while they were read. Never without `written`.
+    /// only what Silo wrote into it, unchanged while it was read. Never without `written`.
+    /// Either:
+    /// - its length is one recorded in `written`, and all its bytes hash to that length's
+    ///   SHA-256; or
+    /// - its length lies strictly between the length recorded before a chunk and the one
+    ///   after it (a crash or a full disk cut that chunk's write off), and its first `before`
+    ///   bytes hash to the SHA-256 recorded before the chunk. The bytes past those are taken to
+    ///   be the start of that chunk: a write that never finished can't be hashed, and only
+    ///   Silo writes into its part (#400).
     pub(crate) fn holds_written(&self, p: &Path) -> bool {
         let Some(before) = Made::of(p).filter(|now| self.same_file(now)) else {
             return false;
         };
-        let Some(w) = self.written.iter().find(|w| w.len == before.size) else {
+        let len = before.size;
+        let (count, want) = if let Some(w) = self.written.iter().find(|w| w.len == len) {
+            (u64::MAX, &w.sha256)
+        } else if let Some(w) = self
+            .written
+            .windows(2)
+            .find(|w| w[0].len < len && len < w[1].len)
+            .map(|w| &w[0])
+        {
+            (w.len, &w.sha256)
+        } else {
             return false;
         };
-        let sha = crate::provenance::sha256_file(p);
+        let sha = sha256_prefix(p, count);
         let after = Made::of(p);
-        sha.is_ok_and(|sha| sha == w.sha256) && after.is_some_and(|a| before.unchanged(&a))
+        sha.is_some_and(|sha| &sha == want) && after.is_some_and(|a| before.unchanged(&a))
     }
 
     /// The file at `p` is this one, unchanged, holding the recorded bytes (when a SHA-256 was
@@ -179,6 +197,26 @@ impl Made {
         Made::with_sha256(p)
             .is_some_and(|now| self.unchanged(&now) && now.sha256.as_ref() == Some(want))
     }
+}
+
+/// The SHA-256 of `p`'s first `n` bytes (all of them for `u64::MAX`); `None` when it can't be
+/// read or holds fewer.
+fn sha256_prefix(p: &Path, n: u64) -> Option<String> {
+    use sha2::Digest;
+    use std::io::Read;
+    let mut r = std::fs::File::open(p).ok()?.take(n);
+    let mut h = sha2::Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut got = 0u64;
+    loop {
+        let k = r.read(&mut buf).ok()?;
+        if k == 0 {
+            break;
+        }
+        h.update(&buf[..k]);
+        got += k as u64;
+    }
+    (n == u64::MAX || got == n).then(|| format!("{:x}", h.finalize()))
 }
 
 /// Open `p` for its attributes only, never following a link at it (a link opens as itself).
@@ -628,13 +666,14 @@ pub(crate) enum Swept {
 ///   back under its name (`from`) when that's free; a folder (perhaps half-deleted) is kept.
 ///
 /// - `Part`: the very file the claim made (`made`: the same file number and birth time, read
-///   without following a link), holding exactly what the download wrote (its length is one it
-///   recorded writing to, and its bytes hash to that: `Made::holds_written`), that no download
-///   running now claims (`crate::remove_unclaimed_part` holds the claims across the check and
-///   the removal). A recorded part nothing claims is a download that stopped (a crash, or a
+///   without following a link), holding only what the download wrote (`Made::holds_written`:
+///   its length is one it recorded and its bytes hash to that, or a chunk's write was cut off
+///   and its bytes before that chunk hash to what was recorded), that no download running now
+///   claims (`crate::remove_unclaimed_part` holds the claims across the check and the
+///   removal). A recorded part nothing claims is a download that stopped (a crash, or a
 ///   removal that failed). Any other file there, or one with bytes Silo can't prove it wrote
-///   (changed since, or a write a crash cut off), is left in place and the record dropped
-///   (`Disowned`).
+///   (changed since, or longer than the chunk being written), is left in place and the record
+///   dropped (`Disowned`).
 ///
 /// Only the entries `which` picks are looked at (a relink pass sweeps relink temps; a move
 /// sweeps those and its own folders' move scratch, never an older move's). Update backups

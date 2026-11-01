@@ -1792,8 +1792,9 @@ pub struct PartClaim {
     db: Option<PathBuf>,
     /// The file [`PartClaim::create`] made.
     made: std::sync::OnceLock<scratch::Made>,
-    /// What its [`PartFile`] has written so far.
-    written: std::sync::Mutex<Option<scratch::Written>>,
+    /// What its [`PartFile`] last recorded it may hold (as in the journal: before the chunk
+    /// being written, then after it).
+    written: std::sync::Mutex<Vec<scratch::Written>>,
 }
 
 impl PartClaim {
@@ -1835,7 +1836,7 @@ impl PartClaim {
             return Ok(out);
         };
         let _ = self.made.set(made);
-        *self.written.lock().unwrap_or_else(|e| e.into_inner()) = Some(empty.clone());
+        *self.written.lock().unwrap_or_else(|e| e.into_inner()) = vec![empty.clone()];
         if let Some(db) = &self.db {
             match db::open(db) {
                 Ok(conn) => out.conn = Some(conn),
@@ -1855,13 +1856,13 @@ impl PartClaim {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        match (self.made.get(), written) {
-            (Some(m), Some(w)) => scratch::Made {
-                written: vec![w],
+        match self.made.get() {
+            Some(m) => scratch::Made {
+                written,
                 ..m.clone()
             }
             .holds_written(&self.path),
-            _ => false,
+            None => false,
         }
     }
 
@@ -1886,8 +1887,9 @@ const PART_CHUNK: usize = 8;
 /// [`PART_CHUNK`]. Before each chunk goes in, the length and SHA-256 the part will have after it
 /// are recorded in the journal beside the ones it has now (`scratch::Written`), and a record
 /// that fails stops the download before the chunk is written. So a part a crash leaves holds
-/// only what Silo wrote exactly when its length is one of those two and its bytes hash to it
-/// (a crash inside a write leaves neither: it's left in place).
+/// only what Silo wrote when its length is one of those two and its bytes hash to it, or (a
+/// crash inside the write) its length lies between them and its first bytes hash to the one
+/// before (`scratch::Made::holds_written`). Anything else is left in place.
 pub struct PartFile<'c> {
     claim: &'c PartClaim,
     file: std::fs::File,
@@ -1929,12 +1931,13 @@ impl PartFile<'_> {
             len: self.done.len + self.buf.len() as u64,
             sha256: format!("{:x}", next.clone().finalize()),
         };
-        self.note(&[self.done.clone(), after.clone()])?;
+        let written = vec![self.done.clone(), after.clone()];
+        self.note(&written)?;
+        *self.claim.written.lock().unwrap_or_else(|e| e.into_inner()) = written;
         self.file.write_all(&self.buf)?;
         self.buf.clear();
         self.hasher = next;
-        self.done = after.clone();
-        *self.claim.written.lock().unwrap_or_else(|e| e.into_inner()) = Some(after);
+        self.done = after;
         Ok(())
     }
 
@@ -2134,7 +2137,7 @@ pub(crate) fn claim_part_at(
         key,
         db: db.map(std::path::Path::to_path_buf),
         made: std::sync::OnceLock::new(),
-        written: std::sync::Mutex::new(None),
+        written: std::sync::Mutex::new(Vec::new()),
     };
     if let Some(db) = db {
         let journal_err = |e: String| {
@@ -10001,6 +10004,25 @@ mod tests {
         assert_eq!(std::fs::read(&taken).unwrap(), b"mine");
         drop(claim);
         assert!(!part.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_claim_removes_its_part_cut_off_inside_a_write() {
+        // A write that stopped part-way (a full disk): the part's length lies inside the last
+        // chunk and its proven prefix is intact, so dropping the claim still removes it.
+        let base = temp_base("claim_mid_chunk");
+        let dest = base.join("mods").join("FS25_Cut.zip");
+        let claim = super::claim_part(&dest, None).unwrap();
+        std::io::Write::write_all(&mut claim.create().unwrap(), b"0123456789abcdef").unwrap();
+        let at = claim.path().to_path_buf();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&at)
+            .and_then(|f| f.set_len(12))
+            .unwrap();
+        drop(claim);
+        assert!(!at.exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 

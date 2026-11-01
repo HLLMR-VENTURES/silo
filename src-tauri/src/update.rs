@@ -1239,6 +1239,83 @@ mod tests {
         let _ = std::fs::remove_dir_all(&mods);
     }
 
+    /// Cut `part` back to `len` bytes, as a crash inside the write of its last chunk leaves it
+    /// (the first part of that chunk's bytes reached the disk, the rest didn't).
+    fn cut_to(part: &Path, len: u64) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(part)
+            .and_then(|f| f.set_len(len))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_part_a_crash_cut_off_inside_a_write_is_swept() {
+        // The journal holds the part's length and SHA-256 before its last chunk (8 bytes) and
+        // after it (16). Cut off at 12: the first 8 bytes are proven, the other 4 can only be
+        // that chunk's partial write.
+        let mods = fresh("recover_part_mid_chunk");
+        let layout = Layout::default_for(&mods);
+        let dest = mods.join("FS25_A.zip");
+        let db = mods.join("silo.db");
+        let part = crashed_download(&dest, &db, b"0123456789abcdef");
+        cut_to(&part, 12);
+        let conn = crate::db::open(&db).unwrap();
+        let journal = scratch::DbJournal(&conn);
+
+        settle_with(&mods, &layout, &journal);
+
+        assert!(!part.exists(), "a crash inside a write is swept");
+        assert!(journal.entries().is_empty());
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_part_cut_off_inside_a_write_is_kept_unless_proven() {
+        // Kept, logged and its record dropped: the proven prefix was changed; the file is
+        // longer than the last chunk's end; or it's another file at that name with the same
+        // first bytes.
+        for case in ["prefix changed", "longer than after", "another file"] {
+            let mods = fresh(&format!("recover_part_mid_{}", case.replace(' ', "_")));
+            let layout = Layout::default_for(&mods);
+            let dest = mods.join("FS25_A.zip");
+            let db = mods.join("silo.db");
+            let part = crashed_download(&dest, &db, b"0123456789abcdef");
+            match case {
+                "prefix changed" => {
+                    cut_to(&part, 12);
+                    let mut f = std::fs::OpenOptions::new().write(true).open(&part).unwrap();
+                    std::io::Write::write_all(&mut f, b"X").unwrap();
+                }
+                "longer than after" => {
+                    let mut f = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&part)
+                        .unwrap();
+                    std::io::Write::write_all(&mut f, b"tail").unwrap();
+                }
+                _ => {
+                    std::fs::rename(&part, mods.join("aside")).unwrap();
+                    std::fs::write(&part, b"0123456789ab").unwrap();
+                }
+            }
+            let want = std::fs::read(&part).unwrap();
+            let conn = crate::db::open(&db).unwrap();
+            let journal = scratch::DbJournal(&conn);
+
+            settle_with(&mods, &layout, &journal);
+
+            assert_eq!(std::fs::read(&part).unwrap(), want, "{case}");
+            assert!(
+                journal.entries().is_empty(),
+                "{case}: the record proves nothing now"
+            );
+            drop(conn);
+            let _ = std::fs::remove_dir_all(&mods);
+        }
+    }
+
     #[test]
     fn a_crashed_part_holding_bytes_silo_didnt_write_is_left() {
         // #400: the part is Silo's file, but its bytes must be what Silo wrote. Changed in
