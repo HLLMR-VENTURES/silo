@@ -4368,6 +4368,10 @@ fn target_problems(
 struct Space {
     /// The old and new archive share a drive.
     archive_same_drive: bool,
+    /// The old and new archive are known to be one volume, so each mod is renamed, not copied
+    /// (`relocate::RunCtx::same_volume`): the archive needs no extra room. A rename that falls
+    /// back to a copy checks its own room first.
+    renames: bool,
     /// The whole archive.
     bytes: u64,
     /// The largest single mod.
@@ -4421,9 +4425,10 @@ fn missing_mods_problem(n: usize) -> String {
 /// Pure: everything that blocks a move, in the order the dialog lists them: problems with the
 /// folder itself, mods the library doesn't know (they'd be left behind), library mods missing
 /// from the archive (each would stop the move), names already at the destination, then free
-/// space. On one drive each mod's old copy is deleted before the next is copied — and an active
-/// mod's hardlink is re-linked to the new copy first, so the delete really frees it — so only the
-/// largest mod needs room at a time; across drives the whole archive must fit.
+/// space. Mods renamed on one volume need no room at all. Otherwise, on one drive each mod's old
+/// copy is deleted before the next is copied — and an active mod's hardlink is re-linked to the
+/// new copy first, so the delete really frees it — so only the largest mod needs room at a time;
+/// across drives the whole archive must fit.
 ///
 /// Where a new link into the new archive might be a copy (see `relocate::relink_cost`): an
 /// active mod's hardlink is kept as its standalone copy, so on one drive its old bytes stay used
@@ -4443,6 +4448,7 @@ fn move_problems(f: MoveFacts) -> Vec<String> {
     // kept mod plus the largest other one in flight; a kept mod's own copy is already in that
     // sum.
     let mut needed = match (s.archive_same_drive, s.relink_kept) {
+        _ if s.renames => 0,
         (false, _) => s.bytes,
         (true, 0) => s.largest,
         (true, kept) => kept + s.largest_unkept,
@@ -4497,6 +4503,9 @@ fn check_move(
     // For space, an unknown mount is another drive: the whole archive must fit.
     let old_mount = organize::mount_of(&layout.archive);
     let archive_same_drive = organize::known_same_mount(&old_mount, &new_mount);
+    // The move's own rename decision (`with_move_ctx`): a rename keeps hardlinks valid and
+    // takes no room.
+    let renames = organize::volume_relation(&layout.archive, new) == Some(true);
     let mods_mount = organize::mount_of(&layout.mods);
     // Re-links only cost space where a new link might be a copy. Asking runs the link probes
     // in the new folder, so only once it is cleared (`target` empty) and only when an active
@@ -4509,7 +4518,8 @@ fn check_move(
             archive: new.to_path_buf(),
         };
         if cost.kept + cost.copied_zips > 0 && organize::LinkPolicy::new(&to).can_only_copy() {
-            relink_kept = cost.kept;
+            // A renamed mod's hardlink stays its link (the same file): nothing is kept apart.
+            relink_kept = if renames { 0 } else { cost.kept };
             relink_copied = cost.copied_zips;
             relink_largest_copied = cost.largest_copied_zip;
         }
@@ -4535,6 +4545,7 @@ fn check_move(
         collisions: relocate::collisions(new, &rows),
         space: Space {
             archive_same_drive,
+            renames,
             bytes,
             largest: sizes.iter().copied().max().unwrap_or(0),
             free,
@@ -4628,6 +4639,7 @@ fn with_move_ctx(
             request: relocate::requests(),
             progress: &mut progress,
             free_space: &|p| organize::mount_of(p).map(|(_, free)| free),
+            same_volume: &organize::volume_relation,
         };
         let out = f(&mut ctx, &layout);
         let _ = compute_mods_root_status(&conn);
@@ -8836,6 +8848,7 @@ mod tests {
     fn space(archive_same_drive: bool, free: Option<u64>) -> Space {
         Space {
             archive_same_drive,
+            renames: false,
             bytes: 10 << 30,
             largest: 2 << 30,
             free,
@@ -8900,6 +8913,24 @@ mod tests {
         // Unknown free space never blocks.
         assert!(move_problems(facts(space(false, None))).is_empty());
         assert!(move_problems(facts(space(true, None))).is_empty());
+    }
+
+    /// Renamed on one volume (#401): the archive needs no room, and kept hardlinks cost
+    /// nothing (the renamed file is still theirs). A copy into the mods folder still counts.
+    #[test]
+    fn move_problems_need_no_archive_room_when_mods_are_renamed() {
+        let renamed = |relink_kept, relink_copied, free| Space {
+            renames: true,
+            relink_kept,
+            relink_copied,
+            ..space(true, free)
+        };
+        assert!(move_problems(facts(renamed(5 << 30, 0, Some(0)))).is_empty());
+        let p = move_problems(facts(renamed(0, 3 << 30, Some(1 << 30))));
+        assert!(
+            p[0].starts_with("Not enough free space: needs 4.3 GB"),
+            "{p:?}"
+        );
     }
 
     /// The mods folder rejects hardlinks (a cloud-synced folder, #135) or the new archive's

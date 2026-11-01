@@ -1,9 +1,11 @@
-//! Moving a mods folder's archive to a new location (#166). Each mod is copied to a temp name,
-//! verified, placed (never replacing anything), recorded in the marker, its link re-pointed, and
-//! only then its old copy deleted — so every mod boundary is a safe point (the mods folder is
-//! complete and valid). Progress survives restarts through a marker in `app_setting`; a move can
-//! pause (FS25 may be launched while paused), resume, or cancel — which moves back exactly the
-//! mods Silo placed (`moved`), never anything else.
+//! Moving a mods folder's archive to a new location (#166). Each mod is recorded in the marker,
+//! then copied to a temp name, verified, placed (never replacing anything), its link re-pointed,
+//! and only then its old copy deleted. When both archives are on one drive each mod is renamed
+//! into place instead (never over anything) and its link re-pointed at once (#401): the same
+//! file, so there's nothing to verify or delete. Either way every mod boundary is a safe point
+//! (the mods folder is complete and valid). Progress survives restarts through a marker in
+//! `app_setting`; a move can pause (FS25 may be launched while paused), resume, or cancel —
+//! which moves back exactly the mods Silo placed (`moved`), never anything else.
 
 use crate::db::{self, OrganizedRow};
 use crate::organize::{self, Layout, LinkPolicy};
@@ -452,6 +454,87 @@ fn copy_to_temp_and_place(
     place(tmp, dst, kind).map_err(StepErr::Failed)
 }
 
+/// How a mod got to its new place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placed {
+    /// Renamed on one drive: the very same file or folder, so nothing is left to verify or delete.
+    Renamed,
+    /// Copied and verified: the original is still there, deleted once the link moves.
+    Copied,
+}
+
+/// Put `src` at `dst`, never over anything. Where both archives are on one drive
+/// (`Env::same_volume`) it's renamed: no copy, no extra space, and a mods-folder hardlink to it
+/// stays valid (the same file). Otherwise, or when the rename fails for any reason but "something
+/// is already there" (another drive after all, a file in use), it's copied and verified
+/// (`copy_verify_place`), as across drives.
+fn rename_or_copy(
+    env: &Env,
+    src: &Path,
+    dst: &Path,
+    kind: &str,
+    abort: &dyn Fn() -> bool,
+) -> Result<Placed, StepErr> {
+    if env.same_volume {
+        if let Some(p) = dst.parent() {
+            std::fs::create_dir_all(p).map_err(|e| StepErr::Failed(format!("move: {e}")))?;
+        }
+        match (env.rename)(src, dst) {
+            Ok(()) => {
+                crate::fslog::moved("rename-moved", src, dst);
+                return Ok(Placed::Renamed);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(occupied(dst)),
+            Err(e) => log::info!(
+                "couldn't rename {} to {} ({e}), so Silo copies it instead",
+                src.display(),
+                dst.display()
+            ),
+        }
+    }
+    copy_verify_place(env, src, dst, kind, abort).map(|()| Placed::Copied)
+}
+
+/// A mods-folder entry as `repoint` could change it: there or not, and where it links to.
+fn entry_state(link: &Path) -> Option<Option<PathBuf>> {
+    link.symlink_metadata()
+        .ok()
+        .map(|_| std::fs::read_link(link).ok())
+}
+
+/// Right after `src` was renamed to `dst`: re-point the mod's mods-folder entry at once (no
+/// pause in between, so a boundary never leaves a link to the old place). If that fails while
+/// the entry is still as it was, the mod is renamed back, so nothing changed (`Err(_, true)`);
+/// otherwise it stays at `dst` and a retry re-points it again (`Err(_, false)`). Then the
+/// rename is flushed to disk (best effort: it's already complete on a journaling drive).
+fn relink_renamed(
+    env: &Env,
+    row: &OrganizedRow,
+    src: &Path,
+    dst: &Path,
+    root: &Path,
+    policy: &mut LinkPolicy,
+) -> Result<(), (StepErr, bool)> {
+    let link = env.mods.join(&row.file_name);
+    let before = entry_state(&link);
+    if let Err(e) = repoint(env, row, src, dst, policy) {
+        let back = entry_state(&link) == before && (env.rename)(dst, src).is_ok();
+        if back {
+            crate::fslog::moved("rename-back", dst, src);
+        }
+        return Err((e, back));
+    }
+    let synced = organize::sync_placement(dst, Some(root))
+        .and_then(|()| src.parent().map_or(Ok(()), organize::sync_dir));
+    if let Err(e) = synced {
+        log::warn!(
+            "couldn't flush the rename of {} to disk: {e}",
+            dst.display()
+        );
+    }
+    Ok(())
+}
+
 /// Delete a moved mod's old copy `src`, now that `replacement` holds it: rename it aside to a
 /// new name of its own (recorded in the scratch journal first, never over anything), so the
 /// mod's name is gone at once; check `replacement` is still in place against it; only then
@@ -777,6 +860,11 @@ struct Env<'a> {
     mods: &'a Path,
     mods_key: &'a str,
     free_space: &'a dyn Fn(&Path) -> Option<u64>,
+    /// Both archives are known to be on one drive (`RunCtx::same_volume`): mods are renamed,
+    /// not copied.
+    same_volume: bool,
+    /// The no-replace rename (`paths::rename_no_replace`; tests inject failures).
+    rename: fn(&Path, &Path) -> std::io::Result<()>,
 }
 
 impl Env<'_> {
@@ -886,10 +974,10 @@ fn unresolved_old(env: &Env, a: &Path, b: &Path) -> Result<(), StepErr> {
     }
 }
 
-/// One mod, `from` → `to`. Idempotent. The mod is recorded in `moved` before its copy starts
-/// (and un-recorded if the copy isn't placed), so a destination counts as Silo's only when it is
-/// recorded — and even then it must verify against the original. Anything else at the
-/// destination is refused and left untouched.
+/// One mod, `from` → `to`. Idempotent. The mod is recorded in `moved` before it's renamed or
+/// its copy starts (and un-recorded if it isn't placed), so a destination counts as Silo's only
+/// when it is recorded — and even then, next to an original, it must verify against it. Anything
+/// else at the destination is refused and left untouched.
 fn forward_one(
     env: &Env,
     row: &OrganizedRow,
@@ -940,9 +1028,23 @@ fn forward_one(
                 }
             }
             env.record(marker, tech)?;
-            if let Err(e) = copy_verify_place(env, &src, &dst, &row.kind, abort) {
-                env.unrecord(marker, tech)?;
-                return Err(e);
+            match rename_or_copy(env, &src, &dst, &row.kind, abort) {
+                Ok(Placed::Copied) => {}
+                Ok(Placed::Renamed) => {
+                    return match relink_renamed(env, row, &src, &dst, &marker.to, policy) {
+                        Ok(()) => Ok(Step::Moved),
+                        Err((e, put_back)) => {
+                            if put_back {
+                                env.unrecord(marker, tech)?;
+                            }
+                            Err(e)
+                        }
+                    };
+                }
+                Err(e) => {
+                    env.unrecord(marker, tech)?;
+                    return Err(e);
+                }
             }
         }
     }
@@ -993,7 +1095,15 @@ fn back_one(
                 return Err(occupied(&home));
             }
         }
-        (true, false) => copy_verify_place(env, &src, &home, &row.kind, abort)?,
+        (true, false) => {
+            if rename_or_copy(env, &src, &home, &row.kind, abort)? == Placed::Renamed {
+                // Renamed back: still recorded until its link is home too (a put-back leaves it
+                // in `to`, recorded, for the retry).
+                relink_renamed(env, row, &src, &home, &marker.from, policy).map_err(|(e, _)| e)?;
+                env.unrecord(marker, &row.tech_name)?;
+                return Ok(Step::Moved);
+            }
+        }
     }
     if abort() {
         return Err(StepErr::Interrupted);
@@ -1499,6 +1609,9 @@ pub struct RunCtx<'a> {
     /// Free bytes on the drive holding a folder (`organize::mount_of` in production), asked
     /// before each copy; `None` (unknown) never blocks.
     pub free_space: &'a dyn Fn(&Path) -> Option<u64>,
+    /// Whether two folders are on one drive (`organize::volume_relation` in production):
+    /// `Some(true)` renames each mod, anything else copies it.
+    pub same_volume: &'a dyn Fn(&Path, &Path) -> Option<bool>,
 }
 
 /// Throttled "has FS25 started?" that stays true once seen, so the boundary after an aborted
@@ -1583,6 +1696,8 @@ pub fn start(ctx: &mut RunCtx, from: PathBuf, to: PathBuf) -> Result<Option<Move
         mods: ctx.mods,
         mods_key: ctx.mods_key,
         free_space: ctx.free_space,
+        same_volume: false,
+        rename: crate::paths::rename_no_replace,
     };
     if let Some(reason) = settle_updates(&env, &marker, Direction::Forward) {
         return Err(reason);
@@ -1628,6 +1743,9 @@ fn run_locked(
         mods: ctx.mods,
         mods_key: ctx.mods_key,
         free_space: ctx.free_space,
+        // Asked once: the same answer both ways, so a cancel renames back too. Unknown copies.
+        same_volume: (ctx.same_volume)(&marker.from, &marker.to) == Some(true),
+        rename: crate::paths::rename_no_replace,
     };
     // Not reset here: a pause/cancel sent after the caller took its lock (before this point)
     // must be honored at the first boundary. The command layer clears stale requests when it
@@ -1973,6 +2091,8 @@ mod tests {
             mods: &f.mods,
             mods_key: &f.key,
             free_space: &|_| None,
+            same_volume: false,
+            rename: crate::paths::rename_no_replace,
         }
     }
 
@@ -2051,6 +2171,8 @@ mod tests {
             request,
             progress,
             free_space: &|_| None,
+            // The copy path unless a test says otherwise (the fixture is really on one drive).
+            same_volume: &|_, _| Some(false),
         }
     }
 
@@ -4181,6 +4303,325 @@ mod tests {
             .collect();
         found.sort();
         assert_eq!(found, vec!["FS25_X.zip", "FS25_Y"]);
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    // Same-drive moves rename each mod (#401).
+
+    /// `p`'s identity witness: a hardlink outside the archives (no handle kept open, so a
+    /// folder holding it can still be renamed on Windows). A copy never shares it.
+    fn witness(f: &Fx, p: &Path, name: &str) -> PathBuf {
+        let w = f.base.join(format!("witness-{name}"));
+        std::fs::hard_link(p, &w).unwrap();
+        w
+    }
+
+    fn add_dir(f: &Fx, tech: &str, active: bool) -> OrganizedRow {
+        let src = f.old.join("Tools").join(tech);
+        std::fs::create_dir_all(src.join("textures")).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::write(src.join("textures").join("a.dds"), tech.as_bytes()).unwrap();
+        let r = row(tech, tech, "dir", active);
+        db::upsert_organized(&f.conn, &f.key, &r).unwrap();
+        r
+    }
+
+    fn one_drive(_: &Path, _: &Path) -> Option<bool> {
+        Some(true)
+    }
+
+    /// Drive an entry point with both archives on one drive and no free space at all: a copy
+    /// would pause for room, a rename needs none.
+    fn run_on_one_drive(
+        f: &Fx,
+        op: Op,
+        request: &AtomicU8,
+        on_progress: &mut dyn FnMut(&Progress),
+    ) -> Result<Option<MoveMarker>, String> {
+        let _turn = RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ctx = RunCtx {
+            same_volume: &one_drive,
+            free_space: &|_| Some(0),
+            ..ctx_for(f, &|| false, request, on_progress)
+        };
+        drive(&mut ctx, f, op)
+    }
+
+    fn one_drive_run(f: &Fx, op: Op) -> Result<Option<MoveMarker>, String> {
+        run_on_one_drive(f, op, &AtomicU8::new(0), &mut |_| {})
+    }
+
+    fn no_scratch_left(f: &Fx) {
+        assert!(env(f).journal().entries().is_empty());
+        for dir in [f.old.join("Tools"), f.new.join("Tools"), f.mods.clone()] {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                assert!(!is_move_scratch(&n), "{n} left in {}", dir.display());
+            }
+        }
+    }
+
+    #[test]
+    fn a_move_on_one_drive_renames_each_mod() {
+        let f = fx("rename");
+        add_zip(&f, "FS25_A", false);
+        add_dir(&f, "FS25_D", false);
+        let wa = witness(&f, &zip_at(&f.old, "FS25_A"), "a");
+        let wd = witness(&f, &f.old.join("Tools/FS25_D/modDesc.xml"), "d");
+        assert!(one_drive_run(&f, Op::Start).unwrap().is_none());
+        // The very same files, with no room needed and nothing left to delete.
+        assert!(same_file(&wa, &zip_at(&f.new, "FS25_A")));
+        assert!(same_file(&wd, &f.new.join("Tools/FS25_D/modDesc.xml")));
+        assert_eq!(
+            std::fs::read(f.new.join("Tools/FS25_D/textures/a.dds")).unwrap(),
+            b"FS25_D"
+        );
+        assert!(!f.old.exists(), "the emptied default archive is removed");
+        assert_eq!(
+            setting(&f).as_deref(),
+            Some(f.new.to_string_lossy().as_ref())
+        );
+        assert!(load_marker(&f.conn, &f.key).is_none());
+        no_scratch_left(&f);
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_hardlinked_active_mod_stays_linked_through_a_rename() {
+        let f = fx("renamelink");
+        let flat = add_hardlinked(&f, "FS25_A");
+        let before = flat.symlink_metadata().unwrap().modified().unwrap();
+        assert!(one_drive_run(&f, Op::Start).unwrap().is_none());
+        // The entry was never touched: still a hardlink of the (renamed) archived copy.
+        assert!(same_file(&flat, &zip_at(&f.new, "FS25_A")));
+        assert!(!flat.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(flat.symlink_metadata().unwrap().modified().unwrap(), before);
+        assert_eq!(std::fs::read(&flat).unwrap(), b"PK\x03\x04 FS25_A");
+        no_scratch_left(&f);
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_linked_folder_mod_is_relinked_right_after_its_rename() {
+        let f = fx("renamedir");
+        add_dir(&f, "FS25_D", true);
+        let (src, dst) = (f.old.join("Tools/FS25_D"), f.new.join("Tools/FS25_D"));
+        let link = f.mods.join("FS25_D");
+        // A symlink (a junction on Windows): it names the old place, so it must move.
+        organize::link_dir_native(&src, &link).unwrap();
+        let w = witness(&f, &src.join("modDesc.xml"), "d");
+        assert!(one_drive_run(&f, Op::Start).unwrap().is_none());
+        assert!(same_file(&w, &dst.join("modDesc.xml")));
+        assert_eq!(
+            std::fs::canonicalize(&link).unwrap(),
+            std::fs::canonicalize(&dst).unwrap()
+        );
+        assert!(link.join("textures/a.dds").is_file());
+        no_scratch_left(&f);
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// A crash right after the mod was recorded, before its rename: Resume renames it.
+    #[test]
+    fn a_crash_before_the_rename_is_finished_on_resume() {
+        let f = fx("renamecrash1");
+        add_zip(&f, "FS25_A", false);
+        let w = witness(&f, &zip_at(&f.old, "FS25_A"), "a");
+        let mut m = marker(&f);
+        env(&f).record(&mut m, "FS25_A").unwrap();
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        assert!(one_drive_run(&f, Op::Resume).unwrap().is_none());
+        assert!(same_file(&w, &zip_at(&f.new, "FS25_A")));
+        assert!(!zip_at(&f.old, "FS25_A").exists());
+        no_scratch_left(&f);
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// Recorded and renamed, then a crash before the folder link moved.
+    fn crashed_after_rename(f: &Fx) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        add_dir(f, "FS25_D", true);
+        let (src, dst) = (f.old.join("Tools/FS25_D"), f.new.join("Tools/FS25_D"));
+        let link = f.mods.join("FS25_D");
+        organize::link_dir_native(&src, &link).unwrap();
+        let w = witness(f, &src.join("modDesc.xml"), "d");
+        let mut m = marker(f);
+        env(f).record(&mut m, "FS25_D").unwrap();
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        crate::paths::rename_no_replace(&src, &dst).unwrap();
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        (src, dst, link, w)
+    }
+
+    #[test]
+    fn a_crash_after_the_rename_relinks_on_resume() {
+        let f = fx("renamecrash2");
+        let (_, dst, link, w) = crashed_after_rename(&f);
+        assert!(one_drive_run(&f, Op::Resume).unwrap().is_none());
+        assert!(same_file(&w, &dst.join("modDesc.xml")));
+        assert_eq!(
+            std::fs::canonicalize(&link).unwrap(),
+            std::fs::canonicalize(&dst).unwrap()
+        );
+        no_scratch_left(&f);
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// The same crash, then Cancel instead: the mod is renamed home and its link follows.
+    #[test]
+    fn a_cancel_after_a_crash_mid_rename_renames_it_home() {
+        let f = fx("renamecrash3");
+        add_zip(&f, "FS25_E", false);
+        let (src, dst, link, w) = crashed_after_rename(&f);
+        assert!(one_drive_run(&f, Op::Cancel).unwrap().is_none());
+        assert!(same_file(&w, &src.join("modDesc.xml")));
+        assert!(!dst.exists());
+        assert_eq!(
+            std::fs::canonicalize(&link).unwrap(),
+            std::fs::canonicalize(&src).unwrap()
+        );
+        assert!(
+            zip_at(&f.old, "FS25_E").exists(),
+            "never moved, never touched"
+        );
+        assert!(load_marker(&f.conn, &f.key).is_none() && setting(&f).is_none());
+        no_scratch_left(&f);
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_cancel_on_one_drive_renames_everything_home() {
+        let f = fx("renamecancel");
+        let flat = add_hardlinked(&f, "FS25_A");
+        add_zip(&f, "FS25_B", false);
+        let wa = witness(&f, &zip_at(&f.old, "FS25_A"), "a");
+        let req = AtomicU8::new(0);
+        let mut prog = |p: &Progress| {
+            if !p.cancelling && p.current == "FS25_B" {
+                req.store(CANCEL, Ordering::SeqCst);
+            }
+        };
+        assert!(run_on_one_drive(&f, Op::Start, &req, &mut prog)
+            .unwrap()
+            .is_none());
+        assert!(same_file(&wa, &zip_at(&f.old, "FS25_A")));
+        assert!(same_file(&flat, &zip_at(&f.old, "FS25_A")));
+        assert!(!zip_at(&f.new, "FS25_A").exists() && zip_at(&f.old, "FS25_B").exists());
+        assert!(
+            !f.new.join("Tools").exists(),
+            "the category Silo made is removed"
+        );
+        assert!(load_marker(&f.conn, &f.key).is_none() && setting(&f).is_none());
+        no_scratch_left(&f);
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn another_drive_or_an_unknown_one_still_copies() {
+        for (tag, relation) in [("renameno", Some(false)), ("renameunknown", None)] {
+            let f = fx(tag);
+            add_zip(&f, "FS25_A", false);
+            let w = witness(&f, &zip_at(&f.old, "FS25_A"), "a");
+            let _turn = RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let req = AtomicU8::new(0);
+            let mut quiet = |_: &Progress| {};
+            let rel = move |_: &Path, _: &Path| relation;
+            let mut ctx = RunCtx {
+                same_volume: &rel,
+                ..ctx_for(&f, &|| false, &req, &mut quiet)
+            };
+            assert!(start(&mut ctx, f.old.clone(), f.new.clone())
+                .unwrap()
+                .is_none());
+            let new_a = zip_at(&f.new, "FS25_A");
+            assert_eq!(std::fs::read(&new_a).unwrap(), b"PK\x03\x04 FS25_A");
+            assert!(!same_file(&w, &new_a), "{tag}: a copy, not the same file");
+            assert!(!zip_at(&f.old, "FS25_A").exists());
+            let _ = std::fs::remove_dir_all(&f.base);
+        }
+    }
+
+    fn rename_fails(_: &Path, _: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::other("not the same device"))
+    }
+
+    fn rename_finds_it_taken(_: &Path, _: &Path) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::AlreadyExists.into())
+    }
+
+    #[test]
+    fn a_failed_rename_falls_back_to_the_copy() {
+        let f = fx("renamefail");
+        let r = add_zip(&f, "FS25_A", false);
+        let w = witness(&f, &zip_at(&f.old, "FS25_A"), "a");
+        let layout = dest(&f);
+        let mut m = marker(&f);
+        let e = Env {
+            same_volume: true,
+            rename: rename_fails,
+            ..env(&f)
+        };
+        assert_eq!(
+            forward_one(&e, &r, &mut m, &mut LinkPolicy::new(&layout), &|| false),
+            Ok(Step::Moved)
+        );
+        let new_a = zip_at(&f.new, "FS25_A");
+        assert_eq!(std::fs::read(&new_a).unwrap(), b"PK\x03\x04 FS25_A");
+        assert!(!same_file(&w, &new_a), "copied");
+        assert!(!zip_at(&f.old, "FS25_A").exists());
+        assert_eq!(m.moved, vec!["FS25_A".to_string()]);
+        no_scratch_left(&f);
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    #[test]
+    fn a_rename_that_finds_its_name_taken_is_refused_not_copied() {
+        let f = fx("renametaken");
+        let r = add_zip(&f, "FS25_A", false);
+        let layout = dest(&f);
+        let mut m = marker(&f);
+        let e = Env {
+            same_volume: true,
+            rename: rename_finds_it_taken,
+            ..env(&f)
+        };
+        let out = forward_one(&e, &r, &mut m, &mut LinkPolicy::new(&layout), &|| false);
+        assert!(
+            matches!(&out, Err(StepErr::Failed(s)) if s.contains("won't replace it")),
+            "{out:?}"
+        );
+        assert!(zip_at(&f.old, "FS25_A").exists() && !zip_at(&f.new, "FS25_A").exists());
+        assert!(m.moved.is_empty());
+        assert!(load_marker(&f.conn, &f.key).unwrap().moved.is_empty());
+        no_scratch_left(&f);
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// The link can't be made after the rename (here: its folder is gone) and the entry is as
+    /// it was: the mod is renamed back and un-recorded, so the pause leaves nothing changed.
+    #[test]
+    fn a_relink_that_fails_after_a_rename_puts_the_mod_back() {
+        let f = fx("renameback");
+        let r = add_zip(&f, "FS25_A", true);
+        let w = witness(&f, &zip_at(&f.old, "FS25_A"), "a");
+        let layout = dest(&f);
+        let mut m = marker(&f);
+        let gone = f.base.join("no-such-mods-folder");
+        let e = Env {
+            mods: &gone,
+            same_volume: true,
+            ..env(&f)
+        };
+        let out = forward_one(&e, &r, &mut m, &mut LinkPolicy::new(&layout), &|| false);
+        assert!(
+            matches!(&out, Err(StepErr::Failed(s)) if s.starts_with("relink:")),
+            "{out:?}"
+        );
+        assert!(same_file(&w, &zip_at(&f.old, "FS25_A")), "renamed back");
+        assert!(!zip_at(&f.new, "FS25_A").exists());
+        assert!(m.moved.is_empty());
+        assert!(load_marker(&f.conn, &f.key).unwrap().moved.is_empty());
         let _ = std::fs::remove_dir_all(&f.base);
     }
 }

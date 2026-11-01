@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Requests work as before. One difference: when GitHub answers a star, watch, gist or
   collection upload with a temporary redirect, Silo now shows an error instead of reporting a
   change that never happened. (#315)
+- Moving your library archive to another folder on the same drive now renames each mod instead
+  of copying and checking it, so it's quick and needs no extra space. Moves to another drive
+  still copy. (#401)
 
 ### Fixed
 
