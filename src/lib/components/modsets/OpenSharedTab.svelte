@@ -33,6 +33,7 @@
     ImportPlanRow,
     ModEntry,
     MpModRef,
+    MpUnverifiable,
     MpVerifyReport,
   } from "../../types";
   import { formatCount, plural } from "../../plural";
@@ -303,14 +304,20 @@
     if (source) void open(source.kind === "link" ? { kind: "link", url: source.url } : { ...source });
   }
 
+  // Hashing the active mods can take a while, and Open / Choose stay usable meanwhile: a result
+  // for a file that was replaced by another is dropped, never shown under the new one (#355).
   async function check() {
     if (!source || source.kind !== "multiplayer" || checking) return;
+    const my = seq;
+    const s = source;
     checking = true;
     error = "";
     try {
-      mpReport = await mpVerifyPath(source.path, activeRefs);
+      const r = await mpVerifyPath(s.path, activeRefs);
+      if (my === seq && source === s) mpReport = r;
     } catch (e) {
-      error = inlineError(e, "Checking your mods");
+      const msg = inlineError(e, "Checking your mods");
+      if (my === seq && source === s) error = msg;
     } finally {
       checking = false;
     }
@@ -319,6 +326,15 @@
   onDestroy(() => unlisten?.());
 
   const label = (t: string) => titleOf.get(t) ?? t;
+  const activeKind = $derived(new Map(activeRefs.map((m) => [m.techName, m.kind])));
+
+  /** Why Silo couldn't compare a mod: which copy has no fingerprint. */
+  function unverifiableReason(u: MpUnverifiable): string {
+    if (u.yours && activeKind.get(u.techName) === "dir") return "yours is an unpacked folder; multiplayer needs the .zip";
+    if (u.yours && u.server) return "neither copy could be fingerprinted";
+    if (u.yours) return "Silo couldn't read your file";
+    return "the check file has no fingerprint for it";
+  }
 </script>
 
 <div class="open-shared">
@@ -389,6 +405,16 @@
                 <span class="mn">{label(m.techName)}</span>
                 <span class="rt">{i < r.versionMismatch.length && m.got && m.expected && m.got !== m.expected ? `yours ${m.got}, server ${m.expected}` : "a different file"}</span>
                 <Button size="sm" variant="ghost" aria-label="Find in Browse: {label(m.techName)}" onclick={() => onFindInBrowse(m.techName)}>Find in Browse</Button>
+              </div>
+            {/each}
+          {/if}
+          {#if r.unverifiable.length}
+            <h4>Silo can't check these ({r.unverifiable.length})</h4>
+            {#each r.unverifiable as u (u.techName)}
+              <div class="mod">
+                <span class="mn">{label(u.techName)}</span>
+                <span class="rt">{unverifiableReason(u)}</span>
+                <Button size="sm" variant="ghost" aria-label="Find in Browse: {label(u.techName)}" onclick={() => onFindInBrowse(u.techName)}>Find in Browse</Button>
               </div>
             {/each}
           {/if}

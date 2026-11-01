@@ -45,6 +45,7 @@ import type {
   LogStatus,
   BisectStep,
   BindingReport,
+  MpExportResult,
   MpModRef,
   MpVerifyReport,
   CollectionExportResult,
@@ -680,14 +681,17 @@ export function generateBridge(spec: BridgeSpec): Promise<string> {
 }
 
 // ── Multiplayer mod-set sync ──
-/** Prompt for a path and export a manifest of the active set. Returns count, or null if cancelled. */
-export async function mpExport(mods: MpModRef[], name = "my mod set"): Promise<number | null> {
+/**
+ * Prompt for a path and export a manifest of the active set. Returns the count and the zips Silo
+ * couldn't fingerprint, or null if cancelled.
+ */
+export async function mpExport(mods: MpModRef[], name = "my mod set"): Promise<MpExportResult | null> {
   const path = await save({
     defaultPath: `${safeFileStem(name)}.silomp`,
     filters: [{ name: "Multiplayer check file", extensions: ["silomp"] }],
   });
   if (!path) return null;
-  return await invoke<number>("mp_export", { mods, path });
+  return await invoke<MpExportResult>("mp_export", { mods, path });
 }
 /** Check the active set against a Multiplayer check file the user already picked. */
 export function mpVerifyPath(path: string, local: MpModRef[]): Promise<MpVerifyReport> {
@@ -751,9 +755,19 @@ export interface CollectionSummary {
   canDelete: boolean;
 }
 
-/** List the collections you've published to your GitHub (secret gists + silo- repos). */
-export function collectionsList(): Promise<CollectionSummary[]> {
-  return invoke<CollectionSummary[]>("collections_list");
+/** Your published collections, and a warning when only part of the list could be read. */
+export interface CollectionList {
+  items: CollectionSummary[];
+  /** Set when one of the two listings (gists or repos) failed: the list is partial. */
+  warning: string | null;
+}
+
+/**
+ * List the collections you've published to your GitHub (secret gists + silo- repos). Rejects
+ * when neither listing could be read, so a failure never looks like "nothing shared".
+ */
+export function collectionsList(): Promise<CollectionList> {
+  return invoke<CollectionList>("collections_list");
 }
 
 /** Delete a published collection. Gists delete in-app; repos must be removed on GitHub. */

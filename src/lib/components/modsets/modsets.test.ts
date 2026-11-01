@@ -18,7 +18,7 @@ vi.mock("../../api", async (importOriginal) => ({
   sharedFileKindOf: vi.fn(() => Promise.reject(new Error("no backend"))),
   collectionExport: vi.fn(),
   exportSetFile: vi.fn(() => Promise.resolve(true)),
-  mpExport: vi.fn(() => Promise.resolve(2)),
+  mpExport: vi.fn(() => Promise.resolve({ count: 2, unreadable: [] })),
   ghStatus: vi.fn(),
   openExternal: vi.fn(() => Promise.resolve()),
   copyText: vi.fn(() => Promise.resolve()),
@@ -147,6 +147,7 @@ describe("Open a shared set", () => {
       ],
       versionMismatch: [],
       hashMismatch: [],
+      unverifiable: [],
       extra: ["B"],
     });
     const p = openTab();
@@ -168,7 +169,7 @@ describe("Open a shared set", () => {
 
   it("says you match when you do", async () => {
     vi.mocked(pickSharedSetFile).mockResolvedValue("server.silomp");
-    vi.mocked(mpVerifyPath).mockResolvedValue({ ok: true, missing: [], versionMismatch: [], hashMismatch: [], extra: [] });
+    vi.mocked(mpVerifyPath).mockResolvedValue({ ok: true, missing: [], versionMismatch: [], hashMismatch: [], unverifiable: [], extra: [] });
     openTab();
     await fireEvent.click(screen.getByRole("button", { name: "Choose a file…" }));
     await fireEvent.click(await screen.findByRole("button", { name: "Check my mods" }));
@@ -182,6 +183,7 @@ describe("Open a shared set", () => {
       missing: [],
       versionMismatch: [{ techName: "A", expected: "1.1.0.0", got: "1.0.0.0" }],
       hashMismatch: [{ techName: "Dev", expected: "aaaa1111", got: "bbbb2222" }],
+      unverifiable: [],
       extra: [],
     });
     openTab();
@@ -190,6 +192,28 @@ describe("Open a shared set", () => {
     expect(await screen.findByText("yours 1.0.0.0, server 1.1.0.0")).toBeInTheDocument();
     expect(screen.getByText("a different file")).toBeInTheDocument();
     expect(screen.queryByText(/aaaa1111|bbbb2222/)).toBeNull();
+  });
+
+  it("a mod with no fingerprint on either side is 'can't check', never a match (#355)", async () => {
+    vi.mocked(pickSharedSetFile).mockResolvedValue("server.silomp");
+    vi.mocked(mpVerifyPath).mockResolvedValue({
+      ok: false,
+      missing: [],
+      versionMismatch: [],
+      hashMismatch: [],
+      unverifiable: [
+        { techName: "A", server: true, yours: false },
+        { techName: "B", server: false, yours: true },
+      ],
+      extra: [],
+    });
+    openTab();
+    await fireEvent.click(screen.getByRole("button", { name: "Choose a file…" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "Check my mods" }));
+    expect(await screen.findByText("Silo can't check these (2)")).toBeInTheDocument();
+    expect(screen.getByText("the check file has no fingerprint for it")).toBeInTheDocument();
+    expect(screen.getByText("Silo couldn't read your file")).toBeInTheDocument();
+    expect(screen.queryByText(/You match/)).toBeNull();
   });
 });
 
@@ -257,6 +281,22 @@ describe("Open a shared set: races and repeats", () => {
     await waitFor(() => expect(collectionImportPreview).toHaveBeenCalledTimes(2));
   });
 
+  it("a check that finishes after another file was chosen isn't shown under it (#355)", async () => {
+    let finish!: (r: unknown) => void;
+    vi.mocked(mpVerifyPath).mockReturnValueOnce(new Promise((res) => (finish = res)) as never);
+    vi.mocked(pickSharedSetFile).mockResolvedValueOnce("/x/serverA.silomp");
+    openTab();
+    await fireEvent.click(screen.getByRole("button", { name: "Choose a file…" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "Check my mods" }));
+    vi.mocked(pickSharedSetFile).mockResolvedValueOnce("/x/serverB.silomp");
+    await fireEvent.click(screen.getByRole("button", { name: "Choose a file…" }));
+    expect(await screen.findByText("serverB.silomp")).toBeInTheDocument();
+    finish({ ok: true, missing: [], versionMismatch: [], hashMismatch: [], unverifiable: [], extra: [] });
+    await tick();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Check my mods" })).toBeEnabled());
+    expect(screen.queryByText(/You match/)).toBeNull();
+  });
+
   it("a Multiplayer check file saved as .json still opens as one", async () => {
     vi.mocked(pickSharedSetFile).mockResolvedValue("/x/server.json");
     vi.mocked(sharedFileKindOf).mockResolvedValueOnce("multiplayer");
@@ -280,8 +320,8 @@ describe("Share dialog", () => {
       onShared: vi.fn(),
       ...extra,
     };
-    render(ShareDialog, props);
-    return props;
+    const r = render(ShareDialog, props);
+    return Object.assign(props, { rerender: r.rerender });
   }
 
   it("a link needs GitHub: Connect GitHub when it isn't connected", async () => {
@@ -295,7 +335,13 @@ describe("Share dialog", () => {
 
   it("creates an unlisted link from the set's mods Silo has files for", async () => {
     vi.mocked(ghStatus).mockResolvedValue(gh(true));
-    vi.mocked(collectionExport).mockResolvedValue({ url: "https://silo.hllmr.com/c/?g=1", count: 1, omitted: ["Dev"] });
+    vi.mocked(collectionExport).mockResolvedValue({
+      url: "https://silo.hllmr.com/c/?g=1",
+      count: 1,
+      omitted: ["Dev"],
+      unpinned: [],
+      warning: null,
+    });
     const p = share();
     await fireEvent.click(await screen.findByRole("button", { name: "Create link" }));
     await waitFor(() => expect(collectionExport).toHaveBeenCalled());
@@ -326,6 +372,49 @@ describe("Share dialog", () => {
     const [refs, name] = vi.mocked(mpExport).mock.calls[0];
     expect(refs.map((r) => r.techName)).toEqual(["A", "Dev"]);
     expect(name).toBe("Harvest 2026");
+  });
+
+  it("a check file names the mods Silo couldn't read (#355)", async () => {
+    vi.mocked(ghStatus).mockResolvedValue(gh(false));
+    vi.mocked(mpExport).mockResolvedValueOnce({ count: 2, unreadable: ["A"] });
+    share();
+    await fireEvent.click(await screen.findByLabelText(/^Multiplayer check file/));
+    await tick();
+    await fireEvent.click(screen.getByRole("button", { name: "Save file…" }));
+    expect(await screen.findByText(/Saved a multiplayer check file for 2 mods/)).toBeInTheDocument();
+    expect(screen.getByText(/Silo couldn't read 1 mod \(Title A\)/)).toBeInTheDocument();
+  });
+
+  it("a link names the mods it couldn't fingerprint, and a README problem is a warning (#355)", async () => {
+    vi.mocked(ghStatus).mockResolvedValue(gh(true));
+    vi.mocked(collectionExport).mockResolvedValue({
+      url: "https://silo.hllmr.com/c/?g=2",
+      count: 2,
+      omitted: [],
+      unpinned: ["A"],
+      warning: "The link works, but Silo couldn't add the page that describes the set on GitHub.",
+    });
+    share();
+    await fireEvent.click(await screen.findByRole("button", { name: "Create link" }));
+    expect(await screen.findByText("https://silo.hllmr.com/c/?g=2")).toBeInTheDocument();
+    expect(screen.getByText(/Silo couldn't read 1 mod \(Title A\), so the link lists it without a fingerprint/)).toBeInTheDocument();
+    expect(screen.getByText(/The link works, but Silo couldn't add the page/)).toBeInTheDocument();
+  });
+
+  it("a link still being made when the dialog closed doesn't show in the next Share (#355)", async () => {
+    vi.mocked(ghStatus).mockResolvedValue(gh(true));
+    let finish!: (r: unknown) => void;
+    vi.mocked(collectionExport).mockReturnValueOnce(new Promise((res) => (finish = res)) as never);
+    const p = share();
+    await fireEvent.click(await screen.findByRole("button", { name: "Create link" }));
+    await p.rerender({ open: false });
+    await p.rerender({ open: true, name: "Forestry", mods: ["B"] });
+    expect(await screen.findByRole("dialog", { name: "Share “Forestry”" })).toBeInTheDocument();
+    finish({ url: "https://silo.hllmr.com/c/?g=old", count: 1, omitted: [], unpinned: [], warning: null });
+    await tick();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create link" })).toBeEnabled());
+    expect(screen.queryByText("https://silo.hllmr.com/c/?g=old")).toBeNull();
+    expect(p.onShared).toHaveBeenCalled();
   });
 });
 

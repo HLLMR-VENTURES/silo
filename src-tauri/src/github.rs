@@ -1032,9 +1032,16 @@ pub struct RepoRef {
     pub html_url: String,
 }
 
+const REPO_NAME_TAKEN: &str =
+    "You already have a repository with that name. Rename the collection or delete the old repo.";
+
 /// POST /user/repos — create a public repo for a shared collection (P2). `auto_init` is
 /// off so we own the first commit and can create both files cleanly via the Contents API;
 /// needs the `public_repo` scope Silo already requests for star/watch.
+///
+/// When the name is taken by a repo Silo made earlier whose first upload failed (the user's
+/// own, public, still empty, with Silo's description), that repo is returned instead, so a
+/// retry carries on rather than failing with "name taken" (#355).
 pub fn create_public_repo(token: &str, name: &str, description: &str) -> Result<RepoRef, String> {
     let body = ureq::json!({
         "name": name,
@@ -1042,21 +1049,24 @@ pub fn create_public_repo(token: &str, name: &str, description: &str) -> Result<
         "private": false,
         "auto_init": false,
     });
-    let v = crate::net::api()
+    let v = match crate::net::api()
         .post("https://api.github.com/user/repos")
         .set("Accept", "application/vnd.github+json")
         .set("Authorization", &format!("Bearer {token}"))
         .send_json(body)
-        .map_err(|e| match e {
-            ureq::Error::Status(422, _) => {
-                "You already have a repository with that name. Rename the collection or \
-                 delete the old repo."
-                    .to_string()
-            }
-            other => gh_err(other),
-        })?
-        .into_json::<serde_json::Value>()
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(resp) => resp
+            .into_json::<serde_json::Value>()
+            .map_err(|e| e.to_string())?,
+        Err(ureq::Error::Status(422, _)) => {
+            return match unfinished_collection_repo(token, name, description) {
+                Ok(Some(repo)) => Ok(repo),
+                Ok(None) => Err(REPO_NAME_TAKEN.to_string()),
+                Err(e) => Err(format!("{REPO_NAME_TAKEN} ({e})")),
+            };
+        }
+        Err(other) => return Err(gh_err(other)),
+    };
     let full_name = v["full_name"].as_str().unwrap_or_default().to_string();
     let html_url = v["html_url"].as_str().unwrap_or_default().to_string();
     if full_name.is_empty() {
@@ -1066,6 +1076,69 @@ pub fn create_public_repo(token: &str, name: &str, description: &str) -> Result<
         full_name,
         html_url,
     })
+}
+
+/// The user's own repo `name`, if it is a collection repo Silo created whose first upload never
+/// landed: it matches by owner and name, is public and not a fork, carries Silo's description,
+/// and has no commits. `None` when it's anything else, so Silo never writes into a repo it
+/// didn't start.
+fn unfinished_collection_repo(
+    token: &str,
+    name: &str,
+    description: &str,
+) -> Result<Option<RepoRef>, String> {
+    let login = whoami(token)?;
+    let v = gh_get(api_url(&["repos", &login, name])?.as_str(), Some(token))?;
+    let Some(repo) = resumable_repo(&v, &login, name, description) else {
+        return Ok(None);
+    };
+    Ok(if repo_is_empty(token, &login, name)? {
+        Some(repo)
+    } else {
+        None
+    })
+}
+
+/// The checks on a repo's metadata for `unfinished_collection_repo` (pure, unit-tested). The
+/// description must match Silo's up to its mod count, which may differ on a retry.
+fn resumable_repo(
+    v: &serde_json::Value,
+    login: &str,
+    name: &str,
+    description: &str,
+) -> Option<RepoRef> {
+    let same = |a: Option<&str>, b: &str| a.is_some_and(|a| a.eq_ignore_ascii_case(b));
+    let stem = |d: &str| d.split(" (").next().unwrap_or(d).trim().to_string();
+    let ok = same(v["owner"]["login"].as_str(), login)
+        && same(v["name"].as_str(), name)
+        && v["private"].as_bool() == Some(false)
+        && v["fork"].as_bool() == Some(false)
+        && v["description"].as_str().map(stem) == Some(stem(description));
+    if !ok {
+        return None;
+    }
+    Some(RepoRef {
+        full_name: v["full_name"].as_str()?.to_string(),
+        html_url: v["html_url"].as_str()?.to_string(),
+    })
+}
+
+/// Whether a repo has no commits. GitHub answers the commit list of an empty repository with
+/// 409 "Git Repository is empty." (checked live 2026-10-31); a repo's `size` can't tell, as it
+/// reads 0 for some repos that hold commits.
+fn repo_is_empty(token: &str, owner: &str, repo: &str) -> Result<bool, String> {
+    let mut url = api_url(&["repos", owner, repo, "commits"])?;
+    url.set_query(Some("per_page=1"));
+    match crate::net::api()
+        .get(url.as_str())
+        .set("Accept", "application/vnd.github+json")
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+    {
+        Ok(_) => Ok(false),
+        Err(ureq::Error::Status(409, _)) => Ok(true),
+        Err(e) => Err(gh_err(e)),
+    }
 }
 
 /// PUT /repos/{owner}/{repo}/contents/{path} — create a file on the `main` branch. The
@@ -1286,6 +1359,45 @@ mod tests {
         assert!(check_repo("HLLMR", "r/collaborators/x").is_err());
         assert!(check_gist_id("aa5a315d61ae9438b18d").is_ok());
         assert!(check_gist_id("../../user/repos").is_err());
+    }
+
+    #[test]
+    fn a_retry_resumes_only_into_silos_own_unfinished_repo() {
+        let desc = "A Silo mod set for Farming Simulator 25 (3 mods)";
+        let repo = serde_json::json!({
+            "full_name": "hllmr/silo-pack",
+            "html_url": "https://github.com/hllmr/silo-pack",
+            "name": "silo-pack",
+            "owner": { "login": "hllmr" },
+            "private": false,
+            "fork": false,
+            // Created with another mod count on the first try: still Silo's.
+            "description": "A Silo mod set for Farming Simulator 25 (2 mods)",
+        });
+        assert_eq!(
+            resumable_repo(&repo, "HLLMR", "silo-pack", desc),
+            Some(RepoRef {
+                full_name: "hllmr/silo-pack".into(),
+                html_url: "https://github.com/hllmr/silo-pack".into(),
+            })
+        );
+        let with = |k: &str, val: serde_json::Value| {
+            let mut r = repo.clone();
+            r[k] = val;
+            r
+        };
+        // Someone else's, a different name, private, a fork, or not Silo's description: never.
+        let others = [
+            with("owner", serde_json::json!({ "login": "someone" })),
+            with("name", serde_json::json!("silo-other")),
+            with("private", serde_json::json!(true)),
+            with("fork", serde_json::json!(true)),
+            with("description", serde_json::json!("My own project")),
+            with("description", serde_json::Value::Null),
+        ];
+        for r in &others {
+            assert_eq!(resumable_repo(r, "hllmr", "silo-pack", desc), None, "{r}");
+        }
     }
 
     #[test]

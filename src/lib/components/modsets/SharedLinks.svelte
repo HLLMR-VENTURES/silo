@@ -28,6 +28,8 @@
   let links = $state<CollectionSummary[]>([]);
   let loading = $state(false);
   let error = $state("");
+  /** Only part of the list could be read (gists or repos failed). */
+  let warning = $state("");
   let busyRef = $state<string | null>(null);
 
   const zips = $derived(active.filter((m) => m.kind === "zip").length);
@@ -44,8 +46,11 @@
     loading = true;
     error = "";
     try {
-      links = await collectionsList();
+      const list = await collectionsList();
+      links = list.items;
+      warning = list.warning ?? "";
     } catch (e) {
+      warning = "";
       error = inlineError(e, "Loading your shared links");
     } finally {
       loading = false;
@@ -87,7 +92,10 @@
     error = "";
     try {
       const r = await collectionUpdate(c.reference, active);
-      toast({ message: `Updated the link for ${c.name} to ${count(r.count)}.` });
+      const unpinned = r.unpinned.length
+        ? ` Silo couldn't read ${count(r.unpinned.length)}, so the link lists ${r.unpinned.length === 1 ? "it" : "them"} without a fingerprint.`
+        : "";
+      toast({ message: `Updated the link for ${c.name} to ${count(r.count)}.${unpinned}` });
       await load();
     } catch (e) {
       error = inlineError(e, "Updating the link");
@@ -132,9 +140,10 @@
       <p class="muted">Loading your shared links…</p>
     {:else if error}
       <p class="err" role="status">{error}</p>
-    {:else if links.length === 0}
+    {:else if links.length === 0 && !warning}
       <p class="muted">Nothing shared yet. Use Share on a set to create a link.</p>
     {/if}
+    {#if !error && warning}<p class="warn" role="status">{warning}</p>{/if}
     {#each links as c (c.reference)}
       <div class="row">
         <div class="info">
@@ -193,6 +202,11 @@
     margin: 0;
     font-size: var(--fs-xs);
     color: var(--text-muted);
+  }
+  .warn {
+    margin: 0;
+    font-size: var(--fs-sm);
+    color: var(--warn-text);
   }
   .err {
     margin: 0;

@@ -4163,16 +4163,30 @@ async fn generate_bridge(spec: bridge::BridgeSpec, root: Option<String>) -> Resu
 
 // ── Multiplayer mod-set sync ──
 
+/// What a saved Multiplayer check file holds.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MpExportResult {
+    /// How many mods the file lists.
+    count: usize,
+    /// Packaged mods whose zip Silo couldn't read: listed without a fingerprint, so friends
+    /// will see them as "can't check" (#355).
+    unreadable: Vec<String>,
+}
+
 /// Hash the host's active set and write a shareable manifest to `path`. Returns the
-/// number of mods written.
+/// number of mods written and the zips that couldn't be fingerprinted.
 #[tauri::command]
-async fn mp_export(mods: Vec<mpsync::ModRef>, path: String) -> Result<usize, String> {
-    tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+async fn mp_export(mods: Vec<mpsync::ModRef>, path: String) -> Result<MpExportResult, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<MpExportResult, String> {
         let manifest = mpsync::build_manifest(&mods);
         let json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
         paths::safe_outbound(std::path::Path::new(&path), &["silomp", "json"])?;
         std::fs::write(&path, json).map_err(|e| e.to_string())?;
-        Ok(manifest.mods.len())
+        Ok(MpExportResult {
+            count: manifest.mods.len(),
+            unreadable: mpsync::unreadable(&mods, &manifest.mods),
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -4210,16 +4224,29 @@ struct ExportResult {
     count: usize,
     /// Dev/unpacked (directory) mods left out — they have no stable bytes to pin.
     omitted: Vec<String>,
+    /// Packaged mods that went in without the curator's fingerprint (their zip couldn't be
+    /// read), so friends can't confirm they got the same build (#355).
+    unpinned: Vec<String>,
+    /// The link works, but something around it didn't (the README couldn't be written).
+    warning: Option<String>,
+}
+
+/// An active set pinned into collection entries (see `build_collection_entries`).
+struct PinnedSet {
+    /// Sorted by tech-name.
+    entries: Vec<collection::CollectionMod>,
+    /// Unpacked (directory) mods, left out.
+    omitted: Vec<String>,
+    /// Packaged mods listed without a fingerprint: their zip couldn't be read.
+    unpinned: Vec<String>,
 }
 
 /// Pin an active set into collection entries: drop dev/unpacked (directory) mods (no stable
 /// bytes to pin), and for each packaged mod stamp its version, catalog source/id (one batch
-/// lookup, best-effort), and the curator's own provenance hash. Returns the entries sorted by
-/// tech-name plus the omitted dir-mod tech-names. Shared by export and update.
-fn build_collection_entries(
-    base: &str,
-    mods: Vec<mpsync::ModRef>,
-) -> (Vec<collection::CollectionMod>, Vec<String>) {
+/// lookup, best-effort), and the curator's own provenance hash. A mod whose hash failed still
+/// goes in (an importer reads it as unverified) but is named in `unpinned` for the curator.
+/// Shared by export and update.
+fn build_collection_entries(base: &str, mods: Vec<mpsync::ModRef>) -> PinnedSet {
     let (zips, dirs): (Vec<_>, Vec<_>) = mods.into_iter().partition(|m| m.kind == "zip");
     let omitted: Vec<String> = dirs.into_iter().map(|m| m.tech_name).collect();
 
@@ -4233,10 +4260,15 @@ fn build_collection_entries(
     let mut entries: Vec<collection::CollectionMod> = zips
         .iter()
         .map(|m| {
-            // The curator's own build hash — the trust anchor. Best-effort per mod.
-            let manifest_hash = provenance::manifest_from_zip(std::path::Path::new(&m.path))
-                .ok()
-                .map(|lm| lm.manifest_hash);
+            // The curator's own build hash — the trust anchor. Best-effort per mod; a failure
+            // is reported through `unpinned`, not dropped silently.
+            let manifest_hash = match provenance::manifest_from_zip(std::path::Path::new(&m.path)) {
+                Ok(lm) => Some(lm.manifest_hash),
+                Err(e) => {
+                    log::warn!("collection: couldn't fingerprint {}: {e}", m.tech_name);
+                    None
+                }
+            };
             let hit = by_tech.get(m.tech_name.as_str());
             let dl = hit.and_then(|r| r.download.as_ref());
             collection::CollectionMod {
@@ -4251,7 +4283,21 @@ fn build_collection_entries(
         })
         .collect();
     entries.sort_by(|a, b| a.tech_name.cmp(&b.tech_name));
-    (entries, omitted)
+    let unpinned = unpinned_names(&entries);
+    PinnedSet {
+        entries,
+        omitted,
+        unpinned,
+    }
+}
+
+/// The entries that carry no curator fingerprint, by tech-name (already sorted).
+fn unpinned_names(entries: &[collection::CollectionMod]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|e| e.manifest_hash.is_none())
+        .map(|e| e.tech_name.clone())
+        .collect()
 }
 
 /// Export a mod set as a shareable Collection: pin each mod's identity (version +
@@ -4285,7 +4331,11 @@ async fn collection_export(
         let author = db::get_app_setting(&conn, "gh_user");
 
         // Pin the packaged mods (dev/unpacked ones can't be byte-pinned — reported as omitted).
-        let (entries, omitted) = build_collection_entries(&base, mods);
+        let PinnedSet {
+            entries,
+            omitted,
+            unpinned,
+        } = build_collection_entries(&base, mods);
         if entries.is_empty() {
             return Err(
                 "Nothing to share. A shared set needs at least one packaged (.zip) mod.".into(),
@@ -4305,8 +4355,11 @@ async fn collection_export(
         // The shareable link is always the silo.hllmr.com/c/ handoff page — never the raw
         // gist/repo URL (which dead-ends recipients on JSON and can't carry a working
         // "Open in Silo" link, since GitHub strips silo:// schemes).
+        let mut warning = None;
         let url = if public.unwrap_or(false) {
             // P2: a public, forkable repo holding the collection + a human-readable README.
+            // A retry after a failed first upload carries on in the user's own still-empty
+            // repo of that name instead of failing with "name taken" (#355).
             let repo = github::create_public_repo(
                 &token,
                 &collection::repo_slug(&name),
@@ -4330,15 +4383,20 @@ async fn collection_export(
                 collection::FILE_NAME,
                 &json,
                 "Add mod set (via Silo)",
-            )?;
-            github::put_repo_file(
+            )
+            .map_err(|e| repo_upload_failed(&repo.html_url, &e))?;
+            // The link already works without the README (the page and importers read only the
+            // list), so a failure here is a warning, as it is for a gist.
+            if let Err(e) = github::put_repo_file(
                 &token,
                 &owner,
                 &rname,
                 "README.md",
                 &readme,
                 "Add README (via Silo)",
-            )?;
+            ) {
+                warning = Some(readme_failed(&e));
+            }
             page_url
         } else {
             // P1: a secret (unlisted) gist for private / group sharing. Create with the JSON,
@@ -4359,11 +4417,30 @@ async fn collection_export(
             url,
             count: coll.mods.len(),
             omitted,
+            unpinned,
+            warning,
         })
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(error::AppError::from)
+}
+
+/// A public collection's repo was created but its list couldn't be saved: name the repo, and
+/// say a retry carries on there (it's still empty, so `create_public_repo` resumes into it).
+fn repo_upload_failed(repo_url: &str, cause: &str) -> String {
+    format!(
+        "Silo created {repo_url} on your GitHub but couldn't save the mod list to it. \
+         Try again: Silo carries on in that repository. ({cause})"
+    )
+}
+
+/// The README of a public collection couldn't be written; the link works anyway.
+fn readme_failed(cause: &str) -> String {
+    format!(
+        "The link works, but Silo couldn't add the page that describes the set on GitHub. \
+         Updating the link later adds it. ({cause})"
+    )
 }
 
 /// Update an existing collection in place: re-pin `mods` (the current active set) and write
@@ -4386,7 +4463,11 @@ async fn collection_update(
 
         // Preserve the collection's identity (name/description/author/date); re-pin the mods.
         let existing = read_collection_json(&reference, Some(&token))?;
-        let (entries, omitted) = build_collection_entries(&base, mods);
+        let PinnedSet {
+            entries,
+            omitted,
+            unpinned,
+        } = build_collection_entries(&base, mods);
         if entries.is_empty() {
             return Err(
                 "Nothing to update. Your active mods include no packaged (.zip) mods.".into(),
@@ -4439,6 +4520,8 @@ async fn collection_update(
             url,
             count: coll.mods.len(),
             omitted,
+            unpinned,
+            warning: None,
         })
     })
     .await
@@ -4555,19 +4638,60 @@ struct CollectionSummary {
     can_delete: bool,
 }
 
+/// The "Your collections" list, and what's missing from it when one of the two listings failed.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CollectionList {
+    items: Vec<CollectionSummary>,
+    /// Set when only one listing (gists or repos) could be read: the list is partial.
+    warning: Option<String>,
+}
+
+/// Merge the gist and repo listings (#355). Both failed: the error, so a broken token or an
+/// outage never shows as "nothing shared yet". One failed: what the other found, plus a warning.
+fn merge_collection_listings(
+    gists: Result<Vec<CollectionSummary>, String>,
+    repos: Result<Vec<CollectionSummary>, String>,
+) -> Result<CollectionList, String> {
+    let (mut items, warning) = match (gists, repos) {
+        (Err(g), Err(_)) => return Err(g),
+        (Ok(g), Err(e)) => (
+            g,
+            Some(format!(
+                "Silo couldn't list your public GitHub repositories, so links shared that way \
+                 aren't shown. ({e})"
+            )),
+        ),
+        (Err(e), Ok(r)) => (
+            r,
+            Some(format!(
+                "Silo couldn't list your unlisted links on GitHub, so they aren't shown. ({e})"
+            )),
+        ),
+        (Ok(mut g), Ok(r)) => {
+            g.extend(r);
+            (g, None)
+        }
+    };
+    // Newest first (gists and repos interleaved by creation time).
+    items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(CollectionList { items, warning })
+}
+
 /// List the collections the user has published to their GitHub — secret gists (carrying the
 /// collection file) and `silo-`-prefixed public repos. Best-effort per item: one that fails
-/// to read or parse is skipped rather than failing the whole list.
+/// to read or parse is skipped rather than failing the whole list. A listing call that fails
+/// is not skipped: see `merge_collection_listings`.
 #[tauri::command]
-async fn collections_list(app: tauri::AppHandle) -> Result<Vec<CollectionSummary>, String> {
+async fn collections_list(app: tauri::AppHandle) -> Result<CollectionList, String> {
     let db = db_path(&app)?;
-    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<CollectionSummary>, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<CollectionList, String> {
         let conn = db::open(&db)?;
         let token = secrets::get(&conn, "gh_token")
             .ok_or_else(|| "Connect your GitHub account first.".to_string())?;
-        let mut out: Vec<CollectionSummary> = Vec::new();
 
-        if let Ok(gists) = github::list_user_gists(&token) {
+        let gists = github::list_user_gists(&token).map(|gists| {
+            let mut out = Vec::new();
             for g in gists {
                 if !g.filenames.iter().any(|f| f == collection::FILE_NAME) {
                     continue;
@@ -4585,9 +4709,11 @@ async fn collections_list(app: tauri::AppHandle) -> Result<Vec<CollectionSummary
                     });
                 }
             }
-        }
+            out
+        });
 
-        if let Ok(repos) = github::list_owned_repos(&token) {
+        let repos = github::list_owned_repos(&token).map(|repos| {
+            let mut out = Vec::new();
             for r in repos {
                 if !r.name.starts_with("silo-") {
                     continue;
@@ -4607,11 +4733,10 @@ async fn collections_list(app: tauri::AppHandle) -> Result<Vec<CollectionSummary
                     });
                 }
             }
-        }
+            out
+        });
 
-        // Newest first (gists and repos interleaved by creation time).
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        Ok(out)
+        merge_collection_listings(gists, repos)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -8012,5 +8137,88 @@ mod tests {
                 w["title"]
             );
         }
+    }
+}
+
+/// Collections and Multiplayer check reporting (#355).
+#[cfg(test)]
+mod collection_reporting_tests {
+    use super::{merge_collection_listings, repo_upload_failed, unpinned_names, CollectionSummary};
+    use crate::collection::CollectionMod;
+
+    fn summary(reference: &str, created_at: &str) -> CollectionSummary {
+        CollectionSummary {
+            kind: "gist".into(),
+            reference: reference.into(),
+            name: reference.into(),
+            mod_count: 1,
+            created_at: Some(created_at.into()),
+            page_url: String::new(),
+            source_url: String::new(),
+            can_delete: true,
+        }
+    }
+
+    #[test]
+    fn both_listings_failing_is_an_error_not_an_empty_list() {
+        let r = merge_collection_listings(
+            Err("GitHub rejected the token. Reconnect your account.".into()),
+            Err("GitHub rejected the token. Reconnect your account.".into()),
+        );
+        assert!(r.err().is_some_and(|e| e.contains("Reconnect")));
+    }
+
+    #[test]
+    fn one_listing_failing_gives_a_partial_list_and_a_warning() {
+        let r = merge_collection_listings(
+            Ok(vec![summary("g1", "2026-01-01")]),
+            Err("rate limit".into()),
+        )
+        .unwrap();
+        assert_eq!(r.items.len(), 1);
+        assert!(r.warning.as_deref().unwrap().contains("rate limit"));
+
+        let r = merge_collection_listings(
+            Err("offline".into()),
+            Ok(vec![summary("o/silo-x", "2026-01-01")]),
+        )
+        .unwrap();
+        assert_eq!(r.items.len(), 1);
+        assert!(r.warning.as_deref().unwrap().contains("offline"));
+    }
+
+    #[test]
+    fn both_listings_merge_newest_first_with_no_warning() {
+        let r = merge_collection_listings(
+            Ok(vec![summary("old", "2026-01-01")]),
+            Ok(vec![summary("new", "2026-02-01")]),
+        )
+        .unwrap();
+        assert!(r.warning.is_none());
+        let refs: Vec<&str> = r.items.iter().map(|c| c.reference.as_str()).collect();
+        assert_eq!(refs, ["new", "old"]);
+    }
+
+    #[test]
+    fn mods_without_a_fingerprint_are_named() {
+        let m = |t: &str, h: Option<&str>| CollectionMod {
+            tech_name: t.into(),
+            version: None,
+            source: None,
+            source_url: None,
+            manifest_hash: h.map(String::from),
+            installable: None,
+            catalog_id: None,
+        };
+        let entries = [m("FS25_A", Some("h")), m("FS25_B", None), m("FS25_C", None)];
+        assert_eq!(unpinned_names(&entries), ["FS25_B", "FS25_C"]);
+    }
+
+    #[test]
+    fn a_failed_first_upload_names_the_repo_it_made() {
+        let msg = repo_upload_failed("https://github.com/me/silo-pack", "timed out");
+        assert!(msg.contains("https://github.com/me/silo-pack"));
+        assert!(msg.contains("Try again"));
+        assert!(msg.contains("timed out"));
     }
 }

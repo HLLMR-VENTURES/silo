@@ -31,8 +31,26 @@ pub struct ModRef {
 pub struct ManifestEntry {
     pub tech_name: String,
     pub version: Option<String>,
-    pub hash: String,
+    /// MD5 of the zip, or `None` when Silo has no fingerprint for it (an unpacked folder, or a
+    /// zip it couldn't read). On disk that is `""` with size 0, as 1.0.3 wrote it, so check
+    /// files stay readable both ways.
+    #[serde(with = "empty_hash")]
+    pub hash: Option<String>,
     pub size: u64,
+}
+
+/// `hash` on disk: a string, `""` for "no fingerprint". A missing fingerprint never reaches
+/// the comparison as `""`, so two of them can't read as a match (#355).
+mod empty_hash {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(v.as_deref().unwrap_or(""))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+        Ok(Option::<String>::deserialize(d)?.filter(|h| !h.is_empty()))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,8 +79,22 @@ pub struct VerifyReport {
     pub version_mismatch: Vec<Mismatch>,
     /// Same version, different bytes — re-download to be safe.
     pub hash_mismatch: Vec<Mismatch>,
+    /// Same version, but one side (or both) has no fingerprint, so Silo can't tell whether the
+    /// files match. Never counted as a match.
+    pub unverifiable: Vec<Unverifiable>,
     /// Present locally, not in the manifest — must be removed/disabled to join.
     pub extra: Vec<String>,
+}
+
+/// A mod Silo couldn't compare, because a copy of it has no fingerprint.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Unverifiable {
+    pub tech_name: String,
+    /// The server's check file has no fingerprint for it.
+    pub server: bool,
+    /// Silo couldn't fingerprint the joiner's copy (an unpacked folder, or an unreadable zip).
+    pub yours: bool,
 }
 
 const ALGO: &str = "md5-zip-v1";
@@ -87,12 +119,23 @@ fn md5_file(path: &std::path::Path) -> std::io::Result<(String, u64)> {
 }
 
 /// MD5 of a mod's bytes + its size. Zip mods hash the file; unpacked (dev) mods can't
-/// participate in a byte-exact manifest, so they hash empty and are flagged by size 0.
+/// participate in a byte-exact manifest, and a zip that can't be read has no trustworthy
+/// fingerprint: both get `hash: None` (size 0), which never compares as a match.
 fn hash_one(m: &ModRef) -> ManifestEntry {
-    let (hash, size) = if m.kind == "zip" {
-        md5_file(std::path::Path::new(&m.path)).unwrap_or((String::new(), 0))
+    let fingerprint = if m.kind == "zip" {
+        match md5_file(std::path::Path::new(&m.path)) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                log::warn!("mp check: couldn't read {} ({}): {e}", m.tech_name, m.path);
+                None
+            }
+        }
     } else {
-        (String::new(), 0) // unpacked dir — not byte-comparable
+        None // unpacked dir — not byte-comparable
+    };
+    let (hash, size) = match fingerprint {
+        Some((hash, size)) => (Some(hash), size),
+        None => (None, 0),
     };
     ManifestEntry {
         tech_name: m.tech_name.clone(),
@@ -117,12 +160,32 @@ pub fn build_manifest(mods: &[ModRef]) -> Manifest {
     }
 }
 
-/// Diff a manifest against the joiner's already-hashed local set. Pure — unit-tested.
+/// The packaged mods of `mods` that went into `entries` without a fingerprint: their zip
+/// couldn't be read, so the host is told (unpacked folders are expected to have none).
+pub fn unreadable(mods: &[ModRef], entries: &[ManifestEntry]) -> Vec<String> {
+    use std::collections::HashSet;
+    let zips: HashSet<&str> = mods
+        .iter()
+        .filter(|m| m.kind == "zip")
+        .map(|m| m.tech_name.as_str())
+        .collect();
+    let mut out: Vec<String> = entries
+        .iter()
+        .filter(|e| e.hash.is_none() && zips.contains(e.tech_name.as_str()))
+        .map(|e| e.tech_name.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// True when `text` is a Multiplayer check file (a `Manifest`), not a mod set or anything else.
 pub fn is_manifest(text: &str) -> bool {
     serde_json::from_str::<Manifest>(text).is_ok()
 }
 
+/// Diff a manifest against the joiner's already-hashed local set. Pure — unit-tested.
+/// A mod matches only when both sides have a fingerprint and hash and size agree.
 pub fn diff(manifest: &[ManifestEntry], local: &[ManifestEntry]) -> VerifyReport {
     use std::collections::HashMap;
     let local_by: HashMap<&str, &ManifestEntry> =
@@ -133,6 +196,7 @@ pub fn diff(manifest: &[ManifestEntry], local: &[ManifestEntry]) -> VerifyReport
     let mut missing = Vec::new();
     let mut version_mismatch = Vec::new();
     let mut hash_mismatch = Vec::new();
+    let mut unverifiable = Vec::new();
 
     for want in manifest {
         match local_by.get(want.tech_name.as_str()) {
@@ -144,13 +208,22 @@ pub fn diff(manifest: &[ManifestEntry], local: &[ManifestEntry]) -> VerifyReport
                         expected: want.version.clone().unwrap_or_default(),
                         got: have.version.clone().unwrap_or_default(),
                     });
-                } else if want.hash != have.hash {
-                    // Same version, different bytes — the subtle case that still blocks MP.
-                    hash_mismatch.push(Mismatch {
-                        tech_name: want.tech_name.clone(),
-                        expected: want.hash.clone(),
-                        got: have.hash.clone(),
-                    });
+                } else {
+                    match (&want.hash, &have.hash) {
+                        (Some(w), Some(h)) if w == h && want.size == have.size => {}
+                        // Same version, different bytes — the subtle case that still blocks MP.
+                        (Some(w), Some(h)) => hash_mismatch.push(Mismatch {
+                            tech_name: want.tech_name.clone(),
+                            expected: w.clone(),
+                            got: h.clone(),
+                        }),
+                        // No fingerprint on one side: neither a match nor a known difference.
+                        (w, h) => unverifiable.push(Unverifiable {
+                            tech_name: want.tech_name.clone(),
+                            server: w.is_none(),
+                            yours: h.is_none(),
+                        }),
+                    }
                 }
             }
         }
@@ -167,10 +240,12 @@ pub fn diff(manifest: &[ManifestEntry], local: &[ManifestEntry]) -> VerifyReport
         ok: missing.is_empty()
             && version_mismatch.is_empty()
             && hash_mismatch.is_empty()
+            && unverifiable.is_empty()
             && extra.is_empty(),
         missing,
         version_mismatch,
         hash_mismatch,
+        unverifiable,
         extra,
     }
 }
@@ -211,9 +286,116 @@ mod tests {
         ManifestEntry {
             tech_name: tech.into(),
             version: Some(ver.into()),
-            hash: hash.into(),
+            hash: Some(hash.into()),
             size: 1,
         }
+    }
+
+    /// An entry with no fingerprint (a folder, or a zip that couldn't be read).
+    fn none(tech: &str, ver: &str) -> ManifestEntry {
+        ManifestEntry {
+            tech_name: tech.into(),
+            version: Some(ver.into()),
+            hash: None,
+            size: 0,
+        }
+    }
+
+    fn zip(tech: &str, path: &str) -> ModRef {
+        ModRef {
+            tech_name: tech.into(),
+            path: path.into(),
+            kind: "zip".into(),
+            version: Some("1.0".into()),
+        }
+    }
+
+    /// Both sides unpacked (or both unreadable) used to compare `"" == ""` and say
+    /// "You match" (#355).
+    #[test]
+    fn two_missing_fingerprints_are_unverifiable_not_a_match() {
+        let host = vec![none("FS25_Dev", "1.0")];
+        let joiner = vec![none("FS25_Dev", "1.0")];
+        let r = diff(&host, &joiner);
+        assert!(!r.ok);
+        assert!(r.hash_mismatch.is_empty());
+        assert_eq!(r.unverifiable.len(), 1);
+        assert!(r.unverifiable[0].server && r.unverifiable[0].yours);
+    }
+
+    #[test]
+    fn one_missing_fingerprint_is_unverifiable_and_says_which_side() {
+        let r = diff(&[none("FS25_A", "1.0")], &[e("FS25_A", "1.0", "aaa")]);
+        assert!(!r.ok);
+        assert_eq!(r.unverifiable.len(), 1);
+        assert!(r.unverifiable[0].server && !r.unverifiable[0].yours);
+
+        let r = diff(&[e("FS25_A", "1.0", "aaa")], &[none("FS25_A", "1.0")]);
+        assert!(!r.ok);
+        assert!(!r.unverifiable[0].server && r.unverifiable[0].yours);
+    }
+
+    #[test]
+    fn same_hash_different_size_is_a_mismatch() {
+        let host = vec![e("FS25_A", "1.0", "aaa")];
+        let mut joiner = host.clone();
+        joiner[0].size = 2;
+        let r = diff(&host, &joiner);
+        assert!(!r.ok);
+        assert_eq!(r.hash_mismatch.len(), 1);
+    }
+
+    #[test]
+    fn version_mismatch_wins_over_a_missing_fingerprint() {
+        let r = diff(&[none("FS25_A", "2.0")], &[none("FS25_A", "1.0")]);
+        assert_eq!(r.version_mismatch.len(), 1);
+        assert!(r.unverifiable.is_empty());
+    }
+
+    /// A 1.0.3 check file wrote a folder mod as `"hash": ""`, size 0. It still loads, that entry
+    /// reads as "no fingerprint", and a new file writes the same shape.
+    #[test]
+    fn check_files_from_1_0_3_still_load() {
+        let old = r#"{ "algo": "md5-zip-v1", "mods": [
+            { "techName": "FS25_Zip", "version": "1.0", "hash": "abc", "size": 10 },
+            { "techName": "FS25_Dev", "version": null, "hash": "", "size": 0 }
+        ] }"#;
+        assert!(is_manifest(old));
+        let m: Manifest = serde_json::from_str(old).unwrap();
+        assert_eq!(m.mods[0].hash.as_deref(), Some("abc"));
+        assert_eq!(m.mods[1].hash, None);
+        let back = serde_json::to_value(&m).unwrap();
+        assert_eq!(back["mods"][0]["hash"], "abc");
+        assert_eq!(back["mods"][1]["hash"], "");
+        assert_eq!(back["mods"][1]["size"], 0);
+    }
+
+    #[test]
+    fn an_unreadable_zip_has_no_fingerprint_and_is_reported() {
+        let dir = std::env::temp_dir().join(format!("silo_mp_unread_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = dir.join("FS25_Ok.zip");
+        std::fs::write(&ok, b"zipbytes").unwrap();
+        let gone = dir.join("FS25_Gone.zip"); // never written: the read fails
+        let mods = vec![
+            zip("FS25_Ok", ok.to_str().unwrap()),
+            zip("FS25_Gone", gone.to_str().unwrap()),
+            ModRef {
+                tech_name: "FS25_Dev".into(),
+                path: dir.to_string_lossy().into(),
+                kind: "dir".into(),
+                version: None,
+            },
+        ];
+        let m = build_manifest(&mods);
+        let gone_entry = m.mods.iter().find(|e| e.tech_name == "FS25_Gone").unwrap();
+        assert_eq!(gone_entry.hash, None);
+        assert_eq!(gone_entry.size, 0);
+        let ok_entry = m.mods.iter().find(|e| e.tech_name == "FS25_Ok").unwrap();
+        assert!(ok_entry.hash.is_some());
+        // Folders are expected to have no fingerprint; only the zip counts as unreadable.
+        assert_eq!(unreadable(&mods, &m.mods), vec!["FS25_Gone".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
