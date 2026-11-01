@@ -142,7 +142,9 @@
     let stop: (() => void) | null = null;
     let gone = false;
     void onCatalogLinked((names) => {
-      if (names.includes(untrack(() => mod.techName))) linked++;
+      // A mod left out of update checks (#333) isn't asked about again, whatever was linked.
+      const left = untrack(() => curation.skipUpdates);
+      if (!left && names.includes(untrack(() => mod.techName))) linked++;
     })
       .then((un) => (gone ? un() : (stop = un)))
       .catch(() => {});

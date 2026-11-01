@@ -271,6 +271,35 @@ describe("drawer lookups", () => {
     );
   });
 
+  it("doesn't ask the catalog again for a linked mod left out of update checks (#402)", async () => {
+    let linked!: (names: string[]) => void;
+    vi.mocked(onCatalogLinked).mockImplementation((h) => {
+      linked = h;
+      return Promise.resolve(() => {});
+    });
+    vi.mocked(catalogDetailByTech).mockClear();
+    vi.mocked(catalogCheckUpdates).mockClear();
+    const mod = entry(27, {
+      path: "C:/mods/FS25_FieldToDoList.zip",
+      techName: "FS25_FieldToDoList",
+    });
+    const p = props(mod);
+    const { rerender } = render(ModDetail, p);
+    await settle();
+    // Left out while the link was being looked up; then the link arrives.
+    await rerender({ ...p, curation: { ...p.curation, skipUpdates: true } });
+    await settle();
+    vi.mocked(catalogDetailByTech).mockClear();
+    vi.mocked(catalogCheckUpdates).mockClear();
+    linked(["FS25_FieldToDoList"]);
+    await settle();
+    expect(catalogDetailByTech).not.toHaveBeenCalled();
+    expect(catalogCheckUpdates).not.toHaveBeenCalled();
+    vi.mocked(onCatalogLinked).mockImplementation(() =>
+      Promise.resolve(() => {}),
+    );
+  });
+
   it("says when the catalog couldn't check the mod, instead of 'not in the catalog' (#386)", async () => {
     vi.mocked(catalogCheckUpdates).mockImplementation(() =>
       Promise.resolve([
