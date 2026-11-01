@@ -808,12 +808,14 @@ pub(crate) fn get_guarded(
     check: &dyn Fn(&Url) -> Result<(), String>,
     auth: Option<&str>,
 ) -> Result<Response, FetchError> {
-    let deadline = g.overall.map(|d| Instant::now() + d);
-    // The first request can run on the agent's own cap when that is this fetch's cap.
+    // The deadline starts with the first request, as the agent's own cap does, so that request
+    // can run on the agent's cap alone when it is this fetch's cap (no request-level override).
+    let mut deadline: Option<Instant> = None;
     let mut first = g.agent.config().timeouts().global == g.overall;
     follow_redirects(url, check, |u, same_origin| {
         let mut req = g.agent.get(u.as_str());
-        if let Some(d) = deadline {
+        if let Some(cap) = g.overall {
+            let d = *deadline.get_or_insert_with(|| Instant::now() + cap);
             let left = d.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 let timed_out = ureq::Error::Timeout(ureq::Timeout::Global);
@@ -2141,5 +2143,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    #[test]
+    fn a_fetch_on_an_agent_with_the_same_cap_keeps_one_deadline() {
+        // As in production (`guarded_api()`): the agent carries the fetch's cap, so the first
+        // request runs on the agent's cap and later hops on what is left of it.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_redirects(
+            listener,
+            MAX_REDIRECTS + 1,
+            Duration::from_millis(300),
+            format!("http://{addr}/next"),
+        );
+        let cap = Some(Duration::from_millis(700));
+        let g = GuardedAgent {
+            agent: build_agent(Duration::from_millis(500), Duration::from_millis(500), cap),
+            overall: cap,
+        };
+        assert_eq!(g.agent.config().timeouts().global, g.overall);
+        let start = Instant::now();
+        let res = get_guarded(&g, &format!("http://{addr}/a.zip"), &allow_loopback, None);
+        let took = start.elapsed();
+        let served = server.join().unwrap();
+        let err = res.unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert!(served < MAX_REDIRECTS, "served {served}");
+        assert!(took < Duration::from_millis(1500), "took {took:?}");
     }
 }
