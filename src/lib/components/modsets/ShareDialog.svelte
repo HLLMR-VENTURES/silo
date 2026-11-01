@@ -13,7 +13,6 @@
   import type { ChoiceOption } from "../../ui/types";
   import type { CollectionExportResult, ModEntry, MpModRef } from "../../types";
   import { formatCount, plural } from "../../plural";
-  import { capList } from "../../archiveMoveLogic";
 
   type How = "link" | "file" | "multiplayer";
 
@@ -78,8 +77,8 @@
   const folders = $derived(refs.have.filter((r) => r.kind !== "zip").length);
   const count = (n: number) => `${formatCount(n)} ${plural(n, { one: "mod", other: "mods" })}`;
   const titleOf = $derived(new Map(library.map((m) => [m.techName, m.title ?? m.techName])));
-  /** A few mods by name: "A, B, C +2 more". */
-  const names = (techs: string[]) => capList(techs.map((t) => titleOf.get(t) ?? t));
+  /** Every one of these mods by name: the curator needs each to fix it. */
+  const names = (techs: string[]) => techs.map((t) => titleOf.get(t) ?? t).join(", ");
 
   // Each time it opens: start from the top, name the link after the set, check GitHub.
   $effect(() => {

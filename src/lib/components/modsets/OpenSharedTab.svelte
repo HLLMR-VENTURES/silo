@@ -383,7 +383,12 @@
         {#if r.ok}
           <p class="verdict good"><Icon name="ok" size={16} /> You match. You're ready to join.</p>
         {:else}
-          <p class="verdict bad"><Icon name="problem" size={16} /> Your mods don't match yet. Fix these, then check again.</p>
+          {#if !r.missing.length && !r.versionMismatch.length && !r.hashMismatch.length && !r.extra.length}
+            <!-- Only mods without a fingerprint: nothing shows a difference, but nothing confirms a match. -->
+            <p class="verdict bad"><Icon name="problem" size={16} /> Silo couldn't confirm that you match. Everything it could check matches.</p>
+          {:else}
+            <p class="verdict bad"><Icon name="problem" size={16} /> Your mods don't match yet. Fix these, then check again.</p>
+          {/if}
           {#if r.missing.length}
             <h4>The server has these and your active mods don't ({r.missing.length})</h4>
             {#each r.missing as m (m.techName)}

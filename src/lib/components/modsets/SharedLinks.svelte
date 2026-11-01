@@ -15,7 +15,6 @@
   import { inlineError } from "../../state/notify.svelte";
   import type { MpModRef } from "../../types";
   import { formatCount, plural } from "../../plural";
-  import { capList } from "../../archiveMoveLogic";
 
   interface Props {
     /** The active mods as refs: what "Update link" pins the link to. */
@@ -101,7 +100,7 @@
       const notes: string[] = [];
       if (r.unpinned.length)
         notes.push(
-          `Silo couldn't read ${count(r.unpinned.length)} (${capList(r.unpinned)}), so the link for ${c.name} lists ${r.unpinned.length === 1 ? "it" : "them"} without a fingerprint.`,
+          `Silo couldn't read ${count(r.unpinned.length)} (${r.unpinned.join(", ")}), so the link for ${c.name} lists ${r.unpinned.length === 1 ? "it" : "them"} without a fingerprint.`,
         );
       if (r.warning) notes.push(r.warning);
       updateWarn = notes.join(" ");

@@ -215,6 +215,24 @@ describe("Open a shared set", () => {
     expect(screen.getByText("Silo couldn't read your file")).toBeInTheDocument();
     expect(screen.queryByText(/You match/)).toBeNull();
   });
+
+  it("only unverifiable mods: not a match, and not called a mismatch either", async () => {
+    vi.mocked(pickSharedSetFile).mockResolvedValue("server.silomp");
+    vi.mocked(mpVerifyPath).mockResolvedValue({
+      ok: false,
+      missing: [],
+      versionMismatch: [],
+      hashMismatch: [],
+      unverifiable: [{ techName: "A", server: true, yours: false }],
+      extra: [],
+    });
+    openTab();
+    await fireEvent.click(screen.getByRole("button", { name: "Choose a file…" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "Check my mods" }));
+    expect(await screen.findByText(/Silo couldn't confirm that you match/)).toBeInTheDocument();
+    expect(screen.queryByText(/don't match yet/)).toBeNull();
+    expect(screen.queryByText(/You match\./)).toBeNull();
+  });
 });
 
 describe("Open a shared set: races and repeats", () => {
@@ -413,6 +431,15 @@ describe("Share dialog", () => {
     expect(await screen.findByText("https://silo.hllmr.com/c/?g=2")).toBeInTheDocument();
     expect(screen.getByText(/Silo couldn't read 1 mod \(Title A\), so the link lists it without a fingerprint/)).toBeInTheDocument();
     expect(screen.getByText(/The link works, but Silo couldn't add the page/)).toBeInTheDocument();
+  });
+
+  it("a link names every mod it couldn't fingerprint, not just the first few", async () => {
+    vi.mocked(ghStatus).mockResolvedValue(gh(true));
+    const many = ["M1", "M2", "M3", "M4", "M5", "M6"];
+    vi.mocked(collectionExport).mockResolvedValue({ url: "https://silo.hllmr.com/c/?g=3", count: 6, omitted: [], unpinned: many, warning: null });
+    share();
+    await fireEvent.click(await screen.findByRole("button", { name: "Create link" }));
+    expect(await screen.findByText(/Silo couldn't read 6 mods \(M1, M2, M3, M4, M5, M6\)/)).toBeInTheDocument();
   });
 
   it("a link still being made when the dialog closed doesn't show in the next Share (#355)", async () => {
