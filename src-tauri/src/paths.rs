@@ -1048,6 +1048,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Windows, Linux (glibc) and macOS take the one-step no-replace rename, never the
+    /// check-then-rename fallback, on an ordinary local folder.
+    #[cfg(any(
+        windows,
+        target_os = "macos",
+        all(target_os = "linux", target_env = "gnu")
+    ))]
+    #[test]
+    fn the_native_no_replace_rename_is_used_where_the_system_has_one() {
+        let d = scratch("native");
+        std::fs::write(d.join("a.part"), b"new").unwrap();
+        std::fs::write(d.join("a.zip"), b"theirs").unwrap();
+        let r = rename_noreplace_native(&d.join("a.part"), &d.join("a.zip"))
+            .expect("this system has a no-replace rename");
+        assert_eq!(
+            taken_or(&d.join("a.zip"), r.unwrap_err()).kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(d.join("a.zip")).unwrap(), b"theirs");
+        rename_noreplace_native(&d.join("a.part"), &d.join("b.zip"))
+            .expect("this system has a no-replace rename")
+            .unwrap();
+        assert_eq!(std::fs::read(d.join("b.zip")).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn the_checked_fallback_never_replaces_either() {
         let d = scratch("fallback");

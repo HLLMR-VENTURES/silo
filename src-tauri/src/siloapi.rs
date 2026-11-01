@@ -502,11 +502,15 @@ pub fn resolve_download(
     // /manifest endpoint (the server does version-equivalence). Only its 404 means "not hashed
     // yet" (the download is then validated as an archive, not identity-checked). A catalog that
     // doesn't answer, or answers with something unreadable, stops the install instead of
-    // skipping the check. With no version at all there is no build to look up.
+    // skipping the check. With no version at all there is no build to look up, which is only
+    // acceptable when the catalog says it has no hash for this mod either.
     let expected_sha256 = match version {
         Some(v) => manifest(base, id, &v)
             .map_err(|e| Operational(format!("{MANIFEST_UNCHECKED} {e}")))?
             .and_then(|m| m.archive_sha256),
+        None if detail.archive_sha256.is_some() || detail.verified == Some(true) => {
+            return Err(Operational(MANIFEST_UNCHECKED.to_string()));
+        }
         None => None,
     };
 
@@ -556,11 +560,8 @@ fn pick_download(
         .download_url
         .clone()
         .ok_or_else(|| Gated("This source doesn't offer a download.".to_string()))?;
-    let version = pick
-        .version
-        .clone()
-        .or_else(|| detail.latest_version.clone())
-        .filter(|v| !v.trim().is_empty());
+    let named = |v: &Option<String>| v.clone().filter(|v| !v.trim().is_empty());
+    let version = named(&pick.version).or_else(|| named(&detail.latest_version));
     Ok((url, version))
 }
 
@@ -823,6 +824,19 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_source_version_falls_back_to_the_latest_version() {
+        for blank in [Some(""), Some("   "), None] {
+            let mut d = detail_with("github", true, Some("https://github.com/a/b/FS25_X.zip"));
+            d.sources[0].version = blank.map(str::to_string);
+            let (_, version) = pick_download(&d, Some("github")).unwrap();
+            assert_eq!(version.as_deref(), Some("1.0.0.0"), "{blank:?}");
+            d.latest_version = Some(" ".into());
+            let (_, version) = pick_download(&d, Some("github")).unwrap();
+            assert_eq!(version, None, "{blank:?}");
+        }
+    }
+
+    #[test]
     fn a_download_must_be_named_after_the_mod_asked_for() {
         assert!(check_download_name("FS25_X.zip", "FS25_X").is_ok());
         assert!(check_download_name("fs25_x.ZIP", "FS25_X").is_ok());
@@ -840,12 +854,23 @@ mod tests {
         manifest: (&'static str, &'static str),
     ) -> std::thread::JoinHandle<()> {
         use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+        // Never hang the suite: stop waiting once no request comes for 5 s.
+        listener.set_nonblocking(true).unwrap();
         std::thread::spawn(move || {
             for _ in 0..max {
-                let Ok((mut s, _)) = listener.accept() else {
-                    return;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut s = loop {
+                    match listener.accept() {
+                        Ok((s, _)) => break s,
+                        Err(_) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(10))
+                        }
+                        Err(_) => return,
+                    }
                 };
-                let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let _ = s.set_nonblocking(false);
+                let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
                 let mut req = Vec::new();
                 let mut buf = [0u8; 1024];
                 while !req.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -892,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hashed_build_is_held_to_its_hash() {
+    fn a_hashed_build_resolves_with_its_hash() {
         let r =
             resolve_against(("200 OK", r#"{"archiveSha256":"abc","manifestHash":"h"}"#)).unwrap();
         assert_eq!(r.filename, "FS25_X.zip");

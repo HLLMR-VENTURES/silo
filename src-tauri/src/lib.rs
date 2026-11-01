@@ -1188,14 +1188,21 @@ impl Drop for PartClaim {
     }
 }
 
-/// Paths that name the same file compare equal: the name is lowercased on every system, since
-/// Windows and macOS (APFS, HFS+) both ignore case by default. On a case-sensitive Linux folder
-/// this only over-claims (two case variants can't download at once), which is harmless. The
+/// Paths that name the same file compare equal: the name is lowercased and put in one Unicode
+/// form (NFC) on every system, since Windows ignores case and macOS (APFS, HFS+) ignores both
+/// case and how an accent is encoded (`é` vs `e` + combining accent). On a case-sensitive Linux
+/// folder this only over-claims (two variants can't download at once), which is harmless. The
 /// parent is kept as given; callers join names onto one root.
 fn same_file_key(p: &std::path::Path) -> PathBuf {
+    use unicode_normalization::UnicodeNormalization;
     match p.file_name() {
         Some(name) => {
-            let lower = name.to_string_lossy().to_lowercase();
+            let lower: String = name
+                .to_string_lossy()
+                .nfd()
+                .collect::<String>()
+                .to_lowercase();
+            let lower: String = lower.nfc().collect();
             match p.parent() {
                 Some(parent) => parent.join(lower),
                 None => PathBuf::from(lower),
@@ -4655,7 +4662,10 @@ async fn collection_apply(
             }
         }
         let locked = lock.as_ref().map(|_| ()).map_err(String::clone);
-        let (placed, place_failed) = place_pending(&mut rows, pending, locked);
+        // The mods folder may have been switched while the downloads ran.
+        let (placed, place_failed) = place_pending(&mut rows, pending, locked, |dest| {
+            install_recheck(&root, dest)
+        });
         installed_count += placed;
         failed_count += place_failed;
 
@@ -4703,18 +4713,20 @@ struct PendingPlace {
 
 /// Fill in the rows of finished collection downloads: placed (`installed`, with its verdict),
 /// `present` (the file appeared meanwhile; theirs is kept), or `failed`. `locked` is whether
-/// the library lock is held; without it every pending row fails with that reason. Each part
-/// not placed is removed as its claim drops. Returns (installed, failed).
+/// the library lock is held; without it every pending row fails with that reason. `recheck`
+/// is asked again for each destination under the lock (`install_recheck`); a refusal fails
+/// that row. Each part not placed is removed as its claim drops. Returns (installed, failed).
 fn place_pending(
     rows: &mut [ApplyRow],
     pending: Vec<PendingPlace>,
     locked: Result<(), String>,
+    recheck: impl Fn(&std::path::Path) -> Result<(), String>,
 ) -> (usize, usize) {
     let (mut installed, mut failed) = (0, 0);
     for p in pending {
         let row = &mut rows[p.row];
-        if let Err(e) = &locked {
-            *row = fail_row(&row.tech_name, e.clone());
+        if let Err(e) = locked.clone().and_then(|()| recheck(&p.dest)) {
+            *row = fail_row(&row.tech_name, e);
             failed += 1;
         } else if path_taken(&p.dest) {
             // Appeared while we downloaded (another install): keep theirs.
@@ -6622,8 +6634,12 @@ mod tests {
             dest: dest.clone(),
             verdict: "verified".into(),
         }];
-        let (installed, failed) =
-            super::place_pending(&mut rows, pending, Err(super::LIBRARY_BUSY.to_string()));
+        let (installed, failed) = super::place_pending(
+            &mut rows,
+            pending,
+            Err(super::LIBRARY_BUSY.to_string()),
+            |_| Ok(()),
+        );
         assert_eq!((installed, failed), (0, 1));
         assert_eq!(rows[0].status, "failed");
         assert_eq!(rows[0].detail.as_deref(), Some(super::LIBRARY_BUSY));
@@ -6643,6 +6659,41 @@ mod tests {
             super::claim_part_at(&mods.join("FS25_FOO.zip"), mods.join("FS25_FOO.zip.part"))
                 .is_err()
         );
+        // APFS also treats the two ways of writing an accent as one name.
+        let _cafe = super::claim_part(&mods.join("FS25_Caf\u{e9}.zip")).unwrap();
+        assert!(super::claim_part(&mods.join("FS25_Cafe\u{301}.zip")).is_err());
+        assert!(super::claim_part(&mods.join("fs25_CAFE\u{301}.zip")).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn collection_downloads_are_not_placed_once_their_mods_folder_was_switched_away() {
+        let base = temp_base("place_pending_switched");
+        let dest = base.join("mods").join("FS25_Moved.zip");
+        let part = super::claim_part(&dest).unwrap();
+        std::fs::write(part.path(), b"done").unwrap();
+        let part_path = part.path().to_path_buf();
+        let mut rows = vec![super::ApplyRow {
+            tech_name: "FS25_Moved".into(),
+            filename: Some("FS25_Moved.zip".into()),
+            status: "installed".into(),
+            verdict: None,
+            detail: None,
+        }];
+        let pending = vec![super::PendingPlace {
+            row: 0,
+            part,
+            dest: dest.clone(),
+            verdict: "verified".into(),
+        }];
+        let (installed, failed) = super::place_pending(&mut rows, pending, Ok(()), |_| {
+            Err(super::MODS_FOLDER_CHANGED.to_string())
+        });
+        assert_eq!((installed, failed), (0, 1));
+        assert_eq!(rows[0].status, "failed");
+        assert_eq!(rows[0].detail.as_deref(), Some(super::MODS_FOLDER_CHANGED));
+        assert!(!dest.exists());
+        assert!(!part_path.exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 
