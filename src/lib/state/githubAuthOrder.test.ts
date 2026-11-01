@@ -1,5 +1,6 @@
-// GitHub account changes, seen at `invoke`: sign-in registrations, cancels and Disconnect reach
-// the backend in click order, and Disconnect never waits for a sign-in's network work (#403).
+// GitHub account changes, seen at `invoke`: sign-in registrations, cancels and Disconnect are
+// sent in click order, each after the one before it answered, and Disconnect never waits for a
+// sign-in's network work (#403).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
@@ -95,7 +96,7 @@ afterEach(() => {
 });
 
 describe("GitHub account changes at invoke", () => {
-  it("Connect then Disconnect, with the registration slower: the backend sees them in click order", async () => {
+  it("Connect then Disconnect, with the registration slower: sent in click order", async () => {
     const release = hold("gh_sign_in_begin");
     const connecting = startDeviceFlow();
     const disconnecting = disconnectGithub();
