@@ -95,8 +95,10 @@ pub fn no_traversal(path: &Path) -> Result<(), String> {
 
 /// The parts of a path a mod names for one of its own files, or `None` when it could lead
 /// outside the mod: empty, absolute, a leading `//`, a drive or network prefix, a `..`, a `:`
-/// anywhere (a drive-relative `C:x`, a stream name) or a reserved device name. Both slash kinds
-/// separate, on every OS; `.` parts are dropped.
+/// anywhere (a drive-relative `C:x`, a stream name), a reserved device name, or a part ending in
+/// a dot or space (Windows drops those only at the end of a path, so `a /b` and `a ` would name
+/// different folders and the check could look at the wrong one). Both slash kinds separate, on
+/// every OS; `.` parts are dropped.
 fn member_parts(member: &str) -> Option<Vec<String>> {
     let member = member.replace('\\', "/");
     if member.starts_with('/') || member.contains([':', '\0']) {
@@ -107,7 +109,7 @@ fn member_parts(member: &str) -> Option<Vec<String>> {
         match c {
             Component::Normal(part) => {
                 let part = part.to_str()?;
-                if is_device_name(part) {
+                if part.ends_with(['.', ' ']) || is_device_name(part) {
                     return None;
                 }
                 parts.push(part.to_string());
@@ -708,6 +710,12 @@ mod tests {
             "nul",
             "xml/con.xml",
             "a\0b.xml",
+            "xml /store.xml",
+            "xml./store.xml",
+            "store.xml.",
+            "store.xml ",
+            ".../x.xml",
+            ".. /x.xml",
         ] {
             assert_eq!(join_inside(&root, bad), None, "{bad:?}");
             assert!(open_inside(&root, bad).is_none(), "{bad:?}");
@@ -771,6 +779,22 @@ mod tests {
         assert!(up.join("outside.xml").is_file(), "the junction works");
         assert!(open_inside(&root, "up/outside.xml").is_none());
         std::fs::remove_dir(&up).unwrap(); // the junction only, not what it points at
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `pivot ` (trailing space) is a different folder from `pivot` in the middle of a path, but
+    /// the same at its end, so a junction named `pivot ` beside a real `pivot` folder is refused.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_named_like_a_real_folder_is_not_followed() {
+        let (base, root) = link_fixture("silo_member_pivot");
+        std::fs::create_dir_all(root.join("pivot")).unwrap();
+        // Only the verbatim form can make a name ending in a space.
+        let verbatim = std::fs::canonicalize(&root).unwrap().join("pivot ");
+        crate::organize::junction_to(&base, &verbatim).unwrap();
+        assert!(verbatim.join("outside.xml").is_file(), "the junction works");
+        assert!(open_inside(&root, "pivot /outside.xml").is_none());
+        std::fs::remove_dir(&verbatim).unwrap();
         let _ = std::fs::remove_dir_all(&base);
     }
 
