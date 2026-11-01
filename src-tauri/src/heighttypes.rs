@@ -225,10 +225,10 @@ impl Loads<'_> {
 /// Read a mod's script-loaded lists for its estimate: every candidate but the declared file,
 /// capped as [`MAX_LIST_FILES`] and [`MAX_LIST_NAMES`] say. Lists under `mod_support/<dir>/` (see
 /// [`support_dir`]) go to the map-specific part, the rest to the plain estimate. Neither repeats
-/// an exact name. The plain lists are read first, so lists for maps that may not load never use
-/// up their budget. When Silo can't read all the map-specific lists (past the file cap, or more
-/// names than it keeps), which of them load where is unknown, so the ones it read count on every
-/// map, as they did before #385. Pure.
+/// an exact name. Each part has its own file and name budget, so lists for maps that may not
+/// load never crowd out the others. When Silo can't read all the map-specific lists (more files
+/// or names than it reads), which of them load where is unknown, so the ones it read count on
+/// every map, as they did before #385. Pure.
 pub(crate) fn read_estimates(
     exact: &[String],
     declared: Option<&str>,
@@ -236,7 +236,7 @@ pub(crate) fn read_estimates(
     read: &dyn Fn(&str) -> Option<Vec<u8>>,
     parse: fn(&[u8]) -> Vec<String>,
 ) -> (Vec<String>, Scoped) {
-    let (mut ordered, for_maps): (Vec<(String, Option<String>)>, Vec<_>) = candidates
+    let (plain, for_maps): (Vec<(String, Option<String>)>, Vec<_>) = candidates
         .into_iter()
         .filter(|m| Some(m.as_str()) != declared)
         .map(|m| {
@@ -244,27 +244,28 @@ pub(crate) fn read_estimates(
             (m, dir)
         })
         .partition(|(_, dir)| dir.is_none());
-    let plain_files = ordered.len();
-    ordered.extend(for_maps);
-    // Map-specific lists past the file cap go unread.
-    let mut incomplete = plain_files < MAX_LIST_FILES && ordered.len() > MAX_LIST_FILES;
 
     let mut estimate: Vec<String> = Vec::new();
-    let mut scoped: Scoped = Vec::new();
     // Seeded with the exact names, so an estimate never repeats one.
     let mut seen: HashSet<String> = exact.iter().cloned().collect();
+    for (m, _) in plain.into_iter().take(MAX_LIST_FILES) {
+        if seen.len() >= MAX_LIST_NAMES {
+            break;
+        }
+        let names = read(&m).map(|b| parse(&b)).unwrap_or_default();
+        push_new(&mut estimate, &mut seen, names);
+    }
+
+    // Each folder remembers only its own names; the exact ones are looked up once, here.
+    let exact_set: HashSet<&str> = exact.iter().map(String::as_str).collect();
+    let mut scoped: Scoped = Vec::new();
     let mut scoped_seen: Vec<HashSet<String>> = Vec::new();
     // The map-specific names: distinct across folders, and as kept (a name in two folders twice).
     let mut scoped_distinct: HashSet<String> = HashSet::new();
     let mut scoped_kept = 0usize;
-    for (m, dir) in ordered.into_iter().take(MAX_LIST_FILES) {
-        let Some(dir) = dir else {
-            if seen.len() < MAX_LIST_NAMES {
-                let names = read(&m).map(|b| parse(&b)).unwrap_or_default();
-                push_new(&mut estimate, &mut seen, names);
-            }
-            continue;
-        };
+    let mut incomplete = for_maps.len() > MAX_LIST_FILES;
+    for (m, dir) in for_maps.into_iter().take(MAX_LIST_FILES) {
+        let Some(dir) = dir else { continue };
         if scoped_distinct.len() >= MAX_LIST_NAMES || scoped_kept >= 4 * MAX_LIST_NAMES {
             incomplete = true;
             break;
@@ -277,14 +278,19 @@ pub(crate) fn read_estimates(
             Some(i) => i,
             None => {
                 scoped.push((dir, Vec::new()));
-                scoped_seen.push(exact.iter().cloned().collect());
+                scoped_seen.push(HashSet::new());
                 scoped.len() - 1
             }
         };
-        let before = scoped[i].1.len();
-        push_new(&mut scoped[i].1, &mut scoped_seen[i], names);
-        scoped_kept += scoped[i].1.len() - before;
-        scoped_distinct.extend(scoped[i].1[before..].iter().cloned());
+        for t in names {
+            if exact_set.contains(t.as_str()) || scoped_seen[i].contains(&t) {
+                continue;
+            }
+            scoped_seen[i].insert(t.clone());
+            scoped_distinct.insert(t.clone());
+            scoped[i].1.push(t);
+            scoped_kept += 1;
+        }
     }
     if incomplete {
         for (_, names) in scoped.drain(..) {
@@ -1579,16 +1585,48 @@ mod tests {
         assert!(t.scoped.is_empty());
         assert_eq!(t.estimate.len(), 80 + 10_000);
 
-        // Past the file cap the plain list is still read, first.
+        // Past the file cap the plain list is still read, and what was read counts everywhere.
         let mut c: Vec<String> = (0..MAX_LIST_FILES + 20).map(for_map).collect();
-        c.push(plain);
+        c.push(plain.clone());
         let t = run(c.clone(), 1, false);
         assert!(t.scoped.is_empty());
-        assert_eq!(t.estimate.len(), 80 + MAX_LIST_FILES - 1);
+        assert_eq!(t.estimate.len(), 80 + MAX_LIST_FILES);
         assert!(t.estimate.contains(&"PLAIN0".to_string()));
         // Within the cap nothing is lost.
         c.truncate(10);
         assert_eq!(run(c, 1, false).scoped.len(), 10);
+
+        // A full set of plain lists leaves the map lists their own allowance.
+        let mut c: Vec<String> = vec![for_map(0)];
+        c.extend((0..MAX_LIST_FILES).map(|_| plain.clone()));
+        let t = run(c, 3, false);
+        assert_eq!(t.scoped.len(), 1);
+        assert_eq!(t.scoped[0].1.len(), 3);
+    }
+
+    /// A big declared list isn't copied per map folder, and is never repeated in one.
+    #[test]
+    fn map_lists_skip_the_exact_names() {
+        let exact: Vec<String> = (0..50).map(|i| format!("E{i}")).collect();
+        let read = |m: &str| {
+            let n = if m.contains("Map0") { "E1" } else { "NEW" };
+            Some(format!(
+                r#"<map><densityMapHeightTypes><densityMapHeightType fillTypeName="{n}"/></densityMapHeightTypes></map>"#
+            ).into_bytes())
+        };
+        let candidates: Vec<String> = (0..3)
+            .map(|i| format!("mod_support/FS25_Map{i}/heightTypes.xml"))
+            .collect();
+        let (estimate, scoped) =
+            read_estimates(&exact, None, candidates, &read, |b| parse_list(b).0);
+        assert!(estimate.is_empty());
+        assert_eq!(
+            scoped,
+            [
+                ("FS25_Map1".to_string(), vec!["NEW".to_string()]),
+                ("FS25_Map2".to_string(), vec!["NEW".to_string()]),
+            ]
+        );
     }
 
     #[test]
