@@ -103,10 +103,15 @@ pub fn folder_key(path: &str) -> String {
 /// folder in mods for a `modDesc.xml`, so Silo's archive and backups folders there get this line
 /// on every start (#385). Pure.
 fn silo_folder(line: &str, silo: &[String]) -> Option<String> {
-    const OPEN: &str = "Failed to open xml file '";
-    let rest = &line[line.find(OPEN)? + OPEN.len()..];
+    // The whole line is that message: the same words inside another error (a Lua one, say) are
+    // that error's business.
+    let rest = line
+        .strip_prefix("Error: Failed to open xml file '")?
+        .trim_end();
     // The last quote closes it: a folder name may hold one ("D:/O'Brien/mods").
-    let path = &rest[..rest.rfind('\'')?];
+    let path = rest
+        .strip_suffix("'.")
+        .or_else(|| rest.strip_suffix('\''))?;
     let (dir, file) = path.rsplit_once(['/', '\\'])?;
     if !file.eq_ignore_ascii_case("modDesc.xml") {
         return None;
@@ -662,12 +667,16 @@ Application quit
             .as_deref(),
             Some("D:/O'Brien/mods/backups")
         );
-        // Another file in it, a folder inside it, or no closing quote: not this line.
+        // Another file in it, a folder inside it, no closing quote, or the words inside another
+        // message: not this line.
         for line in [
             "Error: Failed to open xml file 'D:/Mods/archive/other.xml'.",
             "Error: Failed to open xml file 'D:/Mods/archive/FS25_A/modDesc.xml'.",
             "Error: Failed to open xml file 'D:/Mods/archive/modDesc.xml",
             "Error: Failed to load 'D:/Mods/archive/modDesc.xml'.",
+            "Error: Running LUA method 'loadMap': Failed to open xml file 'D:/Mods/archive/modDesc.xml'.",
+            "Fatal: Failed to open xml file 'D:/Mods/archive/modDesc.xml'.",
+            "Error: Failed to open xml file 'D:/Mods/archive/modDesc.xml'. Retrying 'x'",
         ] {
             assert_eq!(silo_folder(line, &silo), None, "{line}");
         }
