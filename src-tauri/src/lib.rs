@@ -189,15 +189,7 @@ fn backfill_catalog_links(app: &tauri::AppHandle, zips: &[aliasbackfill::Library
         let out = aliasbackfill::run(&conn, zips, &catalog, provenance::sha256_file, || {
             library_write_within(ALIAS_BACKFILL_WAIT)
         });
-        let mut linked: Vec<String> = Vec::new();
-        for (path, outcome) in &out {
-            let tech = zips.iter().find(|z| &z.path == path).map(|z| &z.tech_name);
-            if let (aliasbackfill::Outcome::Linked(_), Some(t)) = (outcome, tech) {
-                if !linked.contains(t) {
-                    linked.push(t.clone());
-                }
-            }
-        }
+        let linked = linked_tech_names(zips, &out);
         if !out.is_empty() {
             log::info!(
                 "[catalog] link backfill looked at {} mods, linked {}",
@@ -214,6 +206,29 @@ fn backfill_catalog_links(app: &tauri::AppHandle, zips: &[aliasbackfill::Library
         Ok(_) => {}
         Err(e) => log::warn!("[catalog] link backfill skipped: {e}"),
     }
+}
+
+/// The techNames of the zips a backfill run linked, each once (`catalog:linked`'s payload).
+fn linked_tech_names(
+    zips: &[aliasbackfill::LibraryZip],
+    out: &[(PathBuf, aliasbackfill::Outcome)],
+) -> Vec<String> {
+    let linked: HashSet<&PathBuf> = out
+        .iter()
+        .filter(|(_, o)| matches!(o, aliasbackfill::Outcome::Linked(_)))
+        .map(|(p, _)| p)
+        .collect();
+    if linked.is_empty() {
+        return Vec::new();
+    }
+    let mut names: Vec<String> = zips
+        .iter()
+        .filter(|z| linked.contains(&z.path))
+        .map(|z| z.tech_name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Run the catalog-link backfill on the blocking pool without holding up the caller (a scan or
@@ -8003,6 +8018,32 @@ fn hold_quit() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_backfill_tells_the_window_each_linked_mod_once() {
+        use crate::aliasbackfill::{LibraryZip, Outcome};
+        let zip = |p: &str, t: &str| LibraryZip {
+            path: PathBuf::from(p),
+            tech_name: t.into(),
+            size: 1,
+            mtime_ms: 1,
+        };
+        let zips = [
+            zip("a/FS25_X.zip", "FS25_X"),
+            zip("b/FS25_X.zip", "FS25_X"),
+            zip("a/FS25_Y.zip", "FS25_Y"),
+        ];
+        let out = [
+            (PathBuf::from("a/FS25_X.zip"), Outcome::Linked("c".into())),
+            (PathBuf::from("b/FS25_X.zip"), Outcome::Linked("c".into())),
+            (
+                PathBuf::from("a/FS25_Y.zip"),
+                Outcome::Retry("later".into()),
+            ),
+        ];
+        assert_eq!(super::linked_tech_names(&zips, &out), ["FS25_X"]);
+        assert!(super::linked_tech_names(&zips, &out[2..]).is_empty());
+    }
+
     #[test]
     fn an_update_check_hands_the_backfill_the_file_the_scan_read() {
         let m = |size, mtime_ms| super::LocalMod {

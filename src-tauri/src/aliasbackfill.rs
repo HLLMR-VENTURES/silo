@@ -217,7 +217,19 @@ pub fn run_with<G>(
 
     // A zip the catalog knows by its own name is joined by that and needs no link.
     let names: Vec<String> = pending.iter().map(|p| p.zip.tech_name.clone()).collect();
-    let known = match catalog.known_tech_names(&names) {
+    let known = catalog.known_tech_names(&names);
+    // Each file of the batch is noted as tried (any hash noted for it is kept), so the next
+    // run's batch starts with files not tried yet: a batch that keeps failing, or files the
+    // hash budget leaves, never hold up the rest.
+    for p in &pending {
+        note(
+            conn,
+            p.zip,
+            p.noted.as_ref().and_then(|n| n.sha256.as_deref()),
+            false,
+        );
+    }
+    let known = match known {
         Ok(k) => k,
         Err(e) => {
             log::info!("[catalog] link backfill skipped, trying next time: {e}");
@@ -1000,6 +1012,34 @@ mod tests {
             out,
             [(zips[2].path.clone(), Outcome::Linked("cat-2".into()))]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_name_batch_that_fails_goes_behind_files_not_tried_yet() {
+        let (dir, conn) = setup("named_fail");
+        let (zips, fake) = many(&dir, 3);
+        let two = Limits {
+            max_named: 2,
+            ..Limits::default()
+        };
+        let hash = crate::provenance::sha256_file;
+        let down = Fake {
+            fail_known: true,
+            ..Fake::default()
+        };
+        let out = run_with(&conn, &zips, &down, hash, || Ok(()), two);
+        assert!(
+            out.iter().all(|(_, o)| matches!(o, Outcome::Retry(_))),
+            "{out:?}"
+        );
+        // The next batch starts with the file the failed one didn't hold.
+        let out = run_with(&conn, &zips, &fake, hash, || Ok(()), two);
+        let got = out
+            .iter()
+            .find(|(p, _)| *p == zips[2].path)
+            .map(|(_, o)| o.clone());
+        assert_eq!(got, Some(Outcome::Linked("cat-2".into())));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

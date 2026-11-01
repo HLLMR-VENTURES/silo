@@ -23,8 +23,10 @@ import {
 import {
   checkBlockedReason,
   installBlockedReason,
-  heldRecheck,
-  recheckOnLink,
+  heldRefresh,
+  holdRefresh,
+  linkRefresh,
+  mergeRows,
   recheckRow,
   runUpdateCheck,
   updateAll,
@@ -602,53 +604,93 @@ describe("automatic update checks (opt-in)", () => {
 
 describe("checking again when Silo links mods to the catalog (#402)", () => {
   const lib = new Set(["FS25_FieldToDoList", "FS25_Other"]);
-  const at = (o: Partial<Parameters<typeof recheckOnLink>[0]>) =>
-    recheckOnLink({
+  const at = (o: Partial<Parameters<typeof linkRefresh>[0]>) =>
+    linkRefresh({
       linked: ["FS25_FieldToDoList"],
-      checking: false,
+      gen: 1,
+      running: null,
+      lastAsked: lib,
       blocked: false,
-      asked: lib,
-      asking: lib,
       ...o,
     });
 
-  it("checks now after a check that asked about the mod, and once nothing holds one back", () => {
-    expect(at({})).toBe("now");
-    expect(at({ checking: true })).toBe("after");
-    // An update installing keeps a check from starting: it waits, it isn't dropped.
-    expect(at({ blocked: true })).toBe("after");
+  it("refreshes just the linked mods a check of this folder asked about", () => {
+    expect(at({})).toEqual({ when: "now", names: ["FS25_FieldToDoList"] });
+    expect(
+      at({ linked: ["FS25_FieldToDoList", "FS25_New", "FS25_FieldToDoList"] })
+        .names,
+    ).toEqual(["FS25_FieldToDoList"]);
+    // An update installing: it waits, it isn't dropped.
+    expect(at({ blocked: true }).when).toBe("after");
+    // A check running in this folder: after it, for what it asks about.
+    expect(
+      at({ running: { gen: 1, asked: lib }, lastAsked: undefined }).when,
+    ).toBe("after");
   });
 
-  it("only for mods a check of this folder asked about, or the running one asks about", () => {
+  it("never for mods no allowed check of this folder asked about", () => {
     // No check of this folder yet: the first one sees the links.
-    expect(at({ asked: undefined })).toBe("no");
-    expect(at({ asked: undefined, blocked: true })).toBe("no");
-    // Mods of another folder, or left out of the check.
-    expect(at({ linked: ["FS25_Elsewhere"] })).toBe("no");
-    expect(at({ checking: true, asking: new Set(["FS25_Other"]) })).toBe("no");
+    expect(at({ lastAsked: undefined }).when).toBe("no");
+    // Mods added since the check, or of another folder.
+    expect(at({ linked: ["FS25_New"] }).when).toBe("no");
+    // A check of folder 1 still running after the switch to folder 2, though folder 2 has a
+    // mod of that name: nothing is sent for folder 2.
+    expect(
+      at({ gen: 2, running: { gen: 1, asked: lib }, lastAsked: undefined })
+        .when,
+    ).toBe("no");
+    // The running check's own snapshot, not the folder's mods now.
+    expect(
+      at({ running: { gen: 1, asked: new Set(["FS25_Other"]) } }).when,
+    ).toBe("no");
   });
 
-  it("drops a held-back check when the folder changed, and runs it once nothing is busy", () => {
-    expect(heldRecheck(null, 3, false)).toEqual({ run: false, pending: null });
-    expect(heldRecheck(3, 3, true)).toEqual({ run: false, pending: 3 });
-    expect(heldRecheck(3, 3, false)).toEqual({ run: true, pending: null });
-    // Held for folder 3, now in folder 4: never run against folder 4's mods.
-    expect(heldRecheck(3, 4, false)).toEqual({ run: false, pending: null });
+  it("holds refreshes per folder, drops one held for another, runs it when nothing is busy", () => {
+    const held = holdRefresh(holdRefresh(null, 1, ["A"]), 1, ["B", "A"]);
+    expect(held).toEqual({ gen: 1, names: ["A", "B"] });
+    expect(holdRefresh(held, 2, ["C"])).toEqual({ gen: 2, names: ["C"] });
+    expect(heldRefresh(null, 1, false)).toEqual({ run: null, held: null });
+    expect(heldRefresh(held, 1, true)).toEqual({ run: null, held });
+    expect(heldRefresh(held, 1, false)).toEqual({
+      run: ["A", "B"],
+      held: null,
+    });
+    expect(heldRefresh(held, 2, false)).toEqual({ run: null, held: null });
+  });
+
+  it("puts a refresh's rows in place of those mods' rows only", () => {
+    const row = (techName: string, latest: string) => ({
+      techName,
+      title: techName,
+      path: `${techName}.zip`,
+      latest,
+    });
+    const rows = [row("A", "1"), row("B", "1")];
+    expect(mergeRows(rows, [row("B", "2")], new Set(["B"]))).toEqual([
+      row("A", "1"),
+      row("B", "2"),
+    ]);
+    // A refreshed mod the catalog no longer answers for loses its old row.
+    expect(mergeRows(rows, [], new Set(["B"]))).toEqual([row("A", "1")]);
   });
 
   it("tells the catalog the size and time each mod's version was read at", async () => {
     let asked: unknown[] = [];
     const m = { ...mod("FS25_FieldToDoList"), size: 9, mtimeMs: 77 };
-    await runUpdateCheck([m], {}, {
-      catalog: async (mods) => {
-        asked = mods;
-        return [];
+    await runUpdateCheck(
+      [m],
+      {},
+      {
+        catalog: async (mods) => {
+          asked = mods;
+          return [];
+        },
+        checkRepo: async () => {
+          throw "unused";
+        },
+        explain: (e: unknown) => ({ message: String(e), detail: String(e) }),
       },
-      checkRepo: async () => {
-        throw "unused";
-      },
-      explain: (e: unknown) => ({ message: String(e), detail: String(e) }),
-    });
+    );
     expect(asked).toEqual([
       {
         techName: "FS25_FieldToDoList",

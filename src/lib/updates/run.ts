@@ -97,40 +97,67 @@ async function checkLinked(
   }
 }
 
-/**
- * What the Updates list does when Silo links mods (`linked`, techNames) to their catalog entries
- * in the background (#402): check again now, once nothing keeps a check from starting (one
- * running, or an update installing), or not at all. Only for mods of this library that a check
- * the user allowed asked about (`asked`, the last check of this folder, failed or not) or that
- * the running one asks about (`asking`); otherwise no check has asked about them, and the
- * first one sees the links. That check doesn't link more mods itself, so links never set off
- * check after check.
- */
-export function recheckOnLink(s: {
-  linked: string[];
-  checking: boolean;
-  /** Something keeps a check from starting now (an update installing). */
-  blocked: boolean;
-  asked: ReadonlySet<string> | undefined;
-  asking: ReadonlySet<string>;
-}): "now" | "after" | "no" {
-  if (s.checking) return s.linked.some((n) => s.asking.has(n)) ? "after" : "no";
-  if (!s.asked || !s.linked.some((n) => s.asked!.has(n))) return "no";
-  return s.blocked ? "after" : "now";
+/** Mods Silo linked to their catalog entries (#402) whose rows are owed a refresh, in the
+ *  folder (generation) the check that asked about them was of. */
+export interface HeldRefresh {
+  gen: number;
+  names: string[];
 }
 
 /**
- * Whether the check held back by links (`pending`: the folder generation it was for) may run now,
- * and what stays pending. One held back for another folder is dropped, never run here.
+ * Which of the mods Silo just linked in the background (`linked`, techNames; #402) the Updates
+ * list refreshes, and when: now, or once nothing keeps a check from starting (a check running,
+ * an update installing). Only mods a check the user allowed asked about in this folder: the
+ * running one (its snapshot, and only while it's of this folder) or else the last one (failed
+ * or not). Mods added since, of another folder, or never asked about aren't sent anywhere.
  */
-export function heldRecheck(
-  pending: number | null,
+export function linkRefresh(s: {
+  linked: string[];
+  gen: number;
+  running: { gen: number; asked: ReadonlySet<string> } | null;
+  lastAsked: ReadonlySet<string> | undefined;
+  blocked: boolean;
+}): { when: "now" | "after" | "no"; names: string[] } {
+  const pool = s.running
+    ? s.running.gen === s.gen
+      ? s.running.asked
+      : undefined
+    : s.lastAsked;
+  const names = pool ? [...new Set(s.linked.filter((n) => pool.has(n)))] : [];
+  if (names.length === 0) return { when: "no", names };
+  return { when: s.running || s.blocked ? "after" : "now", names };
+}
+
+/** `held` with `names` for folder `gen` added (a refresh held for another folder is replaced). */
+export function holdRefresh(
+  held: HeldRefresh | null,
+  gen: number,
+  names: string[],
+): HeldRefresh {
+  const before = held && held.gen === gen ? held.names : [];
+  return { gen, names: [...new Set([...before, ...names])] };
+}
+
+/**
+ * The held refresh that may run now (`run`), and what stays held. One held for another folder
+ * is dropped, never run in this one.
+ */
+export function heldRefresh(
+  held: HeldRefresh | null,
   gen: number,
   busy: boolean,
-): { run: boolean; pending: number | null } {
-  if (pending === null) return { run: false, pending: null };
-  if (pending !== gen) return { run: false, pending: null };
-  return busy ? { run: false, pending } : { run: true, pending: null };
+): { run: string[] | null; held: HeldRefresh | null } {
+  if (!held || held.gen !== gen) return { run: null, held: null };
+  return busy ? { run: null, held } : { run: held.names, held: null };
+}
+
+/** The Updates rows with those of `names` replaced by `fresh` (a refresh of just those mods). */
+export function mergeRows(
+  rows: UpdateRow[],
+  fresh: UpdateRow[],
+  names: ReadonlySet<string>,
+): UpdateRow[] {
+  return [...rows.filter((r) => !names.has(r.techName)), ...fresh];
 }
 
 /**

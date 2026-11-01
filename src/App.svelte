@@ -122,9 +122,12 @@
     checkBlockedReason,
     installBlockedReason,
     recheckRow,
-    heldRecheck,
-    recheckOnLink,
+    heldRefresh,
+    holdRefresh,
+    linkRefresh,
+    mergeRows,
     runUpdateCheck,
+    type HeldRefresh,
     updateAll,
     updateAllSummary,
     type ExplainedError,
@@ -2140,6 +2143,7 @@
     const checkable = mods.filter((m) => !cur(m.techName).skipUpdates);
     const asked = new Set(checkable.map((m) => m.techName));
     const gen = updateFolderGen;
+    runningCheck = { gen, asked };
     try {
       const res = await runUpdateCheck(checkable, repoMap, {
         ...updateCheckDeps,
@@ -2158,40 +2162,71 @@
     } finally {
       updateChecking = false;
       updateProgress = null;
+      runningCheck = null;
     }
   }
 
-  /** Silo linked mods to their catalog entries while a check couldn't start (#402): the folder
-   *  generation the check again is for, or null. */
-  let recheckAfterLink = $state<number | null>(null);
+  /** The check running now: its folder generation and the mods it asks about (#402). */
+  let runningCheck: { gen: number; asked: ReadonlySet<string> } | null = null;
 
-  /** Mods Silo just linked to their catalog entries (#402) get checked again, when a check the
-   *  user allowed asked about them in this folder. */
+  /** Rows owed a refresh because Silo linked their mods while a check couldn't start (#402). */
+  let heldLinkRefresh = $state.raw<HeldRefresh | null>(null);
+
+  /** Mods Silo just linked to their catalog entries (#402): their rows are checked again, when a
+   *  check the user allowed asked about them in this folder. */
   function onCatalogLinkedMods(linked: string[]) {
-    const when = recheckOnLink({
+    const r = linkRefresh({
       linked,
-      checking: updateChecking,
-      blocked: !!updateCheckBlocked,
-      asked: updateCheckedTechs,
-      asking: new Set(
-        mods.filter((m) => !cur(m.techName).skipUpdates).map((m) => m.techName),
-      ),
+      gen: updateFolderGen,
+      running: runningCheck,
+      lastAsked: updateCheckedTechs,
+      // A refresh of other linked mods running counts as busy too.
+      blocked: !!updateCheckBlocked || updateChecking,
     });
-    if (when === "now") void checkAllUpdates(true, false);
-    else if (when === "after") recheckAfterLink = updateFolderGen;
+    if (r.when === "now") void refreshLinked(r.names, updateFolderGen);
+    else if (r.when === "after") {
+      heldLinkRefresh = holdRefresh(heldLinkRefresh, updateFolderGen, r.names);
+    }
   }
 
-  // The check held back by links meanwhile, once nothing keeps one from starting, and only in
-  // the folder it was for.
+  // A refresh held back meanwhile, once nothing keeps a check from starting, and only in the
+  // folder it was for.
   $effect(() => {
-    const held = heldRecheck(
-      recheckAfterLink,
+    const h = heldRefresh(
+      heldLinkRefresh,
       updateFolderGen,
       updateChecking || !!updateCheckBlocked,
     );
-    if (held.pending !== recheckAfterLink) recheckAfterLink = held.pending;
-    if (held.run) void checkAllUpdates(true, false);
+    if (h.held !== heldLinkRefresh) heldLinkRefresh = h.held;
+    if (h.run) void refreshLinked(h.run, updateFolderGen);
   });
+
+  /** Check just these mods again (they were just linked, #402) and put their rows in. This
+   *  check links nothing itself. */
+  async function refreshLinked(names: string[], gen: number) {
+    if (gen !== updateFolderGen) return;
+    if (updateChecking || updateCheckBlocked) {
+      heldLinkRefresh = holdRefresh(heldLinkRefresh, gen, names);
+      return;
+    }
+    const want = new Set(names);
+    const subset = mods.filter(
+      (m) => want.has(m.techName) && !cur(m.techName).skipUpdates,
+    );
+    if (subset.length === 0) return;
+    updateChecking = true;
+    try {
+      const res = await runUpdateCheck(subset, repoMap, {
+        ...updateCheckDeps,
+        catalog: (asks) => catalogCheckUpdates(asks, false),
+      });
+      // Another folder's rows, or a failed request: the rows stay as they were.
+      if (gen !== updateFolderGen || res.catalogError) return;
+      updateResults = mergeRows(updateResults, res.rows, want);
+    } finally {
+      updateChecking = false;
+    }
+  }
 
   /** "Couldn't check" → Try again: that mod's linked repo only. */
   async function recheckUpdate(row: UpdateRow) {
@@ -2896,7 +2931,7 @@
     for (const t of dropToasts.splice(0)) t.dismiss();
     // The last update check was of the other folder's files (and one still running is too).
     updateFolderGen++;
-    recheckAfterLink = null;
+    heldLinkRefresh = null;
     updateResults = [];
     updateCheckedAt = null;
     updateCatalogError = null;
