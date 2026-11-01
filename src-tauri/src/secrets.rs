@@ -286,6 +286,35 @@ pub fn clear(conn: &Connection, key: &str) -> Result<Removal, String> {
     clear_with(conn, key, entry(key).as_ref(), keychain_missing)
 }
 
+/// Delete what a disconnect left behind (a revoked row, a distrusted keychain copy) once the
+/// stores allow, without reading a token out. For while the account is signed out, when no
+/// `get` runs to do it. It never touches a token a reconnect saved: that save lifts both marks,
+/// under the same lock.
+pub fn sweep(conn: &Connection, key: &str) {
+    let _held = store_lock();
+    sweep_with(conn, key, entry(key).as_ref());
+}
+
+fn sweep_with(conn: &Connection, key: &str, keychain: Option<&keyring::Entry>) {
+    if let Ok(Some(row)) = setting(conn, key) {
+        if row_revoked(conn, key, &row) == Ok(true) {
+            let _ = clear_fallback(conn, key);
+        }
+    }
+    if let (Some(e), Ok(Some(_))) = (keychain, setting(conn, &distrust_key(key))) {
+        if matches!(e.delete_credential(), Ok(()) | Err(keyring::Error::NoEntry)) {
+            let _ = set_distrust(conn, key, false);
+        }
+    }
+}
+
+/// Disconnect when the database can't be opened: delete the keychain copy at least. True when
+/// it's gone (or there's no keychain entry to delete).
+pub fn forget_keychain(key: &str) -> bool {
+    let _held = store_lock();
+    entry(key).map_or(true, |e| clear_keychain(&e) == Cleared::Gone)
+}
+
 /// `set`, with the keychain entry and the "is there no keychain service at all?" probe passed
 /// in so tests can use fakes instead of the real store.
 fn set_with(
@@ -1231,6 +1260,44 @@ mod tests {
         db::set_app_setting(&conn, KEY, Some("tok")).unwrap();
         assert!(drop_row(&conn, KEY, None).is_err());
         assert_eq!(drop_row(&conn, KEY, Some("tok")), Ok(true));
+    }
+
+    #[test]
+    fn a_sweep_removes_leftovers_but_never_a_current_token() {
+        // A disconnect left a distrusted keychain copy (locked) and a revoked row (busy).
+        let conn = mem_db();
+        db::set_app_setting(&conn, KEY, Some("tok")).unwrap();
+        refuse_row_delete(&conn);
+        let k = FakeKeychain::with(|s| {
+            s.stored = Some("tok".into());
+            s.delete_fails = Some(Fail::NoAccess);
+            s.get_fails = Some(Fail::NoAccess);
+        });
+        assert!(clear_with(&conn, KEY, Some(&k.entry()), KEYCHAIN_WORKS).is_ok());
+        // Still locked and busy: nothing changes.
+        sweep_with(&conn, KEY, Some(&k.entry()));
+        assert_eq!(k.stored().as_deref(), Some("tok"));
+        assert_eq!(row(&conn).as_deref(), Some("tok"));
+        // Both stores allow it again: both copies go, and the marks with them.
+        allow_row_delete(&conn);
+        {
+            let mut s = k.0.lock().unwrap();
+            s.delete_fails = None;
+            s.get_fails = None;
+        }
+        sweep_with(&conn, KEY, Some(&k.entry()));
+        assert_eq!(k.stored(), None);
+        assert_eq!(row(&conn), None);
+        assert!(!keychain_distrusted(&conn, KEY));
+        assert_eq!(db::get_app_setting(&conn, &revoked_key(KEY)), None);
+        // A token saved normally is neither marked, so a sweep leaves it alone.
+        set_with(&conn, KEY, Some("new"), Some(&k.entry()), KEYCHAIN_WORKS).unwrap();
+        sweep_with(&conn, KEY, Some(&k.entry()));
+        assert_eq!(k.stored().as_deref(), Some("new"));
+        let conn = mem_db();
+        set_with(&conn, KEY, Some("row"), None, NO_KEYCHAIN).unwrap();
+        sweep_with(&conn, KEY, None);
+        assert_eq!(row(&conn).as_deref(), Some("row"));
     }
 
     #[test]

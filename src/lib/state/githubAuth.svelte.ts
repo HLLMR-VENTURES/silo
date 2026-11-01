@@ -168,14 +168,18 @@ async function poll(gen: number, deviceCode: string, seconds: number): Promise<v
   try {
     r = await ghDevicePoll(deviceCode);
   } catch (e) {
-    if (gen !== generation) return;
-    fail(gen, inlineError(e, "Waiting for GitHub to confirm"));
-    // Saving the sign-in can fail halfway, and then the backend signs out: show what's true.
+    // Saving the sign-in can fail halfway, and then the backend signs out: show what's true,
+    // even for a flow that was cancelled or replaced meanwhile.
     void refreshGithub();
+    if (gen === generation) fail(gen, inlineError(e, "Waiting for GitHub to confirm"));
     return;
   }
-  // Cancelled (or restarted) while the poll was out: drop its answer.
-  if (gen !== generation) return;
+  // Cancelled (or restarted) while the poll was out: drop its answer. If it connected anyway
+  // (the backend stored it before the cancel or the newer sign-in reached it), show that.
+  if (gen !== generation) {
+    if (r.status === "ok") void refreshGithub();
+    return;
+  }
   switch (r.status) {
     case "ok": {
       const done = ++generation; // done: nothing of this flow may run again
@@ -241,6 +245,8 @@ export async function startDeviceFlow(write = false, gist = false): Promise<void
     arm(gen, dc.deviceCode, Math.max(dc.interval, MIN_POLL_SECONDS));
   } catch (e) {
     fail(gen, inlineError(e, "Starting GitHub sign-in"));
+    // A flow this one replaced may have connected meanwhile: show what's connected now.
+    if (gen === generation) void refreshGithub();
   }
 }
 

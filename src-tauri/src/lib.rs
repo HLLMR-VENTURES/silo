@@ -491,6 +491,10 @@ async fn gh_status(app: tauri::AppHandle) -> Result<GhStatus, String> {
     let db = db_path(&app)?;
     off_main(move || {
         let conn = db::open(&db)?;
+        // Signed out: no read removes what a Disconnect left behind, so do it here.
+        if GH_SESSION.signed_out() {
+            secrets::sweep(&conn, "gh_token");
+        }
         // Capability comes from the scopes GitHub actually granted. Older connections predate
         // scope capture and only carry the coarse booleans — honour those until the next
         // reconnect writes `gh_scopes`.
@@ -1712,7 +1716,13 @@ async fn gh_logout(app: tauri::AppHandle) -> Result<(), String> {
         signing_out.finish(|marked| {
             let conn = match db::open(&db) {
                 Ok(c) => c,
-                Err(e) => return (false, Err(gh_not_removed(&e, marked))),
+                Err(e) => {
+                    // Delete the keychain copy at least; the database can't record anything.
+                    if !secrets::forget_keychain("gh_token") {
+                        log::warn!("gh_token: couldn't remove it from the keychain either");
+                    }
+                    return (false, Err(gh_not_removed(&e, marked)));
+                }
             };
             // Silo stops using the token even when the keychain keeps a copy it couldn't
             // delete (it's distrusted, and removed once the store allows), or the database
