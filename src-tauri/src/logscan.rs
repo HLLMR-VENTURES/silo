@@ -234,30 +234,45 @@ const MAX_LOG_NAMES: usize = 10_000;
 /// finding still counts but isn't remembered, so a later exact repeat of it counts again.
 const MAX_SEEN_FINDINGS: usize = 1_000_000;
 
-/// Read and parse a log, reading at most `head + tail` bytes of it (plus one). A bigger log gives
-/// its first `head` and last `tail` bytes, cut to whole lines, and the report is marked truncated.
-/// The lines skipped in between aren't read, so lines from the end have no line number.
+/// How many times [`scan`] starts over when the log changes size while it's read.
+const SCAN_ATTEMPTS: usize = 3;
+
+/// Read and parse a log, reading at most `head + tail` bytes of it (plus one) per attempt. A
+/// bigger log gives its first `head` and last `tail` bytes, cut to whole lines, and the report is
+/// marked truncated. The lines skipped in between aren't read, so lines from the end have no line
+/// number. A log that changes size while it's read (the game starting over, say) is read again,
+/// a few times at most.
 pub fn scan<R: std::io::Read + std::io::Seek>(
     mut r: R,
     head: u64,
     tail: u64,
 ) -> std::io::Result<LogReport> {
+    for _ in 0..SCAN_ATTEMPTS {
+        if let Some(report) = scan_once(&mut r, head, tail)? {
+            return Ok(report);
+        }
+    }
+    Err(std::io::Error::other(
+        "The game log kept changing while Silo read it. Try again in a moment.",
+    ))
+}
+
+/// One attempt of [`scan`]: None when the log changed size while it was read.
+fn scan_once<R: std::io::Read + std::io::Seek>(
+    mut r: R,
+    head: u64,
+    tail: u64,
+) -> std::io::Result<Option<LogReport>> {
     use std::io::{Read, SeekFrom};
     let limit = head.saturating_add(tail);
-    let mut len = r.seek(SeekFrom::End(0))?;
+    let len = r.seek(SeekFrom::End(0))?;
     r.seek(SeekFrom::Start(0))?;
     if len <= limit {
         let mut bytes = Vec::new();
-        r.by_ref()
-            .take(limit.saturating_add(1))
-            .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 <= limit {
-            return Ok(parse(&String::from_utf8_lossy(&bytes)));
-        }
-        // It grew past the limit while we read it: read it as a big log.
-        drop(bytes);
-        len = r.seek(SeekFrom::End(0))?;
-        r.seek(SeekFrom::Start(0))?;
+        r.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+        // Past the limit, it grew while we read it: start over, as a big log.
+        let fits = bytes.len() as u64 <= limit;
+        return Ok(fits.then(|| parse(&String::from_utf8_lossy(&bytes))));
     }
     let mut head_bytes = Vec::new();
     r.by_ref().take(head).read_to_end(&mut head_bytes)?;
@@ -270,8 +285,13 @@ pub fn scan<R: std::io::Read + std::io::Seek>(
     // The tail starts one byte early, so a line that starts exactly at the cut is kept whole.
     r.seek(SeekFrom::Start(len.saturating_sub(tail.saturating_add(1))))?;
     let mut tail_bytes = Vec::new();
-    r.take(tail.saturating_add(1))
+    r.by_ref()
+        .take(tail.saturating_add(1))
         .read_to_end(&mut tail_bytes)?;
+    // A different size now means the head and tail may not be from the same log.
+    if r.seek(SeekFrom::End(0))? != len {
+        return Ok(None);
+    }
     // Drop the partial line the tail starts in.
     let start = tail_bytes
         .iter()
@@ -293,7 +313,7 @@ pub fn scan<R: std::io::Read + std::io::Seek>(
         );
     let mut report = parse_lines(lines, head_lines);
     report.truncated = true;
-    Ok(report)
+    Ok(Some(report))
 }
 
 /// Bytes as text, without a copy when they're valid UTF-8 (lossy otherwise).
@@ -744,15 +764,27 @@ Application quit
         assert!(r.mods.iter().all(|m| m.mod_name != "FS25_Spam"));
     }
 
-    /// A log of `len` bytes made of one repeated line, generated on the fly, that counts the
-    /// bytes read from it. After its first `SeekFrom::End` it reports `grown` bytes instead.
+    /// A log made of one repeated line, generated on the fly, that counts the bytes read from it.
+    /// Each `SeekFrom::End` reports the next length in `ends`, and right after it the log takes
+    /// the length after that (the last one sticks), the way a log the game is writing or starting
+    /// over changes size between looks.
     struct Virtual {
+        ends: Vec<u64>,
         len: u64,
-        grown: u64,
         pos: u64,
         read: u64,
     }
     const SPAM: &[u8] = b"Error: spam in mod 'FS25_Spam'\n";
+    impl Virtual {
+        fn new(ends: &[u64]) -> Self {
+            Virtual {
+                ends: ends.to_vec(),
+                len: ends[0],
+                pos: 0,
+                read: 0,
+            }
+        }
+    }
     impl std::io::Read for Virtual {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             let n = (self.len.saturating_sub(self.pos) as usize).min(buf.len());
@@ -769,9 +801,12 @@ Application quit
             self.pos = match to {
                 std::io::SeekFrom::Start(p) => p,
                 std::io::SeekFrom::End(d) => {
-                    let end = self.len;
-                    self.len = self.grown;
-                    end.saturating_add_signed(d)
+                    let seen = self.ends[0];
+                    if self.ends.len() > 1 {
+                        self.ends.remove(0);
+                    }
+                    self.len = self.ends[0];
+                    seen.saturating_add_signed(d)
                 }
                 std::io::SeekFrom::Current(d) => self.pos.saturating_add_signed(d),
             };
@@ -783,13 +818,7 @@ Application quit
     #[test]
     fn scan_reads_only_the_head_and_tail_of_a_huge_log() {
         // About 62 GB of whole lines.
-        let huge = SPAM.len() as u64 * 2_000_000_000;
-        let mut v = Virtual {
-            len: huge,
-            grown: huge,
-            pos: 0,
-            read: 0,
-        };
+        let mut v = Virtual::new(&[SPAM.len() as u64 * 2_000_000_000]);
         let r = scan(&mut v, 1000, 4000).unwrap();
         assert!(r.truncated);
         assert!(v.read <= 5001, "read {} bytes", v.read);
@@ -798,18 +827,23 @@ Application quit
         assert_eq!(r.mods[0].sample_line, Some(1));
     }
 
-    /// A log that grows past the limit while it's read is read as a big log, not cut silently.
+    /// A log that grows past the limit while it's read is read again as a big log, not cut
+    /// silently; one that shrinks (the game starting over) is read again whole.
     #[test]
-    fn scan_notices_a_log_that_grows_while_read() {
-        let mut v = Virtual {
-            len: 100,
-            grown: 1_000_000,
-            pos: 0,
-            read: 0,
-        };
-        let r = scan(&mut v, 100, 100).unwrap();
+    fn scan_reads_again_when_the_log_changes_size() {
+        let mut grows = Virtual::new(&[100, 1_000_000]);
+        let r = scan(&mut grows, 100, 100).unwrap();
         assert!(r.truncated);
-        assert!(v.read <= 201 + 201, "read {} bytes", v.read);
+        assert!(grows.read <= 201 + 201, "read {} bytes", grows.read);
+        let mut shrinks = Virtual::new(&[1_000_000, 93]);
+        let r = scan(&mut shrinks, 100, 100).unwrap();
+        assert!(!r.truncated);
+        assert_eq!(r.total_findings, 1);
+        // A log that never holds still gives up after a few bounded attempts.
+        let sizes: Vec<u64> = (1..=7).map(|i| i * 1_000_000).collect();
+        let mut churns = Virtual::new(&sizes);
+        assert!(scan(&mut churns, 100, 100).is_err());
+        assert!(churns.read <= 3 * 201, "read {} bytes", churns.read);
     }
 
     /// Past MAX_LOG_NAMES mods, a new mod's findings count as unattributed; the inventory count

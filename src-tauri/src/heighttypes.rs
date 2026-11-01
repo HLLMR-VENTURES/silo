@@ -123,6 +123,10 @@ pub fn parse_list_checked(xml: &[u8]) -> Option<(Vec<String>, Option<u32>)> {
 /// junk (a 32 MiB member of tiny entries compresses to almost nothing) and counts as unreadable.
 pub const MAX_LIST_NAMES: usize = 10_000;
 
+/// The longest name Silo reads (real ones are a few dozen bytes); a list with a longer one counts
+/// as unreadable, so a handful of giant names can't hold gigabytes.
+pub const MAX_NAME_BYTES: usize = 256;
+
 /// The most script-loaded lists Silo reads from one mod for its estimate (real mods ship up to
 /// five). Once the estimate holds [`MAX_LIST_NAMES`] names it stops growing too: it's far past
 /// any cap by then.
@@ -146,7 +150,7 @@ pub(crate) fn push_new(
 /// The `name_attr` values of `<root><list><item>` entries, upper-cased and de-duplicated, and the
 /// list element's `numChannels`. `None` when the XML isn't a complete, well-formed document or
 /// an element on the way has a malformed attribute: the game can't load such a file. Also `None`
-/// past [`MAX_LIST_NAMES`] distinct names. Pure.
+/// past [`MAX_LIST_NAMES`] distinct names or with a name over [`MAX_NAME_BYTES`]. Pure.
 pub(crate) fn named_list(
     xml: &[u8],
     list: &[u8],
@@ -162,6 +166,9 @@ pub(crate) fn named_list(
         if depth == 2 && parent == list && name.as_ref() == item {
             if let Some(n) = attr(e, name_attr)? {
                 let n = n.trim().to_uppercase();
+                if n.len() > MAX_NAME_BYTES {
+                    return None;
+                }
                 if !n.is_empty() && !seen.contains(&n) {
                     if names.len() >= MAX_LIST_NAMES {
                         return None;
@@ -499,7 +506,7 @@ pub fn mod_types(
         .map(|b| parse_list(&b).0)
         .unwrap_or_default();
     let mut estimate: Vec<String> = Vec::new();
-    if !md.is_map {
+    if !md.is_map && exact.len() < MAX_LIST_NAMES {
         // Seeded with the exact names, so an estimate never repeats one.
         let mut seen: HashSet<String> = exact.iter().cloned().collect();
         for m in candidates().into_iter().take(MAX_LIST_FILES) {
@@ -824,6 +831,17 @@ mod tests {
         assert_eq!((names.len(), ch), (MAX_LIST_NAMES, Some(7)));
         assert_eq!(parse_list_checked(&list(MAX_LIST_NAMES + 1)), None);
         assert!(parse_list(&list(MAX_LIST_NAMES + 1)).0.is_empty());
+        // A name over MAX_NAME_BYTES makes the list unreadable too.
+        let named = |n: &str| {
+            format!("<map><densityMapHeightTypes><densityMapHeightType fillTypeName=\"{n}\"/></densityMapHeightTypes></map>")
+        };
+        let longest = "a".repeat(MAX_NAME_BYTES);
+        assert_eq!(
+            parse_list_checked(named(&longest).as_bytes()).unwrap().0,
+            [longest.to_uppercase()]
+        );
+        let over = "a".repeat(MAX_NAME_BYTES + 1);
+        assert_eq!(parse_list_checked(named(&over).as_bytes()), None);
     }
 
     #[test]

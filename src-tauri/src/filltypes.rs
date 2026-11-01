@@ -218,7 +218,7 @@ pub fn mod_fills(
         .map(|b| fill_type_names(&b))
         .unwrap_or_default();
     let mut estimate: Vec<String> = Vec::new();
-    if !md.is_map {
+    if !md.is_map && exact.len() < MAX_LIST_NAMES {
         // Seeded with the exact names, so an estimate never repeats one.
         let mut seen: HashSet<String> = exact.iter().cloned().collect();
         for m in candidates().into_iter().take(MAX_LIST_FILES) {
