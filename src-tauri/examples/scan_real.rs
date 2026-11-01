@@ -36,11 +36,11 @@ fn main() {
         .result
         .mods
         .iter()
-        .filter(|m| cold.fresh_paths.contains(&m.path))
         .filter_map(|m| {
+            let key = cold.fresh_paths.get(&m.path)?;
             serde_json::to_string(m)
                 .ok()
-                .map(|j| (m.path.clone(), m.mtime_ms, m.size, j))
+                .map(|j| (m.path.clone(), key.mtime_ms, key.size, j))
         })
         .collect();
     silo_lib::db::upsert_many(&mut conn, &fresh_rows).expect("upsert");
