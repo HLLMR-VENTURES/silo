@@ -423,6 +423,7 @@ fn copy_verify_place(
                 from: src.to_path_buf(),
                 to: dst.to_path_buf(),
                 kind: kind.to_string(),
+                made: None,
             },
         );
     }
@@ -2280,7 +2281,8 @@ mod tests {
             a.exists() && !zip_at(&f.new, "FS25_A").exists(),
             "nothing moved"
         );
-        assert!(!part.exists(), "an unclaimed stale download is removed");
+        // An older version's fixed-name part, never recorded: left in place, logged (#400).
+        assert_eq!(std::fs::read(&part).unwrap(), b"stale download");
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
