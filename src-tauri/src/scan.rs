@@ -820,21 +820,29 @@ fn plan_jobs<'a>(
         copies.entry(slot(c)).or_default().push(c);
     }
 
+    // The archived mods that have a row, by slot and by case-folded name (see `archived_slot`).
+    let visible: HashSet<Slot> = archive_cands.iter().map(slot).collect();
+    let mut folded: HashMap<(usize, String), Slot> = HashMap::new();
+    for s in &visible {
+        folded
+            .entry((s.0, s.1.to_string_lossy().to_lowercase()))
+            .or_insert(*s);
+    }
+    let listed: HashSet<Slot> = root_cands.iter().map(slot).collect();
+
     // Mods-folder entries at archived mods' names: checked in parallel (a few stats each).
-    let verdicts: Vec<Option<bool>> = root_cands
+    let verdicts: Vec<Option<(Slot, bool)>> = root_cands
         .par_iter()
         .map(|r| {
-            let (layout, name) = slot(r);
-            let candidates = copies.get(&(layout, name))?;
+            let at = archived_slot(r, &visible, &folded, &listed)?;
             let record = records
-                .get(layout)
-                .and_then(|m| m.get(name.to_string_lossy().as_ref()))
+                .get(at.0)
+                .and_then(|m| m.get(at.1.to_string_lossy().as_ref()))
                 .copied();
-            Some(
-                candidates
-                    .iter()
-                    .any(|a| looks_like_projection(r, a, record)),
-            )
+            let ours = copies
+                .get(&at)
+                .is_some_and(|c| c.iter().any(|a| looks_like_projection(r, a, record)));
+            Some((at, ours))
         })
         .collect();
 
@@ -850,10 +858,10 @@ fn plan_jobs<'a>(
                 active: true, // a vanilla mod sits in the mods folder, so it loads
                 behind: None,
             }),
-            Some(ours) => {
-                in_root.insert(slot(r));
+            Some((at, ours)) => {
+                in_root.insert(at);
                 if !ours {
-                    foreign.insert(slot(r), r);
+                    foreign.insert(at, r);
                 }
             }
         }
@@ -883,6 +891,34 @@ fn plan_jobs<'a>(
     }
     jobs.extend(loose);
     jobs
+}
+
+/// The slot of an archived mod with a row that mods-folder entry `r` sits at, if any: its own
+/// file name, or on a case-insensitive volume the archived spelling of it (`FS25_A.ZIP` for an
+/// archived `FS25_A.zip`), when no entry is listed under that spelling and the folder still
+/// resolves it to this very entry, as `organize` would when it opens the archived name there.
+/// An entry matching only a later archive's copy has no row to stand in for, so it gets none.
+fn archived_slot<'a>(
+    r: &'a Candidate,
+    visible: &HashSet<Slot<'a>>,
+    folded: &HashMap<(usize, String), Slot<'a>>,
+    listed: &HashSet<Slot<'a>>,
+) -> Option<Slot<'a>> {
+    let own = slot(r);
+    if visible.contains(&own) {
+        return Some(own);
+    }
+    let at = *folded.get(&(own.0, own.1.to_string_lossy().to_lowercase()))?;
+    if listed.contains(&at) {
+        return None;
+    }
+    let same = |p: &Path| {
+        fs::symlink_metadata(p)
+            .ok()
+            .map(|m| (m.file_type().is_dir(), m.len(), m.modified().ok()))
+    };
+    let alias = same(&r.path.with_file_name(at.1));
+    (alias.is_some() && alias == same(&r.path)).then_some(at)
 }
 
 /// Convenience wrapper with no cache — used by the example harness and tests.
@@ -1576,28 +1612,71 @@ mod layout_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// A slot is the exact file name: a zip spelled `.ZIP` is never at an archived `.zip`'s name
-    /// (Silo links under the archived name, and the foreign-file check matches names exactly).
+    /// A zip spelled `.ZIP` at an archived `.zip`'s name. Where the volume ignores case, the
+    /// folder resolves the archived spelling to it, so it is at that mod's slot (here Silo's own
+    /// hardlink, so the archived row stands). Where case matters it is a different file name,
+    /// so it is its own loose row and the archived mod is parked.
     #[test]
-    fn a_differently_spelled_extension_is_its_own_row() {
+    fn a_differently_spelled_extension_follows_the_volume() {
         let base = fresh("ext_case");
         let mods = base.join("mods");
         let arch = base.join("arch");
         std::fs::create_dir_all(&mods).unwrap();
         std::fs::create_dir_all(arch.join("Tools")).unwrap();
         moddesc_zip(&arch.join("Tools/FS25_A.zip"), "Archived");
-        moddesc_zip(&mods.join("FS25_A.ZIP"), "Upper case");
+        std::fs::hard_link(arch.join("Tools/FS25_A.zip"), mods.join("FS25_A.ZIP")).unwrap();
+        let ignores_case = mods.join("FS25_A.zip").exists();
 
         let out = scan_one(&mods, &arch);
         assert!(out.stand_ins.is_empty());
-        assert_eq!(out.result.mods.len(), 2);
-        let upper = out
+        let rows: Vec<(bool, bool)> = out
             .result
             .mods
             .iter()
-            .find(|m| m.title.as_deref() == Some("Upper case"))
-            .unwrap();
-        assert!(!upper.organized && upper.active);
+            .map(|m| (m.organized, m.active))
+            .collect();
+        if ignores_case {
+            assert_eq!(rows, vec![(true, true)]);
+        } else {
+            assert_eq!(rows.len(), 2);
+            assert!(rows.contains(&(true, false)) && rows.contains(&(false, true)));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Mid archive move the older archive can hold a folder where the newer one holds a zip of
+    /// the same techName. A mods-folder entry matching only that hidden copy has no row to stand
+    /// in for, so it is listed as its own row, never dropped.
+    #[test]
+    fn an_entry_matching_only_a_hidden_archive_copy_is_listed() {
+        let base = fresh("shadow_only");
+        let mods = base.join("mods");
+        let (new_arch, old_arch) = (base.join("new"), base.join("old"));
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(new_arch.join("Tools")).unwrap();
+        moddesc_zip(&new_arch.join("Tools/FS25_A.zip"), "New zip");
+        moddesc_dir(&old_arch.join("Tools/FS25_A"), "Old folder");
+        moddesc_dir(&mods.join("FS25_A"), "In the mods folder");
+        std::fs::write(
+            mods.join("FS25_A").join(crate::organize::SILO_MARKER),
+            b"silo\n",
+        )
+        .unwrap();
+
+        let out = scan_layouts(
+            vec![(mods.clone(), vec![new_arch, old_arch])],
+            &HashMap::new(),
+            |_, _| {},
+        );
+        assert!(out.stand_ins.is_empty());
+        let shown = out
+            .result
+            .mods
+            .iter()
+            .find(|m| m.title.as_deref() == Some("In the mods folder"))
+            .expect("listed");
+        assert!(shown.active && !shown.organized);
+        assert_eq!(out.result.mods.len(), 2);
         let _ = std::fs::remove_dir_all(&base);
     }
 
