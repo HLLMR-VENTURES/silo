@@ -1667,6 +1667,55 @@ mod tests {
     }
 
     #[test]
+    fn tries_are_numbered_in_the_order_made_whatever_the_clock_says() {
+        let (dir, conn) = setup("try_order");
+        let (zips, fake) = many(&dir, 3);
+        // A try noted far ahead of the clock (a clock set back since, say).
+        let ahead = now_ms() + 1_000_000;
+        let seen = scanned(&write_zip(&dir, "FS25_Elsewhere.zip", b"x"));
+        let check = db::AliasCheck {
+            size: seen.size,
+            mtime_ms: seen.mtime_ms,
+            sha256: None,
+            unnamed_ms: None,
+            decided: false,
+            attempted_ms: ahead,
+        };
+        db::note_alias_check(&conn, &path_key(&seen), &check).unwrap();
+        let one = Limits {
+            max_hashed: 1,
+            ..Limits::default()
+        };
+        let hash = crate::provenance::sha256_file;
+        let down = Fake {
+            fail_by_hash: true,
+            ..Fake::default()
+        };
+        run_with(&conn, &zips, &down, hash, |_| Ok(()), one);
+        let tried = |i: usize| {
+            db::alias_check(&conn, &path_key(&zips[i]))
+                .unwrap()
+                .unwrap()
+                .attempted_ms
+        };
+        // The name batch after the earlier try, the hashed file after the name batch.
+        assert!(
+            tried(1) > ahead && tried(2) == tried(1),
+            "{} {}",
+            tried(1),
+            tried(2)
+        );
+        assert!(tried(0) > tried(1));
+        // The next run goes after all of them, and takes a file the last one only asked about.
+        run_with(&conn, &zips, &fake, hash, |_| Ok(()), one);
+        assert!(
+            settled(&conn, &zips[1]),
+            "the file left by the last run went first"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn files_that_keep_failing_dont_hold_up_the_rest() {
         let (dir, conn) = setup("starve");
         let (mut zips, fake) = many(&dir, MAX_HASHED + 1);
