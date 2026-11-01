@@ -1101,61 +1101,73 @@ async fn catalog_image(app: tauri::AppHandle, url: String) -> Result<String, Str
 /// failed fetch, not an image.
 const MIN_CACHED_IMAGE_BYTES: usize = 16;
 
-/// Pure: whether `s` is a usable cached thumbnail: an image `data:` URL whose base64 payload
-/// decodes to a non-trivial image. An empty, cut-off or foreign entry isn't.
-fn cached_image_ok(s: &str) -> bool {
+/// Pure: the image bytes of a thumbnail `data:` URL (`data:image/...;base64,...`), when it is one
+/// and isn't trivially short.
+fn thumbnail_bytes(s: &str) -> Option<Vec<u8>> {
     use base64::Engine;
-    let Some(rest) = s.strip_prefix("data:image/") else {
-        return false;
-    };
-    let Some((_, payload)) = rest.split_once(";base64,") else {
-        return false;
-    };
+    let rest = s.strip_prefix("data:image/")?;
+    let (_, payload) = rest.split_once(";base64,")?;
     base64::engine::general_purpose::STANDARD
         .decode(payload)
-        .is_ok_and(|b| b.len() >= MIN_CACHED_IMAGE_BYTES && image_looks_whole(&b))
+        .ok()
+        .filter(|b| b.len() >= MIN_CACHED_IMAGE_BYTES)
 }
 
-/// Pure: whether image bytes are a whole file of a format whose end can be checked: PNG ending
-/// in its `IEND` chunk, JPEG ending in its end-of-image marker that also decodes (a cut can land
-/// right after an embedded EXIF thumbnail's own marker), WebP whose RIFF length matches. Any
-/// other format (GIF, SVG, ...) is false: it is shown, but not cached, since a cut-off copy
-/// couldn't be told apart.
-fn image_looks_whole(b: &[u8]) -> bool {
+/// Pure: the format of image bytes that end the way a whole file of it ends (PNG's `IEND`
+/// chunk, JPEG's end-of-image marker) and whose header reads (a cut right after an embedded EXIF
+/// thumbnail's own end marker leaves a header that doesn't). `None` for anything else (GIF, SVG,
+/// WebP, ...): shown, but never cached, since a cut-off copy couldn't be told apart.
+fn whole_image_format(b: &[u8]) -> Option<image::ImageFormat> {
     const PNG_END: [u8; 8] = [0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82];
-    if b.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
-        b.ends_with(&PNG_END)
+    let format = if b.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        b.ends_with(&PNG_END).then_some(image::ImageFormat::Png)
     } else if b.starts_with(&[0xFF, 0xD8]) {
         b.ends_with(&[0xFF, 0xD9])
-            && image::load_from_memory_with_format(b, image::ImageFormat::Jpeg).is_ok()
-    } else if b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP") {
-        let size = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
-        size.checked_add(8) == Some(b.len())
+            .then_some(image::ImageFormat::Jpeg)
     } else {
-        false
-    }
+        None
+    }?;
+    image::ImageReader::with_format(std::io::Cursor::new(b), format)
+        .into_dimensions()
+        .ok()
+        .map(|_| format)
+}
+
+/// Pure: whether `s` is a usable cached thumbnail: its bytes are a whole PNG or JPEG
+/// (`whole_image_format`). Cheap enough for every read: a cut-off write is all an entry written
+/// by this cache can suffer, since it decoded before it was kept (`cacheable_image`).
+fn cached_image_ok(s: &str) -> bool {
+    thumbnail_bytes(s).is_some_and(|b| whole_image_format(&b).is_some())
+}
+
+/// Pure: whether a fetched thumbnail is worth caching: whole (`whole_image_format`) and it
+/// decodes, so a damaged image the server sent is shown but never kept.
+fn cacheable_image(s: &str) -> bool {
+    thumbnail_bytes(s).is_some_and(|b| {
+        whole_image_format(&b).is_some_and(|f| image::load_from_memory_with_format(&b, f).is_ok())
+    })
 }
 
 /// The cached thumbnail at `file`, or `None` when there is none or it isn't usable
-/// (`cached_image_ok`); an unusable one is deleted so it is fetched again.
+/// (`cached_image_ok`). An unusable one is left for the fetch that follows to replace (deleting
+/// it here could delete a good copy another request just put in its place).
 fn read_cached_image(file: &std::path::Path) -> Option<String> {
     let cached = std::fs::read_to_string(file).ok()?;
     if cached_image_ok(&cached) {
         return Some(cached);
     }
-    log::info!("dropping an unusable cached thumbnail {}", file.display());
-    let _ = std::fs::remove_file(file);
+    log::info!("refetching an unusable cached thumbnail {}", file.display());
     None
 }
 
 /// Tells concurrent thumbnail cache writes in this process apart.
 static IMAGE_CACHE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Cache thumbnail `data` at `file`, best effort: only a usable image (`cached_image_ok`), written
-/// to a temp file of its own beside `file` and renamed into place, so a crash or a concurrent
-/// fetch of the same image never leaves a cut-off entry behind.
+/// Cache thumbnail `data` at `file`, best effort: only an image worth keeping (`cacheable_image`),
+/// written to a temp file of its own beside `file` and renamed into place (replacing an unusable
+/// entry), so a crash or a concurrent fetch of the same image never leaves a cut-off entry.
 fn cache_image(file: &std::path::Path, data: &str) {
-    if !cached_image_ok(data) {
+    if !cacheable_image(data) {
         return;
     }
     let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
@@ -6511,18 +6523,20 @@ mod tests {
             "data:image/jpeg;base64,{}",
             enc(&jpeg)
         )));
-        // A GIF can't be told whole from a cut-off one, so it isn't cached at all.
+        // GIF, WebP and the rest can't be told whole from a cut-off copy: never cached.
         let mut gif = b"GIF89a".to_vec();
         gif.extend([0u8; 20]);
         gif.push(0x3B);
-        assert!(!super::image_looks_whole(&gif));
-        // WebP is told whole by its RIFF length.
         let mut webp = b"RIFF".to_vec();
         webp.extend(24u32.to_le_bytes());
         webp.extend(b"WEBP");
         webp.extend([0u8; 20]);
-        assert!(super::image_looks_whole(&webp));
-        assert!(!super::image_looks_whole(&webp[..webp.len() - 4]));
+        for other in [&gif, &webp] {
+            assert_eq!(super::whole_image_format(other), None);
+        }
+        // A PNG signature straight followed by its end chunk has no header: not an image.
+        let hollow = [&png[..8], &png[png.len() - 12..]].concat();
+        assert_eq!(super::whole_image_format(&hollow), None);
         for bad in [
             String::new(),
             "data:image/png;base64,".into(),
@@ -6551,7 +6565,28 @@ mod tests {
     }
 
     #[test]
-    fn thumbnails_are_cached_whole_and_a_broken_entry_is_dropped() {
+    fn a_damaged_fetched_image_is_shown_but_never_cached() {
+        use base64::Engine;
+        let mut png = image_bytes(image::ImageFormat::Png);
+        let idat = png.windows(4).position(|w| w == b"IDAT").unwrap();
+        png[idat + 6] ^= 0xFF;
+        let damaged = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        );
+        // Whole as far as a cache read can tell (header and end intact)...
+        assert!(super::cached_image_ok(&damaged));
+        // ...but it doesn't decode, so it isn't kept.
+        assert!(!super::cacheable_image(&damaged));
+        let base = temp_base("thumbs_damaged");
+        let file = base.join("catalog_images").join("abc");
+        super::cache_image(&file, &damaged);
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn thumbnails_are_cached_whole_and_a_broken_entry_is_replaced() {
         use base64::Engine;
         let base = temp_base("thumbs");
         let dir = base.join("catalog_images");
@@ -6573,10 +6608,12 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, ["abc"]);
-        // A broken entry (an older Silo's cut-off write) is deleted so it is fetched again.
+        // A broken entry (an older Silo's cut-off write) is a miss, left for the refetch to
+        // replace (never deleted on read: that could delete another request's good copy).
         std::fs::write(&file, "data:image/jpeg;base64,AAA").unwrap();
         assert_eq!(super::read_cached_image(&file), None);
-        assert!(!file.exists());
+        super::cache_image(&file, &good);
+        assert_eq!(super::read_cached_image(&file), Some(good.clone()));
         let _ = std::fs::remove_dir_all(&base);
     }
 
