@@ -968,6 +968,12 @@ pub(crate) fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
 /// [`move_path`], logged as `action` (`backup` for an update's previous version), so each move
 /// is one log line that says what it was for.
 pub(crate) fn move_path_as(from: &Path, to: &Path, action: &str) -> std::io::Result<()> {
+    // The nearest folder above `to` that already exists: every folder made below it is a new
+    // name a cross-drive move flushes before deleting its source.
+    let anchor = to
+        .parent()
+        .and_then(|p| p.ancestors().find(|a| a.symlink_metadata().is_ok()))
+        .map(Path::to_path_buf);
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -976,7 +982,7 @@ pub(crate) fn move_path_as(from: &Path, to: &Path, action: &str) -> std::io::Res
         // A rename that failed for another reason would fail the copy's final delete the same
         // way, after the copy was placed: two copies, or a half-deleted folder mod.
         Err(e) if !crosses_drives(&e) => return Err(e),
-        Err(_) => copy_then_remove(from, to)?,
+        Err(_) => copy_then_remove(from, to, anchor.as_deref())?,
     }
     crate::fslog::moved(action, from, to);
     Ok(())
@@ -993,8 +999,9 @@ fn crosses_drives(e: &std::io::Error) -> bool {
 /// then remove `from`. If `from` can't be removed, the copy at `to` (Silo's own, just made) is
 /// removed again, so a failure leaves exactly the original. A folder is first renamed aside on
 /// its own drive, so a delete that stops halfway never leaves a half-deleted mod under its
-/// real name.
-fn copy_then_remove(from: &Path, to: &Path) -> std::io::Result<()> {
+/// real name. `anchor` is the highest folder whose entries the move changed (see
+/// [`sync_placement`]).
+fn copy_then_remove(from: &Path, to: &Path, anchor: Option<&Path>) -> std::io::Result<()> {
     let tmp = tmp_sibling(to);
     remove_path(&tmp)?; // clear any stale temp from a prior aborted run
     let is_dir = from.is_dir();
@@ -1013,7 +1020,7 @@ fn copy_then_remove(from: &Path, to: &Path) -> std::io::Result<()> {
         let _ = remove_path(to);
         e
     };
-    sync_placement(to).map_err(undo)?;
+    sync_placement(to, anchor).map_err(undo)?;
     if !is_dir {
         return std::fs::remove_file(from).map_err(undo);
     }
@@ -1207,12 +1214,21 @@ fn link_zip(
 /// part-way (a full disk, an archive file that won't read, Silo closed mid-copy) never leaves a
 /// truncated mod under its real name. A failed copy removes its temp.
 fn copy_new(src: &Path, dst: &Path) -> std::io::Result<()> {
+    copy_new_with(src, dst, stream_new_synced)
+}
+
+/// [`copy_new`] with the write into the temp injected, so a copy cut off part-way is testable.
+fn copy_new_with(
+    src: &Path,
+    dst: &Path,
+    write: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     if dst.symlink_metadata().is_ok() {
         return Err(std::io::ErrorKind::AlreadyExists.into());
     }
     let tmp = tmp_sibling(dst);
     remove_path(&tmp)?; // a stale temp from a copy that was cut off
-    if let Err(e) = stream_new_synced(src, &tmp).and_then(|()| place_new(&tmp, dst)) {
+    if let Err(e) = write(src, &tmp).and_then(|()| place_new(&tmp, dst)) {
         let _ = remove_path(&tmp);
         return Err(e);
     }
@@ -1273,19 +1289,32 @@ fn flush_file(p: &Path) -> std::io::Result<()> {
 
 /// Make a cross-drive move's placement at `to` durable before its source is deleted. The
 /// placed file is flushed again (on Windows that commits NTFS's metadata for it, the new name
-/// included), and on Unix the folder holding it and the one above are flushed too
-/// (`move_path_as` may just have created the folder, e.g. a new archive category).
-fn sync_placement(to: &Path) -> std::io::Result<()> {
+/// included), then on Unix every folder from the one holding `to` up to `anchor`, the nearest
+/// one that existed before the move (`move_path_as` may have created the folders below it,
+/// e.g. a new archive category). Without an anchor, only the folder holding `to`.
+fn sync_placement(to: &Path, anchor: Option<&Path>) -> std::io::Result<()> {
     if to.symlink_metadata()?.is_dir() {
         sync_dir(to)?;
     } else {
         flush_file(to)?;
     }
-    let parent = to.parent();
-    for dir in parent.into_iter().chain(parent.and_then(Path::parent)) {
+    for dir in placement_dirs(to, anchor) {
         sync_dir(dir)?;
     }
     Ok(())
+}
+
+/// The folders whose entries placing `to` changed: the one holding it, up to and including
+/// `anchor` (just the one holding it without an anchor).
+fn placement_dirs<'a>(to: &'a Path, anchor: Option<&Path>) -> Vec<&'a Path> {
+    let mut dirs = Vec::new();
+    for dir in to.parent().into_iter().flat_map(Path::ancestors) {
+        dirs.push(dir);
+        if anchor.map_or(true, |a| dir == a) {
+            break;
+        }
+    }
+    dirs
 }
 
 /// Put the finished temp `tmp` at `dst` without replacing anything there. A file is hardlinked
@@ -2118,21 +2147,21 @@ mod tests {
         let to = base.join("other/FS25_A.zip");
         std::fs::create_dir_all(to.parent().unwrap()).unwrap();
         let held = open(&file);
-        assert!(copy_then_remove(&file, &to).is_err());
+        assert!(copy_then_remove(&file, &to, to.parent()).is_err());
         drop(held);
         assert!(file.exists() && !to.exists());
 
         let dir = base.join("FS25_Dir");
         let to = base.join("other/FS25_Dir");
         let held = open(&inner);
-        assert!(copy_then_remove(&dir, &to).is_err());
+        assert!(copy_then_remove(&dir, &to, to.parent()).is_err());
         drop(held);
         assert!(inner.exists(), "the folder is whole");
         assert!(dir.join("modDesc.xml").exists());
         assert!(!to.exists() && !aside_sibling(&dir).exists());
 
         // Nothing held: the folder moves and no leftover remains.
-        copy_then_remove(&dir, &to).unwrap();
+        copy_then_remove(&dir, &to, to.parent()).unwrap();
         assert!(to.join("data/x.i3d").exists() && !dir.exists());
         assert!(!aside_sibling(&dir).exists());
         let _ = std::fs::remove_dir_all(&base);
@@ -3330,8 +3359,73 @@ mod tests {
         assert!(std::fs::metadata(&dst).unwrap().permissions().readonly());
         // Never over an existing file.
         assert!(copy_file_synced(&src, &dst).is_err());
-        set_readonly(&src, false);
         set_readonly(&dst, false);
+
+        // A cut-off folder copy's temp holding a read-only file is still cleared, and the
+        // next copy lands.
+        let folder = base.join("FS25_Dir");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::copy(&src, folder.join("modDesc.xml")).unwrap();
+        let dst = base.join("mods").join("FS25_Dir");
+        std::fs::create_dir_all(tmp_sibling(&dst)).unwrap();
+        std::fs::copy(&src, tmp_sibling(&dst).join("modDesc.xml")).unwrap();
+        copy_dir_projection(&folder, &dst).unwrap();
+        assert!(tmp_sibling(&dst).symlink_metadata().is_err());
+        assert!(is_silo_projection(&dst, &folder, "dir"));
+        set_readonly(&src, false);
+        set_readonly(&folder.join("modDesc.xml"), false);
+        set_readonly(&dst.join("modDesc.xml"), false);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_zip_copy_cut_off_after_some_bytes_leaves_nothing_under_the_mods_name() {
+        let base = temp_dir_for("zipcopy_cutoff");
+        let src = base.join("FS25_A.zip");
+        std::fs::write(&src, b"PK\x03\x04 whole").unwrap();
+        let dst = base.join("FS25_A_flat.zip");
+        let disk_full = |_: &Path, tmp: &Path| -> std::io::Result<()> {
+            std::fs::write(tmp, b"PK\x03")?;
+            Err(std::io::Error::other("no space left on device"))
+        };
+        assert!(copy_new_with(&src, &dst, disk_full).is_err());
+        assert!(dst.symlink_metadata().is_err(), "nothing at the real name");
+        assert!(
+            tmp_sibling(&dst).symlink_metadata().is_err(),
+            "temp removed"
+        );
+
+        // A flush that fails after the whole copy was written: same.
+        let flush_fails = |s: &Path, tmp: &Path| -> std::io::Result<()> {
+            std::fs::copy(s, tmp)?;
+            Err(std::io::Error::other("flush failed"))
+        };
+        assert!(copy_new_with(&src, &dst, flush_fails).is_err());
+        assert!(dst.symlink_metadata().is_err() && tmp_sibling(&dst).symlink_metadata().is_err());
+
+        copy_new(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"PK\x03\x04 whole");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_move_flushes_up_to_the_first_folder_that_already_existed() {
+        let base = temp_dir_for("move_anchor");
+        let from = base.join("FS25_A.zip");
+        std::fs::write(&from, b"PK").unwrap();
+        // New archive and category folders below an existing one.
+        let to = base.join("new_archive").join("Tools").join("FS25_A.zip");
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        copy_then_remove(&from, &to, Some(&base)).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"PK");
+        assert!(!from.exists());
+        let tools = to.parent().unwrap();
+        assert_eq!(
+            placement_dirs(&to, Some(&base)),
+            [tools, tools.parent().unwrap(), base.as_path()]
+        );
+        assert_eq!(placement_dirs(&to, None), [tools]);
+        assert_eq!(placement_dirs(&to, Some(tools)), [tools]);
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -3357,14 +3451,14 @@ mod tests {
         let to = base.join("other").join("FS25_A.zip");
         std::fs::create_dir_all(to.parent().unwrap()).unwrap();
         std::fs::write(&to, b"PK theirs").unwrap();
-        assert!(copy_then_remove(&from, &to).is_err());
+        assert!(copy_then_remove(&from, &to, to.parent()).is_err());
         assert_eq!(std::fs::read(&from).unwrap(), b"PK mine");
         assert_eq!(std::fs::read(&to).unwrap(), b"PK theirs");
         assert!(tmp_sibling(&to).symlink_metadata().is_err());
 
         // Free destination: copied whole, source gone, no temp.
         std::fs::remove_file(&to).unwrap();
-        copy_then_remove(&from, &to).unwrap();
+        copy_then_remove(&from, &to, to.parent()).unwrap();
         assert_eq!(std::fs::read(&to).unwrap(), b"PK mine");
         assert!(!from.exists() && tmp_sibling(&to).symlink_metadata().is_err());
         let _ = std::fs::remove_dir_all(&base);
