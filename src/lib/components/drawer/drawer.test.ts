@@ -221,6 +221,18 @@ describe("drawer lookups", () => {
     ]);
   });
 
+  it("says when the catalog couldn't check the mod, instead of 'not in the catalog' (#386)", async () => {
+    vi.mocked(catalogCheckUpdates).mockImplementation(() =>
+      Promise.resolve([
+        { techName: "FS25_Mod24", latest: null, hasUpdate: false, downloadUrl: null, source: null, error: "Silo couldn't check this mod against its catalog entry: in use" },
+      ]),
+    );
+    render(ModDetail, props(entry(24, { path: "C:/mods/err24.zip" })));
+    await settle();
+    expect(screen.getByText(/couldn't check this mod against its catalog entry/)).toBeInTheDocument();
+    expect(screen.queryByText(/Not in Silo's catalog/)).toBeNull();
+  });
+
   it("doesn't call a mod with no version outdated on the catalog's word alone", async () => {
     vi.mocked(catalogCheckUpdates).mockImplementation(() =>
       Promise.resolve([{ techName: "FS25_Mod22", latest: "1.0.0.0", hasUpdate: true, downloadUrl: null, source: null }]),

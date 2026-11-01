@@ -998,17 +998,12 @@ async fn download_update(
             },
             (carry, _) => carry,
         };
-        let undo = match &carry {
-            Some((link, sha, size)) => Some(remember_catalog_alias(&db, &dest, sha, *size, link)?),
-            None => None,
-        };
-        let mut done = match update::swap(&dest, part.path(), &layout.mods, &mut policy) {
-            Ok(done) => done,
-            Err(e) => {
-                undo_catalog_alias(&db, undo);
-                return Err(e);
-            }
-        };
+        // Kept even if the swap then fails: a swap can fail after the new file is in place
+        // (recovery then finishes it), and the record is true of those bytes either way.
+        if let Some((link, sha, size)) = &carry {
+            remember_catalog_alias(&db, &dest, sha, *size, link)?;
+        }
+        let mut done = update::swap(&dest, part.path(), &layout.mods, &mut policy)?;
         done.problems.extend(link_problem);
         if let Some(flat) = &done.relinked {
             if let (Ok(conn), Some(name)) = (db::open(&db), flat.file_name()) {
@@ -1856,6 +1851,27 @@ struct CatalogUpdate {
     source: Option<String>,
     /// Where to get it by hand when there's no direct download (a ModHub page).
     page_url: Option<String>,
+    /// Why this mod couldn't be checked (#386: its catalog link couldn't be read, or its linked
+    /// entry couldn't be fetched). The rest of the library is still answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl CatalogUpdate {
+    /// The row for a mod that couldn't be checked.
+    fn failed(tech_name: &str, why: String) -> Self {
+        CatalogUpdate {
+            tech_name: tech_name.to_string(),
+            latest: None,
+            has_update: false,
+            download_url: None,
+            source: None,
+            page_url: None,
+            error: Some(format!(
+                "Silo couldn't check this mod against its catalog entry: {why}"
+            )),
+        }
+    }
 }
 
 /// Check the whole library against the SiloAPI catalog in one request (by tech name),
@@ -1870,24 +1886,44 @@ async fn catalog_check_updates(
         let base = siloapi_base(&app)?;
         // A zip Silo installed from a catalog entry under another name is looked up as that
         // entry (#386); a file is hashed only when an alias of its size is recorded for its name.
+        // A mod whose link can't be checked, or whose linked entry can't be fetched, gets a
+        // row saying so: never another entry's answer, and the rest of the library still gets
+        // its own. Only the lookup failing fails the whole check.
         let conn = alias_db(&app)?;
-        let asked = mods
+        let links: Vec<Result<Option<catalogalias::Link>, String>> = mods
             .iter()
-            .map(|m| {
-                let link = file_catalog_link(&conn, &m.tech_name, m.path.as_deref())?;
-                Ok((m.tech_name.clone(), link))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        // Any mod the catalog couldn't be asked about fails the check, as the lookup does.
-        let found = resolve_catalog(&base, &asked)?
-            .into_iter()
-            .collect::<Result<Vec<_>, String>>()?;
+            .map(|m| file_catalog_link(&conn, &m.tech_name, m.path.as_deref()))
+            .collect();
+        let asked: Vec<(String, Option<catalogalias::Link>)> = mods
+            .iter()
+            .zip(&links)
+            .map(|(m, l)| (m.tech_name.clone(), l.clone().ok().flatten()))
+            .collect();
+        let found = resolve_catalog(&base, &asked)?;
 
         let mut out = Vec::new();
-        for (m, r) in mods.iter().zip(&found) {
-            let Some(r) = r else {
-                continue;
+        for ((m, link), answer) in mods.iter().zip(&links).zip(found) {
+            let r = match (link, answer) {
+                (Err(e), _) => {
+                    log::warn!(
+                        "[catalog] couldn't check {}'s catalog link: {e}",
+                        m.tech_name
+                    );
+                    out.push(CatalogUpdate::failed(&m.tech_name, e.clone()));
+                    continue;
+                }
+                (Ok(_), Err(e)) => {
+                    log::warn!(
+                        "[catalog] couldn't fetch {}'s catalog entry: {e}",
+                        m.tech_name
+                    );
+                    out.push(CatalogUpdate::failed(&m.tech_name, e));
+                    continue;
+                }
+                (Ok(_), Ok(None)) => continue,
+                (Ok(_), Ok(Some(r))) => r,
             };
+            let r = &r;
             let current = m.version.clone().unwrap_or_default();
             let has_update = r
                 .latest_version
@@ -1900,6 +1936,7 @@ async fn catalog_check_updates(
                 download_url: r.download.as_ref().map(|d| d.url.clone()),
                 source: r.download.as_ref().map(|d| d.source.clone()),
                 page_url: r.page_url.clone(),
+                error: None,
             });
         }
         Ok(out)
@@ -4981,7 +5018,7 @@ fn build_collection_entries(
             let hit = hit.as_ref();
             let dl = hit.and_then(|r| r.download.as_ref());
             // An importer finds mods by techName and installs only a file named after the mod,
-            // so a file linked by an alias can't be installed from the set directly.
+            // so the set doesn't claim a direct install for a file linked by an alias.
             let direct = dl.is_some() && link.is_none();
             collection::CollectionMod {
                 tech_name: m.tech_name.clone(),

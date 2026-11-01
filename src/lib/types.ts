@@ -368,6 +368,8 @@ export interface CatalogUpdate {
   /** Where to get it by hand when there's no direct download (a ModHub page). Older Silo
    *  builds' catalog rows don't carry it. */
   pageUrl?: string | null;
+  /** Why this mod couldn't be checked (its catalog link or entry couldn't be read, #386). */
+  error?: string | null;
 }
 
 /** The detail record is a BrowseMod plus its registrations; sources are the same shape. */

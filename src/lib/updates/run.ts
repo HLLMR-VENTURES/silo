@@ -109,6 +109,11 @@ export async function runUpdateCheck(
     for (const c of catalog) {
       const m = byTech.get(c.techName);
       if (!m) continue;
+      if (c.error) {
+        // Couldn't be checked (#386): shown as such, never as up to date.
+        rows.set(c.techName, { techName: c.techName, title: m.title || c.techName, path: m.path, error: c.error, errorDetail: c.error });
+        continue;
+      }
       rows.set(c.techName, {
         techName: c.techName,
         title: m.title || c.techName,

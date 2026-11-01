@@ -363,6 +363,24 @@ describe("runUpdateCheck", () => {
     expect(asked).toEqual([{ techName: "FS25_FieldToDoList", version: "1.0.0.0", path: mod("FS25_FieldToDoList").path }]);
   });
 
+  it("shows a mod the catalog couldn't check as failed, and still answers the rest (#386)", async () => {
+    const res = await runUpdateCheck([mod("A"), mod("B")], {}, {
+      catalog: async () => [
+        { techName: "A", latest: null, hasUpdate: false, downloadUrl: null, source: null, error: "Silo couldn't check this mod" },
+        { techName: "B", latest: "2.0", hasUpdate: true, downloadUrl: "https://gh/b.zip", source: "github" },
+      ],
+      checkRepo: async () => {
+        throw "unused";
+      },
+      explain,
+    });
+    const by = Object.fromEntries(res.rows.map((r) => [r.techName, r]));
+    expect(by.A).toMatchObject({ error: "Silo couldn't check this mod" });
+    expect(by.A.hasUpdate).toBeUndefined();
+    expect(by.B).toMatchObject({ hasUpdate: true, assetUrl: "https://gh/b.zip" });
+    expect(res.catalogError).toBeNull();
+  });
+
   it("names the mod in the failure it logs and copies (#333)", async () => {
     const ops: string[] = [];
     const res = await runUpdateCheck([{ ...mod("A"), title: "Yield Tracker" }, mod("B")], {

@@ -28,6 +28,8 @@
     <div class="d-log muted">Checking the catalog…</div>
   {:else if !catalog}
     <div class="d-log muted">Not in Silo's catalog.</div>
+  {:else if catalog.error}
+    <div class="d-log warn">{catalog.error}</div>
   {:else if catalog.hasUpdate}
     {@const c = catalog}
     <div class="d-log warn">
