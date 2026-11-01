@@ -33,8 +33,12 @@ export interface ModSetsDeps {
   /** A mod's display title. */
   title: (techName: string) => string;
   /** App's guarded switch: true = clean, false = finished with problems (reported), null =
-   *  refused because another write runs (said so; nothing changed). */
+   *  nothing changed: refused because another write or a scan runs (said so), cancelled, or it
+   *  failed (reported) and the mods folder still holds the old set. */
   setActiveSetTo: (mods: string[], label: string) => Promise<boolean | null>;
+  /** Wait briefly for a running library scan, so the active mods read next aren't about to be
+   *  replaced by it. False when it still runs (refused, said why). */
+  settle: () => Promise<boolean>;
   /** App's switch Undo toast (one at a time, with the staleness guard). */
   undo: SwitchUndo;
   /** Saving, replacing and deleting sets wait for a foreground library change. True when it
@@ -172,10 +176,13 @@ export function createModSets(deps: ModSetsDeps): ModSets {
     target: () => Promise<{ id: number; name: string; kind: Loadout["kind"] } | null>,
   ) {
     deps.undo.dismiss();
+    // The snapshot and Undo keep the active mods from before: not while a scan may replace them.
+    if (!(await deps.settle())) return;
     const previous = [...deps.active()];
     const was = currentState();
     const clean = await deps.setActiveSetTo(mods, `Switching to ${name}`);
-    if (clean === null) return; // refused: another write is running, nothing changed
+    // Refused, or failed with nothing changed (said so): no snapshot, not remembered, no Undo.
+    if (clean === null) return;
     let snapshotId: number | null = null;
     if (previous.length > 0) {
       try {
@@ -201,6 +208,8 @@ export function createModSets(deps: ModSetsDeps): ModSets {
   }
 
   async function switchTo(set: Loadout) {
+    // The confirmation's diff is from the active mods: not while a scan may replace them.
+    if (!(await deps.settle())) return;
     const library = deps.library();
     const diff = activeSetDiff([...deps.active()], set.mods, library);
     if (diff.on.length + diff.off.length === 0) {
@@ -375,6 +384,7 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       return;
     }
     if (deps.editRefused()) return;
+    if (!(await deps.settle())) return;
     const target = present.map((m) => m.modName);
     // Reuse a set of the same name only when it already holds exactly these mods.
     const reuse = () =>
@@ -436,6 +446,7 @@ export function createModSets(deps: ModSetsDeps): ModSets {
   async function applyMembership(techNames: string[], edits: MembershipEdit[]): Promise<boolean> {
     if (edits.length === 0) return true;
     if (deps.editRefused()) return false;
+    if (!(await deps.settle())) return false;
     const st = currentState();
     const change = activeChange(edits, st.kind === "none" ? null : st.id, deps.active());
     const previous = [...deps.active()];
@@ -448,7 +459,7 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       deps.undo.dismiss();
       const label = change.on.length > 0 ? "Turning on mods" : "Parking mods";
       switched = await deps.setActiveSetTo([...target], label);
-      if (switched === null) return false; // refused or cancelled: nothing changed
+      if (switched === null) return false; // refused, cancelled or failed: nothing changed
     }
     const before = edits.map((e) => ({ id: e.set.id, name: e.set.name, mods: [...e.set.mods] }));
     const written = new Map(edits.map((e) => [e.set.id, e.mods]));

@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counting mods that load their materials from a script too, and names the mods adding the most.
   **Last run** lists the materials the game skipped. (#341)
 
+### Fixed
+
+- A mod set switch that fails (an unplugged library drive, say) no longer leaves the Library,
+  **Play** and the multiplayer share list showing the new set while the game loads the old one.
+  Silo reads your mods folder again before it lets go, and when nothing changed it doesn't save a
+  "Before …" snapshot, mark the set as the one you're on, or offer Undo. Turning one mod on or
+  off that finishes with problems reads the folder again too. (#347)
+- Switching mod sets, its Undo and **Use this save's mods** now wait for a library scan that's
+  already running, as turning single mods on or off does. Before, a scan that finished just after
+  the switch could put the old set back on screen, and the next change re-applied it. (#347)
+
 ## [1.0.3] - 2026-10-29
 
 The library database moves to version 3 (one added column, for the per-mod update switch). Silo
