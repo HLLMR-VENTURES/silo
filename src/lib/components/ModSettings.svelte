@@ -34,6 +34,9 @@
   /** Files written as raw XML but not read back since: their form's fields may have moved, so the
    *  form stays hidden until the dialog is opened again (#358). */
   let formStale = $state<Record<string, boolean>>({});
+  /** Files whose form edits were written but not read back: their raw text is the old one, and
+   *  saving it would undo those edits, so Raw XML stays off until the dialog is opened again. */
+  let rawStale = $state<Record<string, boolean>>({});
   // Field ids restart at 0 in each file: values are keyed by file too, and so are element ids
   // (the file's place in the list), so two files' field 0 stay apart.
   const vkey = (file: SettingsFile, id: number) => fieldKey(file.path, id);
@@ -99,15 +102,16 @@
       try {
         const fresh = await getModSettings(modName);
         if (!fresh.some((f) => f.path === path)) {
-          if (!wroteRaw) files = markSent({ files, values, rawText }, path, sent).files;
+          if (!wroteRaw) markFormWritten(path, sent);
           error = "Silo saved this file but couldn't read it back. Close this and open the mod's settings again.";
           return "written";
         }
         // The state as it is now (other files' saves may have landed meanwhile), not as it was.
         ({ files, values, rawText } = afterSave({ files, values, rawText }, fresh, path, sent));
         formStale[path] = false;
+        rawStale[path] = false;
       } catch (e) {
-        if (!wroteRaw) files = markSent({ files, values, rawText }, path, sent).files;
+        if (!wroteRaw) markFormWritten(path, sent);
         error = inlineError(e, "Reading the mod's settings");
         return "written";
       }
@@ -115,6 +119,12 @@
     } finally {
       savingPaths[path] = false;
     }
+  }
+
+  /** A form save was written but not read back (see rawStale). */
+  function markFormWritten(path: string, sent: ReturnType<typeof snapshotOf>) {
+    files = markSent({ files, values, rawText }, path, sent).files;
+    rawStale[path] = true;
   }
 
   function flashSaved(path: string) {
@@ -156,7 +166,7 @@
             variant="link"
             size="sm"
             aria-pressed={rawMode[file.path] ? "true" : "false"}
-            disabled={!!savingPaths[file.path] || !!formStale[file.path]}
+            disabled={!!savingPaths[file.path] || !!formStale[file.path] || !!rawStale[file.path]}
             onclick={() => (rawMode[file.path] = !rawMode[file.path])}
           >
             Raw XML

@@ -246,6 +246,8 @@ describe("ModSettings: raw XML saves (#358)", () => {
     finish();
     await waitFor(() => expect(api.getModSettings).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(save).toBeEnabled()); // 1 isn't what the file holds now (2)
+    // Its raw text is from before the save: saving it would undo the save, so Raw XML is off.
+    expect(screen.getByRole("button", { name: "Raw XML" })).toBeDisabled();
   });
 
   it("stays on Raw XML when the read-back doesn't list the file", async () => {
