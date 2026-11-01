@@ -33,6 +33,7 @@ describe("Find the problem mod: Start while preparing", () => {
     await waitFor(() => expect(onPrepare).toHaveBeenCalledOnce());
     expect(start).toBeDisabled();
     expect(screen.getByRole("button", { name: "Not now" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Close" })).toBeDisabled();
     await user.click(start);
     expect(onPrepare).toHaveBeenCalledOnce();
     // Declined (or refused): Start comes back, and nothing was saved.

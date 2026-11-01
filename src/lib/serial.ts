@@ -24,3 +24,13 @@ export function serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
 export function serialPending(key: string): boolean {
   return queue.has(key);
 }
+
+/**
+ * Settles once every call queued now under a key that starts with `prefix` has settled (each
+ * key's newest call settles after its earlier ones). Calls queued later aren't waited for.
+ * @param prefix e.g. `override:` for every mod's category write
+ */
+export function serialSettled(prefix: string): Promise<void> {
+  const pending = [...queue].filter(([k]) => k.startsWith(prefix)).map(([, p]) => p);
+  return Promise.allSettled(pending).then(() => undefined);
+}

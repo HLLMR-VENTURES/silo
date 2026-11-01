@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   setConfig: vi.fn(),
   getModSettings: vi.fn(),
   saveModSettings: vi.fn(),
+  saveModSettingsRaw: vi.fn(),
 }));
 vi.mock("../api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../api")>()),
@@ -17,6 +18,7 @@ vi.mock("../api", async (importOriginal) => ({
   setConfig: api.setConfig,
   getModSettings: api.getModSettings,
   saveModSettings: api.saveModSettings,
+  saveModSettingsRaw: api.saveModSettingsRaw,
 }));
 
 import ConfigEditor from "./ConfigEditor.svelte";
@@ -201,6 +203,51 @@ describe("ModSettings", () => {
     readBack(one("5"));
     await waitFor(() => expect(screen.getByRole("button", { name: "Raw XML" })).toBeEnabled());
     expect(save).toBeDisabled(); // saved: nothing left to save
+  });
+});
+
+describe("ModSettings: raw XML saves (#358)", () => {
+  const one = (raw: string, labels: string[]) => [
+    {
+      path: "C:/ms/a.xml",
+      name: "a.xml",
+      raw,
+      fields: labels.map((label, id) => ({ id, label, kind: "int", value: "1" })),
+    },
+  ];
+  beforeEach(() => {
+    api.saveModSettingsRaw.mockReset().mockResolvedValue(undefined);
+  });
+
+  it("stays on Raw XML when the file can't be read back: the form's fields may have moved", async () => {
+    api.getModSettings.mockReset().mockResolvedValueOnce(one("<a/>", ["Alpha"])).mockRejectedValueOnce("gone");
+    render(ModSettings, { modName: "FS25_X", title: "X", onClose: vi.fn() });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Raw XML" }));
+    await fireEvent.input(screen.getByLabelText("Raw XML of a.xml"), { target: { value: "<x/><a/>" } });
+    await user.click(screen.getByRole("button", { name: "Save raw XML" }));
+    await waitFor(() => expect(api.getModSettings).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save raw XML" })).toBeEnabled());
+    expect(screen.getByLabelText("Raw XML of a.xml")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Raw XML" })).toBeDisabled();
+    expect(screen.queryByLabelText("Alpha")).toBeNull();
+  });
+
+  it("stays on Raw XML, with the text, when it was edited while the save ran", async () => {
+    let finish!: () => void;
+    api.saveModSettingsRaw.mockImplementationOnce(() => new Promise<void>((r) => (finish = r)));
+    api.getModSettings.mockReset().mockResolvedValueOnce(one("<a/>", ["Alpha"])).mockResolvedValue(one("<v1/>", ["Alpha"]));
+    render(ModSettings, { modName: "FS25_X", title: "X", onClose: vi.fn() });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Raw XML" }));
+    const area = screen.getByLabelText("Raw XML of a.xml");
+    await fireEvent.input(area, { target: { value: "<v1/>" } });
+    await user.click(screen.getByRole("button", { name: "Save raw XML" }));
+    await fireEvent.input(area, { target: { value: "<v2/>" } });
+    finish();
+    await waitFor(() => expect(api.getModSettings).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Raw XML" })).toBeEnabled());
+    expect((screen.getByLabelText("Raw XML of a.xml") as HTMLTextAreaElement).value).toBe("<v2/>");
   });
 });
 

@@ -60,9 +60,17 @@ describe("SaveLedger", () => {
     l.begin("A"); // pick Trucks
     const reset2 = l.begin("A");
     expect(l.failed("A", reset1)).toBeNull(); // the newer reset stays on screen
-    l.saved("A", cat("Trucks"));
-    l.saved("A", undefined); // the second reset worked
-    expect(l.failed("A", reset2)).toEqual({ value: undefined }); // (had it failed: no override)
+    l.saved("A", cat("Trucks")); // the pick worked
+    expect(l.failed("A", reset2)).toEqual({ value: cat("Trucks") }); // the second reset failed
+  });
+
+  it("a removal that worked is what a later failure goes back to", () => {
+    const l = new SaveLedger<Cat>();
+    l.load([["A", cat("Tools")]]);
+    l.begin("A");
+    l.saved("A", undefined); // reset worked
+    const pick = l.begin("A");
+    expect(l.failed("A", pick)).toEqual({ value: undefined });
   });
 
   it("keys don't affect each other", () => {

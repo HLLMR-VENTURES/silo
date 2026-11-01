@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { serial, serialPending } from "./serial";
+import { serial, serialPending, serialSettled } from "./serial";
 
 /** A task that finishes after `ms` and records when it started and ended. */
 function task(log: string[], name: string, ms: number, fail = false) {
@@ -49,5 +49,22 @@ describe("serial", () => {
     await a;
     await b.catch(() => {});
     expect(serialPending("k-clean")).toBe(false);
+  });
+
+  it("serialSettled waits for every queued call under a prefix, failed ones too, and no others", async () => {
+    const log: string[] = [];
+    void serial("override:A", task(log, "a1", 10, true)).catch(() => {});
+    void serial("override:A", task(log, "a2", 5)).catch(() => {});
+    void serial("override:B", task(log, "b", 15)).catch(() => {});
+    const other = serial("curation:A", task(log, "c", 40));
+    await serialSettled("override:");
+    expect(log).toContain("end a2");
+    expect(log).toContain("end b");
+    expect(log).not.toContain("end c");
+    await other;
+  });
+
+  it("serialSettled with nothing queued settles at once", async () => {
+    await expect(serialSettled("nothing-here:")).resolves.toBeUndefined();
   });
 });

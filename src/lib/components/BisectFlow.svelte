@@ -299,7 +299,7 @@
 
   /** The ✕: after a round was applied, stopping loses the rounds played, so ask first. */
   async function stop() {
-    if (working) return;
+    if (working || preparing) return;
     if (started && round > 0 && (phase === "await-launch" || phase === "verdict" || phase === "error")) {
       const ok = await ask({
         title: "Stop finding the problem mod?",
@@ -339,7 +339,7 @@
         <p class="stepper tnum">Round {round} of about {about}</p>
       {/if}
     </div>
-    <button class="x" use:tooltip={cancelLabel} aria-label={cancelLabel} onclick={() => void stop()} disabled={!!working}><Icon name="close" /></button>
+    <button class="x" use:tooltip={cancelLabel} aria-label={cancelLabel} onclick={() => void stop()} disabled={!!working || preparing}><Icon name="close" /></button>
   </div>
 
   <div role="status" aria-live="polite">

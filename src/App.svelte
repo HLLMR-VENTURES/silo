@@ -203,6 +203,7 @@
   import { createSwitchUndo, switchMessage } from "./lib/state/switchUndo";
   import { setSwitchOutcome, switchOutcome } from "./lib/state/switchOutcome";
   import { SaveLedger, withEntry } from "./lib/state/optimistic";
+  import { serialSettled } from "./lib/serial";
   import { getVerdict } from "./lib/provenanceCache.svelte";
   import FilterBar from "./lib/components/FilterBar.svelte";
   import ModSettings from "./lib/components/ModSettings.svelte";
@@ -1399,6 +1400,10 @@
     opts: { auto?: boolean; onStart?: () => void; onProgress?: (done: number, total: number) => void } = {},
   ): Promise<FilingRun | null> {
     if (inputs.length === 0) return null;
+    // A category pick still being saved decides where a mod goes: wait for it, then file by the
+    // categories as they are now, so one whose save failed meanwhile isn't used (#358).
+    await serialSettled("override:");
+    inputs = withCategoriesNow(inputs);
     const op = beginWrite(`Filing ${modsCount(inputs.length)} into the library`, !!opts.onProgress, {
       silent: opts.auto,
     });
@@ -1432,6 +1437,15 @@
     await runScan(false);
     if (out.relinkError !== undefined) reportError(out.relinkError, "Turning your filed mods back on");
     return out;
+  }
+
+  /** Organize inputs with each mod's category as the library shows it now (its override, if any). */
+  function withCategoriesNow(inputs: ModInput[]): ModInput[] {
+    const now = new Map(effectiveMods.map((m) => [m.techName, m]));
+    return inputs.map((i) => {
+      const m = now.get(i.techName);
+      return m ? { ...i, category: m.category, subcategory: m.subcategory } : i;
+    });
   }
 
   // Apply a prepared set of organize inputs, reporting any problem as a toast (with Try again).

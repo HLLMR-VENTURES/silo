@@ -25,7 +25,7 @@ describe("mod settings drafts", () => {
     d.values[fieldKey("a.xml", 0)] = "10";
     d.values[fieldKey("b.xml", 0)] = "20"; // unsaved, in the other file
     d.rawText["b.xml"] = "<edited/>";
-    const sent = snapshotOf(d, "a.xml");
+    const sent = snapshotOf(d, "a.xml", false);
     const after = afterSave(d, [file("a.xml", ["10", "5"], "<a saved/>"), file("b.xml", ["2"])], "a.xml", sent);
     expect(after.values[fieldKey("a.xml", 0)]).toBe("10");
     expect(after.values[fieldKey("b.xml", 0)]).toBe("20");
@@ -39,7 +39,7 @@ describe("mod settings drafts", () => {
   it("an edit to the saved file made while the write was out stays a draft", () => {
     const d = draftsOf([file("a.xml", ["1", "5"])]);
     d.values[fieldKey("a.xml", 0)] = "10";
-    const sent = snapshotOf(d, "a.xml");
+    const sent = snapshotOf(d, "a.xml", false);
     d.values[fieldKey("a.xml", 1)] = "6"; // typed during the save
     const after = afterSave(d, [file("a.xml", ["10", "5"])], "a.xml", sent);
     expect(after.values[fieldKey("a.xml", 0)]).toBe("10");
@@ -50,7 +50,7 @@ describe("mod settings drafts", () => {
   it("a raw save takes the file's new fields (ids may change), and drops the old ones", () => {
     const d = draftsOf([file("a.xml", ["1", "5"])]);
     d.rawText["a.xml"] = "<one field/>";
-    const sent = snapshotOf(d, "a.xml");
+    const sent = snapshotOf(d, "a.xml", true);
     const after = afterSave(d, [file("a.xml", ["7"], "<one field/>")], "a.xml", sent);
     expect(after.values).toEqual({ [fieldKey("a.xml", 0)]: "7" });
     expect(after.rawText["a.xml"]).toBe("<one field/>");
@@ -59,13 +59,25 @@ describe("mod settings drafts", () => {
   it("raw text typed during the save stays", () => {
     const d = draftsOf([file("a.xml", ["1"])]);
     d.rawText["a.xml"] = "<v1/>";
-    const sent = snapshotOf(d, "a.xml");
+    const sent = snapshotOf(d, "a.xml", true);
     d.rawText["a.xml"] = "<v2/>";
     expect(afterSave(d, [file("a.xml", ["1"], "<v1/>")], "a.xml", sent).rawText["a.xml"]).toBe("<v2/>");
   });
 
   it("a file gone since leaves the dialog as it is", () => {
     const d = draftsOf([file("a.xml", ["1"])]);
-    expect(afterSave(d, [], "a.xml", snapshotOf(d, "a.xml"))).toBe(d);
+    expect(afterSave(d, [], "a.xml", snapshotOf(d, "a.xml", false))).toBe(d);
+  });
+
+  it("a form save keeps an unsaved raw draft of the same file, and takes the new raw text if there's none", () => {
+    const d = draftsOf([file("a.xml", ["1"], "<v1/>")]);
+    d.rawText["a.xml"] = "<draft/>"; // typed in Raw XML, not saved
+    d.values[fieldKey("a.xml", 0)] = "2";
+    const after = afterSave(d, [file("a.xml", ["2"], "<v2/>")], "a.xml", snapshotOf(d, "a.xml", false));
+    expect(after.rawText["a.xml"]).toBe("<draft/>");
+    const clean = draftsOf([file("a.xml", ["1"], "<v1/>")]);
+    clean.values[fieldKey("a.xml", 0)] = "2";
+    const after2 = afterSave(clean, [file("a.xml", ["2"], "<v2/>")], "a.xml", snapshotOf(clean, "a.xml", false));
+    expect(after2.rawText["a.xml"]).toBe("<v2/>");
   });
 });

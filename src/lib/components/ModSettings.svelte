@@ -31,6 +31,9 @@
   let savedPath = $state<string | null>(null);
   /** Files whose save is out: their Save stays off, so a double-click can't write twice. */
   let savingPaths = $state<Record<string, boolean>>({});
+  /** Files written as raw XML but not read back since: their form's fields may have moved, so the
+   *  form stays hidden until the dialog is opened again (#358). */
+  let formStale = $state<Record<string, boolean>>({});
   // Field ids restart at 0 in each file: values are keyed by file too, and so are element ids
   // (the file's place in the list), so two files' field 0 stay apart.
   const vkey = (file: SettingsFile, id: number) => fieldKey(file.path, id);
@@ -55,13 +58,17 @@
       .filter((fld) => values[vkey(file, fld.id)] !== fld.value)
       .map((fld) => ({ id: fld.id, value: values[vkey(file, fld.id)] }));
     if (edits.length === 0 || badNumber(file)) return;
-    await saveFile(file, () => saveModSettings(file.path, edits));
+    await saveFile(file, () => saveModSettings(file.path, edits), false);
   }
 
   async function saveRaw(file: SettingsFile) {
-    if (savingPaths[file.path]) return;
-    const text = rawText[file.path];
-    if (await saveFile(file, () => saveModSettingsRaw(file.path, text))) rawMode[file.path] = false;
+    const path = file.path;
+    if (savingPaths[path]) return;
+    const text = rawText[path];
+    const done = await saveFile(file, () => saveModSettingsRaw(path, text), true);
+    if (done === "written") formStale[path] = true;
+    // Back to the form only when it's read again and nothing was typed here meanwhile.
+    if (done === "read" && rawText[path] === text) rawMode[path] = false;
   }
 
   /**
@@ -69,11 +76,16 @@
    * edits in the mod's other files (and edits made here while the write was out) stay (#358).
    * Its Save and Raw XML stay off until the reading is in, so the same edits can't be sent twice
    * and the form can't be edited while a raw save may renumber its fields.
-   * @returns true when it was written
+   * @param wroteRaw the write is the raw XML (else form edits)
+   * @returns "failed" (not written), "written" (but not read back), or "read"
    */
-  async function saveFile(file: SettingsFile, write: () => Promise<void>): Promise<boolean> {
+  async function saveFile(
+    file: SettingsFile,
+    write: () => Promise<void>,
+    wroteRaw: boolean,
+  ): Promise<"failed" | "written" | "read"> {
     const path = file.path;
-    const sent = snapshotOf({ files, values, rawText }, path);
+    const sent = snapshotOf({ files, values, rawText }, path, wroteRaw);
     savingPaths[path] = true;
     error = null;
     try {
@@ -81,17 +93,19 @@
         await write();
       } catch (e) {
         error = inlineError(e, "Saving the mod's settings");
-        return false;
+        return "failed";
       }
       flashSaved(path);
       try {
         const fresh = await getModSettings(modName);
         // The state as it is now (other files' saves may have landed meanwhile), not as it was.
         ({ files, values, rawText } = afterSave({ files, values, rawText }, fresh, path, sent));
+        if (fresh.some((f) => f.path === path)) formStale[path] = false;
       } catch (e) {
         error = inlineError(e, "Reading the mod's settings");
+        return "written";
       }
-      return true;
+      return "read";
     } finally {
       savingPaths[path] = false;
     }
@@ -136,7 +150,7 @@
             variant="link"
             size="sm"
             aria-pressed={rawMode[file.path] ? "true" : "false"}
-            disabled={!!savingPaths[file.path]}
+            disabled={!!savingPaths[file.path] || !!formStale[file.path]}
             onclick={() => (rawMode[file.path] = !rawMode[file.path])}
           >
             Raw XML

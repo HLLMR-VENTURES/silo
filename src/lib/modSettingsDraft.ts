@@ -3,7 +3,7 @@
 // file re-reads that file only: the other files' unsaved edits stay, and so does an edit made to
 // the saved file while its write was out.
 //   let d = draftsOf(files);
-//   const sent = snapshotOf(d, file.path);           // right before the write
+//   const sent = snapshotOf(d, file.path, wroteRaw); // right before the write
 //   d = afterSave(d, await getModSettings(mod), file.path, sent);
 import type { SettingsFile } from "./types";
 
@@ -19,6 +19,8 @@ export interface SettingsDrafts {
 /** What one file's drafts were when its save was sent. */
 export interface SentDrafts {
   values: Record<string, string>;
+  /** The raw text the file holds after this write as far as the drafts go: the text sent (a raw
+   *  save), or the last reading (a form save). A raw draft that differs from it is kept. */
   raw: string | undefined;
 }
 
@@ -45,15 +47,16 @@ export function draftsOf(files: SettingsFile[]): SettingsDrafts {
  * One file's drafts as they are now (taken right before its save is sent).
  * @param d the dialog's state
  * @param path the file being saved
+ * @param wroteRaw the save writes the raw text (else form edits: an unsaved raw draft stays)
  */
-export function snapshotOf(d: SettingsDrafts, path: string): SentDrafts {
+export function snapshotOf(d: SettingsDrafts, path: string, wroteRaw: boolean): SentDrafts {
   const file = d.files.find((f) => f.path === path);
   const values: Record<string, string> = {};
   for (const fld of file?.fields ?? []) {
     const k = fieldKey(path, fld.id);
     if (k in d.values) values[k] = d.values[k];
   }
-  return { values, raw: d.rawText[path] };
+  return { values, raw: wroteRaw ? d.rawText[path] : file?.raw };
 }
 
 /**
@@ -77,7 +80,7 @@ export function afterSave(d: SettingsDrafts, fresh: SettingsFile[], path: string
     const editedSince = k in sent.values && k in d.values && d.values[k] !== sent.values[k];
     values[k] = editedSince ? d.values[k] : fld.value;
   }
-  const rawEditedSince = sent.raw !== undefined && d.rawText[path] !== sent.raw;
+  const rawEditedSince = sent.raw !== undefined && d.rawText[path] !== undefined && d.rawText[path] !== sent.raw;
   return {
     files: d.files.map((f) => (f.path === path ? read : f)),
     values,
