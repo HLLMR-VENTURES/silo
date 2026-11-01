@@ -109,6 +109,17 @@ describe("Conflicts", () => {
     expect(onPark).toHaveBeenCalledWith("FS25_SeederA");
   });
 
+  it("a shared script name is a note: hidden until Show notes, not counted to review (#352)", async () => {
+    const user = userEvent.setup();
+    const script = conflict({ id: "lua", severity: "info", kind: "script", name: "main.lua" });
+    render(ConflictsPanel, { conflicts: [list[0], script], activeCount: 40 });
+    const head = screen.getByRole("heading", { level: 3 });
+    expect(head).toHaveTextContent("1 problem · 0 to review · 1 note hidden");
+    expect(screen.queryByRole("heading", { name: "Two mods ship a script with the same file name" })).toBeNull();
+    await user.click(screen.getByRole("switch", { name: "Show notes" }));
+    expect(screen.getByRole("heading", { name: "Two mods ship a script with the same file name" })).toBeInTheDocument();
+  });
+
   it("only notes: says nothing needs doing", () => {
     render(ConflictsPanel, { conflicts: [list[2]], activeCount: 4 });
     expect(screen.getByText(/No problems and nothing to review/)).toBeInTheDocument();

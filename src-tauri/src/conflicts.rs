@@ -205,6 +205,24 @@ fn participants(parsed: &[Parsed], idxs: &[usize]) -> usize {
     others.len() + usize::from(!maps.is_empty())
 }
 
+/// When maps take part in a collision, the condition it depends on: it only matters on a save
+/// that uses one of them, since no other map loads (#352). Empty when no map is involved.
+fn map_condition(parsed: &[Parsed], idxs: &[usize]) -> &'static str {
+    let mut maps: Vec<&str> = idxs
+        .iter()
+        .filter_map(|&i| parsed.get(i))
+        .filter(|p| p.md.is_map)
+        .map(|p| p.tech_name.as_str())
+        .collect();
+    maps.sort_unstable();
+    maps.dedup();
+    match maps.len() {
+        0 => "",
+        1 => " A map loads only when your savegame is on it, so this matters only when you play on that map.",
+        _ => " Only the map your savegame is on loads, so this matters only when you play on one of these maps.",
+    }
+}
+
 /// "the other" for two participants, "the others" for more.
 fn the_others(n: usize) -> &'static str {
     if n == 2 {
@@ -495,8 +513,9 @@ pub fn detect_with(inputs: &[ConflictInput], game: Option<GameLists>) -> Vec<Con
             "uniqueType",
             &ut,
             format!(
-                "These mods use the same exclusive slot (\"{ut}\"). The game loads only one mod per slot, so {} won't take effect.{}",
+                "These mods use the same exclusive slot (\"{ut}\"). The game loads only one mod per slot, so {} won't take effect.{}{}",
                 the_others(n),
+                map_condition(&parsed, &idxs),
                 if sa { note_same_author } else { "" }
             ),
             involved,
@@ -516,8 +535,9 @@ pub fn detect_with(inputs: &[ConflictInput], game: Option<GameLists>) -> Vec<Con
             &kind,
             &name,
             format!(
-                "These mods each add the {kl} \"{name}\". Only one of them takes effect when the game loads, so {} may not work as intended.{}",
+                "These mods each add the {kl} \"{name}\". Only one of them takes effect when the game loads, so {} may not work as intended.{}{}",
                 the_others(n),
+                map_condition(&parsed, &idxs),
                 if sa { note_same_author } else { "" }
             ),
             involved,
@@ -580,8 +600,9 @@ pub fn detect_with(inputs: &[ConflictInput], game: Option<GameLists>) -> Vec<Con
             "fillType",
             &name,
             format!(
-                "These mods each define the fill type \"{name}\". The game keeps only one definition: whichever loads last replaces {} settings (capacity, price and so on), so one mod may misbehave.{}",
+                "These mods each define the fill type \"{name}\". The game keeps only one definition: whichever loads last replaces {} settings (capacity, price and so on), so one mod may misbehave.{}{}",
                 if n == 2 { "the other's" } else { "the others'" },
+                map_condition(&parsed, &idxs),
                 if sa { " They share an author, so this is likely coordinated." } else { "" }
             ),
             involved,
@@ -872,6 +893,10 @@ mod tests {
         assert_eq!(participants(&p, &[2, 3]), 2);
         assert_eq!(participants(&p, &[2, 2]), 1);
         assert_eq!(participants(&p, &[]), 0);
+        // Only collisions involving a map say when they matter.
+        assert_eq!(map_condition(&p, &[2, 3]), "");
+        assert!(map_condition(&p, &[0, 2, 4]).contains("play on that map"));
+        assert!(map_condition(&p, &[0, 1, 2]).contains("one of these maps"));
     }
 
     /// Write an unpacked mod for `detect` with `body` inside `<modDesc>`, plus a fill-type list
@@ -944,6 +969,14 @@ mod tests {
         assert_eq!(brand.tech_names.len(), 3);
         assert!(
             brand.explanation.contains("so the other may not work"),
+            "{}",
+            brand.explanation
+        );
+        // It only matters on a save on one of those maps.
+        assert!(
+            brand
+                .explanation
+                .contains("matters only when you play on one of these maps"),
             "{}",
             brand.explanation
         );
