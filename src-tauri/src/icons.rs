@@ -35,11 +35,8 @@ pub fn cached_thumbnail(
     kind: &str,
     icon_filename: &str,
 ) -> Result<Vec<u8>, String> {
-    let (mtime, size) = icon_stamp(mod_path, kind, icon_filename)?;
-    let cached = cache_dir.join(format!(
-        "{}.png",
-        cache_key(mod_path, mtime, size, icon_filename)
-    ));
+    let (mtime, size, found) = icon_stamp(mod_path, kind, icon_filename)?;
+    let cached = cache_dir.join(format!("{}.png", cache_key(mod_path, mtime, size, &found)));
 
     if let Ok(bytes) = std::fs::read(&cached) {
         return Ok(bytes);
@@ -50,15 +47,23 @@ pub fn cached_thumbnail(
     Ok(png)
 }
 
-/// The `(mtime_ms, size)` the thumbnail cache is keyed on: the zip's own for a zip, which
-/// changes with any rebuild. For a folder mod, the icon file's own: the folder's mtime doesn't
-/// change when the icon inside it is edited in place (#353).
-fn icon_stamp(mod_path: &Path, kind: &str, icon_filename: &str) -> Result<(u128, u64), String> {
-    let meta = match kind {
-        "zip" => std::fs::metadata(mod_path).map_err(|e| e.to_string())?,
+/// The `(mtime_ms, size, name)` the thumbnail cache is keyed on. For a zip: the zip's own stamp,
+/// which changes with any rebuild, and the listed icon name. For a folder mod: the icon file's
+/// own stamp and the name it was found under (the listed one or its swapped-extension twin),
+/// since the folder's mtime doesn't change when an icon inside it is edited in place (#353).
+fn icon_stamp(
+    mod_path: &Path,
+    kind: &str,
+    icon_filename: &str,
+) -> Result<(u128, u64, String), String> {
+    let (meta, name) = match kind {
+        "zip" => (
+            std::fs::metadata(mod_path).map_err(|e| e.to_string())?,
+            icon_filename.to_string(),
+        ),
         _ => {
-            let (f, _) = open_dir_icon(mod_path, icon_filename)?;
-            f.metadata().map_err(|e| e.to_string())?
+            let (f, found) = open_dir_icon(mod_path, icon_filename)?;
+            (f.metadata().map_err(|e| e.to_string())?, found)
         }
     };
     let mtime = meta
@@ -67,7 +72,7 @@ fn icon_stamp(mod_path: &Path, kind: &str, icon_filename: &str) -> Result<(u128,
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    Ok((mtime, meta.len()))
+    Ok((mtime, meta.len(), name))
 }
 
 /// Cache file stem for a mod's icon: the same across runs, builds and Rust versions.
@@ -259,6 +264,28 @@ mod tests {
 
         let blue = cached_thumbnail(&cache, &dir, "dir", "icon.png").unwrap();
         assert_ne!(blue, red, "the edited icon is decoded again");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The listed icon and its swapped-extension twin are different files: when the listed one
+    /// goes, the twin's thumbnail is made, even with an identical size and mtime.
+    #[test]
+    fn falling_back_to_the_twin_icon_is_a_new_thumbnail() {
+        let base = temp("twin");
+        let dir = base.join("FS25_A");
+        let cache = base.join("cache");
+        std::fs::create_dir_all(&dir).unwrap();
+        let when =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for (name, rgb) in [("icon.dds", [255, 0, 0]), ("icon.png", [0, 0, 255])] {
+            let f = std::fs::File::create(dir.join(name)).unwrap();
+            std::io::Write::write_all(&mut &f, &png(4, 4, rgb)).unwrap();
+            f.set_modified(when).unwrap();
+        }
+        let listed = cached_thumbnail(&cache, &dir, "dir", "icon.dds").unwrap();
+        std::fs::remove_file(dir.join("icon.dds")).unwrap();
+        let twin = cached_thumbnail(&cache, &dir, "dir", "icon.dds").unwrap();
+        assert_ne!(twin, listed);
         let _ = std::fs::remove_dir_all(&base);
     }
 

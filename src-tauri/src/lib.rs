@@ -211,7 +211,13 @@ fn scan_library(
             })
             .collect();
 
-        let out = scan::scan_layouts(layouts, &cache, progress);
+        // What Silo recorded for the zips it projected, so a file swapped in at one of their
+        // names is told apart without hashing (#353).
+        let records: Vec<scan::ProjectionRecords> = roots
+            .iter()
+            .map(|r| db::load_projections(conn, &modsroot::canonical_key(r)))
+            .collect();
+        let out = scan::scan_layouts_with(layouts, &records, &cache, progress);
 
         // Persist freshly-parsed rows; prune mods that vanished from disk.
         let fresh_rows: Vec<(String, u64, u64, String)> = out

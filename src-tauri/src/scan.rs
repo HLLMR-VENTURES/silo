@@ -569,13 +569,19 @@ fn resolve_entry(
     (build_entry(c), Some(key))
 }
 
+/// What Silo recorded for the zips it projected into one mods folder: file name to the
+/// `(size, mtime_ms)` the entry had when Silo wrote or last confirmed it (`db::load_projections`).
+pub type ProjectionRecords = HashMap<String, (u64, i64)>;
+
 /// Cheap check that mods-folder entry `link` is Silo's projection of archived `src`: the
-/// structural tests of `organize::is_silo_projection` without its content hash, which a scan
-/// never pays for. A link must resolve to `src`, a real folder must carry Silo's marker, and a
-/// plain file must be `src`'s size (a hardlink always is, and so is a byte-for-byte copy). A
-/// different kind, link target or size proves the entry is something else the user put there.
-/// A same-size replacement passes; the foreign-file check after each scan hashes those.
-fn looks_like_projection(link: &Candidate, src: &Candidate) -> bool {
+/// structural and recorded-stamp tests of `organize::is_silo_projection` /
+/// `organize::matches_provenance`, without the content hash, which a scan never pays for. A
+/// link must resolve to `src` and a real folder must carry Silo's marker. A plain file is ours
+/// when it is `src` itself (a hardlink); otherwise it must be `src`'s size and, when Silo
+/// recorded the entry (`record`), still carry that size and mtime. A file swapped in by the user
+/// fails one of those; only an unrecorded same-size file passes on trust, and the foreign-file
+/// check after each scan hashes it (and records it when it is ours).
+fn looks_like_projection(link: &Candidate, src: &Candidate, record: Option<(u64, i64)>) -> bool {
     if link.kind != src.kind {
         return false;
     }
@@ -593,9 +599,29 @@ fn looks_like_projection(link: &Candidate, src: &Candidate) -> bool {
     if meta.is_dir() {
         return link.path.join(crate::organize::SILO_MARKER).is_file();
     }
-    fs::metadata(&src.path)
+    if let (Ok(a), Ok(b)) = (
+        same_file::Handle::from_path(&link.path),
+        same_file::Handle::from_path(&src.path),
+    ) {
+        if a == b {
+            return true;
+        }
+    }
+    let same_size = fs::metadata(&src.path)
         .map(|s| s.len() == meta.len())
-        .unwrap_or(true)
+        .unwrap_or(true);
+    same_size && record.map_or(true, |r| r == file_stamp(&meta))
+}
+
+/// A plain file's `(size, mtime_ms)` the way `organize::file_stats` records it.
+fn file_stamp(meta: &fs::Metadata) -> (u64, i64) {
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    (meta.len(), mtime)
 }
 
 /// Core scan over mods folders with explicit archive folders. Archives are read in order and a
@@ -609,9 +635,26 @@ pub fn scan_layouts<F>(
 where
     F: Fn(usize, usize) + Sync + Send,
 {
+    scan_layouts_with(layouts, &[], cache, progress)
+}
+
+/// [`scan_layouts`] with each layout's [`ProjectionRecords`] (by layout index; a layout without
+/// them trusts any same-size file at an archived mod's name, see [`looks_like_projection`]).
+pub fn scan_layouts_with<F>(
+    layouts: Vec<(PathBuf, Vec<PathBuf>)>,
+    records: &[ProjectionRecords],
+    cache: &HashMap<String, CacheEntry>,
+    progress: F,
+) -> ScanOutput
+where
+    F: Fn(usize, usize) + Sync + Send,
+{
     let started = std::time::Instant::now();
     let mut root_cands: Vec<Candidate> = Vec::new();
     let mut archive_cands: Vec<Candidate> = Vec::new();
+    // Later archives' copies of names already seen: not listed, but a mods-folder link may
+    // still point at one (an archive move between placing a mod's new copy and re-pointing it).
+    let mut shadowed: Vec<Candidate> = Vec::new();
     for (layout, (root, archives)) in layouts.iter().enumerate() {
         let tag = |mut c: Candidate| {
             c.layout = layout;
@@ -625,17 +668,18 @@ where
             // kept as-is so a one-archive scan behaves exactly as before.
             let cands = collect_archive_candidates(a);
             let names: Vec<String> = cands.iter().map(|c| c.tech_name.clone()).collect();
-            archive_cands.extend(
-                cands
-                    .into_iter()
-                    .filter(|c| !seen.contains(&c.tech_name))
-                    .map(tag),
-            );
+            let (later, first): (Vec<_>, Vec<_>) = cands
+                .into_iter()
+                .map(tag)
+                .partition(|c| seen.contains(&c.tech_name));
+            archive_cands.extend(first);
+            shadowed.extend(later);
             seen.extend(names);
         }
     }
     let roots: Vec<PathBuf> = layouts.into_iter().map(|(r, _)| r).collect();
-    finish_scan(roots, root_cands, archive_cands, cache, progress, started)
+    let jobs = plan_jobs(&root_cands, &archive_cands, &shadowed, records);
+    finish_scan(roots, jobs, cache, progress, started)
 }
 
 /// Scan with each root's default archive (`<root>/archive`).
@@ -661,8 +705,7 @@ where
 /// Reports progress via a callback (invoked from many rayon threads, hence Sync).
 fn finish_scan<F>(
     roots: Vec<PathBuf>,
-    root_cands: Vec<Candidate>,
-    archive_cands: Vec<Candidate>,
+    jobs: Vec<Job>,
     cache: &HashMap<String, CacheEntry>,
     progress: F,
     started: std::time::Instant,
@@ -670,7 +713,6 @@ fn finish_scan<F>(
 where
     F: Fn(usize, usize) + Sync + Send,
 {
-    let jobs = plan_jobs(&root_cands, &archive_cands);
     let total = jobs.len();
     progress(0, total);
 
@@ -749,37 +791,58 @@ struct Job<'a> {
     behind: Option<&'a Candidate>,
 }
 
+/// Which archived mod a mods-folder entry would be Silo's projection of: same layout, same
+/// techName and same kind, i.e. the same file name, as `organize` matches them.
+type Slot<'a> = (usize, &'a str, &'static str);
+
+fn slot(c: &Candidate) -> Slot<'_> {
+    (c.layout, c.tech_name.as_str(), c.kind)
+}
+
 /// Decide the rows of one scan. Every archived mod gets a row, and so does every mods-folder
-/// entry that isn't organized (vanilla). A mods-folder entry named like an archived mod of the
-/// same layout marks that mod active. When it is Silo's projection (cheaply checked by
-/// [`looks_like_projection`]) the archived row stands, parsed from the archive as before; when
-/// it is something else at that name (the user swapped in another build), the row describes the
-/// file the game will actually load (#353), and the foreign-file banner offers adopt / restore.
-fn plan_jobs<'a>(root_cands: &'a [Candidate], archive_cands: &'a [Candidate]) -> Vec<Job<'a>> {
-    // The first archived copy per (layout, techName) is what a mods-folder entry is checked
-    // against (a second one only exists in a second category of one archive).
-    let mut archived: HashMap<(usize, &str), &Candidate> = HashMap::new();
+/// entry that isn't at an archived mod's file name (vanilla, or the other kind of the same
+/// techName). An entry at an archived mod's file name marks that mod active. When it is Silo's
+/// projection (cheaply checked by [`looks_like_projection`]) the archived row stands, parsed from
+/// the archive as before; when it is something else (the user swapped in another build or their
+/// own folder), the row describes the file the game actually loads (#353), and the foreign-file
+/// banner offers adopt / restore.
+fn plan_jobs<'a>(
+    root_cands: &'a [Candidate],
+    archive_cands: &'a [Candidate],
+    shadowed: &[Candidate],
+    records: &[ProjectionRecords],
+) -> Vec<Job<'a>> {
+    // The first archived copy per slot is what a mods-folder entry is checked against (a second
+    // one only exists in a second category of one archive).
+    let mut archived: HashMap<Slot, &Candidate> = HashMap::new();
     for c in archive_cands {
-        archived
-            .entry((c.layout, c.tech_name.as_str()))
-            .or_insert(c);
+        archived.entry(slot(c)).or_insert(c);
     }
 
     // Mods-folder entries of archived mods: checked in parallel (a few stats each).
     let verdicts: Vec<Option<bool>> = root_cands
         .par_iter()
         .map(|r| {
-            let a = archived.get(&(r.layout, r.tech_name.as_str()))?;
-            Some(looks_like_projection(r, a))
+            let a = archived.get(&slot(r))?;
+            let record = r
+                .path
+                .file_name()
+                .and_then(|n| records.get(r.layout)?.get(n.to_string_lossy().as_ref()))
+                .copied();
+            Some(
+                looks_like_projection(r, a, record)
+                    || shadowed
+                        .iter()
+                        .any(|s| slot(s) == slot(r) && looks_like_projection(r, s, record)),
+            )
         })
         .collect();
 
-    let mut in_root: HashSet<(usize, &str)> = HashSet::new();
-    let mut projected: HashSet<(usize, &str)> = HashSet::new();
-    let mut foreign: HashMap<(usize, &str), &Candidate> = HashMap::new();
+    // A slot is one file name in one folder, so it holds at most one mods-folder entry.
+    let mut in_root: HashSet<Slot> = HashSet::new();
+    let mut foreign: HashMap<Slot, &Candidate> = HashMap::new();
     let mut loose = Vec::new();
     for (r, verdict) in root_cands.iter().zip(verdicts) {
-        let key = (r.layout, r.tech_name.as_str());
         match verdict {
             None => loose.push(Job {
                 read: r,
@@ -788,11 +851,9 @@ fn plan_jobs<'a>(root_cands: &'a [Candidate], archive_cands: &'a [Candidate]) ->
                 behind: None,
             }),
             Some(ours) => {
-                in_root.insert(key);
-                if ours {
-                    projected.insert(key);
-                } else {
-                    foreign.entry(key).or_insert(r);
+                in_root.insert(slot(r));
+                if !ours {
+                    foreign.insert(slot(r), r);
                 }
             }
         }
@@ -800,12 +861,9 @@ fn plan_jobs<'a>(root_cands: &'a [Candidate], archive_cands: &'a [Candidate]) ->
 
     let mut jobs = Vec::with_capacity(archive_cands.len() + loose.len());
     for a in archive_cands {
-        let key = (a.layout, a.tech_name.as_str());
+        let key = slot(a);
         let first = archived.get(&key).is_some_and(|f| f.path == a.path);
-        // A projection under the same name wins over a foreign entry beside it.
-        let stand_in = foreign
-            .get(&key)
-            .filter(|_| first && !projected.contains(&key));
+        let stand_in = foreign.get(&key).filter(|_| first);
         jobs.push(match stand_in {
             Some(r) => Job {
                 read: r,
@@ -1377,15 +1435,12 @@ mod layout_tests {
         moddesc_zip(&mods.join("FS25_Zip.zip"), "Swapped in v2");
         moddesc_dir(&cat.join("FS25_Dir"), "Archived dir");
         moddesc_dir(&mods.join("FS25_Dir"), "Own dir"); // no Silo marker
-        moddesc_zip(&cat.join("FS25_Kind.zip"), "Archived zip");
-        moddesc_dir(&mods.join("FS25_Kind"), "Unpacked"); // same techName, other kind
 
         let out = scan_one(&mods, &arch);
-        assert_eq!(out.result.mods.len(), 3, "one row per mod");
+        assert_eq!(out.result.mods.len(), 2, "one row per mod");
         for (name, title, kind) in [
             ("FS25_Zip", "Swapped in v2", "zip"),
             ("FS25_Dir", "Own dir", "dir"),
-            ("FS25_Kind", "Unpacked", "dir"),
         ] {
             let m = out
                 .result
@@ -1399,10 +1454,94 @@ mod layout_tests {
             assert!(m.organized && m.active);
             let behind = &out.stand_ins[&m.path];
             assert!(Path::new(&behind.path).starts_with(&cat), "{}", behind.path);
+            assert_eq!(behind.kind, kind);
         }
-        let kind = mods.join("FS25_Kind").to_string_lossy().into_owned();
-        assert_eq!(out.stand_ins[&kind].kind, "zip");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A same-size file at an archived zip's name: Silo's recorded stamp decides (#353). One that
+    /// still matches the record is Silo's copy; one that doesn't is the user's build; with no
+    /// record, the same size is trusted (the foreign-file check hashes it after the scan).
+    #[test]
+    fn a_same_size_swap_is_caught_by_the_projection_record() {
+        let base = fresh("same_size");
+        let mods = base.join("mods");
+        let arch = base.join("arch");
+        let cat = arch.join("Tools");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(&cat).unwrap();
+        // Same length, different version: "1.0.0.0" vs "2.0.0.0".
+        moddesc_zip(&cat.join("FS25_A.zip"), "Version 1");
+        moddesc_zip(&mods.join("FS25_A.zip"), "Version 2");
+        let flat = mods.join("FS25_A.zip");
+        assert_eq!(
+            fs::metadata(&flat).unwrap().len(),
+            fs::metadata(cat.join("FS25_A.zip")).unwrap().len()
+        );
+        let stamp = file_stamp(&fs::metadata(&flat).unwrap());
+        let scan_rec = |rec: Option<(u64, i64)>| {
+            let records: ProjectionRecords = rec
+                .map(|r| HashMap::from([("FS25_A.zip".to_string(), r)]))
+                .unwrap_or_default();
+            scan_layouts_with(
+                vec![(mods.clone(), vec![arch.clone()])],
+                &[records],
+                &HashMap::new(),
+                |_, _| {},
+            )
+        };
+
+        let unrecorded = scan_rec(None);
+        assert!(unrecorded.stand_ins.is_empty(), "trusted without a record");
+        let matching = scan_rec(Some(stamp));
+        assert!(matching.stand_ins.is_empty(), "Silo's own recorded copy");
+        assert_eq!(matching.result.mods[0].title.as_deref(), Some("Version 1"));
+
+        let swapped = scan_rec(Some((stamp.0, stamp.1 - 60_000)));
+        assert_eq!(swapped.stand_ins.len(), 1);
+        assert_eq!(swapped.result.mods.len(), 1);
+        assert_eq!(swapped.result.mods[0].title.as_deref(), Some("Version 2"));
+        assert!(swapped.result.mods[0].active);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// The other kind of an archived mod's techName (an unpacked folder beside an archived zip)
+    /// is not at that mod's file name, so it is its own loose row, also beside a real projection;
+    /// the archived mod is active only through its own file name, as `organize` sees it.
+    #[test]
+    fn the_other_kind_of_an_archived_name_is_its_own_row() {
+        let base = fresh("other_kind");
+        let mods = base.join("mods");
+        let arch = base.join("arch");
+        let cat = arch.join("Tools");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(&cat).unwrap();
+        moddesc_zip(&cat.join("FS25_Kind.zip"), "Archived zip");
+        moddesc_dir(&mods.join("FS25_Kind"), "Unpacked");
+        moddesc_zip(&cat.join("FS25_Both.zip"), "Both zip");
+        std::fs::hard_link(cat.join("FS25_Both.zip"), mods.join("FS25_Both.zip")).unwrap();
+        moddesc_dir(&mods.join("FS25_Both"), "Both dir");
+
+        let out = scan_one(&mods, &arch);
+        assert!(out.stand_ins.is_empty());
+        assert_eq!(out.result.mods.len(), 4);
+        let row = |title: &str| {
+            out.result
+                .mods
+                .iter()
+                .find(|m| m.title.as_deref() == Some(title))
+                .unwrap()
+                .clone()
+        };
+        let parked = row("Archived zip");
+        assert!(parked.organized && !parked.active);
+        let both = row("Both zip");
+        assert!(both.organized && both.active);
+        for loose in [row("Unpacked"), row("Both dir")] {
+            assert!(!loose.organized && loose.active);
+            assert!(Path::new(&loose.path).starts_with(&mods));
+        }
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[cfg(unix)]
@@ -1447,6 +1586,32 @@ mod layout_tests {
         assert!(Path::new(&row("FS25_Ours").path).starts_with(&arch));
         assert_eq!(row("FS25_Dev").title.as_deref(), Some("Working copy"));
         assert_eq!(out.stand_ins.len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Mid archive move, a mod can sit in both archives while its mods-folder link still points
+    /// at the old copy: that is still Silo's projection, not a stand-in.
+    #[test]
+    fn a_link_into_the_old_archive_mid_move_is_still_a_projection() {
+        let base = fresh("links_mid_move");
+        let mods = base.join("mods");
+        let (new_arch, old_arch) = (base.join("new"), base.join("old"));
+        std::fs::create_dir_all(&mods).unwrap();
+        moddesc_dir(&new_arch.join("Tools/FS25_A"), "A");
+        moddesc_dir(&old_arch.join("Tools/FS25_A"), "A");
+        if symlink(&old_arch.join("Tools/FS25_A"), &mods.join("FS25_A")).is_err() {
+            let _ = std::fs::remove_dir_all(&base);
+            return; // no symlink privilege on this Windows box
+        }
+        let out = scan_layouts(
+            vec![(mods.clone(), vec![new_arch.clone(), old_arch])],
+            &HashMap::new(),
+            |_, _| {},
+        );
+        assert!(out.stand_ins.is_empty());
+        assert_eq!(out.result.mods.len(), 1);
+        assert!(Path::new(&out.result.mods[0].path).starts_with(&new_arch));
+        assert!(out.result.mods[0].active);
         let _ = std::fs::remove_dir_all(&base);
     }
 
