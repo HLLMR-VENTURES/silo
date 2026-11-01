@@ -700,6 +700,9 @@ fn adopting_files_loose_archive_mods_into_categories() {
 const KEPT_UNPROVEN: &str =
     "stays in your mods folder: Silo couldn't confirm the copy in your library archive matches it";
 
+/// What flatten says about a file in Silo's own archive that no mod it tracks owns.
+const UNRECOGNIZED: &str = "Silo kept an unrecognized file in your library archive:";
+
 /// An active zip `FS25_Foo` archived in `Vehicles` whose mods-folder entry is a byte copy with
 /// its provenance recorded, as activation leaves it where hardlinks fail. Returns (src, flat).
 fn zip_copy_fixture(base: &Path, conn: &Connection) -> (PathBuf, PathBuf) {
@@ -739,12 +742,8 @@ fn a_zip_copy_is_kept_when_the_archived_copy_doesnt_match() {
                 set_active(&conn, &layout, &HashSet::new())
             };
             assert_eq!(rep.changed, 0, "{tag}: {:?}", rep.errors);
-            // Flatten also lists what it left in the archive.
-            assert!(
-                flattening || rep.errors.len() == 1,
-                "{tag}: {:?}",
-                rep.errors
-            );
+            // Flatten doesn't call the kept mod's archived zip unrecognized (#410).
+            assert_eq!(rep.errors.len(), 1, "{tag}: {:?}", rep.errors);
             assert!(
                 rep.errors[0].starts_with(&format!("FS25_Foo: FS25_Foo.zip {KEPT_UNPROVEN}")),
                 "{tag}: {:?}",
@@ -763,6 +762,65 @@ fn a_zip_copy_is_kept_when_the_archived_copy_doesnt_match() {
             let _ = std::fs::remove_dir_all(&base);
         }
     }
+}
+
+/// Flatten keeps a zip copy its archived copy doesn't match (#399). Files in the archive no mod
+/// Silo tracks owns are still listed as unrecognized, next to it in the same folder too, but the
+/// kept mod's own archived zip isn't (#410).
+#[test]
+fn flatten_lists_only_archive_files_no_kept_mod_owns() {
+    let base = temp_dir_for("flatten_kept_mix");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = zip_copy_fixture(&base, &conn);
+    std::fs::write(&src, b"PK\x03\x04 the arch").unwrap(); // cut short: the copy is kept
+    let cat = src.parent().unwrap();
+    std::fs::write(cat.join("FS25_Foo.zip.bak"), b"mine").unwrap();
+    std::fs::create_dir_all(base.join(ARCHIVE).join("Tools")).unwrap();
+    std::fs::write(base.join(ARCHIVE).join("Tools").join("orphan.zip"), b"PK").unwrap();
+
+    let rep = flatten(&conn, &Layout::default_for(&base));
+
+    assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+    let (kept, unknown): (Vec<_>, Vec<_>) =
+        rep.errors.iter().partition(|e| e.starts_with("FS25_Foo: "));
+    assert_eq!(kept.len(), 1, "{:?}", rep.errors);
+    assert!(kept[0].contains(KEPT_UNPROVEN), "{:?}", rep.errors);
+    let mut unknown: Vec<&str> = unknown.iter().map(|e| e.as_str()).collect();
+    unknown.sort_unstable();
+    assert_eq!(
+        unknown,
+        [
+            format!("{UNRECOGNIZED} FS25_Foo.zip.bak. Nothing was deleted."),
+            format!("{UNRECOGNIZED} orphan.zip. Nothing was deleted."),
+        ],
+        "{:?}",
+        rep.errors
+    );
+    assert!(flat.is_file() && src.is_file());
+    assert!(cat.join("FS25_Foo.zip.bak").is_file());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A file in Silo's own archive that no organized mod owns is still listed as unrecognized,
+/// and kept.
+#[test]
+fn flatten_lists_a_file_no_mod_owns_as_unrecognized() {
+    let base = temp_dir_for("flatten_orphan");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let orphan = base.join(ARCHIVE).join("Vehicles").join("orphan.zip");
+    std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    std::fs::write(&orphan, b"PK").unwrap();
+
+    let rep = flatten(&conn, &Layout::default_for(&base));
+
+    assert_eq!(
+        rep.errors,
+        [format!("{UNRECOGNIZED} orphan.zip. Nothing was deleted.")]
+    );
+    assert!(orphan.is_file());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// No archived copy, or a folder where the archived zip should be (the wrong kind): the zip

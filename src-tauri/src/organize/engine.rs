@@ -395,9 +395,18 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
     // The default archive is Silo's own. NEVER `remove_dir_all` it — that would destroy any
     // file we don't have a manifest row for (e.g. a mod whose manifest write failed on a
     // crash). Remove only provably-empty directories, and surface anything left untouched.
+    // A mod still in the manifest (one this pass kept, or couldn't restore) has already been
+    // reported by name, so its archived files aren't called unrecognized (#410).
+    let tracked: Vec<PathBuf> = db::load_organized(conn, &key)
+        .iter()
+        .map(|row| archive_path(&layout.archive, &row.category, &row.file_name))
+        .collect();
     match cleanup_empty_archive(&layout.archive, true) {
         Ok(leftover) => {
-            for p in leftover {
+            for p in leftover
+                .into_iter()
+                .filter(|p| !tracked.iter().any(|t| p.starts_with(t)))
+            {
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
                 rep.errors.push(format!(
                     "Silo kept an unrecognized file in your library archive: {}. Nothing was deleted.",
