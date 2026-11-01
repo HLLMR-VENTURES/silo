@@ -34,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Silo's copy back. (#353)
 - Mod icons listed as `.dds` but shipped as `.png` now show instead of a blank tile, and a mod
   zip rebuilt with the same timestamp gets its new icon. (#353)
+- Switching your mods folder while Silo was organizing could, in a rare moment, file mods into
+  the new folder's default archive instead of the archive you chose. Switching now waits for
+  the change in progress to finish. (#357)
+- Saving changes to a mod set that had just been deleted (for example an old "Before…" set Silo
+  cleared away automatically) said it saved, and the changes were lost. Silo now says the set
+  no longer exists and refreshes the list. (#357)
+- A catalog thumbnail cut off by a crash while it was saved stayed broken for good. Thumbnails
+  are now saved whole or not at all, and a broken one is fetched again. (#357)
+- The first catalog request after Silo starts no longer runs the database check on a thread
+  meant for quick work, and a failed library-cache update is now written to the log. (#357)
 - When Silo's catalog was down or sent back something it couldn't read, a mod it has a known
   build for installed without being checked against that build. Silo now stops the install
   instead; only a mod the catalog has never checked installs without that check. (#350)

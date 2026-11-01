@@ -1109,6 +1109,9 @@ pub fn save_auto_snapshot(
     Ok(id)
 }
 
+/// Refusal when saving to a mod set that no longer exists.
+const LOADOUT_GONE: &str = "That mod set no longer exists, so nothing was saved to it.";
+
 fn write_loadout(
     tx: &Connection,
     id: Option<i64>,
@@ -1118,11 +1121,17 @@ fn write_loadout(
 ) -> Result<i64, String> {
     let id = match id {
         Some(id) => {
-            tx.execute(
-                "UPDATE loadout SET name = ?2 WHERE id = ?1",
-                rusqlite::params![id, name],
-            )
-            .map_err(|e| e.to_string())?;
+            let updated = tx
+                .execute(
+                    "UPDATE loadout SET name = ?2 WHERE id = ?1",
+                    rusqlite::params![id, name],
+                )
+                .map_err(|e| e.to_string())?;
+            // Deleted (or pruned as an old automatic set) since the UI read it: refuse, before
+            // writing mod rows no set would own.
+            if updated != 1 {
+                return Err(LOADOUT_GONE.into());
+            }
             tx.execute("DELETE FROM loadout_mod WHERE loadout_id = ?1", [id])
                 .map_err(|e| e.to_string())?;
             id
@@ -1864,6 +1873,36 @@ mod tests {
             .unwrap();
         assert_eq!(l.kind, KIND_AUTO);
         assert_eq!(l.mods, ["FS25_B"]);
+    }
+
+    #[test]
+    fn saving_a_set_that_was_pruned_fails_and_writes_nothing() {
+        let path = temp_db("save_gone");
+        let mut c = open(&path).unwrap();
+        // The UI still holds the oldest automatic set; five more switches prune it.
+        let stale = save_auto_snapshot(&mut c, "Before 0", &["FS25_A".to_string()]).unwrap();
+        for i in 1..=AUTO_SNAPSHOTS_KEPT {
+            save_auto_snapshot(&mut c, &format!("Before {i}"), &[]).unwrap();
+        }
+        assert!(load_loadouts(&c).iter().all(|l| l.id != stale));
+        let err =
+            save_loadout(&mut c, Some(stale), "Before 0", &["FS25_B".to_string()]).unwrap_err();
+        assert_eq!(err, LOADOUT_GONE);
+        assert!(
+            load_loadouts(&c).iter().all(|l| l.id != stale),
+            "not recreated"
+        );
+        let orphans: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM loadout_mod WHERE loadout_id NOT IN (SELECT id FROM loadout)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0, "no mod rows without a set");
+        // An existing set still saves.
+        let ok = save_loadout(&mut c, None, "Harvest", &[]).unwrap();
+        assert_eq!(save_loadout(&mut c, Some(ok), "Harvest", &[]), Ok(ok));
     }
 
     #[test]

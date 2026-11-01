@@ -231,7 +231,13 @@ fn scan_library(
                     .map(|json| (m.path.clone(), key.mtime_ms, key.size, json))
             })
             .collect();
-        let _ = db::upsert_many(conn, &fresh_rows);
+        // A failed cache write only costs a re-parse next scan; logged, not surfaced.
+        if let Err(e) = db::upsert_many(conn, &fresh_rows) {
+            log::warn!(
+                "scan: couldn't save {} parsed mods to the cache: {e}",
+                fresh_rows.len()
+            );
+        }
 
         // An archived copy hidden behind a stand-in is still on disk: keep its cached row.
         let present: HashSet<String> = out
@@ -241,7 +247,9 @@ fn scan_library(
             .map(|m| m.path.clone())
             .chain(out.stand_ins.values().map(|a| a.path.clone()))
             .collect();
-        let _ = db::prune_missing(conn, &present);
+        if let Err(e) = db::prune_missing(conn, &present) {
+            log::warn!("scan: couldn't drop vanished mods from the cache: {e}");
+        }
 
         // Keep the `organized` manifest in step with what's physically in `archive/`, so an
         // archived mod is always activatable even if the DB drifted from disk (e.g. a fresh
@@ -1028,8 +1036,8 @@ async fn browse_mods(
     limit: Option<u32>,
     offset: Option<u32>,
 ) -> Result<siloapi::BrowsePage, String> {
-    let base = siloapi_base(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let base = siloapi_base(&app)?;
         siloapi::browse(
             &base,
             query.as_deref(),
@@ -1048,10 +1056,7 @@ async fn browse_mods(
 /// The available Browse facets (brand/theme/region/realism/era + counts), for the filter chips.
 #[tauri::command]
 async fn siloapi_facets(app: tauri::AppHandle) -> Result<siloapi::Facets, String> {
-    let base = siloapi_base(&app)?;
-    tauri::async_runtime::spawn_blocking(move || siloapi::facets(&base))
-        .await
-        .map_err(|e| e.to_string())?
+    off_main(move || siloapi::facets(&siloapi_base(&app)?)).await
 }
 
 /// One mod's full catalog record (metadata + every source it was seen on).
@@ -1060,10 +1065,7 @@ async fn siloapi_mod_detail(
     app: tauri::AppHandle,
     id: String,
 ) -> Result<siloapi::BrowseMod, String> {
-    let base = siloapi_base(&app)?;
-    tauri::async_runtime::spawn_blocking(move || siloapi::detail(&base, &id))
-        .await
-        .map_err(|e| e.to_string())?
+    off_main(move || siloapi::detail(&siloapi_base(&app)?, &id)).await
 }
 
 /// Resolve a *library* mod (by tech name) to its full catalog record, so the library detail
@@ -1074,8 +1076,8 @@ async fn catalog_detail_by_tech(
     app: tauri::AppHandle,
     tech_name: String,
 ) -> Result<Option<siloapi::BrowseMod>, String> {
-    let base = siloapi_base(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<Option<siloapi::BrowseMod>, String> {
+        let base = siloapi_base(&app)?;
         let hits = siloapi::lookup(&base, std::slice::from_ref(&tech_name))?;
         match hits.into_iter().find(|h| !h.id.is_empty()) {
             Some(h) => siloapi::detail(&base, &h.id).map(Some),
@@ -1091,21 +1093,19 @@ async fn catalog_detail_by_tech(
 /// ModHub thumbnails are never fetched from GIANTS' CDN here: they come from SiloAPI's cache.
 #[tauri::command]
 async fn catalog_image(app: tauri::AppHandle, url: String) -> Result<String, String> {
-    let cache_dir = app
-        .path()
-        .app_cache_dir()
+    // The profile's cache when one is active, the same folder the startup cleanup reads.
+    let cache_dir = profile::app_cache_dir(&app)
         .ok()
-        .map(|d| d.join("catalog_images"));
+        .map(|d| d.join(CATALOG_IMAGES_DIR));
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         if let Some(dir) = &cache_dir {
             let key = format!("{:x}", md5::compute(url.as_bytes()));
             let file = dir.join(&key);
-            if let Ok(cached) = std::fs::read_to_string(&file) {
+            if let Some(cached) = read_cached_image(&file) {
                 return Ok(cached);
             }
             let data = siloapi::fetch_image(&url)?;
-            let _ = std::fs::create_dir_all(dir);
-            let _ = std::fs::write(&file, &data);
+            cache_image(&file, &data);
             Ok(data)
         } else {
             siloapi::fetch_image(&url)
@@ -1115,21 +1115,111 @@ async fn catalog_image(app: tauri::AppHandle, url: String) -> Result<String, Str
     .map_err(|e| e.to_string())?
 }
 
+/// Where catalog thumbnails are cached, under the app cache dir. `-v2`: only entries that decoded
+/// before they were written (`cacheable_image`) live here; the unchecked `catalog_images` of
+/// earlier versions is removed at startup.
+const CATALOG_IMAGES_DIR: &str = "catalog_images_v2";
+
+/// Smallest decoded thumbnail the cache keeps (or accepts back): anything shorter is an empty or
+/// failed fetch, not an image.
+const MIN_CACHED_IMAGE_BYTES: usize = 16;
+
+/// Pure: the image bytes of a thumbnail `data:` URL (`data:image/...;base64,...`), when it is one
+/// and isn't trivially short.
+fn thumbnail_bytes(s: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let rest = s.strip_prefix("data:image/")?;
+    let (_, payload) = rest.split_once(";base64,")?;
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .ok()
+        .filter(|b| b.len() >= MIN_CACHED_IMAGE_BYTES)
+}
+
+/// Pure: the format of image bytes that end the way a whole file of it ends (PNG's `IEND`
+/// chunk, JPEG's end-of-image marker) and whose header reads (a cut right after an embedded EXIF
+/// thumbnail's own end marker leaves a header that doesn't). `None` for anything else (GIF, SVG,
+/// WebP, ...): shown, but never cached, since a cut-off copy couldn't be told apart.
+fn whole_image_format(b: &[u8]) -> Option<image::ImageFormat> {
+    const PNG_END: [u8; 8] = [0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82];
+    let format = if b.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        b.ends_with(&PNG_END).then_some(image::ImageFormat::Png)
+    } else if b.starts_with(&[0xFF, 0xD8]) {
+        b.ends_with(&[0xFF, 0xD9])
+            .then_some(image::ImageFormat::Jpeg)
+    } else {
+        None
+    }?;
+    image::ImageReader::with_format(std::io::Cursor::new(b), format)
+        .into_dimensions()
+        .ok()
+        .map(|_| format)
+}
+
+/// Pure: whether `s` is a usable cached thumbnail: its bytes are a whole PNG or JPEG
+/// (`whole_image_format`). Cheap enough for every read: a cut-off write is all an entry written
+/// by this cache can suffer, since it decoded before it was kept (`cacheable_image`).
+fn cached_image_ok(s: &str) -> bool {
+    thumbnail_bytes(s).is_some_and(|b| whole_image_format(&b).is_some())
+}
+
+/// Pure: whether a fetched thumbnail is worth caching: whole (`whole_image_format`) and it
+/// decodes, so a damaged image the server sent is shown but never kept.
+fn cacheable_image(s: &str) -> bool {
+    thumbnail_bytes(s).is_some_and(|b| {
+        whole_image_format(&b).is_some_and(|f| image::load_from_memory_with_format(&b, f).is_ok())
+    })
+}
+
+/// The cached thumbnail at `file`, or `None` when there is none or it isn't usable
+/// (`cached_image_ok`). An unusable one is left for the fetch that follows to replace (deleting
+/// it here could delete a good copy another request just put in its place).
+fn read_cached_image(file: &std::path::Path) -> Option<String> {
+    let cached = std::fs::read_to_string(file).ok()?;
+    if cached_image_ok(&cached) {
+        return Some(cached);
+    }
+    log::info!("refetching an unusable cached thumbnail {}", file.display());
+    None
+}
+
+/// Tells concurrent thumbnail cache writes in this process apart.
+static IMAGE_CACHE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Cache thumbnail `data` at `file`, best effort: only an image worth keeping (`cacheable_image`),
+/// written to a temp file of its own beside `file` and renamed into place (replacing an unusable
+/// entry), so a crash or a concurrent fetch of the same image never leaves a cut-off entry.
+fn cache_image(file: &std::path::Path, data: &str) {
+    if !cacheable_image(data) {
+        return;
+    }
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
+        return;
+    };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let seq = IMAGE_CACHE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(
+        "{}.{}-{seq}.tmp",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let placed = std::fs::write(&tmp, data).and_then(|()| std::fs::rename(&tmp, file));
+    if placed.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 /// Catalog categories with counts, for the Browse filter.
 #[tauri::command]
 async fn siloapi_categories(app: tauri::AppHandle) -> Result<Vec<siloapi::CategoryCount>, String> {
-    let base = siloapi_base(&app)?;
-    tauri::async_runtime::spawn_blocking(move || siloapi::categories(&base))
-        .await
-        .map_err(|e| e.to_string())?
+    off_main(move || siloapi::categories(&siloapi_base(&app)?)).await
 }
 
 #[tauri::command]
 async fn siloapi_stats(app: tauri::AppHandle) -> Result<siloapi::Stats, String> {
-    let base = siloapi_base(&app)?;
-    tauri::async_runtime::spawn_blocking(move || siloapi::stats(&base))
-        .await
-        .map_err(|e| e.to_string())?
+    off_main(move || siloapi::stats(&siloapi_base(&app)?)).await
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -1154,10 +1244,10 @@ async fn install_remote_mod(
     root: Option<String>,
 ) -> Result<String, error::AppError> {
     ensure_no_move()?;
-    let base = siloapi_base(&app)?;
-    let root = primary_root(root)?;
     let emitter = app.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let base = siloapi_base(&app)?;
+        let root = primary_root(root)?;
         let resolved = siloapi::resolve_download(&base, &id, source.as_deref())?;
         // The filename comes from the catalog — validate it's a plain basename so a
         // hostile response can't redirect the write outside the mods folder.
@@ -1446,8 +1536,8 @@ async fn catalog_check_updates(
     app: tauri::AppHandle,
     mods: Vec<LocalMod>,
 ) -> Result<Vec<CatalogUpdate>, String> {
-    let base = siloapi_base(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<CatalogUpdate>, String> {
+        let base = siloapi_base(&app)?;
         let names: Vec<String> = mods.iter().map(|m| m.tech_name.clone()).collect();
         let results = siloapi::lookup(&base, &names)?;
         let by_tech: std::collections::HashMap<&str, &siloapi::LookupResult> = results
@@ -1501,8 +1591,8 @@ async fn verify_mod(
     version: Option<String>,
     path: String,
 ) -> Result<provenance::VerifyResult, String> {
-    let base = siloapi_base(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<provenance::VerifyResult, String> {
+        let base = siloapi_base(&app)?;
         let local = provenance::manifest_from_zip(std::path::Path::new(&path))?;
 
         // Find the catalog id by tech name (one request).
@@ -1666,13 +1756,25 @@ fn ensure_library_write(dest: &std::path::Path) -> Result<(), String> {
     })
 }
 
-/// The active layout (mods folder + archive), validated against a frontend-supplied root.
+/// The active layout (mods folder + archive), validated against a frontend-supplied root. The
+/// trusted folder and its layout come from ONE published snapshot, so a mods-folder switch
+/// published in between can't pair this folder with another folder's archive.
 fn primary_layout(root: Option<String>) -> Result<organize::Layout, String> {
-    let mods = primary_root(root)?;
-    Ok(match modsroot::active() {
-        Some(a) if modsroot::same_folder(&a.layout.mods, &mods) => a.layout,
-        _ => organize::Layout::default_for(&mods),
-    })
+    // `resolved` before the snapshot: it is set after each publish, so true here means the
+    // snapshot below is at least that resolution.
+    let resolved = modsroot::resolved();
+    let (active, blocked) = modsroot::published();
+    let mods = root_in(active.clone(), blocked, resolved, root)?;
+    Ok(layout_for(active, &mods))
+}
+
+/// Pure: the layout for trusted mods folder `mods`: the published `active` layout when it is
+/// that folder (its archive may be custom), else the default layout.
+fn layout_for(active: Option<modsroot::Active>, mods: &std::path::Path) -> organize::Layout {
+    match active {
+        Some(a) if modsroot::same_folder(&a.layout.mods, mods) => a.layout,
+        _ => organize::Layout::default_for(mods),
+    }
 }
 
 const STILL_LOADING: &str = "Silo is still loading your library. Try again in a moment.";
@@ -1890,7 +1992,8 @@ fn scan_may_reconcile(start: Option<u64>, now: Option<u64>) -> bool {
 /// Rewrite folder `key`'s organize manifest from what a scan found on disk, unless the library
 /// changed since the scan began (`start`, from `quiet_epoch`). `lock` is held while
 /// reconciling, so no write starts on top of it. Returns false when the manifest was left
-/// alone because the library wasn't quiet (a database error is ignored, as before).
+/// alone because the library wasn't quiet. A database error is logged and otherwise ignored:
+/// the reconcile is one transaction, so the manifest stays as it was and the next scan retries.
 fn reconcile_if_quiet(
     lock: &'static std::sync::Mutex<()>,
     epoch: &std::sync::atomic::AtomicU64,
@@ -1906,7 +2009,9 @@ fn reconcile_if_quiet(
     if !scan_may_reconcile(start, seen) {
         return false;
     }
-    let _ = db::reconcile_organized(conn, key, rows);
+    if let Err(e) = db::reconcile_organized(conn, key, rows) {
+        log::warn!("scan: couldn't update the organize manifest for {key}: {e}");
+    }
     true
 }
 
@@ -1970,10 +2075,22 @@ fn archive_unavailable(archive: &std::path::Path) -> String {
 /// archive), or it's rejected — so a compromised webview can't redirect an install/organize
 /// into an arbitrary directory. Returns the matched trusted path, never the raw frontend string.
 fn primary_root(root: Option<String>) -> Result<PathBuf, String> {
-    if let Some(why) = modsroot::blocked() {
-        return Err(why);
+    let resolved = modsroot::resolved();
+    let (active, blocked) = modsroot::published();
+    root_in(active, blocked, resolved, root)
+}
+
+/// `primary_root` over one published snapshot (`active`, `blocked`, `resolved`).
+fn root_in(
+    active: Option<modsroot::Active>,
+    blocked: Option<modsroot::Blocked>,
+    resolved: bool,
+    root: Option<String>,
+) -> Result<PathBuf, String> {
+    if let Some(b) = blocked {
+        return Err(b.reason);
     }
-    let allowed = mods_roots();
+    let allowed = trusted_roots(active, resolved, false);
     match root {
         Some(r) if !r.is_empty() => {
             let want = PathBuf::from(&r)
@@ -1999,10 +2116,9 @@ async fn plan_organize(
     root: Option<String>,
     mods: Vec<organize::ModInput>,
 ) -> Result<Vec<organize::PlannedMove>, error::AppError> {
-    let root = primary_root(root)?;
-    tauri::async_runtime::spawn_blocking(move || organize::plan_organize(&root, &mods))
+    off_main(move || Ok(organize::plan_organize(&primary_root(root)?, &mods)))
         .await
-        .map_err(|e| error::AppError::from(e.to_string()))
+        .map_err(error::AppError::from)
 }
 
 #[tauri::command]
@@ -2101,10 +2217,7 @@ async fn set_active(
 /// Drive / Proton Drive), where Silo projects the active set as copies instead.
 #[tauri::command]
 async fn hardlink_support(root: Option<String>) -> Result<bool, String> {
-    let root = primary_root(root)?;
-    tauri::async_runtime::spawn_blocking(move || Ok(organize::supports_hardlinks(&root)))
-        .await
-        .map_err(|e| e.to_string())?
+    off_main(move || Ok(organize::supports_hardlinks(&primary_root(root)?))).await
 }
 
 /// Repair copy-projections into hardlinks (reclaims duplicated space, makes activate/deactivate
@@ -2381,9 +2494,25 @@ fn rediscovered_archive_fits(
     problems.is_empty()
 }
 
+/// Serializes `compute_mods_root_status`, from reading the stored choice to publishing what it
+/// resolved: a status that read the old choice can't publish after one that read the new choice.
+/// Lock order: the library lock (when held) first, then this one; nothing holding this one
+/// takes the library lock.
+static MODS_ROOT_RESOLVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Resolve the live mods folder, publish it (and its archive) as the trusted write roots, and
-/// describe it.
+/// describe it. Callers hold the library lock, so the trusted roots never change under a write
+/// (a refresh that may not hold it uses `refresh_mods_root`).
 fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
+    resolve_mods_root(conn, true)
+}
+
+/// `compute_mods_root_status`, publishing only when `publish` (else it just describes what it
+/// would publish).
+fn resolve_mods_root(conn: &rusqlite::Connection, publish: bool) -> ModsRootStatus {
+    let _resolving = MODS_ROOT_RESOLVE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let loc = fsgame::locate();
     let default = loc.as_ref().map(|l| l.user_dir.join("mods"));
     let map = loc.as_ref().map(path_map).unwrap_or_default();
@@ -2426,7 +2555,9 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
         && r.source == modsroot::Source::Default
         && loc.as_ref().map(|l| l.user_dir.is_dir()).unwrap_or(false);
     // The folder FS25 reads counts as a known mods folder for every overlap check.
-    modsroot::set_game_reads(r.game_reads.clone());
+    if publish {
+        modsroot::set_game_reads(r.game_reads.clone());
+    }
     let (active, blocked) = match r.path.as_deref() {
         Some(p) if available => match resolve_layout(
             conn,
@@ -2450,7 +2581,9 @@ fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
         .and_then(|b| b.conflict.as_ref())
         .map(|c| c.to_string_lossy().into_owned());
     // Together, so no command sees "no layout" without its reason.
-    modsroot::publish(active, blocked);
+    if publish {
+        modsroot::publish(active, blocked);
+    }
 
     let current_key = r.path.as_ref().map(|p| modsroot::canonical_key(p));
     let mut paths: Vec<PathBuf> =
@@ -2510,10 +2643,62 @@ async fn mods_root_status(app: tauri::AppHandle) -> Result<ModsRootStatus, Strin
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db::open(&db)?;
-        Ok(compute_mods_root_status(&conn))
+        Ok(refresh_mods_root(&conn))
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Resolve and describe the mods folder for a refresh (the status command, startup). A refresh
+/// can pick up a change of FS25's own folder setting, so it publishes only under the library
+/// lock (`status_publish_lock`), like a switch, or before the first resolution (`may_publish`);
+/// otherwise it only describes.
+fn refresh_mods_root(conn: &rusqlite::Connection) -> ModsRootStatus {
+    let lock = status_publish_lock();
+    let publish = may_publish(lock.is_some(), modsroot::resolved());
+    if !publish {
+        log::info!("mods folder status read while the library is busy; not republished");
+    }
+    resolve_mods_root(conn, publish)
+}
+
+/// Pure: whether a refresh may publish: holding the library lock, or before anything was ever
+/// resolved (every write refuses until then, so nothing can rely on the trusted roots yet).
+fn may_publish(locked: bool, resolved: bool) -> bool {
+    locked || !resolved
+}
+
+/// The library lock for a status refresh: waits behind an ordinary write (up to `LIBRARY_WAIT`)
+/// but not behind an archive move, which republishes the layout itself when it ends. Doesn't
+/// move the epoch on: a refresh that finds the same folder changes nothing a scan relies on,
+/// and a scan's manifest is keyed by the folder it scanned. `None` when the lock isn't had.
+fn status_publish_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
+    let start = std::time::Instant::now();
+    loop {
+        if move_in_progress() {
+            return None;
+        }
+        if let Some(guard) = lock_result(LIBRARY_WRITE.try_lock()) {
+            return Some(guard);
+        }
+        if start.elapsed() >= LIBRARY_WAIT {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// The library lock for a command that switches (or re-publishes) the mods folder: no write may
+/// run on the old trusted roots while the new ones are stored and published, and taking the
+/// lock moves the epoch on, so a scan that began on the old folder doesn't reconcile. Refused
+/// during an archive move or a self-update like `library_write`, but update leftovers aren't
+/// settled first: they belong to the folder being left and mustn't keep the user from leaving
+/// it (the next write there settles them).
+fn mods_root_switch_lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    wait_for_library(LIBRARY_WAIT, || {
+        ensure_not_self_updating()?;
+        ensure_no_move()
+    })
 }
 
 /// Use `path` as the mods folder (remembered, added to the known list). Never moves files.
@@ -2525,6 +2710,7 @@ async fn set_mods_root(
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<ModsRootStatus, String> {
+        let _write = mods_root_switch_lock()?;
         let conn = db::open(&db)?;
         let p = std::path::Path::new(&path);
         let default = fsgame::user_dir().map(|d| d.join("mods"));
@@ -2586,6 +2772,7 @@ async fn clear_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus, error:
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<ModsRootStatus, String> {
+        let _write = mods_root_switch_lock()?;
         let conn = db::open(&db)?;
         db::set_app_setting(&conn, modsroot::CHOICE_KEY, None)?;
         Ok(compute_mods_root_status(&conn))
@@ -2602,6 +2789,9 @@ async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<ModsRootStatus, String> {
+        // Pointing FS25 at the folder can unblock it, which publishes a new layout.
+        let _write = mods_root_switch_lock()?;
+        // Checked once the lock is held: FS25 may have started while this waited for it.
         config_write_refusal(gamelaunch::fs25_running())?;
         let folder = game_point_target(
             modsroot::active().as_ref(),
@@ -2621,6 +2811,8 @@ async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus
 async fn create_mods_folder(app: tauri::AppHandle) -> Result<ModsRootStatus, error::AppError> {
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<ModsRootStatus, String> {
+        // The new folder becomes the published layout.
+        let _write = mods_root_switch_lock()?;
         let loc = fsgame::locate().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         std::fs::create_dir_all(loc.user_dir.join("mods")).map_err(|e| e.to_string())?;
         let conn = db::open(&db)?;
@@ -5580,7 +5772,9 @@ pub fn run() {
                                 Err(e) => log::warn!("database snapshot failed: {e}"),
                             }
                         }
-                        let _ = compute_mods_root_status(&conn);
+                        // Under the library lock too: a status refresh may already have resolved
+                        // it and a write be under way.
+                        let _ = refresh_mods_root(&conn);
                         log::info!("library layout resolved at startup");
                     }
                     Err(e) => {
@@ -5590,6 +5784,8 @@ pub fn run() {
                 // Icon thumbnails from the old (unstable) cache naming; `icons-v2` replaced it.
                 if let Ok(c) = profile::app_cache_dir(&handle) {
                     let _ = std::fs::remove_dir_all(c.join("icons"));
+                    // Catalog thumbnails cached before they were checked whole (#357).
+                    let _ = std::fs::remove_dir_all(c.join("catalog_images"));
                 }
             });
             Ok(())
@@ -6301,6 +6497,176 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_refresh_publishes_only_under_the_lock_or_before_the_first_resolution() {
+        assert!(super::may_publish(true, true));
+        assert!(super::may_publish(true, false));
+        // Nothing can write before the first resolution, so startup always publishes.
+        assert!(super::may_publish(false, false));
+        // A write is under way: describe only, don't move the trusted roots under it.
+        assert!(!super::may_publish(false, true));
+    }
+
+    #[test]
+    fn the_trusted_folder_and_its_layout_come_from_one_snapshot() {
+        let base = temp_base("one_snapshot");
+        let a = base.join("mods");
+        let b = base.join("other");
+        let custom = base.join("hdd");
+        for d in [&b, &custom] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let active = |mods: &Path, archive: &Path| crate::modsroot::Active {
+            layout: Layout::new(mods.to_path_buf(), archive.to_path_buf()).unwrap(),
+            move_to: None,
+        };
+        let on_a = active(&a, &custom);
+        // The folder the snapshot trusts, with its own custom archive.
+        let mods = super::root_in(Some(on_a.clone()), None, true, None).unwrap();
+        assert_eq!(mods, a);
+        assert_eq!(super::layout_for(Some(on_a.clone()), &mods).archive, custom);
+        let named = Some(a.to_string_lossy().into_owned());
+        assert_eq!(
+            super::root_in(Some(on_a.clone()), None, true, named.clone()),
+            Ok(a.clone())
+        );
+        // A snapshot taken after a switch to B refuses A outright...
+        let on_b = active(&b, &b.join("archive"));
+        assert!(super::root_in(Some(on_b.clone()), None, true, named).is_err());
+        // ...and never lends A's archive to another folder (or B's to A).
+        assert_eq!(super::layout_for(Some(on_b), &a), Layout::default_for(&a));
+        // A blocked folder answers with its reason.
+        let blocked = crate::modsroot::Blocked {
+            reason: "shares files".into(),
+            cause: crate::modsroot::BlockCause::Overlap,
+            mods: a.clone(),
+            conflict: None,
+            moving: None,
+        };
+        assert_eq!(
+            super::root_in(None, Some(blocked), true, None),
+            Err("shares files".to_string())
+        );
+        assert!(super::root_in(None, None, true, None).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A small real image encoded as `format`.
+    fn image_bytes(format: image::ImageFormat) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(8, 8, image::Rgb([200, 30, 30]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, format).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn only_a_real_image_data_url_is_a_usable_cached_thumbnail() {
+        use base64::Engine;
+        let enc = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let png = image_bytes(image::ImageFormat::Png);
+        let jpeg = image_bytes(image::ImageFormat::Jpeg);
+        let b64 = enc(&png);
+        assert!(super::cached_image_ok(&format!(
+            "data:image/png;base64,{b64}"
+        )));
+        assert!(super::cached_image_ok(&format!(
+            "data:image/jpeg;base64,{}",
+            enc(&jpeg)
+        )));
+        // GIF, WebP and the rest can't be told whole from a cut-off copy: never cached.
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend([0u8; 20]);
+        gif.push(0x3B);
+        let mut webp = b"RIFF".to_vec();
+        webp.extend(24u32.to_le_bytes());
+        webp.extend(b"WEBP");
+        webp.extend([0u8; 20]);
+        for other in [&gif, &webp] {
+            assert_eq!(super::whole_image_format(other), None);
+        }
+        // A PNG signature straight followed by its end chunk has no header: not an image.
+        let hollow = [&png[..8], &png[png.len() - 12..]].concat();
+        assert_eq!(super::whole_image_format(&hollow), None);
+        for bad in [
+            String::new(),
+            "data:image/png;base64,".into(),
+            // Cut off mid-write: not valid base64 any more.
+            format!("data:image/png;base64,{}", &b64[..b64.len() - 3]),
+            // Cut off on a four-character boundary: valid base64 of part of the file.
+            format!("data:image/png;base64,{}", &b64[..b64.len() / 8 * 4]),
+            format!("data:image/jpeg;base64,{}", enc(&jpeg[..jpeg.len() - 30])),
+            // A JPEG cut just after an embedded thumbnail's end marker.
+            format!(
+                "data:image/jpeg;base64,{}",
+                enc(&[&jpeg[..20], &[0xFF, 0xD9][..]].concat())
+            ),
+            // Text labelled as an image.
+            format!(
+                "data:image/png;base64,{}",
+                enc(b"<html>not found, but long enough</html>")
+            ),
+            // Too small to be an image.
+            "data:image/png;base64,AAAA".into(),
+            format!("data:text/html;base64,{b64}"),
+            format!("data:image/png,{b64}"),
+        ] {
+            assert!(!super::cached_image_ok(&bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_damaged_fetched_image_is_shown_but_never_cached() {
+        use base64::Engine;
+        let mut png = image_bytes(image::ImageFormat::Png);
+        let idat = png.windows(4).position(|w| w == b"IDAT").unwrap();
+        png[idat + 6] ^= 0xFF;
+        let damaged = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&png)
+        );
+        // Whole as far as a cache read can tell (header and end intact)...
+        assert!(super::cached_image_ok(&damaged));
+        // ...but it doesn't decode, so it isn't kept.
+        assert!(!super::cacheable_image(&damaged));
+        let base = temp_base("thumbs_damaged");
+        let file = base.join("catalog_images").join("abc");
+        super::cache_image(&file, &damaged);
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn thumbnails_are_cached_whole_and_a_broken_entry_is_replaced() {
+        use base64::Engine;
+        let base = temp_base("thumbs");
+        let dir = base.join("catalog_images");
+        let file = dir.join("abc");
+        let good = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(image_bytes(image::ImageFormat::Png))
+        );
+        // Nothing cached yet; an empty fetch isn't cached at all.
+        assert_eq!(super::read_cached_image(&file), None);
+        super::cache_image(&file, "data:image/jpeg;base64,");
+        assert!(!file.exists());
+        super::cache_image(&file, &good);
+        assert_eq!(super::read_cached_image(&file), Some(good.clone()));
+        // Replacing an entry works too, and no temp file is left behind.
+        super::cache_image(&file, &good);
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["abc"]);
+        // A broken entry (an older Silo's cut-off write) is a miss, left for the refetch to
+        // replace (never deleted on read: that could delete another request's good copy).
+        std::fs::write(&file, "data:image/jpeg;base64,AAA").unwrap();
+        assert_eq!(super::read_cached_image(&file), None);
+        super::cache_image(&file, &good);
+        assert_eq!(super::read_cached_image(&file), Some(good.clone()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// A zip mod with a minimal modDesc at `path`.
     fn mod_zip(path: &Path) {
         use std::io::Write;
@@ -6803,6 +7169,39 @@ mod tests {
         done_tx.send(()).unwrap();
         writer.join().unwrap();
         assert!(!did);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_failed_reconcile_is_logged_and_still_counts_as_a_quiet_scan() {
+        static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static E: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let base = temp_base("scan_reconcile_fails");
+        let mut conn = crate::db::open(&base.join("silo.db")).unwrap();
+        conn.execute_batch("DROP TABLE organized").unwrap();
+        let row = crate::db::OrganizedRow {
+            tech_name: "FS25_A".into(),
+            file_name: "FS25_A.zip".into(),
+            kind: "zip".into(),
+            category: "Tractors".into(),
+            subcategory: None,
+            active: false,
+        };
+        assert!(
+            crate::db::reconcile_organized(&mut conn, "r", std::slice::from_ref(&row)).is_err()
+        );
+        // The library was quiet: the manifest wasn't skipped for a write, it failed (logged),
+        // and the next scan retries it.
+        let start = super::quiet_epoch(&L, &E);
+        assert!(super::reconcile_if_quiet(
+            &L,
+            &E,
+            start,
+            &mut conn,
+            "r",
+            &[row]
+        ));
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
     }
