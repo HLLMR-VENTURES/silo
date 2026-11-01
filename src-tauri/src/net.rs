@@ -247,7 +247,10 @@ impl Resolver for SiloResolver {
 }
 
 /// What a guarded agent may connect to out of `all` (every address a lookup of `netloc`
-/// found): the public ones, at most [`MAX_ADDRS`], filtered before the cap.
+/// found): the public ones, at most [`MAX_ADDRS`], filtered before the cap. The cap is ureq 3's
+/// (a resolver hands over a fixed 16-slot list, for every agent), so a 17th usable answer is
+/// never tried where ureq 2 would have tried it; a known, accepted loss for hosts with more
+/// than 16 addresses.
 fn guarded_addrs(netloc: &str, all: Vec<SocketAddr>) -> io::Result<Vec<SocketAddr>> {
     let mut kept = public_addrs(netloc, |_| Ok(all.clone()))?;
     kept.truncate(MAX_ADDRS);
@@ -328,6 +331,9 @@ impl Connector<()> for SiloConnector {
     }
 }
 
+/// The shortest connect attempt ureq makes (its `MIN_PER_ADDRESS_TIMEOUT`).
+const MIN_ATTEMPT: Duration = Duration::from_millis(10);
+
 /// Try `attempt` on each address in turn until one connects, within one deadline (`timeout`
 /// from the first attempt). As in ureq 2 (`connect_host`): with more than one address, each
 /// attempt gets half the time left; a failed attempt (an I/O error or its own timeout) moves
@@ -352,8 +358,10 @@ fn connect_each<T>(
                 return Err(expired());
             }
             let share = if multiple { left / 2 } else { left };
-            // Never zero: ureq reads a zero budget as "one second".
-            this.after = Budget::Exact(share.max(Duration::from_millis(1)));
+            // ureq's TCP connect never waits less than 10 ms (`MIN_PER_ADDRESS_TIMEOUT`), so say
+            // so here: an attempt can end at most 10 ms past the deadline, and the next check
+            // stops there. (Also never zero, which ureq would read as "one second".)
+            this.after = Budget::Exact(share.max(MIN_ATTEMPT));
         }
         match attempt(addr, this) {
             Ok(v) => return Ok(v),
@@ -551,6 +559,10 @@ impl std::fmt::Display for HttpError {
                 match &t.error {
                     ureq::Error::Io(e) => write!(f, "{e}"),
                     ureq::Error::Timeout(which) => write!(f, "timed out ({which})"),
+                    // ureq 2's text, with the limit it counted against (its `redirects(5)`).
+                    ureq::Error::TooManyRedirects => {
+                        write!(f, "reached max redirects ({})", API_MAX_REDIRECTS + 1)
+                    }
                     ureq::Error::Other(o) => write!(f, "{o}"),
                     e => write!(f, "{e}"),
                 }
@@ -1418,7 +1430,11 @@ mod tests {
             matches!(&e, HttpError::Transport(t) if matches!(t.error(), ureq::Error::TooManyRedirects)),
             "{e}"
         );
-        assert!(e.to_string().contains("Too Many Redirects"), "{e}");
+        assert!(
+            e.to_string()
+                .ends_with("Too Many Redirects: reached max redirects (5)"),
+            "{e}"
+        );
         assert_eq!(server.join().unwrap().len(), 5);
     }
 
@@ -1968,11 +1984,12 @@ mod tests {
             },
         );
         let spent = clock.now() - start;
-        // The budget, plus at most the 1 ms floor per attempt.
+        // The budget, plus at most one attempt at ureq's 10 ms floor.
         assert!(
-            spent <= Duration::from_secs(10) + Duration::from_millis(16),
+            spent <= Duration::from_secs(10) + MIN_ATTEMPT,
             "spent {spent:?}"
         );
+        assert!(given.iter().all(|g| *g >= MIN_ATTEMPT), "{given:?}");
         assert!(
             matches!(res, Err(ureq::Error::Timeout(ureq::Timeout::Connect))),
             "{res:?}"
