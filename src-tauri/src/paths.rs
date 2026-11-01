@@ -654,7 +654,7 @@ mod tests {
         std::os::unix::fs::symlink(&sentinel, root.join("game.xml.silo-tmp")).unwrap();
         // A dangling link at `.bak` (rotation only moves names that resolve).
         std::os::unix::fs::symlink(base.join("nowhere.xml"), root.join("game.xml.bak")).unwrap();
-        guarded_xml_write(&[root.clone()], &dest, "<new/>").unwrap();
+        guarded_xml_write(std::slice::from_ref(&root), &dest, "<new/>").unwrap();
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "<new/>");
         assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "<main/>");
         assert!(!base.join("nowhere.xml").exists());
