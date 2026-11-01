@@ -1009,11 +1009,9 @@ async fn download_update(
             Ok(done) => done,
             Err(e) => {
                 // A swap can fail after the new file is in place (recovery then finishes it):
-                // the record stays only while `dest` holds the new bytes.
+                // the record is undone only when `dest` provably doesn't hold the new bytes.
                 if let Some((_, sha, _)) = &carry {
-                    let placed =
-                        provenance::sha256_file(&dest).is_ok_and(|h| h.eq_ignore_ascii_case(sha));
-                    if !placed {
+                    if new_bytes_absent(&dest, sha) {
                         undo_catalog_alias(&db, undo);
                     }
                 }
@@ -1043,6 +1041,35 @@ async fn download_update(
     .await
     .map_err(|e| e.to_string())?
     .map_err(error::AppError::from)
+}
+
+/// Whether `dest` provably doesn't hold the bytes hashing to `sha`: no file there, or other
+/// bytes. A file that can't be read proves nothing, so its record is kept (and logged).
+fn new_bytes_absent(dest: &std::path::Path, sha: &str) -> bool {
+    new_bytes_absent_with(dest, sha, provenance::sha256_file)
+}
+
+/// `new_bytes_absent`, with the hashing passed in (tests make it fail).
+fn new_bytes_absent_with(
+    dest: &std::path::Path,
+    sha: &str,
+    hash: impl Fn(&std::path::Path) -> Result<String, String>,
+) -> bool {
+    if let Err(e) = dest.symlink_metadata() {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            return true;
+        }
+    }
+    match hash(dest) {
+        Ok(h) => !h.eq_ignore_ascii_case(sha),
+        Err(e) => {
+            log::warn!(
+                "[catalog] couldn't read {} after a failed update, so its link is kept: {e}",
+                file_label(dest)
+            );
+            false
+        }
+    }
 }
 
 /// The alias to record for the downloaded file `part` linked by `link`: its hash and size.
@@ -8807,6 +8834,25 @@ mod tests {
         .unwrap();
         let dl = super::lookup_from_detail(detail).download.unwrap();
         assert!(dl.url.contains("/k/b/"), "{}", dl.url);
+    }
+
+    #[test]
+    fn a_failed_update_undoes_its_record_only_when_the_new_bytes_are_provably_not_there() {
+        let dir = std::env::temp_dir().join(format!("silo_absent_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("FS25_FieldToDoList.zip");
+        let ok =
+            |h: &'static str| move |_: &std::path::Path| -> Result<String, String> { Ok(h.into()) };
+        // No file: absent.
+        assert!(super::new_bytes_absent_with(&dest, "aa", ok("aa")));
+        std::fs::write(&dest, b"x").unwrap();
+        // The new bytes are there (any case of hex): kept. Other bytes: absent.
+        assert!(!super::new_bytes_absent_with(&dest, "AA", ok("aa")));
+        assert!(super::new_bytes_absent_with(&dest, "aa", ok("bb")));
+        // Unreadable: proves nothing, so the record is kept.
+        let locked = |_: &std::path::Path| -> Result<String, String> { Err("in use".into()) };
+        assert!(!super::new_bytes_absent_with(&dest, "aa", locked));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

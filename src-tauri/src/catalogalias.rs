@@ -214,10 +214,9 @@ pub fn release_asset(url: &str) -> Option<(String, String)> {
         [owner, repo, "releases", "download", tag, file]
             if !owner.is_empty() && !repo.is_empty() && !tag.is_empty() && !file.is_empty() =>
         {
-            Some((
-                format!("{owner}/{repo}").to_ascii_lowercase(),
-                file.to_string(),
-            ))
+            // The file name as `update::check_asset_name` reads it (percent-decoded).
+            let file = crate::update::asset_file_name(url)?;
+            Some((format!("{owner}/{repo}").to_ascii_lowercase(), file))
         }
         _ => None,
     }
@@ -443,6 +442,14 @@ mod tests {
         let later =
             "https://github.com/Knoellix/FS25_ToDo/releases/download/v0.2/FS25_FieldToDoList.zip";
         assert!(another_release_of(&todo(), later));
+        // The same name percent-encoded is the same file, as the update check reads it.
+        let encoded =
+            "https://github.com/knoellix/FS25_ToDo/releases/download/v0.2/%46S25_FieldToDoList.zip";
+        assert!(another_release_of(&todo(), encoded));
+        assert!(
+            crate::update::check_asset_name(encoded, Path::new("mods/FS25_FieldToDoList.zip"))
+                .is_ok()
+        );
         // Another mod published from the same repository is not this entry's release.
         let sibling =
             "https://github.com/knoellix/FS25_ToDo/releases/download/v0.2/FS25_OtherMod.zip";
