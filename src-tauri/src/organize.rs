@@ -1193,11 +1193,14 @@ pub(crate) fn make_link(
 
 /// Whether a zip projection may fall back to a symlink — decided lazily, at most once per
 /// engine call, and only after a hardlink attempt actually failed, so the common same-volume
-/// case never probes (or writes) anything.
+/// case never probes (or writes) anything. `can_only_copy` (asked by an archive move before it
+/// re-links an active mod's hardlink) also probes a hardlink, once.
 pub(crate) struct LinkPolicy<'a> {
     layout: &'a Layout,
     cached: Option<bool>,
     cross_volume: Option<bool>,
+    /// A probe hardlink from the mods folder into the archive worked (`hardlink_known`).
+    hardlinks: Option<bool>,
 }
 
 impl<'a> LinkPolicy<'a> {
@@ -1206,16 +1209,30 @@ impl<'a> LinkPolicy<'a> {
             layout,
             cached: None,
             cross_volume: None,
+            hardlinks: None,
         }
     }
 
     /// A policy that decided the archive is on another drive with no symlinks (copies only).
     #[cfg(test)]
     pub(crate) fn copy_only_for_tests(layout: &'a Layout) -> Self {
+        Self::decided_for_tests(layout, true, false, false)
+    }
+
+    /// A policy with every answer decided up front: the archive is on another drive
+    /// (`cross_volume`), symlinks are allowed, a hardlink is known to work.
+    #[cfg(test)]
+    pub(crate) fn decided_for_tests(
+        layout: &'a Layout,
+        cross_volume: bool,
+        symlinks: bool,
+        hardlinks: bool,
+    ) -> Self {
         LinkPolicy {
             layout,
-            cached: Some(false),
-            cross_volume: Some(true),
+            cached: Some(symlinks),
+            cross_volume: Some(cross_volume),
+            hardlinks: Some(hardlinks),
         }
     }
 
@@ -1239,10 +1256,26 @@ impl<'a> LinkPolicy<'a> {
         allow
     }
 
-    /// A zip link into this archive can only be a full copy: it's on another drive (no
-    /// hardlink) and symlinks aren't allowed.
+    /// A hardlink from the mods folder into this archive is known to work (`hardlink_known`).
+    /// Asked at most once; probes only when the archive isn't on another drive.
+    fn hardlinks_work(&mut self) -> bool {
+        if let Some(h) = self.hardlinks {
+            return h;
+        }
+        let layout = self.layout;
+        let h = hardlink_known(self.cross_volume(), || {
+            hardlinks_between(&layout.mods, &layout.archive)
+        });
+        self.hardlinks = Some(h);
+        h
+    }
+
+    /// A new zip link into this archive could end up a full copy: symlinks aren't allowed and
+    /// a hardlink isn't known to work — the archive is on another drive, the mods folder
+    /// rejects hardlinks (a cloud-synced folder), or Silo can't tell (a drive it can't
+    /// identify, where no probe could be made).
     pub(crate) fn can_only_copy(&mut self) -> bool {
-        self.cross_volume() && !self.allow_symlink()
+        !self.allow_symlink() && !self.hardlinks_work()
     }
 
     /// The mods folder is inside a Mac App Store sandbox, so the game can't follow any link
@@ -1637,6 +1670,14 @@ pub(crate) fn mount_of(p: &Path) -> Option<(PathBuf, u64)> {
 /// check, where guessing "same" could let a move run out of room.
 pub(crate) fn known_same_mount(a: &Option<(PathBuf, u64)>, b: &Option<(PathBuf, u64)>) -> bool {
     matches!((a, b), (Some((ma, _)), Some((mb, _))) if ma == mb)
+}
+
+/// Pure: a hardlink from the mods folder into the archive is known to work — the archive
+/// isn't on another drive (`cross_volume`) and a probe hardlink (`probe`, asked only then)
+/// worked. A probe that couldn't run (`None`) isn't knowing: on a drive Silo can't identify
+/// it counts as "might copy", never as "will link".
+pub(crate) fn hardlink_known(cross_volume: bool, probe: impl FnOnce() -> Option<bool>) -> bool {
+    !cross_volume && probe() == Some(true)
 }
 
 /// What the disk list says about `a` and `b` (one enumeration for both): `Some(same)` when it
@@ -4100,7 +4141,9 @@ mod tests {
 
     /// On a mount the disk list can't identify where no probe can even be made (a path that
     /// won't resolve), the answer is inconclusive, not "another drive": linking falls back to
-    /// the hardlink-first path, which copies safely if the link fails.
+    /// the hardlink-first path, which copies safely if the link fails. But a hardlink isn't
+    /// known to work there either, so a new link might be a copy (`can_only_copy`): a move
+    /// keeps an active mod's hardlink instead of trading it for a possible copy (#188).
     #[test]
     fn an_unknown_mount_where_no_probe_can_run_is_inconclusive() {
         let base = std::env::temp_dir().join(format!("silo_unknown_mount_{}", std::process::id()));
@@ -4118,7 +4161,70 @@ mod tests {
             archive: unknown,
         };
         assert!(same_volume_for_links(&layout));
-        assert!(!LinkPolicy::new(&layout).can_only_copy());
+        assert!(LinkPolicy::new(&layout).can_only_copy());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A hardlink counts as working only when a probe made one: never across drives (no probe
+    /// even runs), never when the probe couldn't run (an unidentified drive), never where the
+    /// mods folder rejects it (a cloud-synced folder on the same drive) (#188).
+    #[test]
+    fn a_hardlink_is_known_to_work_only_when_a_probe_made_one() {
+        let asked = std::cell::Cell::new(false);
+        let probe = |answer: Option<bool>| {
+            let a = &asked;
+            move || {
+                a.set(true);
+                answer
+            }
+        };
+        assert!(hardlink_known(false, probe(Some(true))));
+        assert!(!hardlink_known(false, probe(Some(false))), "cloud folder");
+        assert!(!hardlink_known(false, probe(None)), "unidentified drive");
+        asked.set(false);
+        assert!(!hardlink_known(true, probe(Some(true))));
+        assert!(!asked.get(), "another drive is never probed");
+    }
+
+    /// Same drive, a working hardlink: a new link is a hardlink, never a copy. Same drive where
+    /// the mods folder rejects hardlinks, or a drive Silo can't identify: it might be a copy.
+    /// Another drive with symlinks: a symlink.
+    #[test]
+    fn can_only_copy_unless_a_link_is_known_to_work() {
+        let layout = Layout {
+            mods: PathBuf::from("/m"),
+            archive: PathBuf::from("/a"),
+        };
+        let d = |cross, sym, hard| LinkPolicy::decided_for_tests(&layout, cross, sym, hard);
+        assert!(!d(false, false, true).can_only_copy());
+        assert!(d(false, false, false).can_only_copy());
+        assert!(!d(true, true, false).can_only_copy());
+        assert!(d(true, false, false).can_only_copy());
+    }
+
+    /// A real same-drive pair (a temp folder) where hardlinks work: no copy.
+    #[test]
+    fn a_same_drive_archive_where_hardlinks_work_links() {
+        let base = std::env::temp_dir().join(format!("silo_hardlinks_work_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let layout = Layout {
+            mods: base.join("mods"),
+            archive: base.join("mods").join("archive"),
+        };
+        std::fs::create_dir_all(&layout.archive).unwrap();
+        if hardlinks_between(&layout.mods, &layout.archive) == Some(true) {
+            assert!(!LinkPolicy::new(&layout).can_only_copy());
+        }
+        let left: Vec<_> = std::fs::read_dir(&layout.mods)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(
+            left,
+            vec![std::ffi::OsString::from("archive")],
+            "probes are removed"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

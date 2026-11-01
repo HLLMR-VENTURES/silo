@@ -2356,9 +2356,7 @@ fn resolve_layout(
         Ok(Some(p)) => p,
         Err(e) => {
             return Err(blocked(
-                format!(
-                "Silo couldn't check this folder against your other mods folders ({e}). Try again."
-            ),
+                folder_check_unreadable(&e),
                 modsroot::BlockCause::ReadError,
                 None,
             ))
@@ -2482,7 +2480,10 @@ fn rediscovered_archive_fits(
         .map(std::path::Path::new)
         .and_then(std::path::Path::parent)
         .filter(|p| !p.as_os_str().is_empty());
-    let problems = fence_problems(&layout, found, &fences(conn, &layout, app_data));
+    let problems = match fences(conn, &layout, app_data) {
+        Ok(f) => fence_problems(&layout, found, &f),
+        Err(e) => vec![e],
+    };
     if !problems.is_empty() {
         log::warn!(
             "not using the archive {} named in {}: {}",
@@ -2757,7 +2758,7 @@ fn apply_mods_root_choice(
     let mut extra: Vec<PathBuf> = default.map(PathBuf::from).into_iter().collect();
     extra.extend(live.iter().cloned());
     let all = known_mods_folders(conn, &extra);
-    if let Some(why) = mods_folder_check(conn, p, &all)? {
+    if let Some(why) = mods_folder_check(conn, p, &all).map_err(|e| folder_check_unreadable(&e))? {
         return Err(why.message);
     }
     modsroot::validate_folder(p)?;
@@ -3006,34 +3007,67 @@ fn archive_of(conn: &rusqlite::Connection, mods: &std::path::Path) -> PathBuf {
     .unwrap_or_else(|| organize::Layout::default_for(mods).archive)
 }
 
+/// The fences around `layout` (see `Fences`). `other_archives` is every archive Silo knows
+/// except this folder's own (`other_archives`): each other known folder's, and every stored
+/// archive choice — also one for a folder Silo only ever followed through FS25's override,
+/// which never joined the known list, so a re-point can't make two layouts share an archive.
+/// An unreadable setting list is an error: the fences must never pass because Silo couldn't
+/// look.
 fn fences(
     conn: &rusqlite::Connection,
     layout: &organize::Layout,
     app_data: Option<&std::path::Path>,
-) -> Fences {
+) -> Result<Fences, String> {
     let user_dir = fsgame::locate().map(|l| l.user_dir);
     let mut extra: Vec<PathBuf> = user_dir.iter().map(|u| u.join("mods")).collect();
     extra.extend(live_mods_folders());
-    let others = known_mods_folders(conn, &extra);
+    fences_with(conn, layout, &extra, user_dir.as_deref(), app_data)
+}
+
+/// `fences` with the folders that count as known besides the list (`extra`: FS25's default
+/// mods folder, the folders in use) and FS25's user folder passed in (tests).
+fn fences_with(
+    conn: &rusqlite::Connection,
+    layout: &organize::Layout,
+    extra: &[PathBuf],
+    user_dir: Option<&std::path::Path>,
+    app_data: Option<&std::path::Path>,
+) -> Result<Fences, String> {
+    let others = known_mods_folders(conn, extra);
     let mine = key_path(&layout.mods);
     let mut other_mods: Vec<PathBuf> = Vec::new();
-    let mut other_archives: Vec<PathBuf> = Vec::new();
-    for p in others {
-        let k = key_path(&p);
-        if k == mine || other_mods.contains(&k) {
-            continue;
+    for p in &others {
+        let k = key_path(p);
+        if k != mine && !other_mods.contains(&k) {
+            other_mods.push(k);
         }
-        other_mods.push(k);
-        other_archives.extend(managed_archive(conn, &p).map(|a| key_path(&a)));
     }
-    Fences {
+    let other_archives = other_archives(conn, &layout.mods, &others)
+        .map_err(|e| archive_list_unreadable(&e))?
+        .iter()
+        .map(|a| key_path(a))
+        .collect();
+    Ok(Fences {
         mods: mine,
         current_archive: key_path(&layout.archive),
         other_mods,
         other_archives,
-        user_dir: user_dir.as_deref().map(key_path),
+        user_dir: user_dir.map(key_path),
         app_data: app_data.map(key_path),
-    }
+    })
+}
+
+/// Why a folder can't be checked as a mods folder: Silo couldn't read what it knows of the
+/// other mods folders and their archives.
+fn folder_check_unreadable(e: &str) -> String {
+    format!("Silo couldn't check this folder against your other mods folders ({e}). Try again.")
+}
+
+/// Why a folder can't be checked as an archive: Silo couldn't read the archives it knows.
+fn archive_list_unreadable(e: &str) -> String {
+    format!(
+        "Silo couldn't read its list of archives ({e}), so it can't check this folder. Try again."
+    )
 }
 
 /// Pure: `a` and `b` (identity keys) are the same folder, or one is inside the other.
@@ -3228,8 +3262,10 @@ fn target_problems(
     new: &std::path::Path,
     app_data: Option<&std::path::Path>,
 ) -> Vec<String> {
-    let f = fences(conn, layout, app_data);
-    let mut v = fence_problems(layout, new, &f);
+    let mut v = match fences(conn, layout, app_data) {
+        Ok(f) => fence_problems(layout, new, &f),
+        Err(e) => return vec![e],
+    };
     // Mods filed in `<new>/<subfolder>/` that Silo doesn't know would mix with the library.
     // (Loose mods at the top level are fine — that's adopt.)
     match relocate::unknown_mods(new, &[]) {
@@ -3253,6 +3289,13 @@ struct Space {
     largest: u64,
     /// Free on the new archive's drive (unknown never blocks).
     free: Option<u64>,
+    /// What re-linking active mods costs (`relocate::relink_cost`): zero unless a new link into
+    /// the new archive can only be a copy (`LinkPolicy::can_only_copy`).
+    relink: relocate::RelinkCost,
+    /// The mods folder is on the new archive's drive (known mounts only).
+    mods_same_drive: bool,
+    /// Free on the mods folder's drive (unknown never blocks).
+    mods_free: Option<u64>,
 }
 
 /// Pure inputs to `move_problems`.
@@ -3281,9 +3324,14 @@ fn missing_mods_problem(n: usize) -> String {
 /// from the archive (each would stop the move), names already at the destination, then free
 /// space. On one drive each mod's old copy is deleted before the next is copied — and an active
 /// mod's hardlink is re-linked to the new copy first, so the delete really frees it — so only the
-/// largest mod needs room at a time; across drives the whole archive must fit. The mods folder's
-/// drive needs nothing extra: across drives an active mod's hardlink becomes a symlink, or —
-/// where only a copy could be made — is left as the mod's standalone copy (`relocate::repoint`).
+/// largest mod needs room at a time; across drives the whole archive must fit.
+///
+/// Where a new link into the new archive can only be a copy (`s.relink`, see
+/// `relocate::relink_cost`): an active mod's hardlink is kept as its standalone copy, so on one
+/// drive its old bytes stay used (`kept`); and an active mod whose link is missing or points
+/// into the old archive gets a full copy in the mods folder (`copied`), counted on the new
+/// archive's drive when the mods folder shares it, else as its own check on the mods folder's
+/// drive. Otherwise the mods folder's drive needs nothing extra.
 fn move_problems(f: MoveFacts) -> Vec<String> {
     let mut v = f.target;
     v.extend(f.unknown);
@@ -3292,13 +3340,22 @@ fn move_problems(f: MoveFacts) -> Vec<String> {
     }
     v.extend(f.collisions);
     let s = f.space;
-    let needed = if s.archive_same_drive {
-        s.largest
+    let mut needed = if s.archive_same_drive {
+        s.largest + s.relink.kept
     } else {
         s.bytes
     };
+    let mods_needed = if s.mods_same_drive {
+        needed += s.relink.copied;
+        0
+    } else {
+        s.relink.copied
+    };
     if needed > 0 {
         v.extend(relocate::space_problem(needed, s.free));
+    }
+    if mods_needed > 0 {
+        v.extend(relocate::mods_space_problem(mods_needed, s.mods_free));
     }
     v
 }
@@ -3336,6 +3393,20 @@ fn check_move(
     // For space, an unknown mount is another drive: the whole archive must fit.
     let archive_same_drive =
         organize::known_same_mount(&organize::mount_of(&layout.archive), &new_mount);
+    let mods_mount = organize::mount_of(&layout.mods);
+    // Re-links only cost space where a new link can only be a copy. Asking runs the link
+    // probes in the new folder, so only once it is cleared (`target` empty) and only when an
+    // active mod would be re-linked at all.
+    let mut relink = relocate::relink_cost(&layout.mods, &layout.archive, &rows);
+    if relink != relocate::RelinkCost::default() {
+        let to = organize::Layout {
+            mods: layout.mods.clone(),
+            archive: new.to_path_buf(),
+        };
+        if !target.is_empty() || !organize::LinkPolicy::new(&to).can_only_copy() {
+            relink = relocate::RelinkCost::default();
+        }
+    }
     // An archive folder Silo can't list may hold unrecorded mods the move would leave behind.
     let unknown = match relocate::unknown_mods(&layout.archive, &rows) {
         Ok(unknown) => relocate::unknown_messages(
@@ -3356,6 +3427,9 @@ fn check_move(
             bytes,
             largest: sizes.iter().copied().max().unwrap_or(0),
             free,
+            relink,
+            mods_same_drive: organize::known_same_mount(&mods_mount, &new_mount),
+            mods_free: mods_mount.as_ref().map(|(_, f)| *f),
         },
     });
     MoveCheck {
@@ -3527,8 +3601,9 @@ async fn archive_status(app: tauri::AppHandle) -> Result<ArchiveStatus, error::A
 }
 
 /// What moving the archive to `path` involves, and anything that blocks it. Read-only apart
-/// from the write probe, the symlink probe and — on a drive the disk list doesn't know — the
-/// hardlink probe (each removed again), which only run when the folder itself isn't ruled out.
+/// from the write probe, the symlink probe and the hardlink probe — on a drive the disk list
+/// doesn't know, or when an active mod would be re-linked (`check_move`) — each removed again,
+/// which only run when the folder itself isn't ruled out.
 #[tauri::command]
 async fn archive_move_preflight(
     app: tauri::AppHandle,
@@ -3554,8 +3629,8 @@ async fn archive_move_preflight(
         // Refused as a move but fine as a re-point: an archive holding no mods (nothing to
         // move or orphan) and a folder clear of every fence — its own filed mods are welcome.
         let can_repoint = !archive_holds_mods(&layout)
-            && fence_problems(&layout, &new, &fences(&conn, &layout, app_data.as_deref()))
-                .is_empty();
+            && fences(&conn, &layout, app_data.as_deref())
+                .is_ok_and(|f| fence_problems(&layout, &new, &f).is_empty());
         let check = check_move(&conn, &layout, &key, &new, target);
         // Links as `LinkPolicy` will decide them there: a drive the disk list doesn't know is
         // probed (only once the folder is cleared), and symlinks never leave a Mac App Store
@@ -3747,7 +3822,7 @@ async fn archive_repoint(
             }
             None => organize::Layout::default_for(&modsroot::real_folder(&layout.mods)?).archive,
         };
-        let problems = fence_problems(&layout, &new, &fences(&conn, &layout, app_data.as_deref()));
+        let problems = fence_problems(&layout, &new, &fences(&conn, &layout, app_data.as_deref())?);
         if !problems.is_empty() {
             return Err(problems.join("\n"));
         }
@@ -6525,6 +6600,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A database Silo can't read refuses the switch in plain words, never lets it through.
+    #[test]
+    fn a_mods_folder_choice_is_refused_when_the_check_cant_read() {
+        let base = temp_base("choiceunreadable");
+        let a = base.join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        conn.execute_batch("DROP TABLE app_setting").unwrap();
+        let e = super::apply_mods_root_choice(&conn, &a.to_string_lossy(), true, None, &[])
+            .unwrap_err();
+        assert!(
+            e.starts_with("Silo couldn't check this folder against your other mods folders (")
+                && e.ends_with("Try again."),
+            "{e}"
+        );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn the_folder_fs25_reads_counts_as_a_known_mods_folder() {
         let base = temp_base("overridepick");
@@ -7037,6 +7131,80 @@ mod tests {
         );
     }
 
+    /// The re-point from #188: folder X was only ever followed through FS25's override (never
+    /// in the known list) and its archive was moved to B. Once Silo follows D again, D's
+    /// archive may not be re-pointed (or moved) at B, nor a folder inside B or holding it —
+    /// two layouts would share one archive. D's own stored archive isn't a fence.
+    #[test]
+    fn fences_include_every_stored_archive_but_the_folders_own() {
+        let base = temp_base("fences_stored");
+        let d = base.join("d-mods");
+        let x = base.join("x-mods");
+        let b = base.join("b-archive");
+        let mine = base.join("d-archive");
+        for p in [&d, &x, &b, &mine] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let set = |mods: &Path, archive: &Path| {
+            crate::db::set_app_setting(
+                &conn,
+                &crate::relocate::archive_setting_key(&crate::modsroot::canonical_key(mods)),
+                Some(&archive.to_string_lossy()),
+            )
+            .unwrap();
+        };
+        set(&x, &b);
+        set(&d, &mine);
+        let layout = Layout {
+            mods: d.clone(),
+            archive: mine.clone(),
+        };
+        // X isn't known and isn't in use: only its stored archive choice names it.
+        let f = super::fences_with(&conn, &layout, &[], None, None).unwrap();
+        assert!(f.other_mods.is_empty());
+        assert_eq!(f.other_archives, vec![super::key_path(&b)]);
+        let problems = fence_problems(&layout, &b, &f);
+        assert!(
+            has(&problems, "Another mods folder already uses that archive."),
+            "{problems:?}"
+        );
+        assert!(!fence_problems(&layout, &b.join("Tools"), &f).is_empty());
+        let clear = fence_problems(&layout, &base.join("clear"), &f);
+        assert!(clear.is_empty(), "{clear:?}");
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The stored archives can't be read: the fences refuse in plain words instead of passing,
+    /// and so does every check built on them (a move, a re-point, a found-again archive).
+    #[test]
+    fn fences_refuse_when_the_stored_archives_cant_be_read() {
+        let base = temp_base("fences_unreadable");
+        let d = base.join("d-mods");
+        let new = base.join("new-archive");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        conn.execute_batch("DROP TABLE app_setting").unwrap();
+        let layout = Layout::default_for(&d);
+        let e = super::fences_with(&conn, &layout, &[], None, None)
+            .err()
+            .expect("an unreadable list is never a pass");
+        assert!(
+            e.starts_with("Silo couldn't read its list of archives") && e.ends_with("Try again."),
+            "{e}"
+        );
+        let problems = super::target_problems(&conn, &layout, &new, None);
+        assert!(
+            has(&problems, "couldn't read its list of archives"),
+            "{problems:?}"
+        );
+        assert!(!super::rediscovered_archive_fits(&conn, &d, &new));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn other_archives_lists_stored_and_default_archives_but_not_its_own() {
         let base = temp_base("otherarchives");
@@ -7188,6 +7356,9 @@ mod tests {
             bytes: 10 << 30,
             largest: 2 << 30,
             free,
+            relink: crate::relocate::RelinkCost::default(),
+            mods_same_drive: true,
+            mods_free: free,
         }
     }
 
@@ -7242,6 +7413,51 @@ mod tests {
         // Unknown free space never blocks.
         assert!(move_problems(facts(space(false, None))).is_empty());
         assert!(move_problems(facts(space(true, None))).is_empty());
+    }
+
+    /// The mods folder rejects hardlinks (a cloud-synced folder, #135) or the new archive's
+    /// drive can't be identified, so re-links can only copy (#188). On one drive, each kept
+    /// hardlink's old bytes stay used and each missing or symlinked active mod is copied into
+    /// the mods folder: both count on top of the largest mod.
+    #[test]
+    fn move_problems_count_re_link_copies_where_links_cant_be_made() {
+        let gb = |n: u64| n << 30;
+        let with = |kept: u64, copied: u64, mods_same_drive: bool, free, mods_free| Space {
+            relink: crate::relocate::RelinkCost { kept, copied },
+            mods_same_drive,
+            mods_free,
+            ..space(true, free)
+        };
+        // Largest (2) + margin (1) fits in 4 GB, but not with a 3 GB kept hardlink as well.
+        assert!(move_problems(facts(with(0, 0, true, Some(gb(4)), None))).is_empty());
+        let p = move_problems(facts(with(gb(3), 0, true, Some(gb(4)), None)));
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(
+            p[0].starts_with("Not enough free space: needs 6.4 GB"),
+            "{p:?}"
+        );
+        // A copy into a mods folder on the same drive counts on that drive too.
+        let p = move_problems(facts(with(0, gb(3), true, Some(gb(4)), None)));
+        assert!(
+            p[0].starts_with("Not enough free space: needs 6.4 GB"),
+            "{p:?}"
+        );
+        // Across drives the whole archive must fit; kept hardlinks stay on the old drive.
+        assert!(move_problems(facts(Space {
+            archive_same_drive: false,
+            ..with(gb(3), 0, true, Some(gb(12)), None)
+        }))
+        .is_empty());
+        // The mods folder on its own drive: its copies are checked against that drive.
+        let p = move_problems(facts(with(0, gb(3), false, Some(gb(4)), Some(gb(2)))));
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(
+            p[0].starts_with("Not enough free space on your mods folder's drive"),
+            "{p:?}"
+        );
+        assert!(move_problems(facts(with(0, gb(3), false, Some(gb(4)), Some(gb(5))))).is_empty());
+        // Unknown free space on the mods folder's drive never blocks.
+        assert!(move_problems(facts(with(0, gb(3), false, Some(gb(4)), None))).is_empty());
     }
 
     // Against a lock of its own: other tests hold `LIBRARY_WRITE`, so asserting "not busy" on

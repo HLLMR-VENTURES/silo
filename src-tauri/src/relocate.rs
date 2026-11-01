@@ -433,7 +433,8 @@ fn delete_source(src: &Path) -> Result<(), String> {
 /// atomic replace; folder links are removed and re-made, restoring the old link if that fails);
 /// a zip hardlinked to `src` is atomically replaced by a hardlink or symlink to `dst` —
 /// otherwise it would keep the old copy's bytes alive after that copy is deleted, and the move
-/// would free nothing (where only a copy is possible it's kept as the standalone copy instead).
+/// would free nothing (where the new link might be a copy it's kept as the standalone copy
+/// instead, see `LinkPolicy::can_only_copy`).
 /// Copied zips, marker-copied folders and the user's own files are standalone and left alone;
 /// a link to anything else is not ours to change.
 fn repoint(
@@ -454,21 +455,16 @@ fn repoint(
     };
     if !meta.file_type().is_symlink() {
         // Only a hardlink of the very file being moved — provably Silo's projection. Where the
-        // new link could only be a full copy (another drive, no symlinks), keep it: once the
-        // old copy is deleted it simply becomes the mod's standalone copy, with no second copy
-        // made (and its date kept).
+        // new link could be a full copy (no symlinks, and a hardlink isn't known to work: another
+        // drive, a mods folder that rejects hardlinks, a drive Silo can't identify), keep it:
+        // once the old copy is deleted it simply becomes the mod's standalone copy, with no
+        // second copy made in the mods folder (and its date kept).
         if row.kind != "dir" && meta.is_file() && same_file(&link, src) && !policy.can_only_copy() {
             return replace_zip_link(env, row, &link, dst, policy);
         }
         return Ok(());
     }
-    let target = std::fs::read_link(&link).map_err(|e| format!("relink: {e}"))?;
-    let points_at_src = target == src
-        || matches!(
-            (std::fs::canonicalize(&link), std::fs::canonicalize(src)),
-            (Ok(a), Ok(b)) if a == b
-        );
-    if !points_at_src && link.exists() {
+    if !stale_symlink(&link, src).map_err(|e| format!("relink: {e}"))? {
         return Ok(());
     }
     if row.kind == "dir" {
@@ -491,6 +487,57 @@ fn repoint(
         return Ok(());
     }
     replace_zip_link(env, row, &link, dst, policy)
+}
+
+/// A symlink entry `link` that `repoint` makes again: it points at `src` (the copy being
+/// moved), or at nothing. A link to anything else is not ours to change.
+fn stale_symlink(link: &Path, src: &Path) -> std::io::Result<bool> {
+    let target = std::fs::read_link(link)?;
+    let points_at_src = target == src
+        || matches!(
+            (std::fs::canonicalize(link), std::fs::canonicalize(src)),
+            (Ok(a), Ok(b)) if a == b
+        );
+    Ok(points_at_src || !link.exists())
+}
+
+/// What a move's re-links cost in space where a new link can only be a copy
+/// (`LinkPolicy::can_only_copy`). Bytes, from the archived copies in `archive`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RelinkCost {
+    /// Active zips hardlinked to their archived copy. `repoint` keeps that hardlink as the
+    /// mod's standalone copy, so deleting the old copy frees nothing: on one drive these stay
+    /// used alongside their new copies.
+    pub kept: u64,
+    /// Active zips whose mods-folder entry is missing or a symlink into `archive` (or to
+    /// nothing): `repoint` makes each again, which here means a full copy in the mods folder.
+    pub copied: u64,
+}
+
+/// `RelinkCost` of the active zip mods in `rows`, with their mods-folder entries in `mods` and
+/// archived copies in `archive` — the same cases `repoint` tells apart. Folder mods are left
+/// out: their links (a symlink, or a junction on Windows) don't depend on hardlinks. Read-only.
+pub fn relink_cost(mods: &Path, archive: &Path, rows: &[OrganizedRow]) -> RelinkCost {
+    let mut cost = RelinkCost::default();
+    for row in rows.iter().filter(|r| r.active && r.kind != "dir") {
+        let link = mods.join(&row.file_name);
+        let src = organize::archive_path(archive, &row.category, &row.file_name);
+        let size = size_of(&src);
+        match link.symlink_metadata() {
+            Err(_) => cost.copied += size,
+            Ok(m) if m.file_type().is_symlink() => {
+                if stale_symlink(&link, &src).unwrap_or(false) {
+                    cost.copied += size;
+                }
+            }
+            Ok(m) => {
+                if m.is_file() && same_file(&link, &src) {
+                    cost.kept += size;
+                }
+            }
+        }
+    }
+    cost
 }
 
 /// Atomically swap a zip's mods-folder entry `link` for a new link to `dst`
@@ -1507,6 +1554,14 @@ pub fn space_problem(bytes: u64, free: Option<u64>) -> Option<String> {
     short_of(bytes, free).map(|s| format!("Not enough free space: {s}."))
 }
 
+/// Space problem on the mods folder's own drive (another drive than the new archive's), if it
+/// can't hold the `bytes` of copies a move makes there plus a 1 GB margin.
+pub fn mods_space_problem(bytes: u64, free: Option<u64>) -> Option<String> {
+    short_of(bytes, free).map(|s| {
+        format!("Not enough free space on your mods folder's drive for copies of your active mods: {s}.")
+    })
+}
+
 /// Loose mods (zips / mod folders) at the top level of an archive folder — candidates to adopt.
 pub fn loose_mods(archive: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(archive)
@@ -2481,6 +2536,86 @@ mod tests {
         assert_eq!(same_file::Handle::from_path(&flat).unwrap(), before);
         assert!(!same_file(&flat, &zip_at(&f.new, "FS25_A")));
         assert_eq!(std::fs::read(&flat).unwrap(), b"PK\x03\x04 FS25_A");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// Same drive, but a hardlink into the new archive isn't known to work — the mods folder
+    /// is cloud-synced and rejects it, or the drive can't be identified and no probe could run —
+    /// and no symlinks: the hardlink is kept as the mod's standalone copy, never traded for a
+    /// copy in the mods folder that no free-space check counted (#188).
+    #[test]
+    fn a_hardlink_is_kept_when_a_new_hardlink_isnt_known_to_work() {
+        let f = fx("nohardlink");
+        let flat = add_hardlinked(&f, "FS25_A");
+        let r = db::load_organized(&f.conn, &f.key).remove(0);
+        let before = same_file::Handle::from_path(&flat).unwrap();
+        let layout = dest(&f);
+        let mut pol = LinkPolicy::decided_for_tests(&layout, false, false, false);
+        let mut m = marker(&f);
+        assert_eq!(
+            forward_one(&env(&f), &r, &mut m, &mut pol, &|| false),
+            Ok(Step::Moved)
+        );
+        assert!(!zip_at(&f.old, "FS25_A").exists());
+        assert!(zip_at(&f.new, "FS25_A").exists());
+        assert_eq!(same_file::Handle::from_path(&flat).unwrap(), before);
+        assert_eq!(std::fs::read(&flat).unwrap(), b"PK FS25_A");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// Where a hardlink is known to work, the hardlink is moved to the new copy as before.
+    #[test]
+    fn a_hardlink_follows_the_mod_when_a_new_hardlink_works() {
+        let f = fx("hardlinkworks");
+        let flat = add_hardlinked(&f, "FS25_A");
+        let r = db::load_organized(&f.conn, &f.key).remove(0);
+        let layout = dest(&f);
+        let mut pol = LinkPolicy::decided_for_tests(&layout, false, false, true);
+        let mut m = marker(&f);
+        assert_eq!(
+            forward_one(&env(&f), &r, &mut m, &mut pol, &|| false),
+            Ok(Step::Moved)
+        );
+        assert!(same_file(&flat, &zip_at(&f.new, "FS25_A")));
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// `relink_cost` sorts active zips the way `repoint` does: a hardlink to the archived copy
+    /// is kept, a missing entry (or a symlink into the archive) is made again. A standalone
+    /// copy, a parked mod and a folder mod cost nothing (#188).
+    #[test]
+    fn relink_cost_counts_kept_hardlinks_and_entries_made_again() {
+        let f = fx("relinkcost");
+        let size = |tech: &str| std::fs::metadata(zip_at(&f.old, tech)).unwrap().len();
+        add_hardlinked(&f, "FS25_Linked");
+        add_zip(&f, "FS25_Missing", true);
+        add_zip(&f, "FS25_Copied", true);
+        std::fs::copy(
+            zip_at(&f.old, "FS25_Copied"),
+            f.mods.join("FS25_Copied.zip"),
+        )
+        .unwrap();
+        add_zip(&f, "FS25_Parked", false);
+        let dir = row("FS25_Dir", "FS25_Dir", "dir", true);
+        std::fs::create_dir_all(f.old.join("Tools/FS25_Dir")).unwrap();
+        std::fs::write(f.old.join("Tools/FS25_Dir/modDesc.xml"), b"<modDesc/>").unwrap();
+        db::upsert_organized(&f.conn, &f.key, &dir).unwrap();
+        let rows = db::load_organized(&f.conn, &f.key);
+        let mut want = RelinkCost {
+            kept: size("FS25_Linked"),
+            copied: size("FS25_Missing"),
+        };
+        assert_eq!(relink_cost(&f.mods, &f.old, &rows), want);
+        // A symlink into the archive is made again too, and so is one pointing at nothing.
+        let sym = f.mods.join("FS25_Copied.zip");
+        std::fs::remove_file(&sym).unwrap();
+        if organize::symlink_file(&zip_at(&f.old, "FS25_Copied"), &sym).is_ok() {
+            want.copied += size("FS25_Copied");
+            assert_eq!(relink_cost(&f.mods, &f.old, &rows), want);
+            std::fs::remove_file(&sym).unwrap();
+            organize::symlink_file(&f.base.join("gone.zip"), &sym).unwrap();
+            assert_eq!(relink_cost(&f.mods, &f.old, &rows), want);
+        }
         let _ = std::fs::remove_dir_all(&f.base);
     }
 

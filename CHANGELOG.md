@@ -161,6 +161,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Moving your archive now stops with "Silo can't read …" when one of its category folders can't
   be opened, instead of moving the rest and leaving that folder's unrecorded mods behind in an
   archive Silo no longer looks at. (#356)
+- Moving your archive no longer makes a second full copy of an active mod in your mods folder
+  when Silo can't link the mod to its new place: a cloud-synced mods folder (OneDrive, Proton
+  Drive) or a drive Silo can't identify, such as a network share. The mod's file in your mods
+  folder stays as it is and becomes the mod's own copy. (#188)
+- Before a move starts, the free-space check now also counts the copies Silo will make in your
+  mods folder for active mods it can't link, and the space active mods keep using on the same
+  drive. Before, such a move could run out of space part-way and pause. (#188)
+- Silo no longer lets you point a mods folder's archive at a folder another mods folder already
+  uses as its archive, when Silo only ever reached that other mods folder through Farming
+  Simulator 25's own mods folder setting. Two mods folders sharing an archive would shuffle each
+  other's parked mods. If Silo can't read its list of archives, it now says so and stops instead
+  of skipping the check. (#188)
 - Mod downloads, updates and catalog images now check every redirect, not just the first
   address: Silo won't follow one to plain `http` or to an address on your own network, and it
   refuses a web address whose name points at your own network. GitHub downloads work as
