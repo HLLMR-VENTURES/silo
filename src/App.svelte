@@ -203,7 +203,7 @@
   import { createSwitchUndo, switchMessage } from "./lib/state/switchUndo";
   import { setSwitchOutcome, switchOutcome } from "./lib/state/switchOutcome";
   import { SaveLedger, withEntry } from "./lib/state/optimistic";
-  import { serialSettled } from "./lib/serial";
+  import { serialDrained, serialPendingUnder } from "./lib/serial";
   import { getVerdict } from "./lib/provenanceCache.svelte";
   import FilterBar from "./lib/components/FilterBar.svelte";
   import ModSettings from "./lib/components/ModSettings.svelte";
@@ -1400,9 +1400,19 @@
     opts: { auto?: boolean; onStart?: () => void; onProgress?: (done: number, total: number) => void } = {},
   ): Promise<FilingRun | null> {
     if (inputs.length === 0) return null;
-    // A category pick still being saved decides where a mod goes: wait for it, then file by the
-    // categories as they are now, so one whose save failed meanwhile isn't used (#358).
-    await serialSettled("override:");
+    // A category pick still being saved decides where a mod goes: wait until none is, then file
+    // by the categories as they are then (no await between that and taking the write), so one
+    // whose save failed isn't used (#358). If the folder changed or a scan started meanwhile,
+    // these inputs may be stale: refuse, as a busy library would.
+    if (serialPendingUnder("override:")) {
+      const root = roots[0];
+      await serialDrained("override:");
+      const moved = folderSwitches > 0 || roots[0] !== root;
+      if (moved || scanning) {
+        if (!opts.auto) refuse(moved ? FOLDER_SWITCH_WAIT : SCAN_WAIT);
+        return null;
+      }
+    }
     inputs = withCategoriesNow(inputs);
     const op = beginWrite(`Filing ${modsCount(inputs.length)} into the library`, !!opts.onProgress, {
       silent: opts.auto,

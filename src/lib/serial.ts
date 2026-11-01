@@ -25,12 +25,22 @@ export function serialPending(key: string): boolean {
   return queue.has(key);
 }
 
+/** True while any call under a key that starts with `prefix` is queued or running. */
+export function serialPendingUnder(prefix: string): boolean {
+  for (const k of queue.keys()) if (k.startsWith(prefix)) return true;
+  return false;
+}
+
 /**
- * Settles once every call queued now under a key that starts with `prefix` has settled (each
- * key's newest call settles after its earlier ones). Calls queued later aren't waited for.
+ * Settles once no call under a key that starts with `prefix` is queued or running, calls queued
+ * while it waits included (each key's newest call settles after its earlier ones).
  * @param prefix e.g. `override:` for every mod's category write
  */
-export function serialSettled(prefix: string): Promise<void> {
-  const pending = [...queue].filter(([k]) => k.startsWith(prefix)).map(([, p]) => p);
-  return Promise.allSettled(pending).then(() => undefined);
+export async function serialDrained(prefix: string): Promise<void> {
+  while (serialPendingUnder(prefix)) {
+    const pending = [...queue].filter(([k]) => k.startsWith(prefix)).map(([, p]) => p);
+    await Promise.allSettled(pending);
+    // Let each settled call's own clean-up (it forgets its key) run before looking again.
+    await Promise.resolve();
+  }
 }

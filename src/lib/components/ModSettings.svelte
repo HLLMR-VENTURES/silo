@@ -98,9 +98,13 @@
       flashSaved(path);
       try {
         const fresh = await getModSettings(modName);
+        if (!fresh.some((f) => f.path === path)) {
+          error = "Silo saved this file but couldn't read it back. Close this and open the mod's settings again.";
+          return "written";
+        }
         // The state as it is now (other files' saves may have landed meanwhile), not as it was.
         ({ files, values, rawText } = afterSave({ files, values, rawText }, fresh, path, sent));
-        if (fresh.some((f) => f.path === path)) formStale[path] = false;
+        formStale[path] = false;
       } catch (e) {
         error = inlineError(e, "Reading the mod's settings");
         return "written";

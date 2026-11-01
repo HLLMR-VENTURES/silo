@@ -233,6 +233,18 @@ describe("ModSettings: raw XML saves (#358)", () => {
     expect(screen.queryByLabelText("Alpha")).toBeNull();
   });
 
+  it("stays on Raw XML when the read-back doesn't list the file", async () => {
+    api.getModSettings.mockReset().mockResolvedValueOnce(one("<a/>", ["Alpha"])).mockResolvedValueOnce([]);
+    render(ModSettings, { modName: "FS25_X", title: "X", onClose: vi.fn() });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Raw XML" }));
+    await fireEvent.input(screen.getByLabelText("Raw XML of a.xml"), { target: { value: "<x/><a/>" } });
+    await user.click(screen.getByRole("button", { name: "Save raw XML" }));
+    expect(await screen.findByText(/couldn't read it back/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Raw XML of a.xml")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Raw XML" })).toBeDisabled();
+  });
+
   it("stays on Raw XML, with the text, when it was edited while the save ran", async () => {
     let finish!: () => void;
     api.saveModSettingsRaw.mockImplementationOnce(() => new Promise<void>((r) => (finish = r)));
