@@ -140,12 +140,12 @@
       if (!icon) void loadModIcon(m).then((u) => {
         if (still()) icon = u;
       });
-      catalogDetailByTech(m.techName)
+      catalogDetailByTech(m.techName, m.path)
         .then((c) => {
           if (still()) catalog = c;
         })
         .catch(() => {});
-      catalogCheckUpdates([{ techName: m.techName, version: m.version ?? undefined }])
+      catalogCheckUpdates([{ techName: m.techName, version: m.version ?? undefined, path: m.path }])
         .then((rows) => {
           if (!still()) return;
           catalogUpd = rows.find((x) => x.techName === m.techName) ?? null;

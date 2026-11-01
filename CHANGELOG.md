@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - After you switch mods folders, the screen-reader status no longer reports the old folder's
   scan. "Other folders Silo knows" now counts unpacked folder mods too, the way the Library does.
   The game folder in Settings shows one kind of slash. (#385)
+- A mod you install from **Browse** whose file has a different name from its catalog entry
+  (FS25_ToDo comes as `FS25_FieldToDoList.zip`, for example) now stays linked to that entry.
+  Its drawer shows the catalog's details, update checks find newer versions, and **Verify
+  integrity** compares it with the published build, instead of saying it isn't in Silo's
+  catalog. Silo remembers the exact file it installed, still never renames it, and drops the
+  link if a different build replaces that file. Updating the mod in Silo from the same catalog
+  entry keeps the link. (#386)
 - An unpacked (folder) mod you edit in place now shows its new title, version, dependencies and
   map flag after the next scan, and its new icon. Before, Silo kept showing what it read the
   first time until you cleared the scan cache. (#353)

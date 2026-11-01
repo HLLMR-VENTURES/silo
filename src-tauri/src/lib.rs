@@ -4,6 +4,7 @@
 pub mod bindings;
 pub mod bisect;
 pub mod bridge;
+pub mod catalogalias;
 pub mod category;
 pub mod collection;
 pub mod conflicts;
@@ -941,9 +942,19 @@ async fn download_update(
         if let Some(p) = update_target_problem(&dest, &layout) {
             return Err(p);
         }
+        // A zip linked to its catalog entry by an alias keeps the link when this update is that
+        // entry's own download (#386). Settled before the download, outside the lock.
+        let carry = alias_to_carry(&app, &dest, &asset_url);
         // Public release assets don't need auth, and a download must never carry the user's
         // GitHub credential — keep the token for explicit API actions only.
         let part = update::fetch(&asset_url, &dest)?;
+        let carry = carry.and_then(|link| match provenance::sha256_file(part.path()) {
+            Ok(sha) => Some((link, sha)),
+            Err(e) => {
+                log::warn!("[update] couldn't hash {}: {e}", file_label(&dest));
+                None
+            }
+        });
         // A finished download waits out a busy spell instead of being thrown away.
         let _write = library_write_within(PLACE_WAIT)?;
         let layout = update_recheck(&dest)?;
@@ -964,6 +975,10 @@ async fn download_update(
         }
         github::verify_update_identity(part.path(), &dest)?;
         let done = update::swap(&dest, part.path(), &layout.mods, &mut policy)?;
+        if let Some((link, sha)) = &carry {
+            let id = &link.catalog_id;
+            remember_catalog_alias(&app, &dest, sha, id, link.catalog_tech_name.as_deref());
+        }
         if let Some(flat) = &done.relinked {
             if let (Ok(conn), Some(name)) = (db::open(&db), flat.file_name()) {
                 let key = modsroot::canonical_key(&layout.mods);
@@ -986,6 +1001,39 @@ async fn download_update(
     .await
     .map_err(|e| e.to_string())?
     .map_err(error::AppError::from)
+}
+
+/// The catalog link to keep for the file an update of `dest` from `asset_url` writes: the link
+/// of the file there now (`catalogalias::link_for_file`), when `asset_url` is a download that
+/// catalog entry lists right now. None otherwise, or when the catalog can't be asked: the
+/// update goes ahead, and the new file is joined by its name alone.
+fn alias_to_carry(
+    app: &tauri::AppHandle,
+    dest: &std::path::Path,
+    asset_url: &str,
+) -> Option<catalogalias::Link> {
+    let tech_name = catalogalias::zip_tech_name(dest)?;
+    let link = catalogalias::link_for_file(&alias_db(app)?, &tech_name, dest)?;
+    let base = siloapi_base(app).ok()?;
+    match siloapi::detail(&base, &link.catalog_id) {
+        Ok(detail) if is_catalog_download(&detail, asset_url) => Some(catalogalias::Link {
+            catalog_tech_name: detail.tech_name.or(link.catalog_tech_name),
+            ..link
+        }),
+        Ok(_) => None,
+        Err(e) => {
+            log::warn!("[update] couldn't check {tech_name}'s catalog entry: {e}");
+            None
+        }
+    }
+}
+
+/// Whether `url` is a direct download the catalog entry `detail` lists.
+fn is_catalog_download(detail: &siloapi::BrowseMod, url: &str) -> bool {
+    detail
+        .sources
+        .iter()
+        .any(|s| s.installable && s.download_url.as_deref() == Some(url))
 }
 
 fn log_recovery(r: &update::Recovery) {
@@ -1158,13 +1206,20 @@ async fn siloapi_mod_detail(
 /// Resolve a *library* mod (by tech name) to its full catalog record, so the library detail
 /// drawer can show the same info Browse does — summary, sources, latest version. Returns None
 /// when the mod isn't catalogued (dev/obscure mods), in which case the drawer just shows less.
+/// `path` is the mod's file: a zip Silo installed from a catalog entry under another name is
+/// that entry's (#386).
 #[tauri::command]
 async fn catalog_detail_by_tech(
     app: tauri::AppHandle,
     tech_name: String,
+    path: Option<String>,
 ) -> Result<Option<siloapi::BrowseMod>, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<Option<siloapi::BrowseMod>, String> {
         let base = siloapi_base(&app)?;
+        let conn = alias_db(&app);
+        if let Some(link) = file_catalog_link(conn.as_ref(), &tech_name, path.as_deref()) {
+            return siloapi::detail(&base, &link.catalog_id).map(Some);
+        }
         let hits = siloapi::lookup(&base, std::slice::from_ref(&tech_name))?;
         match hits.into_iter().find(|h| !h.id.is_empty()) {
             Some(h) => siloapi::detail(&base, &h.id).map(Some),
@@ -1345,6 +1400,8 @@ async fn install_remote_mod(
         if let Some(note) = browse_name_note(&resolved.filename, resolved.tech_name.as_deref()) {
             log::info!("{note}");
         }
+        // Such a file is joined to its catalog entry through a recorded alias instead (#386).
+        let alias = catalogalias::needs_alias(&resolved.filename, resolved.tech_name.as_deref());
         let dest = root.join(&resolved.filename);
         if path_taken(&dest) {
             return Err(already_in_library(&dest));
@@ -1365,10 +1422,28 @@ async fn install_remote_mod(
                 );
             },
         )?;
+        // The alias holds the bytes' hash, taken before the lock. A download the catalog has a
+        // hash for was already checked against it.
+        let alias_sha = if alias {
+            resolved.expected_sha256.clone().or_else(|| {
+                match provenance::sha256_file(part.path()) {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        log::warn!("[install] couldn't hash {}: {e}", resolved.filename);
+                        None
+                    }
+                }
+            })
+        } else {
+            None
+        };
         // A finished download waits out a busy spell instead of being thrown away.
         let _write = library_write_within(PLACE_WAIT)?;
         install_recheck(&root, &dest)?;
         place_part(part.path(), &dest)?;
+        if let Some(sha) = alias_sha {
+            remember_catalog_alias(&app, &dest, &sha, &id, resolved.tech_name.as_deref());
+        }
         Ok(resolved.filename)
     })
     .await
@@ -1384,6 +1459,51 @@ fn browse_name_note(filename: &str, tech_name: Option<&str>) -> Option<String> {
     Some(format!(
         "[install] catalog techName {tech} downloads as {filename}; installed under that name"
     ))
+}
+
+/// Record that Silo placed the zip `dest` (whole-file SHA-256 `sha`) from catalog entry
+/// `catalog_id` (#386). Best effort: the mod is installed either way; without the record it
+/// only shows as not in the catalog.
+fn remember_catalog_alias(
+    app: &tauri::AppHandle,
+    dest: &std::path::Path,
+    sha: &str,
+    catalog_id: &str,
+    catalog_tech_name: Option<&str>,
+) {
+    let saved = db_path(app)
+        .and_then(|db| db::open(&db))
+        .and_then(|conn| catalogalias::record(&conn, dest, sha, catalog_id, catalog_tech_name));
+    let label = file_label(dest);
+    match saved {
+        Ok(()) => log::info!(
+            "[install] {label} linked to catalog entry {}",
+            catalog_tech_name.unwrap_or(catalog_id)
+        ),
+        Err(e) => log::warn!("[install] couldn't link {label} to its catalog entry: {e}"),
+    }
+}
+
+/// The database, for reading catalog aliases (#386). None, logged, when it can't be opened:
+/// the joins then go by techName alone, as before.
+fn alias_db(app: &tauri::AppHandle) -> Option<rusqlite::Connection> {
+    match db_path(app).and_then(|db| db::open(&db)) {
+        Ok(conn) => Some(conn),
+        Err(e) => {
+            log::warn!("[catalog] couldn't read catalog aliases: {e}");
+            None
+        }
+    }
+}
+
+/// The catalog entry Silo installed the library zip at `path` (known as `tech_name`) from,
+/// when it recorded one and the file is still those bytes (`catalogalias::link_for_file`).
+fn file_catalog_link(
+    conn: Option<&rusqlite::Connection>,
+    tech_name: &str,
+    path: Option<&str>,
+) -> Option<catalogalias::Link> {
+    catalogalias::link_for_file(conn?, tech_name, std::path::Path::new(path?))
 }
 
 const MODS_FOLDER_CHANGED: &str =
@@ -1601,6 +1721,9 @@ fn no_hardlink_support(e: &std::io::Error) -> bool {
 struct LocalMod {
     tech_name: String,
     version: Option<String>,
+    /// The mod's file, for a catalog alias (#386). Absent: joined by techName only.
+    #[serde(default)]
+    path: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1625,16 +1748,19 @@ async fn catalog_check_updates(
 ) -> Result<Vec<CatalogUpdate>, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<CatalogUpdate>, String> {
         let base = siloapi_base(&app)?;
-        let names: Vec<String> = mods.iter().map(|m| m.tech_name.clone()).collect();
-        let results = siloapi::lookup(&base, &names)?;
-        let by_tech: std::collections::HashMap<&str, &siloapi::LookupResult> = results
+        // A zip Silo installed from a catalog entry under another name is looked up as that
+        // entry (#386); the file is only hashed when it has an alias and changed since.
+        let conn = alias_db(&app);
+        let links: Vec<Option<catalogalias::Link>> = mods
             .iter()
-            .filter_map(|r| r.tech_name.as_deref().map(|t| (t, r)))
+            .map(|m| file_catalog_link(conn.as_ref(), &m.tech_name, m.path.as_deref()))
             .collect();
+        let names = catalog_lookup_names(&mods, &links);
+        let results = siloapi::lookup(&base, &names)?;
 
         let mut out = Vec::new();
-        for m in &mods {
-            let Some(r) = by_tech.get(m.tech_name.as_str()) else {
+        for (m, link) in mods.iter().zip(&links) {
+            let Some(r) = catalog_hit(&m.tech_name, link.as_ref(), &results) else {
                 continue;
             };
             let current = m.version.clone().unwrap_or_default();
@@ -1655,6 +1781,33 @@ async fn catalog_check_updates(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// The techNames to look up: every mod's own, and the catalog techName of each alias.
+fn catalog_lookup_names(mods: &[LocalMod], links: &[Option<catalogalias::Link>]) -> Vec<String> {
+    let aliased = links
+        .iter()
+        .flatten()
+        .filter_map(|l| l.catalog_tech_name.clone());
+    mods.iter()
+        .map(|m| m.tech_name.clone())
+        .chain(aliased)
+        .collect()
+}
+
+/// The lookup result for a library mod: the entry its alias names (by catalog id) when it has
+/// one, else the entry with its own techName.
+fn catalog_hit<'a>(
+    tech_name: &str,
+    link: Option<&catalogalias::Link>,
+    results: &'a [siloapi::LookupResult],
+) -> Option<&'a siloapi::LookupResult> {
+    link.and_then(|l| results.iter().find(|r| r.id == l.catalog_id))
+        .or_else(|| {
+            results
+                .iter()
+                .find(|r| r.tech_name.as_deref() == Some(tech_name))
+        })
 }
 
 /// Verify one installed mod against its canonical build: hash the local zip, look the mod
@@ -1682,15 +1835,26 @@ async fn verify_mod(
         let base = siloapi_base(&app)?;
         let local = provenance::manifest_from_zip(std::path::Path::new(&path))?;
 
-        // Find the catalog id by tech name (one request).
-        let hits = siloapi::lookup(&base, std::slice::from_ref(&tech_name))?;
-        let Some(hit) = hits
-            .into_iter()
-            .find(|r| r.tech_name.as_deref() == Some(tech_name.as_str()))
-        else {
-            return Ok(provenance::VerifyResult::unverified(
-                "This mod isn't in Silo's catalog yet, so there's nothing to compare it with.",
-            ));
+        // A zip Silo installed from a catalog entry under another name is that entry's, when
+        // it is still exactly those bytes (#386). Otherwise find the id by tech name.
+        let link = alias_db(&app).and_then(|conn| {
+            let file = std::path::Path::new(&path);
+            catalogalias::link_for_hash(&conn, &tech_name, file, &local.archive_sha256)
+        });
+        let catalog_id = match link {
+            Some(l) => l.catalog_id,
+            None => {
+                let hits = siloapi::lookup(&base, std::slice::from_ref(&tech_name))?;
+                let Some(hit) = hits
+                    .into_iter()
+                    .find(|r| r.tech_name.as_deref() == Some(tech_name.as_str()))
+                else {
+                    return Ok(provenance::VerifyResult::unverified(
+                        "This mod isn't in Silo's catalog yet, so there's nothing to compare it with.",
+                    ));
+                };
+                hit.id
+            }
         };
 
         // The server does version-equivalence (ModHub `1.2.0` ↔ GitHub `v1.2.0`), so send
@@ -1699,7 +1863,7 @@ async fn verify_mod(
             // The API refuses a blank version (400 "version query param required").
             return Ok(provenance::VerifyResult::unverified(NO_VERSION));
         };
-        match siloapi::manifest(&base, &hit.id, ver)? {
+        match siloapi::manifest(&base, &catalog_id, ver)? {
             Some(cm) => {
                 let canon_entries: Vec<provenance::Entry> = cm
                     .entries
@@ -8219,6 +8383,101 @@ mod tests {
         assert!(
             crate::siloapi::check_download_name("FS25_FieldToDoList.zip", "FS25_ToDo").is_err()
         );
+    }
+
+    fn lookup_row(tech: Option<&str>, id: &str) -> crate::siloapi::LookupResult {
+        serde_json::from_value(serde_json::json!({
+            "techName": tech, "id": id, "title": "t", "latestVersion": "1.0.0.0"
+        }))
+        .unwrap()
+    }
+
+    fn todo_link() -> crate::catalogalias::Link {
+        crate::catalogalias::Link {
+            catalog_id: "cat-todo".into(),
+            catalog_tech_name: Some("FS25_ToDo".into()),
+        }
+    }
+
+    #[test]
+    fn an_aliased_mod_is_looked_up_as_its_catalog_entry() {
+        // #386: FS25_FieldToDoList.zip came from the catalog's FS25_ToDo.
+        let mods = vec![
+            super::LocalMod {
+                tech_name: "FS25_FieldToDoList".into(),
+                version: Some("0.1.0.17".into()),
+                path: Some("mods/FS25_FieldToDoList.zip".into()),
+            },
+            super::LocalMod {
+                tech_name: "FS25_Plain".into(),
+                version: None,
+                path: None,
+            },
+        ];
+        let links = vec![Some(todo_link()), None];
+        assert_eq!(
+            super::catalog_lookup_names(&mods, &links),
+            ["FS25_FieldToDoList", "FS25_Plain", "FS25_ToDo"]
+        );
+
+        let results = vec![
+            lookup_row(Some("FS25_ToDo"), "cat-todo"),
+            lookup_row(Some("FS25_Plain"), "cat-plain"),
+        ];
+        let link = todo_link();
+        let hit = super::catalog_hit("FS25_FieldToDoList", Some(&link), &results).unwrap();
+        assert_eq!(hit.id, "cat-todo");
+        let hit = super::catalog_hit("FS25_Plain", None, &results).unwrap();
+        assert_eq!(hit.id, "cat-plain");
+        // Without its alias the file isn't in the catalog, as before.
+        assert!(super::catalog_hit("FS25_FieldToDoList", None, &results).is_none());
+    }
+
+    #[test]
+    fn an_alias_names_its_entry_by_id_over_any_entry_with_the_file_name() {
+        let results = vec![
+            lookup_row(Some("FS25_FieldToDoList"), "someone-else"),
+            lookup_row(Some("FS25_ToDo"), "cat-todo"),
+        ];
+        let link = todo_link();
+        let hit = super::catalog_hit("FS25_FieldToDoList", Some(&link), &results).unwrap();
+        assert_eq!(hit.id, "cat-todo");
+        // The entry was renamed in the catalog: still found by its id.
+        let results = vec![lookup_row(Some("FS25_FieldToDoList"), "cat-todo")];
+        let hit = super::catalog_hit("FS25_FieldToDoList", Some(&link), &results).unwrap();
+        assert_eq!(hit.id, "cat-todo");
+        // The entry is gone: the file is joined by its own name, as before.
+        let results = vec![lookup_row(Some("FS25_FieldToDoList"), "someone-else")];
+        let hit = super::catalog_hit("FS25_FieldToDoList", Some(&link), &results).unwrap();
+        assert_eq!(hit.id, "someone-else");
+    }
+
+    #[test]
+    fn an_update_keeps_the_alias_only_for_a_download_its_entry_lists() {
+        let detail: crate::siloapi::BrowseMod = serde_json::from_value(serde_json::json!({
+            "id": "cat-todo", "techName": "FS25_ToDo", "title": "To Do",
+            "sources": [
+                {"source": "github", "sourceUrl": "https://github.com/k/FS25_ToDo",
+                 "installable": true,
+                 "downloadUrl": "https://github.com/k/FS25_ToDo/releases/download/v2/FS25_FieldToDoList.zip"},
+                {"source": "modhub", "sourceUrl": "https://modhub.example/x",
+                 "installable": false,
+                 "downloadUrl": "https://modhub.example/FS25_FieldToDoList.zip"}
+            ]
+        }))
+        .unwrap();
+        assert!(super::is_catalog_download(
+            &detail,
+            "https://github.com/k/FS25_ToDo/releases/download/v2/FS25_FieldToDoList.zip"
+        ));
+        assert!(!super::is_catalog_download(
+            &detail,
+            "https://github.com/someone/fork/releases/download/v2/FS25_FieldToDoList.zip"
+        ));
+        assert!(!super::is_catalog_download(
+            &detail,
+            "https://modhub.example/FS25_FieldToDoList.zip"
+        ));
     }
 
     #[test]

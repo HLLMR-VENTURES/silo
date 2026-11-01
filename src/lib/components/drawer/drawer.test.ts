@@ -8,7 +8,7 @@ import { tick } from "svelte";
 import ModDetail from "../ModDetail.svelte";
 import DrawerHarness from "./__tests__/DrawerHarness.svelte";
 import { setVerdict } from "../../provenanceCache.svelte";
-import { catalogCheckUpdates, revealInFolder, scanLog, setCuration } from "../../api";
+import { catalogCheckUpdates, catalogDetailByTech, revealInFolder, scanLog, setCuration } from "../../api";
 import type { Conflict, CurationRow, LogReport, ModEntry } from "../../types";
 
 vi.mock("../../api", async (importOriginal) => ({
@@ -210,6 +210,15 @@ describe("drawer lookups", () => {
     await settle();
     expect(within(header()).queryByText("Update available")).toBeNull();
     expect(screen.getByText(/Not in Silo's catalog/)).toBeInTheDocument();
+  });
+
+  it("asks the catalog about the mod's own file, so an install under another name finds its entry (#386)", async () => {
+    render(ModDetail, props(entry(23, { path: "C:/mods/FS25_FieldToDoList.zip", techName: "FS25_FieldToDoList" })));
+    await settle();
+    expect(catalogDetailByTech).toHaveBeenCalledWith("FS25_FieldToDoList", "C:/mods/FS25_FieldToDoList.zip");
+    expect(catalogCheckUpdates).toHaveBeenCalledWith([
+      { techName: "FS25_FieldToDoList", version: "1.0.0.0", path: "C:/mods/FS25_FieldToDoList.zip" },
+    ]);
   });
 
   it("doesn't call a mod with no version outdated on the catalog's word alone", async () => {

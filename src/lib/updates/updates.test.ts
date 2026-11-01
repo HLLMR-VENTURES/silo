@@ -348,6 +348,21 @@ describe("runUpdateCheck", () => {
     ]);
   });
 
+  it("gives the catalog each mod's file, so an install under another name finds its entry (#386)", async () => {
+    let asked: unknown[] = [];
+    await runUpdateCheck([mod("FS25_FieldToDoList")], {}, {
+      catalog: async (mods) => {
+        asked = mods;
+        return [];
+      },
+      checkRepo: async () => {
+        throw "unused";
+      },
+      explain,
+    });
+    expect(asked).toEqual([{ techName: "FS25_FieldToDoList", version: "1.0.0.0", path: mod("FS25_FieldToDoList").path }]);
+  });
+
   it("names the mod in the failure it logs and copies (#333)", async () => {
     const ops: string[] = [];
     const res = await runUpdateCheck([{ ...mod("A"), title: "Yield Tracker" }, mod("B")], {

@@ -105,7 +105,7 @@ pub const AUTO_SNAPSHOTS_KEPT: i64 = 5;
 ///
 /// Keep migrations additive where possible so an older Silo can still read the file; when one
 /// can't be, the version gate in `open` is what protects the user.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 fn newer_schema(found: i64) -> String {
     format!(
@@ -164,6 +164,7 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
             0 => migrate_0_to_1(&tx)?,
             1 => migrate_1_to_2(&tx)?,
             2 => migrate_2_to_3(&tx)?,
+            3 => migrate_3_to_4(&tx)?,
             other => return Err(format!("no migration from database version {other}")),
         }
         tx.pragma_update(None, "user_version", v + 1)
@@ -268,6 +269,28 @@ fn migrate_2_to_3(tx: &Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Version 4 = `catalog_alias` (#386): which catalog entry a zip Silo installed from Browse came
+/// from, when the file isn't named after the entry's techName (`FS25_ToDo` downloads as
+/// `FS25_FieldToDoList.zip`). Keyed by the zip's own name and its whole-file SHA-256, so the
+/// link belongs to those exact bytes: a different build under the same name never matches.
+/// `size` and `mtime_ms` are a shortcut for "still the file Silo recorded" (as `projection`
+/// does); when they differ, the file is hashed again. Additive.
+fn migrate_3_to_4(tx: &Connection) -> Result<(), String> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS catalog_alias (
+             tech_name         TEXT NOT NULL,
+             archive_sha256    TEXT NOT NULL,
+             size              INTEGER NOT NULL,
+             mtime_ms          INTEGER NOT NULL,
+             catalog_id        TEXT NOT NULL,
+             catalog_tech_name TEXT,
+             created_at        INTEGER NOT NULL,
+             PRIMARY KEY (tech_name, archive_sha256)
+         );",
+    )
+    .map_err(|e| e.to_string())
 }
 
 // ── damaged-database recovery and snapshots ──
@@ -1004,6 +1027,85 @@ pub fn mark_source_checked(conn: &Connection, tech_name: &str, now: i64) -> Resu
         )
         .map_err(|e| e.to_string())?;
     Ok(n > 0)
+}
+
+/// One `catalog_alias` row (#386): the zip `tech_name` (its file name without `.zip`) with these
+/// exact bytes was installed by Silo from catalog entry `catalog_id`. See `catalogalias`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogAliasRow {
+    pub tech_name: String,
+    /// Lowercase hex SHA-256 of the whole zip as installed.
+    pub archive_sha256: String,
+    pub size: i64,
+    pub mtime_ms: i64,
+    pub catalog_id: String,
+    /// The entry's techName when it was installed (None when the catalog had none).
+    pub catalog_tech_name: Option<String>,
+}
+
+/// Save a catalog alias, replacing the row for the same file name and bytes.
+pub fn record_catalog_alias(conn: &Connection, row: &CatalogAliasRow) -> Result<(), String> {
+    let now = unix_now().as_secs() as i64;
+    conn.execute(
+        "INSERT INTO catalog_alias(tech_name, archive_sha256, size, mtime_ms, catalog_id,
+                                   catalog_tech_name, created_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(tech_name, archive_sha256) DO UPDATE SET
+             size = excluded.size, mtime_ms = excluded.mtime_ms,
+             catalog_id = excluded.catalog_id, catalog_tech_name = excluded.catalog_tech_name,
+             created_at = excluded.created_at",
+        rusqlite::params![
+            row.tech_name,
+            row.archive_sha256.to_ascii_lowercase(),
+            row.size,
+            row.mtime_ms,
+            row.catalog_id,
+            row.catalog_tech_name,
+            now
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Every catalog alias recorded for a zip named `tech_name` (one per build installed), newest
+/// first. Empty when there are none or the table can't be read.
+pub fn catalog_aliases(conn: &Connection, tech_name: &str) -> Vec<CatalogAliasRow> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT tech_name, archive_sha256, size, mtime_ms, catalog_id, catalog_tech_name
+         FROM catalog_alias WHERE tech_name = ?1 ORDER BY created_at DESC",
+    ) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map([tech_name], |r| {
+        Ok(CatalogAliasRow {
+            tech_name: r.get(0)?,
+            archive_sha256: r.get(1)?,
+            size: r.get(2)?,
+            mtime_ms: r.get(3)?,
+            catalog_id: r.get(4)?,
+            catalog_tech_name: r.get(5)?,
+        })
+    });
+    rows.map(|r| r.flatten().collect()).unwrap_or_default()
+}
+
+/// Note that the file with these bytes now has this size and modified time (a copy of it, or
+/// the same bytes written again), so the next check needn't hash it.
+pub fn touch_catalog_alias(
+    conn: &Connection,
+    tech_name: &str,
+    archive_sha256: &str,
+    size: i64,
+    mtime_ms: i64,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE catalog_alias SET size = ?3, mtime_ms = ?4
+         WHERE tech_name = ?1 AND archive_sha256 = ?2",
+        rusqlite::params![tech_name, archive_sha256, size, mtime_ms],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Replace all tags for a mod.
@@ -1814,7 +1916,7 @@ mod tests {
             .unwrap();
         }
         let conn = open(&path).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 3);
+        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
         let rows = load_curation(&conn);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].favorite && rows[0].rating == 4 && !rows[0].skip_updates);
@@ -1834,6 +1936,50 @@ mod tests {
             load_curation(&conn).is_empty(),
             "back to defaults: the row goes"
         );
+    }
+
+    #[test]
+    fn migrating_to_v4_adds_catalog_aliases_and_keeps_the_library() {
+        let path = temp_db("v3_to_v4");
+        {
+            let conn = open(&path).unwrap();
+            set_source(&conn, "FS25_A", Some("https://example.com/a")).unwrap();
+            // Wind it back to a v3 file, as Silo 1.0.x left it.
+            conn.execute_batch("DROP TABLE catalog_alias; PRAGMA user_version = 3;")
+                .unwrap();
+        }
+        let conn = open(&path).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 4);
+        assert_eq!(load_sources(&conn).len(), 1, "the library is kept");
+        assert!(catalog_aliases(&conn, "FS25_FieldToDoList").is_empty());
+
+        let row = CatalogAliasRow {
+            tech_name: "FS25_FieldToDoList".into(),
+            archive_sha256: "ABCD".into(),
+            size: 10,
+            mtime_ms: 20,
+            catalog_id: "cat-todo".into(),
+            catalog_tech_name: Some("FS25_ToDo".into()),
+        };
+        record_catalog_alias(&conn, &row).unwrap();
+        // The same file again replaces its row; another build gets its own.
+        record_catalog_alias(&conn, &row).unwrap();
+        let other = CatalogAliasRow {
+            archive_sha256: "ef01".into(),
+            catalog_tech_name: None,
+            ..row.clone()
+        };
+        record_catalog_alias(&conn, &other).unwrap();
+        let rows = catalog_aliases(&conn, "FS25_FieldToDoList");
+        assert_eq!(rows.len(), 2);
+        let first = rows.iter().find(|r| r.archive_sha256 == "abcd").unwrap();
+        assert_eq!(first.catalog_id, "cat-todo", "the hash is kept lowercase");
+        assert_eq!(first.catalog_tech_name.as_deref(), Some("FS25_ToDo"));
+        touch_catalog_alias(&conn, "FS25_FieldToDoList", "abcd", 11, 21).unwrap();
+        let rows = catalog_aliases(&conn, "FS25_FieldToDoList");
+        let first = rows.iter().find(|r| r.archive_sha256 == "abcd").unwrap();
+        assert_eq!((first.size, first.mtime_ms), (11, 21));
+        assert!(catalog_aliases(&conn, "FS25_fieldtodolist").is_empty());
     }
 
     #[test]
