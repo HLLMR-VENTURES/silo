@@ -123,6 +123,11 @@ pub fn parse_list_checked(xml: &[u8]) -> Option<(Vec<String>, Option<u32>)> {
 /// junk (a 32 MiB member of tiny entries compresses to almost nothing) and counts as unreadable.
 pub const MAX_LIST_NAMES: usize = 10_000;
 
+/// The most script-loaded lists Silo reads from one mod for its estimate (real mods ship up to
+/// five). Once the estimate holds [`MAX_LIST_NAMES`] names it stops growing too: it's far past
+/// any cap by then.
+pub const MAX_LIST_FILES: usize = 100;
+
 /// Append the items `seen` doesn't hold yet to `out`, in order, and remember them. Linear, so a
 /// huge list can't stall a check the way `Vec::contains` would.
 pub(crate) fn push_new(
@@ -497,7 +502,10 @@ pub fn mod_types(
     if !md.is_map {
         // Seeded with the exact names, so an estimate never repeats one.
         let mut seen: HashSet<String> = exact.iter().cloned().collect();
-        for m in candidates() {
+        for m in candidates().into_iter().take(MAX_LIST_FILES) {
+            if seen.len() >= MAX_LIST_NAMES {
+                break;
+            }
             if Some(m.as_str()) == declared {
                 continue;
             }

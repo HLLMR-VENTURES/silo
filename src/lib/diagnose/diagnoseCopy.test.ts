@@ -129,6 +129,14 @@ describe("Last run", () => {
       body: "but 1 mod logged errors worth a look.",
     });
     expect(lastRunVerdict(report(false, []), 0).title).toBe("Healthy.");
+    expect(lastRunVerdict(report(false, []), 0).body).toBe("Your last game closed normally and no mod logged a real error.");
+    // A log too big to read whole only vouches for the parts Silo read (#351).
+    expect(lastRunVerdict(report(false, [], { truncated: true }), 0).body).toBe(
+      "Your last game closed normally and no mod logged a real error in the parts Silo read.",
+    );
+    expect(lastRunVerdict(report(true, [], { truncated: true }), 0).body).toBe(
+      "The log stops without a clean exit, and no mod logged an error in the parts Silo read, so the log can't name the cause.",
+    );
   });
 
   it("counts, details and the meta line", () => {
@@ -138,6 +146,9 @@ describe("Last run", () => {
     );
     expect(lastRunMeta(r, "9:42 PM")).toBe("FS25 1.4.0.0 · 737 mods loaded · log from 9:42 PM");
     expect(lastRunMeta(report(false, [], { engineVersion: null, modCount: 1 }), null)).toBe("1 mod loaded");
+    expect(logModDetails({ ...mod("FS25_Late", 1), sampleLine: null }, "FS25_Late")).toBe(
+      "FS25_Late\n1 error\nlog.txt near the end: Error: FS25_Late broke",
+    );
     expect(lastRunMeta(report(false, [], { truncated: true }), null)).toBe(
       "FS25 1.4.0.0 · 737 mods loaded · very long log: Silo read only its start and end",
     );

@@ -47,19 +47,6 @@ impl Category {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Finding {
-    /// Tech name of the mod at fault, or None when we can't attribute it.
-    pub mod_name: Option<String>,
-    pub severity: Severity,
-    pub category: Category,
-    pub message: String,
-    pub line: usize,
-    /// True for cosmetic noise (e.g. missing l10n) the user can safely ignore.
-    pub benign: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ModHealth {
     pub mod_name: String,
     pub errors: usize,
@@ -68,7 +55,9 @@ pub struct ModHealth {
     pub benign: usize,
     /// One representative message, for the collapsed row.
     pub sample: String,
-    pub sample_line: usize,
+    /// The sample's line in log.txt; None for a line from the end of a log too big to read
+    /// whole, whose number Silo doesn't know (#351).
+    pub sample_line: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -237,24 +226,38 @@ fn is_continuation(raw: &str, stripped: &str) -> bool {
 pub const LOG_HEAD_BYTES: u64 = 4 * 1024 * 1024;
 pub const LOG_TAIL_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Read and parse a log, keeping at most `head + tail` bytes of it in memory. A bigger log gives
-/// its first `head` and last `tail` bytes, cut to whole lines; the lines in between are counted
-/// (in fixed-size chunks, never kept), so line numbers stay true, and the report is marked
-/// truncated.
+/// The most names (mods in the inventory, mods with findings, skipped fill types and the like)
+/// one report keeps of each kind. A real log names at most a few thousand mods.
+const MAX_LOG_NAMES: usize = 10_000;
+
+/// The most distinct findings remembered for de-duplication (as 8-byte hashes). Past it, a new
+/// finding still counts but isn't remembered, so a later exact repeat of it counts again.
+const MAX_SEEN_FINDINGS: usize = 1_000_000;
+
+/// Read and parse a log, reading at most `head + tail` bytes of it (plus one). A bigger log gives
+/// its first `head` and last `tail` bytes, cut to whole lines, and the report is marked truncated.
+/// The lines skipped in between aren't read, so lines from the end have no line number.
 pub fn scan<R: std::io::Read + std::io::Seek>(
     mut r: R,
     head: u64,
     tail: u64,
 ) -> std::io::Result<LogReport> {
     use std::io::{Read, SeekFrom};
-    let len = r.seek(SeekFrom::End(0))?;
-    r.seek(SeekFrom::Start(0))?;
     let limit = head.saturating_add(tail);
+    let mut len = r.seek(SeekFrom::End(0))?;
+    r.seek(SeekFrom::Start(0))?;
     if len <= limit {
         let mut bytes = Vec::new();
-        // `take` keeps a log that grows while we read within the limit.
-        r.take(limit).read_to_end(&mut bytes)?;
-        return Ok(parse(&String::from_utf8_lossy(&bytes)));
+        r.by_ref()
+            .take(limit.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 <= limit {
+            return Ok(parse(&String::from_utf8_lossy(&bytes)));
+        }
+        // It grew past the limit while we read it: read it as a big log.
+        drop(bytes);
+        len = r.seek(SeekFrom::End(0))?;
+        r.seek(SeekFrom::Start(0))?;
     }
     let mut head_bytes = Vec::new();
     r.by_ref().take(head).read_to_end(&mut head_bytes)?;
@@ -265,22 +268,19 @@ pub fn scan<R: std::io::Read + std::io::Seek>(
         .map_or(0, |i| i + 1);
     head_bytes.truncate(keep);
     // The tail starts one byte early, so a line that starts exactly at the cut is kept whole.
-    let tail_from = len - tail - 1;
-    let pos = r.stream_position()?;
-    let mut newlines = count_newlines(r.by_ref().take(tail_from.saturating_sub(pos)))?;
-    r.seek(SeekFrom::Start(tail_from))?;
+    r.seek(SeekFrom::Start(len.saturating_sub(tail.saturating_add(1))))?;
     let mut tail_bytes = Vec::new();
-    r.take(tail + 1).read_to_end(&mut tail_bytes)?;
-    // Drop the partial line the tail starts in; its newline counts with the middle's.
-    let tail_text = match tail_bytes.iter().position(|&b| b == b'\n') {
-        Some(i) => {
-            newlines += 1;
-            String::from_utf8_lossy(&tail_bytes[i + 1..]).into_owned()
-        }
-        None => String::new(),
-    };
-    let head_text = String::from_utf8_lossy(&head_bytes);
-    let first_tail_line = head_text.lines().count() + newlines + 1;
+    r.take(tail.saturating_add(1))
+        .read_to_end(&mut tail_bytes)?;
+    // Drop the partial line the tail starts in.
+    let start = tail_bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(tail_bytes.len(), |i| i + 1);
+    tail_bytes.drain(..start);
+    let (head_text, tail_text) = (into_text(head_bytes), into_text(tail_bytes));
+    let head_lines = head_text.lines().count();
+    // The tail's lines go on after a one-line gap, so no block folds across the skipped middle.
     let lines = head_text
         .lines()
         .enumerate()
@@ -289,37 +289,50 @@ pub fn scan<R: std::io::Read + std::io::Seek>(
             tail_text
                 .lines()
                 .enumerate()
-                .map(|(i, l)| (first_tail_line + i, l)),
+                .map(|(i, l)| (head_lines + 2 + i, l)),
         );
-    let mut report = parse_lines(lines);
+    let mut report = parse_lines(lines, head_lines);
     report.truncated = true;
     Ok(report)
 }
 
-/// The `\n` bytes in `r`, read in fixed-size chunks.
-fn count_newlines(mut r: impl std::io::Read) -> std::io::Result<usize> {
-    let mut buf = vec![0u8; 1024 * 1024];
-    let mut n = 0;
-    loop {
-        match r.read(&mut buf) {
-            Ok(0) => return Ok(n),
-            Ok(got) => n += buf[..got].iter().filter(|&&b| b == b'\n').count(),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-        }
-    }
+/// Bytes as text, without a copy when they're valid UTF-8 (lossy otherwise).
+fn into_text(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 /// Parse a full `log.txt` into a triage report.
 pub fn parse(log: &str) -> LogReport {
-    parse_lines(log.lines().enumerate().map(|(i, l)| (i + 1, l)))
+    parse_lines(log.lines().enumerate().map(|(i, l)| (i + 1, l)), usize::MAX)
 }
 
-/// Parse a log's lines, each with its 1-based line number, into a triage report. Lines are
-/// streamed, never collected: only the findings are kept. A line continues the finding above it
-/// only when its number follows on, so a gap (the skipped middle of a huge log) ends a block.
-fn parse_lines<'a>(lines: impl Iterator<Item = (usize, &'a str)>) -> LogReport {
-    use std::collections::HashSet;
+/// Add `item` to a name list kept in first-seen order, unless it's there already or the list
+/// holds [`MAX_LOG_NAMES`].
+fn push_name(list: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, item: String) {
+    if seen.len() < MAX_LOG_NAMES && !seen.contains(&item) {
+        seen.insert(item.clone());
+        list.push(item);
+    }
+}
+
+/// A finding's de-duplication key: a hash of its mod, severity and message.
+fn finding_key(mod_name: Option<&str>, severity: Severity, block: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (mod_name, severity, block).hash(&mut h);
+    h.finish()
+}
+
+/// Parse a log's lines into a triage report. Each line comes with its position: its 1-based line
+/// number up to `numbered_through`, past which the true number isn't known. A line continues the
+/// finding above it only when its position follows on, so a gap ends a block. Lines are streamed
+/// and findings rolled up per mod as they come; nothing grows with the log's length except
+/// bounded name lists and the bounded de-duplication set.
+fn parse_lines<'a>(
+    lines: impl Iterator<Item = (usize, &'a str)>,
+    numbered_through: usize,
+) -> LogReport {
+    use std::collections::{BTreeMap, HashSet};
     let mut engine_version: Option<String> = None;
     let mut mods_seen: HashSet<String> = HashSet::new();
     let mut clean_exit = false;
@@ -331,8 +344,9 @@ fn parse_lines<'a>(lines: impl Iterator<Item = (usize, &'a str)>) -> LogReport {
     // Dedup findings: the engine writes a scan pass AND a load pass, repeating the same
     // warnings. Key on (mod, severity, message) so a mod that logs one thing twice per
     // run isn't reported as twice as broken.
-    let mut seen: HashSet<(Option<String>, Severity, String)> = HashSet::new();
-    let mut findings: Vec<Finding> = Vec::new();
+    let mut seen: HashSet<u64> = HashSet::new();
+    let mut roll: BTreeMap<String, ModHealth> = BTreeMap::new();
+    let (mut unattributed, mut total_findings) = (0usize, 0usize);
 
     let mut lines = lines.peekable();
     while let Some((line_no, raw)) = lines.next() {
@@ -342,15 +356,11 @@ fn parse_lines<'a>(lines: impl Iterator<Item = (usize, &'a str)>) -> LogReport {
             ground_pile = ground_pile_cap(s);
         }
         if let Some(name) = ground_pile_disabled(s) {
-            if disabled_seen.insert(name.clone()) {
-                disabled.push(name);
-            }
+            push_name(&mut disabled, &mut disabled_seen, name);
         }
         if let Some((cap, name)) = dropped_fill_type(s) {
             fill_cap = Some(cap);
-            if dropped_seen.insert(name.clone()) {
-                dropped.push(name);
-            }
+            push_name(&mut dropped, &mut dropped_seen, name);
         }
         if engine_version.is_none() {
             if let Some(rest) = s.strip_prefix("GIANTS Engine Runtime ") {
@@ -359,7 +369,9 @@ fn parse_lines<'a>(lines: impl Iterator<Item = (usize, &'a str)>) -> LogReport {
         }
         if let Some(rest) = s.strip_prefix("Available mod:") {
             if let Some(name) = rest.split_whitespace().last() {
-                mods_seen.insert(name.to_string());
+                if mods_seen.len() < MAX_LOG_NAMES {
+                    mods_seen.insert(name.to_string());
+                }
             }
             continue;
         }
@@ -390,6 +402,7 @@ fn parse_lines<'a>(lines: impl Iterator<Item = (usize, &'a str)>) -> LogReport {
             last = next_no;
             lines.next();
         }
+        let line = (line_no <= numbered_through).then_some(line_no);
 
         // Attribute ONLY via strong signals (path, then clause). No "last loaded mod"
         // guess — blaming the wrong mod is worse than admitting we don't know.
@@ -397,51 +410,43 @@ fn parse_lines<'a>(lines: impl Iterator<Item = (usize, &'a str)>) -> LogReport {
         let category = classify(&block);
         let benign = severity == Severity::Warning && category.benign_as_warning();
 
-        let key = (mod_name.clone(), severity, block.clone());
-        if !seen.insert(key) {
+        let key = finding_key(mod_name.as_deref(), severity, &block);
+        if seen.contains(&key) {
             continue; // exact repeat from the other pass
         }
-        findings.push(Finding {
-            mod_name,
-            severity,
-            category,
-            message: block,
-            line: line_no,
-            benign,
-        });
-    }
-    let mod_count = mods_seen.len();
+        if seen.len() < MAX_SEEN_FINDINGS {
+            seen.insert(key);
+        }
+        total_findings += 1;
 
-    // Roll up per mod.
-    use std::collections::BTreeMap;
-    let mut roll: BTreeMap<String, ModHealth> = BTreeMap::new();
-    let mut unattributed = 0usize;
-    for f in &findings {
-        let Some(name) = &f.mod_name else {
+        // Roll up per mod; past MAX_LOG_NAMES mods, a new one's findings count as unattributed.
+        let Some(name) = mod_name.filter(|n| roll.contains_key(n) || roll.len() < MAX_LOG_NAMES)
+        else {
             unattributed += 1;
             continue;
         };
-        let h = roll.entry(name.clone()).or_insert_with(|| ModHealth {
+        let h = roll.entry(name).or_insert_with_key(|name| ModHealth {
             mod_name: name.clone(),
             errors: 0,
             warnings: 0,
             benign: 0,
-            sample: f.message.clone(),
-            sample_line: f.line,
+            sample: block.clone(),
+            sample_line: line,
         });
-        match f.severity {
+        match severity {
             Severity::Error => h.errors += 1,
             Severity::Warning => h.warnings += 1,
         }
-        if f.benign {
+        if benign {
             h.benign += 1;
         }
         // Prefer a non-benign sample so the collapsed row shows the real problem.
-        if f.severity == Severity::Error && h.errors == 1 {
-            h.sample = f.message.clone();
-            h.sample_line = f.line;
+        if severity == Severity::Error && h.errors == 1 {
+            h.sample = block;
+            h.sample_line = line;
         }
     }
+    let mod_count = mods_seen.len();
 
     let mut mods: Vec<ModHealth> = roll.into_values().collect();
     // Worst first: most errors, then most (real) warnings, then name for stability.
@@ -460,7 +465,7 @@ fn parse_lines<'a>(lines: impl Iterator<Item = (usize, &'a str)>) -> LogReport {
         crashed: !clean_exit,
         mods,
         unattributed,
-        total_findings: findings.len(),
+        total_findings,
         ground_pile_cap: ground_pile,
         ground_pile_disabled: disabled,
         fill_type_cap: fill_cap,
@@ -680,10 +685,10 @@ Application quit
         assert_eq!(r.mods[0].sample_line, parse(CRASHY).mods[0].sample_line);
     }
 
-    /// #351: a log bigger than head + tail keeps whole lines from its start and its end, and
-    /// every finding keeps its true line number, whatever the cut points.
+    /// #351: a log bigger than head + tail keeps whole lines from its start and its end. Lines
+    /// from the start keep their true numbers; lines from the end have none, whatever the cut.
     #[test]
-    fn scan_keeps_the_head_and_tail_with_true_line_numbers() {
+    fn scan_keeps_whole_lines_from_the_head_and_tail() {
         let log = "GIANTS Engine Runtime 10.0
 Available mod: (Hash: a) (Version: 1.0.0.0) FS25_A
 Error: early in mod 'FS25_A'
@@ -699,25 +704,32 @@ Application quit
         let len = log.len() as u64;
         for head in 0..len {
             for tail in 0..len - head {
+                let at = format!("head {head} tail {tail}");
                 let r = scan(std::io::Cursor::new(log), head, tail).unwrap();
-                assert!(r.truncated, "head {head} tail {tail}");
-                let check = |line: usize, msg: &str| {
-                    let first = msg.lines().next().unwrap();
-                    assert_eq!(
-                        strip_prefix(full[line - 1]),
-                        first,
-                        "head {head} tail {tail}"
-                    );
-                };
+                assert!(r.truncated, "{at}");
                 for m in &r.mods {
-                    check(m.sample_line, &m.sample);
+                    let first = m.sample.lines().next().unwrap();
+                    match m.sample_line {
+                        // A numbered sample is from the head, on exactly that line.
+                        Some(n) => {
+                            assert_eq!(strip_prefix(full[n - 1]), first, "{at}");
+                            let head_end = full[..n].iter().map(|l| l.len() + 1).sum::<usize>();
+                            assert!(head_end as u64 <= head, "{at}");
+                        }
+                        // An unnumbered one is a whole line from the tail.
+                        None => {
+                            let line = full.iter().position(|l| strip_prefix(l) == first);
+                            let from = full[..line.unwrap()]
+                                .iter()
+                                .map(|l| l.len() + 1)
+                                .sum::<usize>();
+                            assert!(from as u64 >= len - tail, "{at}");
+                        }
+                    }
                 }
                 // The last line is whole in the tail as soon as the tail can hold it.
-                if tail >= "Application quit\n".len() as u64 {
-                    assert!(r.clean_exit, "head {head} tail {tail}");
-                } else {
-                    assert!(!r.clean_exit, "head {head} tail {tail}");
-                }
+                let quit = "Application quit\n".len() as u64;
+                assert_eq!(r.clean_exit, tail >= quit, "{at}");
             }
         }
         // A realistic cut: the start and the crash at the end survive, the spam doesn't.
@@ -725,19 +737,110 @@ Application quit
         let r = scan(std::io::Cursor::new(log), 120, tail).unwrap();
         assert_eq!(r.engine_version.as_deref(), Some("10.0"));
         assert_eq!(r.mod_count, 1);
+        let early = r.mods.iter().find(|m| m.mod_name == "FS25_A").unwrap();
+        assert_eq!(early.sample_line, Some(3));
         let late = r.mods.iter().find(|m| m.mod_name == "FS25_Late").unwrap();
-        assert_eq!(late.sample_line, 8);
+        assert_eq!(late.sample_line, None);
         assert!(r.mods.iter().all(|m| m.mod_name != "FS25_Spam"));
+    }
+
+    /// A log of `len` bytes made of one repeated line, generated on the fly, that counts the
+    /// bytes read from it. After its first `SeekFrom::End` it reports `grown` bytes instead.
+    struct Virtual {
+        len: u64,
+        grown: u64,
+        pos: u64,
+        read: u64,
+    }
+    const SPAM: &[u8] = b"Error: spam in mod 'FS25_Spam'\n";
+    impl std::io::Read for Virtual {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = (self.len.saturating_sub(self.pos) as usize).min(buf.len());
+            for (i, b) in buf[..n].iter_mut().enumerate() {
+                *b = SPAM[((self.pos + i as u64) % SPAM.len() as u64) as usize];
+            }
+            self.pos += n as u64;
+            self.read += n as u64;
+            Ok(n)
+        }
+    }
+    impl std::io::Seek for Virtual {
+        fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.pos = match to {
+                std::io::SeekFrom::Start(p) => p,
+                std::io::SeekFrom::End(d) => {
+                    let end = self.len;
+                    self.len = self.grown;
+                    end.saturating_add_signed(d)
+                }
+                std::io::SeekFrom::Current(d) => self.pos.saturating_add_signed(d),
+            };
+            Ok(self.pos)
+        }
+    }
+
+    /// #351: however big the log, only the head and tail are read.
+    #[test]
+    fn scan_reads_only_the_head_and_tail_of_a_huge_log() {
+        // About 62 GB of whole lines.
+        let huge = SPAM.len() as u64 * 2_000_000_000;
+        let mut v = Virtual {
+            len: huge,
+            grown: huge,
+            pos: 0,
+            read: 0,
+        };
+        let r = scan(&mut v, 1000, 4000).unwrap();
+        assert!(r.truncated);
+        assert!(v.read <= 5001, "read {} bytes", v.read);
+        // The same message from head and tail is one finding.
+        assert_eq!(r.total_findings, 1);
+        assert_eq!(r.mods[0].sample_line, Some(1));
+    }
+
+    /// A log that grows past the limit while it's read is read as a big log, not cut silently.
+    #[test]
+    fn scan_notices_a_log_that_grows_while_read() {
+        let mut v = Virtual {
+            len: 100,
+            grown: 1_000_000,
+            pos: 0,
+            read: 0,
+        };
+        let r = scan(&mut v, 100, 100).unwrap();
+        assert!(r.truncated);
+        assert!(v.read <= 201 + 201, "read {} bytes", v.read);
+    }
+
+    /// Past MAX_LOG_NAMES mods, a new mod's findings count as unattributed; the inventory count
+    /// stops there too.
+    #[test]
+    fn name_lists_stay_bounded() {
+        let mut log = String::new();
+        for i in 0..MAX_LOG_NAMES + 5 {
+            log.push_str(&format!("Available mod: (Version: 1.0) FS25_M{i}\n"));
+            log.push_str(&format!("Error: boom in mod 'FS25_M{i}'\n"));
+        }
+        let r = parse(&log);
+        assert_eq!(r.mod_count, MAX_LOG_NAMES);
+        assert_eq!(r.mods.len(), MAX_LOG_NAMES);
+        assert_eq!(r.unattributed, 5);
+        assert_eq!(r.total_findings, MAX_LOG_NAMES + 5);
     }
 
     /// Lines that don't follow on (the gap where a huge log's middle was skipped) never fold
     /// into the finding above them.
     #[test]
     fn a_gap_ends_a_block() {
-        let r = parse_lines([(1, "Error: boom"), (9, "  mods/FS25_B/x.lua(1)")].into_iter());
+        let lines = [(1, "Error: boom"), (3, "  mods/FS25_B/x.lua(1)")];
+        let r = parse_lines(lines.into_iter(), usize::MAX);
         assert_eq!((r.unattributed, r.total_findings), (1, 1));
-        let r = parse_lines([(1, "Error: boom"), (2, "  mods/FS25_B/x.lua(1)")].into_iter());
+        let lines = [(1, "Error: boom"), (2, "  mods/FS25_B/x.lua(1)")];
+        let r = parse_lines(lines.into_iter(), usize::MAX);
         assert_eq!(r.mods[0].mod_name, "FS25_B");
+        // Past `numbered_through`, a line's number isn't known.
+        let r = parse_lines([(5, "Error: x in mod 'FS25_C'")].into_iter(), 4);
+        assert_eq!(r.mods[0].sample_line, None);
     }
 
     /// The fold still stops after 12 continuation lines, as before #351.

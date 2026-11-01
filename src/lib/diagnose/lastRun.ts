@@ -43,6 +43,8 @@ export interface Verdict {
  * @param causes how many mods logged real errors
  */
 export function lastRunVerdict(report: LogReport, causes: number): Verdict {
+  // A log too big to read whole only vouches for the parts Silo read (#351).
+  const inRead = report.truncated ? " in the parts Silo read" : "";
   if (report.crashed) {
     return {
       tone: "bad",
@@ -50,7 +52,7 @@ export function lastRunVerdict(report: LogReport, causes: number): Verdict {
       body:
         causes > 0
           ? "The log stops without a clean exit. The mods below logged errors during that run, most first."
-          : "The log stops without a clean exit, and no mod logged an error, so the log can't name the cause.",
+          : `The log stops without a clean exit, and no mod logged an error${inRead}, so the log can't name the cause.`,
     };
   }
   if (causes > 0) {
@@ -63,7 +65,7 @@ export function lastRunVerdict(report: LogReport, causes: number): Verdict {
   return {
     tone: "good",
     title: "Healthy.",
-    body: "Your last game closed normally and no mod logged a real error.",
+    body: `Your last game closed normally and no mod logged a real error${inRead}.`,
   };
 }
 
@@ -77,10 +79,15 @@ export function countsLine(m: LogModHealth): string {
   return parts.join(" · ");
 }
 
+/** Where the sample is in log.txt: "line 120", or "near the end" when its number isn't known (#351). */
+export function sampleWhere(m: Pick<LogModHealth, "sampleLine">): string {
+  return m.sampleLine === null ? "near the end" : `line ${m.sampleLine}`;
+}
+
 /** The text "Copy details" puts on the clipboard for one mod. */
 export function logModDetails(m: LogModHealth, title: string): string {
   const name = title === m.modName ? m.modName : `${title} (${m.modName})`;
-  return [name, countsLine(m), `log.txt line ${m.sampleLine}: ${m.sample}`].join("\n");
+  return [name, countsLine(m), `log.txt ${sampleWhere(m)}: ${m.sample}`].join("\n");
 }
 
 /**

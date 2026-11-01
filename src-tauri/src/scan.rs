@@ -427,23 +427,19 @@ fn detect_settings_zip(path: &Path) -> (bool, SettingsSource) {
         return (false, SettingsSource::None);
     };
     // Cheap first pass over just the name list (no decompression): Tier A wins outright,
-    // and we note the Lua members for the bounded Tier-B grep.
-    let names: Vec<String> = archive
-        .file_names()
-        .filter_map(|s| s.ok().map(|n| n.into_owned()))
-        .collect();
+    // and we note the first Lua members for the bounded Tier-B grep.
     let mut lua: Vec<String> = Vec::new();
-    for name in &names {
+    for name in archive.file_names().flatten() {
         let lower = name.to_ascii_lowercase();
         if is_settings_xml(&lower) {
             return (true, SettingsSource::Shipped);
         }
-        if lower.ends_with(".lua") {
-            lua.push(name.clone());
+        if lower.ends_with(".lua") && lua.len() < LUA_MEMBER_LIMIT {
+            lua.push(name.into_owned());
         }
     }
     let mut budget = LUA_SCAN_BUDGET;
-    for name in lua.into_iter().take(LUA_MEMBER_LIMIT) {
+    for name in lua {
         if budget == 0 {
             break;
         }
@@ -476,12 +472,12 @@ fn detect_settings_dir(path: &Path) -> (bool, SettingsSource) {
         if is_settings_xml(&lower) {
             return (true, SettingsSource::Shipped);
         }
-        if lower.ends_with(".lua") {
+        if lower.ends_with(".lua") && lua.len() < LUA_MEMBER_LIMIT {
             lua.push(entry.path().to_path_buf());
         }
     }
     let mut budget = LUA_SCAN_BUDGET;
-    for p in lua.into_iter().take(LUA_MEMBER_LIMIT) {
+    for p in lua {
         if budget == 0 {
             break;
         }
