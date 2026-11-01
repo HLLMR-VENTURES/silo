@@ -385,6 +385,20 @@ describe("Share dialog", () => {
     expect(screen.getByText(/Silo couldn't read 1 mod \(Title A\)/)).toBeInTheDocument();
   });
 
+  it("saving the check file again and cancelling doesn't leave the old note without its warning", async () => {
+    vi.mocked(ghStatus).mockResolvedValue(gh(false));
+    vi.mocked(mpExport).mockResolvedValueOnce({ count: 2, unreadable: ["A"] }).mockResolvedValueOnce(null);
+    share();
+    await fireEvent.click(await screen.findByLabelText(/^Multiplayer check file/));
+    await tick();
+    await fireEvent.click(screen.getByRole("button", { name: "Save file…" }));
+    await screen.findByText(/Silo couldn't read 1 mod/);
+    await fireEvent.click(screen.getByRole("button", { name: "Save file…" }));
+    await waitFor(() => expect(mpExport).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText(/Saved a multiplayer check file/)).toBeNull());
+    expect(screen.queryByText(/Silo couldn't read 1 mod/)).toBeNull();
+  });
+
   it("a link names the mods it couldn't fingerprint, and a README problem is a warning (#355)", async () => {
     vi.mocked(ghStatus).mockResolvedValue(gh(true));
     vi.mocked(collectionExport).mockResolvedValue({

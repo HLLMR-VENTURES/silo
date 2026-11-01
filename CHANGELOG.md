@@ -74,10 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the first set's link under the second. (#355)
 - Sharing a link now names the mods Silo couldn't fingerprint. Before, they went on the link
   without one and you weren't told. (#355)
-- Sharing a set as a public GitHub repository no longer fails because its README couldn't be
-  added (the link works without it, and Silo says so). If saving the list itself fails, the error
-  names the new repository and trying again carries on there instead of saying the name is taken.
-  (#355)
+- Sharing a set as a public GitHub repository, or updating one, no longer fails because its README
+  couldn't be written (the link works without it, and Silo says so). If saving the list itself
+  fails, the error names the new repository and trying again carries on there instead of saying the
+  name is taken. **Update link** also names any mods it couldn't fingerprint. (#355)
 - **Your shared links** shows an error when Silo can't reach GitHub, instead of "Nothing shared
   yet", and says so when it could read only part of the list. (#355)
 - Saving a mod's settings or a game settings form changes only the values you edited. Before,

@@ -2,16 +2,22 @@
 // Your shared links (#355): a listing that failed never reads as "nothing shared yet", and a
 // list that's only partly readable says so.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/svelte";
+import { fireEvent, render, screen } from "@testing-library/svelte";
 
 vi.mock("../../api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api")>()),
   collectionsList: vi.fn(),
+  collectionUpdate: vi.fn(),
   ghStatus: vi.fn(),
   logFrontendError: vi.fn(() => Promise.resolve()),
 }));
+vi.mock("../../ui", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../ui")>()),
+  ask: vi.fn(() => Promise.resolve(true)),
+  toast: vi.fn(),
+}));
 
-import { collectionsList, ghStatus } from "../../api";
+import { collectionsList, collectionUpdate, ghStatus } from "../../api";
 import SharedLinks from "./SharedLinks.svelte";
 
 const link = {
@@ -55,5 +61,20 @@ describe("Your shared links", () => {
     render(SharedLinks, { active: [] });
     expect(await screen.findByText(/couldn't list your unlisted links/)).toBeInTheDocument();
     expect(screen.queryByText(/Nothing shared yet/)).toBeNull();
+  });
+
+  it("updating a link names the mods it couldn't fingerprint, and keeps a README problem on the page", async () => {
+    vi.mocked(collectionsList).mockResolvedValue({ items: [link], warning: null });
+    vi.mocked(collectionUpdate).mockResolvedValue({
+      url: link.pageUrl,
+      count: 2,
+      omitted: [],
+      unpinned: ["FS25_A"],
+      warning: "The link works, but Silo couldn't add the page that describes the set on GitHub.",
+    });
+    render(SharedLinks, { active: [{ techName: "FS25_A", path: "/m/FS25_A.zip", kind: "zip", version: "1" }] });
+    await fireEvent.click(await screen.findByRole("button", { name: "Update link: Harvest 2026" }));
+    expect(await screen.findByText(/Silo couldn't read 1 mod \(FS25_A\)/)).toBeInTheDocument();
+    expect(screen.getByText(/couldn't add the page that describes the set/)).toBeInTheDocument();
   });
 });

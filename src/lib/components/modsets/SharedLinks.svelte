@@ -15,6 +15,7 @@
   import { inlineError } from "../../state/notify.svelte";
   import type { MpModRef } from "../../types";
   import { formatCount, plural } from "../../plural";
+  import { capList } from "../../archiveMoveLogic";
 
   interface Props {
     /** The active mods as refs: what "Update link" pins the link to. */
@@ -30,6 +31,8 @@
   let error = $state("");
   /** Only part of the list could be read (gists or repos failed). */
   let warning = $state("");
+  /** What the last Update link couldn't do fully (mods without a fingerprint, the README). */
+  let updateWarn = $state("");
   let busyRef = $state<string | null>(null);
 
   const zips = $derived(active.filter((m) => m.kind === "zip").length);
@@ -90,12 +93,18 @@
       return;
     busyRef = c.reference;
     error = "";
+    updateWarn = "";
     try {
       const r = await collectionUpdate(c.reference, active);
-      const unpinned = r.unpinned.length
-        ? ` Silo couldn't read ${count(r.unpinned.length)}, so the link lists ${r.unpinned.length === 1 ? "it" : "them"} without a fingerprint.`
-        : "";
-      toast({ message: `Updated the link for ${c.name} to ${count(r.count)}.${unpinned}` });
+      toast({ message: `Updated the link for ${c.name} to ${count(r.count)}.` });
+      // Kept on the page (not just in the toast), naming the mods, so they can be fixed (#355).
+      const notes: string[] = [];
+      if (r.unpinned.length)
+        notes.push(
+          `Silo couldn't read ${count(r.unpinned.length)} (${capList(r.unpinned)}), so the link for ${c.name} lists ${r.unpinned.length === 1 ? "it" : "them"} without a fingerprint.`,
+        );
+      if (r.warning) notes.push(r.warning);
+      updateWarn = notes.join(" ");
       await load();
     } catch (e) {
       error = inlineError(e, "Updating the link");
@@ -144,6 +153,7 @@
       <p class="muted">Nothing shared yet. Use Share on a set to create a link.</p>
     {/if}
     {#if !error && warning}<p class="warn" role="status">{warning}</p>{/if}
+    {#if updateWarn}<p class="warn">{updateWarn}</p>{/if}
     {#each links as c (c.reference)}
       <div class="row">
         <div class="info">

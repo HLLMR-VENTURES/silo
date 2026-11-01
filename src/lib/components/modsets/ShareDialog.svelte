@@ -137,6 +137,9 @@
     const n = mods.length;
     busy = true;
     error = "";
+    // A note and its warning belong to one save: never leave one without the other.
+    note = "";
+    warn = "";
     try {
       const saved = await exportSetFile(name, mods);
       if (saved && my === session) note = `Saved ${count(n)} to a .silo file.`;
@@ -153,6 +156,7 @@
     const my = session;
     busy = true;
     error = "";
+    note = "";
     warn = "";
     const op = start("Fingerprinting your mods");
     try {

@@ -4426,12 +4426,15 @@ async fn collection_export(
     .map_err(error::AppError::from)
 }
 
-/// A public collection's repo was created but its list couldn't be saved: name the repo, and
-/// say a retry carries on there (it's still empty, so `create_public_repo` resumes into it).
+/// A public collection's repo was created but saving its list failed: name the repo. A retry
+/// carries on there while it's still empty (`create_public_repo` resumes into it). If the save
+/// did land and only its answer was lost, the repo isn't empty and the list is already shared:
+/// it shows under "Your shared links".
 fn repo_upload_failed(repo_url: &str, cause: &str) -> String {
     format!(
-        "Silo created {repo_url} on your GitHub but couldn't save the mod list to it. \
-         Try again: Silo carries on in that repository. ({cause})"
+        "Silo created {repo_url} on your GitHub but couldn't confirm the mod list was saved \
+         to it. Try again: if the list never arrived, Silo carries on in that repository; if it \
+         did, the link is already under Your shared links. ({cause})"
     )
 }
 
@@ -4439,7 +4442,7 @@ fn repo_upload_failed(repo_url: &str, cause: &str) -> String {
 fn readme_failed(cause: &str) -> String {
     format!(
         "The link works, but Silo couldn't add the page that describes the set on GitHub. \
-         Updating the link later adds it. ({cause})"
+         Updating the link later tries again. ({cause})"
     )
 }
 
@@ -4484,6 +4487,7 @@ async fn collection_update(
         };
         let json = collection::to_json(&coll)?;
 
+        let mut warning = None;
         let url = match where_ {
             collection::CollectionRef::Gist(id) => {
                 let page_url = collection::gist_page_url(&id);
@@ -4505,14 +4509,17 @@ async fn collection_update(
                     &json,
                     "Update collection (via Silo)",
                 )?;
-                github::put_repo_file(
+                // The list is updated already, so a README failure is a warning, as on export.
+                if let Err(e) = github::put_repo_file(
                     &token,
                     &owner,
                     &repo,
                     "README.md",
                     &readme,
                     "Update README (via Silo)",
-                )?;
+                ) {
+                    warning = Some(readme_failed(&e));
+                }
                 page_url
             }
         };
@@ -4521,7 +4528,7 @@ async fn collection_update(
             count: coll.mods.len(),
             omitted,
             unpinned,
-            warning: None,
+            warning,
         })
     })
     .await
