@@ -284,6 +284,7 @@ jobs:
         shell: bash
         env:
           ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+          RUST_TARGET: ${{ matrix.rust-target }} # names the Mac updater archive as uploaded
           DIGESTS: ${{ runner.temp }}/${{ env.DIGESTS_NAME }}.sha256
         run: node scripts/release-assets.mjs record "$DIGESTS"
 

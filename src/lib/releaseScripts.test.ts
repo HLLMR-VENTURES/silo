@@ -11,7 +11,7 @@ import {
   digestLines,
   parseDigests,
   releaseAssetProblems,
-  uploadNameMatches,
+  uploadName,
 } from "../../scripts/release-assets.mjs";
 
 const files = (v: { pkg?: string; cargo?: string; conf?: string }) => ({
@@ -72,6 +72,12 @@ describe("check-release-version", () => {
     expect(cargoPackageVersion(`[dependencies]\nversion = "1"\n`)).toBeNull();
   });
 
+  it("reads a commented [package] header and a literal-string version", () => {
+    expect(cargoPackageVersion(`[package] # app metadata\nversion = '1.2.3'\n`)).toBe("1.2.3");
+    expect(cargoPackageVersion(`[ package ]\r\nversion="1.2.3"\r\n`)).toBe("1.2.3");
+    expect(cargoPackageVersion(`[package.metadata]\nversion = "1.2.3"\n`)).toBeNull();
+  });
+
   it("reads a JSON version only when it is a string", () => {
     expect(jsonVersion(`{"version":"1.0.0"}`)).toBe("1.0.0");
     expect(jsonVersion(`{"version":1}`)).toBeNull();
@@ -82,42 +88,38 @@ describe("check-release-version", () => {
 const REPO = "HLLMR-VENTURES/silo";
 const TAG = "v1.2.3";
 const BASE = `https://github.com/${REPO}/releases/download/${TAG}/`;
-const d = (c: string) => c.repeat(64);
+const hex = (n: number) => n.toString(16).padStart(64, "0");
 
-/** A small release: a Linux AppImage, the two macOS updater archives and the SBOM. */
+/** The updater bundles of a v1.2.3 release, by latest.json platform keys. */
+const BUNDLES: [string, string[]][] = [
+  ["Silo_aarch64.app.tar.gz", ["darwin-aarch64", "darwin-aarch64-app"]],
+  ["Silo_x64.app.tar.gz", ["darwin-x86_64", "darwin-x86_64-app"]],
+  ["Silo_1.2.3_amd64.AppImage", ["linux-x86_64", "linux-x86_64-appimage"]],
+  ["Silo_1.2.3_amd64.deb", ["linux-x86_64-deb"]],
+  ["Silo-1.2.3-1.x86_64.rpm", ["linux-x86_64-rpm"]],
+  ["Silo_1.2.3_x64_en-US.msi", ["windows-x86_64", "windows-x86_64-msi"]],
+  ["Silo_1.2.3_x64-setup.exe", ["windows-x86_64-nsis"]],
+];
+
+/** A whole release as the build jobs recorded it and the draft holds it, with its latest.json. */
 function release() {
-  const recorded = [
-    { digest: d("1"), name: "Silo_1.2.3_amd64.AppImage" },
-    { digest: d("2"), name: "Silo_1.2.3_amd64.AppImage.sig" },
-    { digest: d("3"), name: "Silo.app.tar.gz" },
-    { digest: d("4"), name: "Silo.app.tar.gz.sig" },
-    { digest: d("5"), name: "Silo.app.tar.gz" },
-    { digest: d("6"), name: "Silo.app.tar.gz.sig" },
-    { digest: d("7"), name: "silo-sbom.cdx.json" },
+  const names = [
+    ...BUNDLES.flatMap(([n]) => [n, `${n}.sig`]),
+    "Silo_1.2.3_aarch64.dmg",
+    "Silo_1.2.3_x64.dmg",
+    "silo-sbom.cdx.json",
   ];
-  const assets: Record<string, string> = {
-    "Silo_1.2.3_amd64.AppImage": d("1"),
-    "Silo_1.2.3_amd64.AppImage.sig": d("2"),
-    "Silo_aarch64.app.tar.gz": d("3"),
-    "Silo_aarch64.app.tar.gz.sig": d("4"),
-    "Silo_x64.app.tar.gz": d("5"),
-    "Silo_x64.app.tar.gz.sig": d("6"),
-    "silo-sbom.cdx.json": d("7"),
-    "latest.json": d("8"),
-  };
-  const sigText: Record<string, string> = {
-    "Silo_1.2.3_amd64.AppImage.sig": "sig-linux",
-    "Silo_aarch64.app.tar.gz.sig": "sig-arm",
-    "Silo_x64.app.tar.gz.sig": "sig-intel",
-  };
-  const manifest = {
-    version: "1.2.3",
-    platforms: {
-      "linux-x86_64": { url: `${BASE}Silo_1.2.3_amd64.AppImage`, signature: "sig-linux" },
-      "darwin-aarch64": { url: `${BASE}Silo_aarch64.app.tar.gz`, signature: "sig-arm" },
-      "darwin-x86_64": { url: `${BASE}Silo_x64.app.tar.gz`, signature: "sig-intel" },
-    },
-  };
+  const recorded = names.map((name, i) => ({ digest: hex(i + 1), name }));
+  const assets: Record<string, string> = Object.fromEntries(recorded.map((r) => [r.name, r.digest]));
+  assets["latest.json"] = hex(999);
+  const sigText: Record<string, string> = Object.fromEntries(
+    BUNDLES.map(([n]) => [`${n}.sig`, `sig of ${n}`]),
+  );
+  const platforms: Record<string, { url: string; signature: string }> = {};
+  for (const [n, keys] of BUNDLES) {
+    for (const k of keys) platforms[k] = { url: BASE + n, signature: `sig of ${n}` };
+  }
+  const manifest = { version: "1.2.3", platforms };
   return { recorded, assets, sigText, manifest, repo: REPO, tag: TAG };
 }
 
@@ -131,74 +133,103 @@ describe("release-assets", () => {
 
   it("fails an asset swapped on the draft", () => {
     const r = release();
-    r.assets["Silo_1.2.3_amd64.AppImage"] = d("9");
+    r.assets["Silo_1.2.3_amd64.AppImage"] = hex(500);
     const p = check(r);
-    expect(p.some((s) => s.startsWith("Silo_1.2.3_amd64.AppImage (sha256"))).toBe(true);
-    expect(p.some((s) => s.startsWith("Recorded build output Silo_1.2.3_amd64.AppImage"))).toBe(true);
+    expect(p.some((s) => s.startsWith("Silo_1.2.3_amd64.AppImage (sha256") && s.includes("isn't what the build recorded"))).toBe(true);
+    expect(p).toContain("latest.json linux-x86_64: Silo_1.2.3_amd64.AppImage isn't a verified asset.");
   });
 
   it("fails recorded bytes uploaded under another file's name", () => {
     const r = release();
-    r.assets["silo-sbom.cdx.json"] = d("1");
+    r.assets["silo-sbom.cdx.json"] = r.assets["Silo_1.2.3_amd64.deb"];
     expect(check(r).some((s) => s.startsWith("silo-sbom.cdx.json (sha256"))).toBe(true);
+  });
+
+  it("fails the two macOS builds swapped, signatures and latest.json included", () => {
+    const r = release();
+    const a = "Silo_aarch64.app.tar.gz";
+    const x = "Silo_x64.app.tar.gz";
+    [r.assets[a], r.assets[x]] = [r.assets[x], r.assets[a]];
+    [r.assets[`${a}.sig`], r.assets[`${x}.sig`]] = [r.assets[`${x}.sig`], r.assets[`${a}.sig`]];
+    [r.sigText[`${a}.sig`], r.sigText[`${x}.sig`]] = [r.sigText[`${x}.sig`], r.sigText[`${a}.sig`]];
+    for (const k of ["darwin-aarch64", "darwin-aarch64-app"]) r.manifest.platforms[k].signature = `sig of ${x}`;
+    for (const k of ["darwin-x86_64", "darwin-x86_64-app"]) r.manifest.platforms[k].signature = `sig of ${a}`;
+    const p = check(r);
+    expect(p.filter((s) => s.includes("isn't what the build recorded"))).toHaveLength(4);
   });
 
   it("fails an asset nobody recorded and a recorded file missing from the release", () => {
     const r = release();
-    r.assets["extra.zip"] = d("a");
+    r.assets["extra.zip"] = hex(700);
     delete r.assets["silo-sbom.cdx.json"];
     const p = check(r);
-    expect(p).toContain(`extra.zip (sha256 ${d("a")}) doesn't match any file the build jobs recorded.`);
-    expect(p).toContain(`Recorded build output silo-sbom.cdx.json (sha256 ${d("7")}) isn't on the release.`);
+    expect(p).toContain(`extra.zip (sha256 ${hex(700)}) isn't a file the build jobs recorded.`);
+    expect(p.some((s) => s.startsWith("Recorded build output silo-sbom.cdx.json"))).toBe(true);
   });
 
-  it("fails when no digests were recorded", () => {
+  it("fails when no digests were recorded, or one name was recorded twice", () => {
     const r = release();
     r.recorded = [];
     expect(check(r)).toContain("No recorded build digests were found.");
+    const t = release();
+    t.recorded.push({ ...t.recorded[0] });
+    expect(check(t)).toContain(`${t.recorded[0].name} was recorded twice.`);
   });
 
   it("checks latest.json's version, urls and signatures", () => {
     const r = release();
     r.manifest.version = "1.2.2";
-    r.manifest.platforms["linux-x86_64"].signature = "forged";
+    r.manifest.platforms["linux-x86_64-deb"].signature = "forged";
     r.manifest.platforms["darwin-aarch64"].url = "https://example.com/Silo_aarch64.app.tar.gz";
     const p = check(r);
     expect(p).toContain("latest.json version '1.2.2' doesn't match tag v1.2.3.");
-    expect(p).toContain("latest.json linux-x86_64: signature doesn't match the verified Silo_1.2.3_amd64.AppImage.sig.");
+    expect(p).toContain("latest.json linux-x86_64-deb: signature doesn't match the verified Silo_1.2.3_amd64.deb.sig.");
     expect(p.some((s) => s.startsWith("latest.json darwin-aarch64: url"))).toBe(true);
   });
 
-  it("fails latest.json pointing at an unverified asset, and a missing latest.json", () => {
+  it("fails latest.json with a platform missing, an unknown one, or another platform's build", () => {
     const r = release();
-    r.assets["Silo_x64.app.tar.gz"] = d("9");
-    expect(check(r)).toContain("latest.json darwin-x86_64: Silo_x64.app.tar.gz isn't a verified asset.");
+    delete r.manifest.platforms["darwin-x86_64"];
+    r.manifest.platforms["linux-aarch64"] = { url: `${BASE}Silo_1.2.3_amd64.deb`, signature: "sig of Silo_1.2.3_amd64.deb" };
+    r.manifest.platforms["darwin-aarch64"] = {
+      url: `${BASE}Silo_1.2.3_amd64.AppImage`,
+      signature: "sig of Silo_1.2.3_amd64.AppImage",
+    };
+    const p = check(r);
+    expect(p).toContain("latest.json has no darwin-x86_64 entry.");
+    expect(p).toContain("latest.json lists linux-aarch64, which this release doesn't build.");
+    expect(p).toContain("latest.json darwin-aarch64: Silo_1.2.3_amd64.AppImage isn't the darwin-aarch64 build.");
+  });
+
+  it("fails a missing latest.json", () => {
     expect(releaseAssetProblems({ ...release(), latestJson: null })).toEqual(["The release has no latest.json."]);
   });
 
-  it("matches upload names to built names", () => {
-    expect(uploadNameMatches("Silo_1.2.3_x64-setup.exe", "Silo_1.2.3_x64-setup.exe")).toBe(true);
-    expect(uploadNameMatches("Silo.app.tar.gz", "Silo_x64.app.tar.gz")).toBe(true);
-    expect(uploadNameMatches("Silo.app.tar.gz.sig", "Silo_aarch64.app.tar.gz.sig")).toBe(true);
-    expect(uploadNameMatches("Silo.app.tar.gz", "Silo_x64.app.tar.gz.sig")).toBe(false);
-    expect(uploadNameMatches("Silo.app.tar.gz", "Other_x64.app.tar.gz")).toBe(false);
-    expect(uploadNameMatches("Silo_1.2.3_amd64.deb", "Silo_1.2.3_amd64.AppImage")).toBe(false);
+  it("names files as tauri-action uploads them", () => {
+    expect(uploadName("Silo_1.2.3_x64-setup.exe", "")).toBe("Silo_1.2.3_x64-setup.exe");
+    expect(uploadName("Silo_1.2.3_aarch64.dmg", "aarch64-apple-darwin")).toBe("Silo_1.2.3_aarch64.dmg");
+    expect(uploadName("Silo.app.tar.gz", "x86_64-apple-darwin")).toBe("Silo_x64.app.tar.gz");
+    expect(uploadName("Silo.app.tar.gz.sig", "aarch64-apple-darwin")).toBe("Silo_aarch64.app.tar.gz.sig");
+    expect(() => uploadName("Silo.app.tar.gz", "")).toThrow(/No macOS arch/);
+    expect(() => uploadName("Silo.app.tar.gz", "toString")).toThrow(/No macOS arch/);
   });
 
   it("parses sha256sum lines, CRLF included, and rejects malformed ones", () => {
-    expect(parseDigests(`${d("a")}  a.exe\r\n${d("b")} *b.msi\r\n\r\n`)).toEqual([
-      { digest: d("a"), name: "a.exe" },
-      { digest: d("b"), name: "b.msi" },
+    expect(parseDigests(`${hex(10)}  a.exe\r\n${hex(11)} *b.msi\r\n\r\n`)).toEqual([
+      { digest: hex(10), name: "a.exe" },
+      { digest: hex(11), name: "b.msi" },
     ]);
     expect(() => parseDigests("nothex  a.exe")).toThrow(/Malformed/);
   });
 
-  it("records files, skips directories, and refuses an empty build", () => {
-    const hash = (p: string) => (p.endsWith("Silo.dmg") ? d("c") : d("e"));
+  it("records files under their upload names, skips directories, and refuses an empty build", () => {
+    const hash = (p: string) => (p.endsWith(".dmg") ? hex(1) : hex(2));
     const fileCheck = (p: string) => !p.endsWith(".app");
-    expect(digestLines(["/b/macos/Silo.app", "/b/dmg/Silo.dmg"], hash, fileCheck)).toEqual([`${d("c")}  Silo.dmg`]);
-    expect(() => digestLines(["/b/macos/Silo.app"], hash, fileCheck)).toThrow(/No build output/);
-    expect(() => digestLines([], hash, fileCheck)).toThrow(/No build output/);
+    const opts = { rustTarget: "x86_64-apple-darwin", hash, fileCheck };
+    const paths = ["/b/macos/Silo.app", "/b/macos/Silo.app.tar.gz", "/b/dmg/Silo_1.2.3_x64.dmg"];
+    expect(digestLines(paths, opts)).toEqual([`${hex(2)}  Silo_x64.app.tar.gz`, `${hex(1)}  Silo_1.2.3_x64.dmg`]);
+    expect(() => digestLines(["/b/macos/Silo.app"], opts)).toThrow(/No build output/);
+    expect(() => digestLines([], opts)).toThrow(/No build output/);
   });
 
   it("fails on a build output path that doesn't exist", () => {

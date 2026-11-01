@@ -23,7 +23,9 @@ const PLAIN_VERSION = /^\d+\.\d+\.\d+$/;
 
 /**
  * The `version` of Cargo.toml's `[package]` table, or null when it has none (or inherits it with
- * `version.workspace = true`, which this check doesn't follow).
+ * `version.workspace = true`, which this check doesn't follow). Reads the plain `key = "value"`
+ * (or `'value'`) form Cargo writes, with optional trailing comments; anything fancier reads as
+ * no version, so the guard fails closed.
  * @param {string} toml Cargo.toml text
  * @returns {string | null}
  */
@@ -32,12 +34,12 @@ export function cargoPackageVersion(toml) {
   for (const raw of toml.split(/\r?\n/)) {
     const line = raw.trim();
     if (line.startsWith("[")) {
-      inPackage = line === "[package]";
+      inPackage = /^\[\s*package\s*\]\s*(?:#.*)?$/.test(line);
       continue;
     }
     if (!inPackage) continue;
-    const m = /^version\s*=\s*"([^"]*)"\s*(?:#.*)?$/.exec(line);
-    if (m) return m[1];
+    const m = /^version\s*=\s*(?:"([^"\\]*)"|'([^']*)')\s*(?:#.*)?$/.exec(line);
+    if (m) return m[1] ?? m[2];
   }
   return null;
 }
