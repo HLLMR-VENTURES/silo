@@ -241,6 +241,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as it can, and still lets you connect again normally. (#370)
 - Starting a GitHub sign-in several times in a row could make the newest code count as expired.
   Each code now lasts as long as GitHub says. (#370)
+- On macOS, cancelling the keychain's unlock prompt while connecting GitHub could make Silo
+  save the token in its database instead. On macOS and Windows, Silo now always uses your
+  system's credential store and says when it refuses. If GitHub approves a sign-in but Silo
+  can't confirm which account it is, Silo no longer connects with no account name shown (and
+  no Disconnect button); it asks you to try again. (#370)
 
 ### Security
 

@@ -174,33 +174,30 @@ impl Drop for SignOut<'_> {
 }
 
 impl SignOut<'_> {
-    /// Wait for the requests already admitted (each is bounded by the HTTP agent's timeouts),
-    /// then run `clear` under the lock. `clear` is told whether the marker was written (when the
-    /// Disconnect started), and returns whether storage is now clean (the token can't be read
-    /// back and the account details are gone) along with its result; when it is, the marker is
-    /// removed again. Then the session ends: a token read before is never sent, and no stored
-    /// token is used until a sign-in commits.
+    /// Clear storage at once, under the lock (nothing is admitted and no sign-in can store
+    /// meanwhile), then wait for the requests already admitted (each is bounded by the HTTP
+    /// agent's timeouts) and end the session. Clearing comes before the wait so a crash while a
+    /// slow request drains can't leave the token in storage. `clear` is told whether the marker
+    /// is written (when the Disconnect started, or tried again here), and returns whether
+    /// storage is now clean (the token can't be read back and the account details are gone)
+    /// along with its result; when it is, the marker is removed again. Once the session ends, a
+    /// token read before is never sent, and no stored token is used until a sign-in commits.
     pub fn finish<T>(mut self, clear: impl FnOnce(bool) -> (bool, T)) -> T {
         let gate = self.gate;
-        let marked = self.marked;
         let mut g = gate.lock();
+        let marked = self.marked || Session::write_marker(&g) == Ok(true);
+        // If `clear` panics, `g` unlocks first and then dropping `self` (not done) still ends
+        // the session.
+        let (clean, out) = clear(marked);
+        g.cleanup_pending = !clean;
+        if clean {
+            let _ = Session::remove_marker(&g);
+        }
         while g.in_flight > 0 {
             g = gate.idle.wait(g).unwrap_or_else(|e| e.into_inner());
         }
-        // Ends the session even if `clear` panics.
-        struct End<'a>(MutexGuard<'a, State>);
-        impl Drop for End<'_> {
-            fn drop(&mut self) {
-                Session::end_sign_out(&mut self.0);
-            }
-        }
+        Session::end_sign_out(&mut g);
         self.done = true;
-        let mut end = End(g);
-        let (clean, out) = clear(marked);
-        end.0.cleanup_pending = !clean;
-        if clean {
-            let _ = Session::remove_marker(&end.0);
-        }
         out
     }
 }
@@ -638,6 +635,20 @@ mod tests {
     }
 
     #[test]
+    fn a_marker_that_failed_at_the_click_is_tried_again_before_clearing() {
+        let dir = std::env::temp_dir().join(format!("silo_gh_late_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("marker");
+        let gate = Session::new();
+        gate.use_marker(path.clone());
+        let so = gate.begin_sign_out(); // the folder is missing: not marked yet
+        std::fs::create_dir_all(&dir).unwrap();
+        let seen = so.finish(|marked| (false, (marked, path.exists())));
+        assert_eq!(seen, (true, true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_unfinished_sign_out_still_ends_the_session() {
         let gate = Session::new();
         let a = stored(&gate, "tok-a");
@@ -704,21 +715,26 @@ mod tests {
         sent_rx.recv().unwrap();
         let other = stored(gate, "tok");
         let (cleared_tx, cleared_rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
         let so = gate.begin_sign_out();
         let logout = {
             std::thread::spawn(move || {
                 so.finish(|_| {
                     cleared_tx.send(()).unwrap();
                     (true, ())
-                })
+                });
+                done_tx.send(()).unwrap();
             })
         };
-        // Disconnect has started: a new request isn't admitted, and the clear waits.
+        // Disconnect has started: a new request isn't admitted, storage is cleared at once,
+        // and the Disconnect itself waits for the admitted request.
         assert!(other.admit().is_err());
         assert!(gate.bearer(|| Some("tok".into())).is_none());
-        assert!(cleared_rx.recv_timeout(Duration::from_millis(100)).is_err());
-        finish_tx.send(()).unwrap();
         cleared_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(gate.signed_out());
+        finish_tx.send(()).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         logout.join().unwrap();
         request.join().unwrap();
     }

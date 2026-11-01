@@ -1052,7 +1052,7 @@ pub fn create_public_repo(
         .header("Accept", "application/vnd.github+json")
         .header("Authorization", auth.header())
         .send_json_checked(body);
-    drop(auth);
+    // `auth` stays until the response body is read below (the recovery path admits its own).
     let v = match sent {
         Ok(resp) => resp
             .into_json::<serde_json::Value>()

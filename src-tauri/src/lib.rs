@@ -625,6 +625,16 @@ fn store_gh_account(
 const GH_HALF_SAVED: &str =
     "Silo disconnected GitHub so it doesn't act as the wrong account. Connect again.";
 
+/// A device flow GitHub approved but whose account Silo couldn't confirm: nothing is stored.
+fn sign_in_unconfirmed(why: &str) -> github::PollResult {
+    github::PollResult {
+        status: "error".into(),
+        token: None,
+        scope: None,
+        error: Some(format!("couldn't confirm the account: {why}")),
+    }
+}
+
 /// A poll's answer for a device flow that's over without storing anything: `status` is
 /// "cancelled" (a newer sign-in, a cancel or a Disconnect) or "expired".
 fn ended_poll(status: &str) -> github::PollResult {
@@ -662,8 +672,13 @@ async fn gh_device_poll(
         };
         if res.status == "ok" {
             if let Some(tok) = &res.token {
-                let user =
-                    github::whoami(&GH_SESSION.sign_in_bearer(attempt, tok)).unwrap_or_default();
+                // No account name, no connection: committing a token with an empty login would
+                // leave it in use with the screen showing "not connected" (and no Disconnect).
+                let user = match github::whoami(&GH_SESSION.sign_in_bearer(attempt, tok)) {
+                    Ok(u) if !u.is_empty() => u,
+                    Ok(_) => return Ok(sign_in_unconfirmed("GitHub didn't name the account")),
+                    Err(e) => return Ok(sign_in_unconfirmed(&e)),
+                };
                 // Store the scopes GitHub actually granted — capability is derived from these,
                 // not from what we asked for. Accumulates across re-auth.
                 let scopes = res.scope.as_deref().unwrap_or("");

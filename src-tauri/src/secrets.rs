@@ -142,7 +142,10 @@ fn write_fallback(conn: &Connection, key: &str, v: &str) -> Result<(), SaveError
 /// is denied) means a store exists, so a failure there is the user's to fix, not a reason to
 /// fall back to SQLite.
 fn keychain_missing() -> bool {
-    if crate::profile::active() {
+    // macOS and Windows always have their store (Keychain, Credential Manager). There, a
+    // platform-level failure is a refusal (keyring maps a cancelled unlock prompt on macOS to
+    // `PlatformFailure`) or a broken call, never a reason to put the token in SQLite.
+    if cfg!(any(target_os = "macos", target_os = "windows")) || crate::profile::active() {
         return false;
     }
     let Ok(e) = keyring::Entry::new(SERVICE, "silo-keychain-probe") else {
@@ -202,7 +205,7 @@ fn get_with(conn: &Connection, key: &str, keychain: Option<&keyring::Entry>) -> 
     match setting(conn, &distrust_key(key)) {
         Ok(None) => e.get_password().ok(),
         Ok(Some(_)) => {
-            if matches!(e.delete_credential(), Ok(()) | Err(keyring::Error::NoEntry)) {
+            if clear_keychain(e) == Cleared::Gone {
                 let _ = set_distrust(conn, key, false);
             }
             None
@@ -307,7 +310,7 @@ fn sweep_with(conn: &Connection, key: &str, keychain: Option<&keyring::Entry>) {
         }
     }
     if let (Some(e), Ok(Some(_))) = (keychain, setting(conn, &distrust_key(key))) {
-        if matches!(e.delete_credential(), Ok(()) | Err(keyring::Error::NoEntry)) {
+        if clear_keychain(e) == Cleared::Gone {
             let _ = set_distrust(conn, key, false);
         }
     }
@@ -421,15 +424,15 @@ enum Cleared {
     Kept,
 }
 
-/// Delete the keychain copy and say what's left. A locked store is never "cleared".
+/// Delete the keychain copy and say what's left. A locked store is never "cleared", and a
+/// delete that reports success only counts once a read confirms the entry is gone: on macOS,
+/// keyring 3.6 ignores the result of the native delete and always reports success.
 fn clear_keychain(e: &keyring::Entry) -> Cleared {
-    match e.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Cleared::Gone,
-        Err(err) => match keychain_copy(e) {
-            KeychainCopy::Gone => Cleared::Gone,
-            KeychainCopy::NoService if no_keychain_service(&err) => Cleared::NoService,
-            _ => Cleared::Kept,
-        },
+    let deleted = e.delete_credential();
+    match (keychain_copy(e), deleted) {
+        (KeychainCopy::Gone, _) => Cleared::Gone,
+        (KeychainCopy::NoService, Err(err)) if no_keychain_service(&err) => Cleared::NoService,
+        _ => Cleared::Kept,
     }
 }
 
@@ -611,6 +614,8 @@ mod tests {
         delete_fails: Option<Fail>,
         /// Writes store the secret, then report this failure anyway (a reply lost on the way).
         set_stores_then_fails: Option<Fail>,
+        /// Deletes report success but keep the secret (keyring 3.6 on macOS).
+        delete_lies: bool,
         /// The next write says so on the first channel, then waits for the second.
         pause: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     }
@@ -650,6 +655,9 @@ mod tests {
             let mut s = self.0.lock().unwrap();
             if let Some(f) = s.delete_fails {
                 return Err(err(f));
+            }
+            if s.delete_lies {
+                return Ok(());
             }
             s.stored.take().map(|_| ()).ok_or(keyring::Error::NoEntry)
         }
@@ -1328,6 +1336,41 @@ mod tests {
         set_with(&conn, KEY, Some("row"), None, NO_KEYCHAIN).unwrap();
         sweep_with(&conn, KEY, None);
         assert_eq!(row(&conn).as_deref(), Some("row"));
+    }
+
+    #[test]
+    fn a_delete_that_reports_success_but_keeps_the_token_isnt_trusted() {
+        // macOS: keyring says the delete worked, but the entry is still there.
+        let conn = mem_db();
+        let k = FakeKeychain::with(|s| {
+            s.stored = Some("tok".into());
+            s.delete_lies = true;
+        });
+        let e = set_with(&conn, KEY, None, Some(&k.entry()), KEYCHAIN_WORKS);
+        assert_eq!(e, Err(REMOVE_FAILED.to_string()));
+        assert!(keychain_distrusted(&conn, KEY));
+        assert_eq!(
+            get_with(&conn, KEY, Some(&k.entry())),
+            None,
+            "never read back"
+        );
+        sweep_with(&conn, KEY, Some(&k.entry()));
+        assert!(
+            keychain_distrusted(&conn, KEY),
+            "a sweep doesn't believe it either"
+        );
+        // Once a delete really works, the copy and its mark go.
+        k.0.lock().unwrap().delete_lies = false;
+        sweep_with(&conn, KEY, Some(&k.entry()));
+        assert_eq!(k.stored(), None);
+        assert!(!keychain_distrusted(&conn, KEY));
+    }
+
+    #[test]
+    fn macos_and_windows_never_count_as_having_no_keychain() {
+        if cfg!(any(target_os = "macos", target_os = "windows")) {
+            assert!(!keychain_missing());
+        }
     }
 
     /// Put a value in the test key's row that can't be read as text, as a read error would.
