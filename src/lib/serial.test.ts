@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { serial, serialPending } from "./serial";
+import { serial, serialDrained, serialPending, serialPendingUnder } from "./serial";
 
 /** A task that finishes after `ms` and records when it started and ended. */
 function task(log: string[], name: string, ms: number, fail = false) {
@@ -49,5 +49,34 @@ describe("serial", () => {
     await a;
     await b.catch(() => {});
     expect(serialPending("k-clean")).toBe(false);
+  });
+
+  it("serialDrained waits for every call under a prefix, failed ones too, and no others", async () => {
+    const log: string[] = [];
+    void serial("override:A", task(log, "a1", 10, true)).catch(() => {});
+    void serial("override:A", task(log, "a2", 5)).catch(() => {});
+    void serial("override:B", task(log, "b", 15)).catch(() => {});
+    let release!: () => void;
+    const other = serial("curation:A", () => new Promise<void>((r) => (release = r)));
+    expect(serialPendingUnder("override:")).toBe(true);
+    await serialDrained("override:"); // settles while the curation write is still held
+    expect(log).toEqual(expect.arrayContaining(["end a1", "end a2", "end b"]));
+    expect(serialPendingUnder("override:")).toBe(false);
+    expect(serialPending("curation:A")).toBe(true);
+    release();
+    await other;
+  });
+
+  it("serialDrained also waits for a call queued while it waits", async () => {
+    const log: string[] = [];
+    void serial("drain:A", task(log, "first", 10));
+    const drained = serialDrained("drain:");
+    setTimeout(() => void serial("drain:B", task(log, "later", 20)).catch(() => {}), 5);
+    await drained;
+    expect(log).toContain("end later");
+  });
+
+  it("serialDrained with nothing queued settles at once", async () => {
+    await expect(serialDrained("nothing-here:")).resolves.toBeUndefined();
   });
 });

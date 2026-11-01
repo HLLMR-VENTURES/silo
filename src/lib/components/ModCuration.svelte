@@ -11,6 +11,7 @@
     curation,
     tags,
     onCurationChange,
+    saveCuration,
     onTagsChange,
     onFilterTag,
   }: {
@@ -18,6 +19,9 @@
     curation: CurationRow;
     tags: string[];
     onCurationChange: (row: CurationRow) => void;
+    /** Shows and saves a row, putting it back when the save fails (#358). Without it, the row is
+     *  handed to onCurationChange and saved here. */
+    saveCuration?: (row: CurationRow) => Promise<void>;
     onTagsChange: (tags: string[]) => void;
     onFilterTag: (tag: string) => void;
   } = $props();
@@ -26,12 +30,26 @@
   let noteDraft = $state("");
   /** The row the note draft belongs to: the drawer can move to another mod with a draft unsaved. */
   let noteRow: CurationRow | null = null;
+  /** The note sent last and not known to be saved: while it's out, or after it failed, a row
+   *  without it (the failed save put back) doesn't take the text out of the field. */
+  let pendingNote: { techName: string; note: string } | null = null;
+  // A new row for the same mod (a save landed or failed, a flag changed) takes over the field
+  // only when the field holds no unsaved text (#358).
   $effect(() => {
     const c = curation;
     untrack(() => {
-      if (noteRow && noteRow.techName !== c.techName) saveNote();
+      if (noteRow && noteRow.techName !== c.techName) {
+        saveNote();
+        pendingNote = null;
+        noteRow = c;
+        noteDraft = c.note ?? "";
+        return;
+      }
+      const dirty = noteRow !== null && noteDraft !== (noteRow.note ?? "");
+      const unsaved =
+        pendingNote?.techName === c.techName && pendingNote.note === noteDraft && (c.note ?? "") !== noteDraft;
       noteRow = c;
-      noteDraft = c.note ?? "";
+      if (!dirty && !unsaved) noteDraft = c.note ?? "";
     });
   });
   // Esc or a view switch removes the field, which doesn't reliably blur it first: keep the draft.
@@ -39,21 +57,34 @@
 
   let newTag = $state("");
 
-  function persistCuration(patch: Partial<CurationRow>) {
-    const next: CurationRow = { ...curation, ...patch };
+  function save(next: CurationRow): Promise<void> {
+    if (saveCuration) return saveCuration(next);
     onCurationChange(next);
-    setCuration(next).catch((e) => reportError(e, "Saving your mod flags"));
+    return setCuration(next);
+  }
+  function persistCuration(patch: Partial<CurationRow>) {
+    save({ ...curation, ...patch }).catch((e) => reportError(e, "Saving your mod flags"));
   }
   function setRating(r: number) {
     persistCuration({ rating: curation.rating === r ? 0 : r });
   }
+  /** Bumped per note sent: only the newest one's success clears pendingNote. */
+  let noteSeq = 0;
   function saveNote() {
     const row = noteRow;
     if (!row || (row.note ?? "") === noteDraft) return;
     const next: CurationRow = { ...row, note: noteDraft };
+    const my = ++noteSeq;
     noteRow = next;
-    onCurationChange(next);
-    setCuration(next).catch((e) => reportError(e, "Saving your mod flags"));
+    pendingNote = { techName: next.techName, note: noteDraft };
+    // On a failure the row goes back to the saved note; the typed one stays in the field while
+    // this mod is open, so leaving the field tries again.
+    save(next).then(
+      () => {
+        if (my === noteSeq) pendingNote = null;
+      },
+      (e) => reportError(e, "Saving your mod flags"),
+    );
   }
   function addTag() {
     const t = newTag.trim();

@@ -182,6 +182,19 @@ describe("drawer Check for updates switch (#333)", () => {
     expect(screen.getByRole("switch", { name: "Check for updates" })).toHaveAttribute("aria-checked", "false");
     expect(screen.getByText(/leaves this mod out of update checks and Update all/)).toBeInTheDocument();
   });
+
+  it("goes through App's saveCuration when given, which puts the row back on a failure (#358)", async () => {
+    const saveCuration = vi.fn(() => Promise.reject(new Error("database is locked")));
+    const p = props(entry(2), { saveCuration });
+    vi.mocked(setCuration).mockClear();
+    render(ModDetail, p);
+    await settle();
+    await userEvent.setup().click(screen.getByRole("switch", { name: "Check for updates" }));
+    await settle();
+    expect(saveCuration).toHaveBeenCalledWith(expect.objectContaining({ skipUpdates: true }));
+    expect(p.onCurationChange).not.toHaveBeenCalled();
+    expect(setCuration).not.toHaveBeenCalled();
+  });
 });
 
 describe("drawer lookups", () => {

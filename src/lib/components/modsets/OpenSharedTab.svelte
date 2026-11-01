@@ -159,7 +159,7 @@
       );
       if (my !== seq) return;
       plan = p;
-      await computePreflight(p);
+      await computePreflight(p, my);
     } catch (e) {
       if (my === seq) error = inlineError(e, "Opening the shared set");
     } finally {
@@ -167,13 +167,18 @@
     }
   }
 
+  // Enter in the link field reaches these too, so they check the same things the buttons do (#358).
+  const pickLocked = () => reading || applying || saving;
+
   async function openLink() {
+    if (pickLocked()) return;
     const url = linkText.trim();
     if (!url) return;
     await open({ kind: "link", url });
   }
 
   async function chooseFile() {
+    if (pickLocked()) return;
     let path: string | null;
     try {
       path = await pickSharedSetFile();
@@ -189,6 +194,7 @@
     } catch {
       /* the preview will say what's wrong with the file */
     }
+    if (pickLocked()) return; // a download or save started while the file dialog was open
     await open(kind === "multiplayer" ? { kind: "multiplayer", path } : { kind: "file", path });
   }
 
@@ -200,8 +206,9 @@
     return [...out];
   }
 
-  // Advisory: dependency gaps and conflicts among the set's mods you already have.
-  async function computePreflight(p: ImportPlan) {
+  // Advisory: dependency gaps and conflicts among the set's mods you already have. `my` is the
+  // preview's seq: a conflict scan that lands after another set was opened is dropped (#358).
+  async function computePreflight(p: ImportPlan, my: number) {
     const setTechs = new Set(allMods(p));
     const byTech = new Map(library.map((m) => [m.techName, m]));
     const have = [...setTechs].map((t) => byTech.get(t)).filter((m): m is ModEntry => m != null);
@@ -219,15 +226,17 @@
       const cs = await detectConflicts(
         have.map((m) => ({ techName: m.techName, title: m.title, path: m.path, kind: m.kind })),
       );
-      preflightConflicts = cs.filter((c) => c.severity !== "info");
+      if (my === seq) preflightConflicts = cs.filter((c) => c.severity !== "info");
     } catch {
-      preflightConflicts = [];
+      if (my === seq) preflightConflicts = [];
     }
   }
 
   async function download() {
     if (!plan || !source || source.kind === "multiplayer" || applying) return;
     const s = source;
+    // Read now: the plan this download was asked for, even if another preview replaces it.
+    const fingerprint = plan.fingerprint;
     // It downloads mods into the library: a library write, one at a time.
     const op = tryStart("Downloading a shared set's mods", { exclusive: "library-write", progress: true });
     if (!op) {
@@ -249,7 +258,7 @@
       const rep = await collectionApply(
         s.kind === "link" ? s.url : "",
         installed,
-        plan.fingerprint,
+        fingerprint,
         s.kind === "file" ? s.path : null,
       );
       if (my === seq) {

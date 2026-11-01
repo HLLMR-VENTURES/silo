@@ -353,8 +353,10 @@ export function getOverrides(): Promise<CategoryOverride[]> {
   return invoke<CategoryOverride[]>("get_overrides");
 }
 
+// Queued per mod like curation (#358): two quick category picks land in the order they were made.
 export function setOverride(row: CategoryOverride): Promise<void> {
-  return invoke("set_override", { row });
+  const snapshot = { ...row };
+  return serial(`override:${row.techName}`, () => invoke<void>("set_override", { row: snapshot }));
 }
 
 // ── Organize / projection ──
