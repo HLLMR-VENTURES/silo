@@ -5,12 +5,13 @@
 //! `FS25_FieldToDoList.zip`). Silo never renames a mod zip (multiplayer needs the exact bytes and
 //! the game names the mod after the file), so when Browse installs one of these it records which
 //! entry the file came from: the file's name, its whole-file SHA-256, and the entry's id. Every
-//! catalog join (the drawer's catalog facts, update checks, Verify integrity) asks here first.
+//! catalog join of a library zip (the drawer's catalog facts, update checks, Verify integrity,
+//! sharing a mod set) asks here first.
 //!
-//! The link belongs to the bytes Silo installed. A different build under the same name (an
-//! update from elsewhere, a file swapped in by hand) has another hash and isn't linked. Size and
-//! modified time are only a shortcut for "still the file Silo recorded"; when either differs the
-//! file is hashed again before the link is used.
+//! The link belongs to the bytes Silo installed: it is used only when the file hashes to what was
+//! recorded. A different build under the same name (an update from elsewhere, a file swapped in
+//! by hand) has another hash and isn't linked. The recorded size only spares hashing a file that
+//! can't match.
 
 use crate::db::{self, CatalogAliasRow};
 use rusqlite::Connection;
@@ -22,6 +23,8 @@ pub struct Link {
     pub catalog_id: String,
     /// The entry's techName when the file was installed (None when the catalog had none).
     pub catalog_tech_name: Option<String>,
+    /// The address the file was downloaded from.
+    pub download_url: Option<String>,
 }
 
 impl From<&CatalogAliasRow> for Link {
@@ -29,6 +32,7 @@ impl From<&CatalogAliasRow> for Link {
         Link {
             catalog_id: r.catalog_id.clone(),
             catalog_tech_name: r.catalog_tech_name.clone(),
+            download_url: r.download_url.clone(),
         }
     }
 }
@@ -54,54 +58,37 @@ pub fn needs_alias(filename: &str, catalog_tech_name: Option<&str>) -> bool {
     catalog_tech_name.map(str::trim) != Some(stem.as_str())
 }
 
-/// Size and modified time (ms since the epoch) of the file `path` leads to. None when it can't
-/// be read or isn't a file.
-fn stats(path: &Path) -> Option<(i64, i64)> {
-    let m = std::fs::metadata(path).ok()?;
-    if !m.is_file() {
-        return None;
-    }
-    let mtime = m
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_millis() as i64;
-    Some((m.len() as i64, mtime))
-}
-
-/// Record that the zip at `file`, whose whole-file SHA-256 is `sha256`, was installed by Silo
-/// from catalog entry `catalog_id`. Call right after placing it.
+/// Record that the zip named `tech_name` (`.zip` added) whose bytes are `size` long and hash
+/// to `sha256` came from the catalog entry `link`. Called before the file is placed, so a
+/// placed file always has its record; a record whose file never arrives matches nothing else.
 pub fn record(
     conn: &Connection,
-    file: &Path,
+    tech_name: &str,
     sha256: &str,
-    catalog_id: &str,
-    catalog_tech_name: Option<&str>,
+    size: u64,
+    link: &Link,
 ) -> Result<(), String> {
-    let tech_name = zip_tech_name(file).ok_or_else(|| format!("{} isn't a zip", file.display()))?;
-    let (size, mtime_ms) =
-        stats(file).ok_or_else(|| format!("couldn't read {}", file.display()))?;
     db::record_catalog_alias(
         conn,
         &CatalogAliasRow {
-            tech_name,
+            tech_name: tech_name.to_string(),
             archive_sha256: sha256.to_ascii_lowercase(),
-            size,
-            mtime_ms,
-            catalog_id: catalog_id.to_string(),
-            catalog_tech_name: catalog_tech_name
+            size: size as i64,
+            catalog_id: link.catalog_id.clone(),
+            catalog_tech_name: link
+                .catalog_tech_name
+                .as_deref()
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
                 .map(str::to_string),
+            download_url: link.download_url.clone(),
         },
     )
 }
 
 /// The catalog entry Silo installed the zip at `path` from, when the library knows it as
-/// `tech_name` (the file's own name must be that) and it is still exactly the file Silo
-/// installed. Hashes the file only when there is an alias for its name and its size or
-/// modified time changed since it was recorded.
+/// `tech_name` (the file's own name must be that) and the file hashes to what Silo recorded.
+/// A file with no record for its name, or whose size matches none, is never hashed.
 pub fn link_for_file(conn: &Connection, tech_name: &str, path: &Path) -> Option<Link> {
     link_for_file_with(conn, tech_name, path, crate::provenance::sha256_file)
 }
@@ -117,28 +104,19 @@ fn link_for_file_with(
         return None;
     }
     let rows = db::catalog_aliases(conn, tech_name);
-    if rows.is_empty() {
+    let meta = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    let size = meta.len() as i64;
+    if !rows.iter().any(|r| r.size == size) {
         return None;
     }
-    let (size, mtime_ms) = stats(path)?;
-    if let Some(r) = rows
-        .iter()
-        .find(|r| r.size == size && r.mtime_ms == mtime_ms)
-    {
-        return Some(r.into());
-    }
     let sha = hash(path).ok()?.to_ascii_lowercase();
-    let r = rows.iter().find(|r| r.archive_sha256 == sha)?;
-    // The same bytes with a new time (a copy, say): the next check needn't hash it again.
-    if let Err(e) = db::touch_catalog_alias(conn, tech_name, &sha, size, mtime_ms) {
-        log::warn!("[catalog] couldn't note {tech_name}'s new file time: {e}");
-    }
-    Some(r.into())
+    rows.iter()
+        .find(|r| r.size == size && r.archive_sha256 == sha)
+        .map(Link::from)
 }
 
 /// The catalog entry Silo installed a zip from, given the file's path and its whole-file
-/// SHA-256 already computed (Verify integrity hashes the file anyway). Matches on the hash
-/// only, never on size and time.
+/// SHA-256 already computed (Verify integrity and sharing a set hash the file anyway).
 pub fn link_for_hash(
     conn: &Connection,
     tech_name: &str,
@@ -153,6 +131,37 @@ pub fn link_for_hash(
         .iter()
         .find(|r| r.archive_sha256 == sha)
         .map(Link::from)
+}
+
+/// The GitHub repository (`owner/repo`, lowercased) a release-asset address belongs to:
+/// `https://github.com/<owner>/<repo>/releases/download/...`. None for anything else.
+pub fn release_repo(url: &str) -> Option<String> {
+    let u = url::Url::parse(url).ok()?;
+    let host = u.host_str()?.to_ascii_lowercase();
+    if u.scheme() != "https" || (host != "github.com" && host != "www.github.com") {
+        return None;
+    }
+    let segs: Vec<&str> = u.path_segments()?.collect();
+    match segs.as_slice() {
+        [owner, repo, "releases", "download", tag, file, ..]
+            if !owner.is_empty() && !repo.is_empty() && !tag.is_empty() && !file.is_empty() =>
+        {
+            Some(format!("{owner}/{repo}").to_ascii_lowercase())
+        }
+        _ => None,
+    }
+}
+
+/// Whether an update downloaded from `asset_url` is another release of the build `link` was
+/// installed from: a release asset of the same GitHub repository.
+pub fn same_release_repo(link: &Link, asset_url: &str) -> bool {
+    match (
+        link.download_url.as_deref().and_then(release_repo),
+        release_repo(asset_url),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -186,10 +195,28 @@ mod tests {
             .collect()
     }
 
-    fn set_mtime(path: &Path, secs_ago: u64) {
+    const TODO_URL: &str =
+        "https://github.com/knoellix/FS25_ToDo/releases/download/v0.1.0.17/FS25_FieldToDoList.zip";
+
+    fn todo() -> Link {
+        Link {
+            catalog_id: "cat-todo".into(),
+            catalog_tech_name: Some("FS25_ToDo".into()),
+            download_url: Some(TODO_URL.into()),
+        }
+    }
+
+    /// Write `bytes` as `<dir>/<tech>.zip` and record it as installed from `todo()`.
+    fn installed(conn: &Connection, dir: &Path, tech: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let file = dir.join(format!("{tech}.zip"));
+        std::fs::write(&file, bytes).unwrap();
+        record(conn, tech, &sha(bytes), bytes.len() as u64, &todo()).unwrap();
+        file
+    }
+
+    fn set_mtime(path: &Path, t: std::time::SystemTime) {
         let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago))
-            .unwrap();
+        f.set_modified(t).unwrap();
     }
 
     #[test]
@@ -219,50 +246,30 @@ mod tests {
     }
 
     #[test]
-    fn the_installed_file_keeps_its_link_without_rehashing() {
+    fn the_installed_file_is_linked_by_its_hash() {
         let dir = temp_dir("keeps");
         let conn = conn_in(&dir);
-        let file = dir.join("FS25_FieldToDoList.zip");
-        std::fs::write(&file, b"build one").unwrap();
-        record(
-            &conn,
-            &file,
-            &sha(b"build one"),
-            "cat-todo",
-            Some("FS25_ToDo"),
-        )
-        .unwrap();
-
-        let hashed = Cell::new(0);
-        let count = |p: &Path| {
-            hashed.set(hashed.get() + 1);
-            crate::provenance::sha256_file(p)
-        };
-        let link = link_for_file_with(&conn, "FS25_FieldToDoList", &file, count).unwrap();
-        assert_eq!(link.catalog_id, "cat-todo");
-        assert_eq!(link.catalog_tech_name.as_deref(), Some("FS25_ToDo"));
-        assert_eq!(hashed.get(), 0, "same size and time: no hash");
+        let file = installed(&conn, &dir, "FS25_FieldToDoList", b"build one");
+        let link = link_for_file(&conn, "FS25_FieldToDoList", &file).unwrap();
+        assert_eq!(link, todo());
+        // Copied elsewhere (a new modified time): the same bytes, still linked.
+        set_mtime(&file, std::time::SystemTime::UNIX_EPOCH);
+        assert_eq!(
+            link_for_file(&conn, "FS25_FieldToDoList", &file),
+            Some(todo())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_different_build_under_the_same_name_loses_the_link() {
+    fn a_different_build_with_the_same_size_and_time_loses_the_link() {
         let dir = temp_dir("replaced");
         let conn = conn_in(&dir);
-        let file = dir.join("FS25_FieldToDoList.zip");
-        std::fs::write(&file, b"build one").unwrap();
-        record(
-            &conn,
-            &file,
-            &sha(b"build one"),
-            "cat-todo",
-            Some("FS25_ToDo"),
-        )
-        .unwrap();
-
-        // Same length, so only the hash can tell them apart.
+        let file = installed(&conn, &dir, "FS25_FieldToDoList", b"build one");
+        let when = std::fs::metadata(&file).unwrap().modified().unwrap();
+        // Same length and, put back by hand, the same modified time: only the hash differs.
         std::fs::write(&file, b"build two").unwrap();
-        set_mtime(&file, 3600);
+        set_mtime(&file, when);
         assert_eq!(link_for_file(&conn, "FS25_FieldToDoList", &file), None);
         assert_eq!(
             link_for_hash(&conn, "FS25_FieldToDoList", &file, &sha(b"build two")),
@@ -272,30 +279,26 @@ mod tests {
     }
 
     #[test]
-    fn the_same_bytes_with_a_new_time_keep_the_link_and_note_the_time() {
-        let dir = temp_dir("touched");
+    fn a_file_whose_size_matches_no_record_is_not_hashed() {
+        let dir = temp_dir("size");
         let conn = conn_in(&dir);
-        let file = dir.join("FS25_FieldToDoList.zip");
-        std::fs::write(&file, b"build one").unwrap();
-        record(
-            &conn,
-            &file,
-            &sha(b"build one"),
-            "cat-todo",
-            Some("FS25_ToDo"),
-        )
-        .unwrap();
-        set_mtime(&file, 3600); // copied elsewhere and back, say
-
+        let file = installed(&conn, &dir, "FS25_FieldToDoList", b"build one");
+        std::fs::write(&file, b"a longer build two").unwrap();
         let hashed = Cell::new(0);
         let count = |p: &Path| {
             hashed.set(hashed.get() + 1);
             crate::provenance::sha256_file(p)
         };
-        assert!(link_for_file_with(&conn, "FS25_FieldToDoList", &file, count).is_some());
-        assert_eq!(hashed.get(), 1);
-        assert!(link_for_file_with(&conn, "FS25_FieldToDoList", &file, count).is_some());
-        assert_eq!(hashed.get(), 1, "the new time was noted");
+        assert_eq!(
+            link_for_file_with(&conn, "FS25_FieldToDoList", &file, count),
+            None
+        );
+        assert_eq!(hashed.get(), 0);
+        // A mod without an alias is never hashed either.
+        let plain = dir.join("FS25_Plain.zip");
+        std::fs::write(&plain, b"x").unwrap();
+        assert_eq!(link_for_file_with(&conn, "FS25_Plain", &plain, count), None);
+        assert_eq!(hashed.get(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -303,17 +306,7 @@ mod tests {
     fn the_link_needs_the_file_to_be_the_named_mod() {
         let dir = temp_dir("named");
         let conn = conn_in(&dir);
-        let file = dir.join("FS25_FieldToDoList.zip");
-        std::fs::write(&file, b"build one").unwrap();
-        record(
-            &conn,
-            &file,
-            &sha(b"build one"),
-            "cat-todo",
-            Some("FS25_ToDo"),
-        )
-        .unwrap();
-
+        let file = installed(&conn, &dir, "FS25_FieldToDoList", b"build one");
         // Another mod's name, or the same bytes under another file name.
         assert_eq!(link_for_file(&conn, "FS25_Other", &file), None);
         let copy = dir.join("FS25_Copy.zip");
@@ -323,36 +316,60 @@ mod tests {
             link_for_hash(&conn, "FS25_Copy", &copy, &sha(b"build one")),
             None
         );
-        // A mod without an alias is never hashed.
-        let plain = dir.join("FS25_Plain.zip");
-        std::fs::write(&plain, b"x").unwrap();
-        let never = |_: &Path| -> Result<String, String> { panic!("hashed") };
-        assert_eq!(link_for_file_with(&conn, "FS25_Plain", &plain, never), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn each_installed_build_keeps_its_own_link() {
-        let dir = temp_dir("builds");
+    fn same_named_files_in_two_folders_are_each_judged_by_their_bytes() {
+        let dir = temp_dir("folders");
         let conn = conn_in(&dir);
-        let a = dir.join("one").join("FS25_FieldToDoList.zip");
-        let b = dir.join("two").join("FS25_FieldToDoList.zip");
-        std::fs::create_dir_all(a.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(b.parent().unwrap()).unwrap();
-        std::fs::write(&a, b"build one").unwrap();
-        std::fs::write(&b, b"build two!").unwrap();
-        record(&conn, &a, &sha(b"build one"), "cat-todo", Some("FS25_ToDo")).unwrap();
-        record(
-            &conn,
-            &b,
-            &sha(b"build two!"),
-            "cat-todo",
-            Some("FS25_ToDo"),
-        )
-        .unwrap();
+        let one = dir.join("one");
+        let two = dir.join("two");
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        let a = installed(&conn, &one, "FS25_FieldToDoList", b"build one");
+        // The other folder holds a different build of the same size and time, never installed.
+        let b = two.join("FS25_FieldToDoList.zip");
+        std::fs::write(&b, b"build two").unwrap();
+        set_mtime(&b, std::fs::metadata(&a).unwrap().modified().unwrap());
+        assert!(link_for_file(&conn, "FS25_FieldToDoList", &a).is_some());
+        assert_eq!(link_for_file(&conn, "FS25_FieldToDoList", &b), None);
+        // Installed there too: each build keeps its own record.
+        let b = installed(&conn, &two, "FS25_FieldToDoList", b"build two!");
         assert!(link_for_file(&conn, "FS25_FieldToDoList", &a).is_some());
         assert!(link_for_file(&conn, "FS25_FieldToDoList", &b).is_some());
-        assert!(link_for_hash(&conn, "FS25_FieldToDoList", &a, &sha(b"build one")).is_some());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_update_from_the_same_release_repo_is_the_same_entry() {
+        assert_eq!(
+            release_repo(TODO_URL).as_deref(),
+            Some("knoellix/fs25_todo")
+        );
+        let later =
+            "https://github.com/Knoellix/FS25_ToDo/releases/download/v0.2/FS25_FieldToDoList.zip";
+        assert!(same_release_repo(&todo(), later));
+        let fork =
+            "https://github.com/someone/FS25_ToDo/releases/download/v0.2/FS25_FieldToDoList.zip";
+        assert!(!same_release_repo(&todo(), fork));
+        // Not a release asset, or not GitHub, or no address recorded: never the same.
+        assert_eq!(
+            release_repo("https://github.com/knoellix/FS25_ToDo/archive/main.zip"),
+            None
+        );
+        assert_eq!(
+            release_repo("http://github.com/k/r/releases/download/v1/x.zip"),
+            None
+        );
+        assert_eq!(
+            release_repo("https://github.com.evil.example/k/r/releases/download/v1/x.zip"),
+            None
+        );
+        let no_url = Link {
+            download_url: None,
+            ..todo()
+        };
+        assert!(!same_release_repo(&no_url, later));
     }
 }

@@ -275,17 +275,17 @@ fn migrate_2_to_3(tx: &Connection) -> Result<(), String> {
 /// from, when the file isn't named after the entry's techName (`FS25_ToDo` downloads as
 /// `FS25_FieldToDoList.zip`). Keyed by the zip's own name and its whole-file SHA-256, so the
 /// link belongs to those exact bytes: a different build under the same name never matches.
-/// `size` and `mtime_ms` are a shortcut for "still the file Silo recorded" (as `projection`
-/// does); when they differ, the file is hashed again. Additive.
+/// `size` only spares hashing a file that can't match; `download_url` is where the file came
+/// from (an update from the same GitHub repository keeps the link). Additive.
 fn migrate_3_to_4(tx: &Connection) -> Result<(), String> {
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS catalog_alias (
              tech_name         TEXT NOT NULL,
              archive_sha256    TEXT NOT NULL,
              size              INTEGER NOT NULL,
-             mtime_ms          INTEGER NOT NULL,
              catalog_id        TEXT NOT NULL,
              catalog_tech_name TEXT,
+             download_url      TEXT,
              created_at        INTEGER NOT NULL,
              PRIMARY KEY (tech_name, archive_sha256)
          );",
@@ -1037,30 +1037,31 @@ pub struct CatalogAliasRow {
     /// Lowercase hex SHA-256 of the whole zip as installed.
     pub archive_sha256: String,
     pub size: i64,
-    pub mtime_ms: i64,
     pub catalog_id: String,
     /// The entry's techName when it was installed (None when the catalog had none).
     pub catalog_tech_name: Option<String>,
+    /// The address the file was downloaded from.
+    pub download_url: Option<String>,
 }
 
 /// Save a catalog alias, replacing the row for the same file name and bytes.
 pub fn record_catalog_alias(conn: &Connection, row: &CatalogAliasRow) -> Result<(), String> {
     let now = unix_now().as_secs() as i64;
     conn.execute(
-        "INSERT INTO catalog_alias(tech_name, archive_sha256, size, mtime_ms, catalog_id,
-                                   catalog_tech_name, created_at)
+        "INSERT INTO catalog_alias(tech_name, archive_sha256, size, catalog_id,
+                                   catalog_tech_name, download_url, created_at)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(tech_name, archive_sha256) DO UPDATE SET
-             size = excluded.size, mtime_ms = excluded.mtime_ms,
-             catalog_id = excluded.catalog_id, catalog_tech_name = excluded.catalog_tech_name,
-             created_at = excluded.created_at",
+             size = excluded.size, catalog_id = excluded.catalog_id,
+             catalog_tech_name = excluded.catalog_tech_name,
+             download_url = excluded.download_url, created_at = excluded.created_at",
         rusqlite::params![
             row.tech_name,
             row.archive_sha256.to_ascii_lowercase(),
             row.size,
-            row.mtime_ms,
             row.catalog_id,
             row.catalog_tech_name,
+            row.download_url,
             now
         ],
     )
@@ -1072,7 +1073,7 @@ pub fn record_catalog_alias(conn: &Connection, row: &CatalogAliasRow) -> Result<
 /// first. Empty when there are none or the table can't be read.
 pub fn catalog_aliases(conn: &Connection, tech_name: &str) -> Vec<CatalogAliasRow> {
     let Ok(mut stmt) = conn.prepare(
-        "SELECT tech_name, archive_sha256, size, mtime_ms, catalog_id, catalog_tech_name
+        "SELECT tech_name, archive_sha256, size, catalog_id, catalog_tech_name, download_url
          FROM catalog_alias WHERE tech_name = ?1 ORDER BY created_at DESC",
     ) else {
         return Vec::new();
@@ -1082,30 +1083,12 @@ pub fn catalog_aliases(conn: &Connection, tech_name: &str) -> Vec<CatalogAliasRo
             tech_name: r.get(0)?,
             archive_sha256: r.get(1)?,
             size: r.get(2)?,
-            mtime_ms: r.get(3)?,
-            catalog_id: r.get(4)?,
-            catalog_tech_name: r.get(5)?,
+            catalog_id: r.get(3)?,
+            catalog_tech_name: r.get(4)?,
+            download_url: r.get(5)?,
         })
     });
     rows.map(|r| r.flatten().collect()).unwrap_or_default()
-}
-
-/// Note that the file with these bytes now has this size and modified time (a copy of it, or
-/// the same bytes written again), so the next check needn't hash it.
-pub fn touch_catalog_alias(
-    conn: &Connection,
-    tech_name: &str,
-    archive_sha256: &str,
-    size: i64,
-    mtime_ms: i64,
-) -> Result<(), String> {
-    conn.execute(
-        "UPDATE catalog_alias SET size = ?3, mtime_ms = ?4
-         WHERE tech_name = ?1 AND archive_sha256 = ?2",
-        rusqlite::params![tech_name, archive_sha256, size, mtime_ms],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 /// Replace all tags for a mod.
@@ -1957,9 +1940,9 @@ mod tests {
             tech_name: "FS25_FieldToDoList".into(),
             archive_sha256: "ABCD".into(),
             size: 10,
-            mtime_ms: 20,
             catalog_id: "cat-todo".into(),
             catalog_tech_name: Some("FS25_ToDo".into()),
+            download_url: Some("https://github.com/k/r/releases/download/v1/x.zip".into()),
         };
         record_catalog_alias(&conn, &row).unwrap();
         // The same file again replaces its row; another build gets its own.
@@ -1975,10 +1958,8 @@ mod tests {
         let first = rows.iter().find(|r| r.archive_sha256 == "abcd").unwrap();
         assert_eq!(first.catalog_id, "cat-todo", "the hash is kept lowercase");
         assert_eq!(first.catalog_tech_name.as_deref(), Some("FS25_ToDo"));
-        touch_catalog_alias(&conn, "FS25_FieldToDoList", "abcd", 11, 21).unwrap();
-        let rows = catalog_aliases(&conn, "FS25_FieldToDoList");
-        let first = rows.iter().find(|r| r.archive_sha256 == "abcd").unwrap();
-        assert_eq!((first.size, first.mtime_ms), (11, 21));
+        assert_eq!(first.size, 10);
+        assert!(first.download_url.is_some());
         assert!(catalog_aliases(&conn, "FS25_fieldtodolist").is_empty());
     }
 
