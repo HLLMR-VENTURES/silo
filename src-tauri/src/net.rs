@@ -317,11 +317,12 @@ fn reject_bad_ip(ip: IpAddr, allow_localhost: bool) -> Result<(), String> {
     let ip = ip.to_canonical();
     if let IpAddr::V6(v6) = ip {
         let s = v6.segments();
-        // NAT64 (well-known 64:ff9b::/96, local-use 64:ff9b:1::/48): a translator forwards to
-        // the IPv4 address in the low 32 bits, so judge that one (a DNS64 network answers
-        // github.com this way). A local-use address in another layout can't be decoded.
-        if s[0] == 0x64 && s[1] == 0xff9b && s[2] <= 1 {
-            if s[3..6] != [0, 0, 0] {
+        // NAT64. The well-known prefix 64:ff9b::/96 reaches the IPv4 address in the low 32
+        // bits, so judge that one (a DNS64 network answers github.com this way). The rest of
+        // 64:ff9b::/32 is refused: the local-use 64:ff9b:1::/48 is split by each network as it
+        // likes, so which IPv4 address it reaches can't be read from the address.
+        if s[0] == 0x64 && s[1] == 0xff9b {
+            if s[2..6] != [0, 0, 0, 0] {
                 return Err("refusing a NAT64 address Silo can't check".to_string());
             }
             let v4 = std::net::Ipv4Addr::from((u32::from(s[6]) << 16) | u32::from(s[7]));
@@ -572,11 +573,13 @@ mod tests {
             "[::1]:443",
             "[fd00::1]:443",
             "[fec0::1234]:443",
-            // NAT64 of a private address (well-known and local-use prefixes), and a local-use
-            // layout that can't be decoded.
+            // NAT64 of a private address, and the local-use NAT64 prefix in any layout (as a
+            // /64 prefix, 64:ff9b:1::808:808 reaches 0.0.0.8, not 8.8.8.8).
             "[64:ff9b::c0a8:101]:443",
             "[64:ff9b:1::a00:1]:443",
+            "[64:ff9b:1::808:808]:443",
             "[64:ff9b:1:ab::8c52:7003]:443",
+            "[64:ff9b:0:1::8c52:7003]:443",
             "[::ffff:10.0.0.1]:443",
         ] {
             let res = public_addrs("evil.example.com:443", stub(vec![private]));
@@ -593,12 +596,7 @@ mod tests {
             vec!["140.82.112.3:443".parse::<SocketAddr>().unwrap()]
         );
         // On a DNS64 network a public site answers with NAT64 of its public address: kept.
-        for nat64 in ["[64:ff9b::8c52:7003]:443", "[64:ff9b:1::8c52:7003]:443"] {
-            assert!(
-                public_addrs("github.com:443", stub(vec![nat64])).is_ok(),
-                "{nat64}"
-            );
-        }
+        assert!(public_addrs("github.com:443", stub(vec!["[64:ff9b::8c52:7003]:443"])).is_ok());
         // A lookup failure passes through.
         let failed = public_addrs("x:443", |_: &str| Err(io::Error::other("no such host")));
         assert!(failed.is_err());
