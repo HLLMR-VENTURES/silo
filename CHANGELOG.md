@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counting mods that load their materials from a script too, and names the mods adding the most.
   **Last run** lists the materials the game skipped. (#341)
 
+### Fixed
+
+- A very large `log.txt` (from a mod that throws an error every frame, say) no longer makes Silo
+  slow or run out of memory. **Last run** reads the start of the log and its last 64 MB, where
+  the mod list and the crash are, and says so when it had to skip the middle. (#351)
+- A mod with an absurdly long list of materials or ground-pile types no longer keeps
+  **Conflicts** busy for hours: such a list is now treated as unreadable, like a broken file.
+  (#351)
+- A mod packed with oversized script files no longer slows down scanning your library. (#351)
+
 ## [1.0.3] - 2026-10-29
 
 The library database moves to version 3 (one added column, for the per-mod update switch). Silo

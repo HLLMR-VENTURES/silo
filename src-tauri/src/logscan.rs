@@ -94,6 +94,9 @@ pub struct LogReport {
     pub fill_type_cap: Option<u32>,
     /// The fill types it skipped because of that limit, in log order.
     pub dropped_fill_types: Vec<String>,
+    /// The log was too big to read whole: only its start and its last [`LOG_TAIL_BYTES`] were
+    /// read, so findings from the middle are missing (#351).
+    pub truncated: bool,
 }
 
 /// What a DLC names when it turns itself off for lack of ground-pile slots: "PnH: unable to
@@ -227,41 +230,125 @@ fn is_continuation(raw: &str, stripped: &str) -> bool {
         || stripped.contains("call stack")
 }
 
+/// How much of a runaway `log.txt` Silo reads (#351). A mod that throws an error every frame can
+/// grow the log to gigabytes, and the middle is then the same error over and over. The start
+/// holds the engine version and the `Available mod:` inventory; the end holds the crash or the
+/// clean exit.
+pub const LOG_HEAD_BYTES: u64 = 4 * 1024 * 1024;
+pub const LOG_TAIL_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read and parse a log, keeping at most `head + tail` bytes of it in memory. A bigger log gives
+/// its first `head` and last `tail` bytes, cut to whole lines; the lines in between are counted
+/// (in fixed-size chunks, never kept), so line numbers stay true, and the report is marked
+/// truncated.
+pub fn scan<R: std::io::Read + std::io::Seek>(
+    mut r: R,
+    head: u64,
+    tail: u64,
+) -> std::io::Result<LogReport> {
+    use std::io::{Read, SeekFrom};
+    let len = r.seek(SeekFrom::End(0))?;
+    r.seek(SeekFrom::Start(0))?;
+    let limit = head.saturating_add(tail);
+    if len <= limit {
+        let mut bytes = Vec::new();
+        // `take` keeps a log that grows while we read within the limit.
+        r.take(limit).read_to_end(&mut bytes)?;
+        return Ok(parse(&String::from_utf8_lossy(&bytes)));
+    }
+    let mut head_bytes = Vec::new();
+    r.by_ref().take(head).read_to_end(&mut head_bytes)?;
+    // Whole lines only: a cut line's rest is in the skipped middle.
+    let keep = head_bytes
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1);
+    head_bytes.truncate(keep);
+    // The tail starts one byte early, so a line that starts exactly at the cut is kept whole.
+    let tail_from = len - tail - 1;
+    let pos = r.stream_position()?;
+    let mut newlines = count_newlines(r.by_ref().take(tail_from.saturating_sub(pos)))?;
+    r.seek(SeekFrom::Start(tail_from))?;
+    let mut tail_bytes = Vec::new();
+    r.take(tail + 1).read_to_end(&mut tail_bytes)?;
+    // Drop the partial line the tail starts in; its newline counts with the middle's.
+    let tail_text = match tail_bytes.iter().position(|&b| b == b'\n') {
+        Some(i) => {
+            newlines += 1;
+            String::from_utf8_lossy(&tail_bytes[i + 1..]).into_owned()
+        }
+        None => String::new(),
+    };
+    let head_text = String::from_utf8_lossy(&head_bytes);
+    let first_tail_line = head_text.lines().count() + newlines + 1;
+    let lines = head_text
+        .lines()
+        .enumerate()
+        .map(|(i, l)| (i + 1, l))
+        .chain(
+            tail_text
+                .lines()
+                .enumerate()
+                .map(|(i, l)| (first_tail_line + i, l)),
+        );
+    let mut report = parse_lines(lines);
+    report.truncated = true;
+    Ok(report)
+}
+
+/// The `\n` bytes in `r`, read in fixed-size chunks.
+fn count_newlines(mut r: impl std::io::Read) -> std::io::Result<usize> {
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut n = 0;
+    loop {
+        match r.read(&mut buf) {
+            Ok(0) => return Ok(n),
+            Ok(got) => n += buf[..got].iter().filter(|&&b| b == b'\n').count(),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Parse a full `log.txt` into a triage report.
 pub fn parse(log: &str) -> LogReport {
+    parse_lines(log.lines().enumerate().map(|(i, l)| (i + 1, l)))
+}
+
+/// Parse a log's lines, each with its 1-based line number, into a triage report. Lines are
+/// streamed, never collected: only the findings are kept. A line continues the finding above it
+/// only when its number follows on, so a gap (the skipped middle of a huge log) ends a block.
+fn parse_lines<'a>(lines: impl Iterator<Item = (usize, &'a str)>) -> LogReport {
+    use std::collections::HashSet;
     let mut engine_version: Option<String> = None;
-    let mut mods_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut mods_seen: HashSet<String> = HashSet::new();
     let mut clean_exit = false;
     let mut ground_pile: Option<u32> = None;
     let mut fill_cap: Option<u32> = None;
-    let mut dropped: Vec<String> = Vec::new();
-    let mut disabled: Vec<String> = Vec::new();
+    let (mut dropped, mut dropped_seen) = (Vec::new(), HashSet::new());
+    let (mut disabled, mut disabled_seen) = (Vec::new(), HashSet::new());
 
     // Dedup findings: the engine writes a scan pass AND a load pass, repeating the same
     // warnings. Key on (mod, severity, message) so a mod that logs one thing twice per
     // run isn't reported as twice as broken.
-    use std::collections::HashSet;
     let mut seen: HashSet<(Option<String>, Severity, String)> = HashSet::new();
     let mut findings: Vec<Finding> = Vec::new();
 
-    let lines: Vec<&str> = log.lines().collect();
-    let mut i = 0usize;
-    while i < lines.len() {
-        let raw = lines[i];
-        let line_no = i + 1;
+    let mut lines = lines.peekable();
+    while let Some((line_no, raw)) = lines.next() {
         let s = strip_prefix(raw);
 
         if ground_pile.is_none() {
             ground_pile = ground_pile_cap(s);
         }
         if let Some(name) = ground_pile_disabled(s) {
-            if !disabled.contains(&name) {
+            if disabled_seen.insert(name.clone()) {
                 disabled.push(name);
             }
         }
         if let Some((cap, name)) = dropped_fill_type(s) {
             fill_cap = Some(cap);
-            if !dropped.contains(&name) {
+            if dropped_seen.insert(name.clone()) {
                 dropped.push(name);
             }
         }
@@ -274,35 +361,35 @@ pub fn parse(log: &str) -> LogReport {
             if let Some(name) = rest.split_whitespace().last() {
                 mods_seen.insert(name.to_string());
             }
-            i += 1;
             continue;
         }
         if s.starts_with("Application quit") || s.starts_with("#End.") {
             clean_exit = true;
-            i += 1;
             continue;
         }
 
         let Some(severity) = severity_of(s) else {
-            i += 1;
             continue;
         };
 
         // Fold continuation lines (bounded) into one block, so a Lua error and its stack
-        // frames are attributed and reported together.
+        // frames are attributed and reported together. A line that doesn't continue it stays
+        // in the iterator for the next round.
         let mut block = s.to_string();
-        let mut j = i + 1;
-        while j < lines.len() && j - i <= 12 {
-            let cs = strip_prefix(lines[j]);
-            if is_continuation(lines[j], cs) {
-                block.push('\n');
-                block.push_str(cs);
-                j += 1;
-            } else {
+        let mut last = line_no;
+        while last - line_no < 12 {
+            let Some(&(next_no, next)) = lines.peek() else {
+                break;
+            };
+            let cs = strip_prefix(next);
+            if next_no != last + 1 || !is_continuation(next, cs) {
                 break;
             }
+            block.push('\n');
+            block.push_str(cs);
+            last = next_no;
+            lines.next();
         }
-        i = j; // resume after the block
 
         // Attribute ONLY via strong signals (path, then clause). No "last loaded mod"
         // guess — blaming the wrong mod is worse than admitting we don't know.
@@ -378,6 +465,7 @@ pub fn parse(log: &str) -> LogReport {
         ground_pile_disabled: disabled,
         fill_type_cap: fill_cap,
         dropped_fill_types: dropped,
+        truncated: false,
     }
 }
 
@@ -581,6 +669,93 @@ Application quit
         assert_eq!(r.fill_type_cap, Some(255));
         assert_eq!(r.dropped_fill_types, ["LIQUID_UREA", "GYPSUM"]);
         assert!(parse(CRASHY).dropped_fill_types.is_empty());
+    }
+
+    /// A log no bigger than head + tail is read whole, exactly as `parse` reads it.
+    #[test]
+    fn scan_reads_a_small_log_whole() {
+        let r = scan(std::io::Cursor::new(CRASHY), 10, CRASHY.len() as u64).unwrap();
+        assert!(!r.truncated);
+        assert_eq!(r.total_findings, parse(CRASHY).total_findings);
+        assert_eq!(r.mods[0].sample_line, parse(CRASHY).mods[0].sample_line);
+    }
+
+    /// #351: a log bigger than head + tail keeps whole lines from its start and its end, and
+    /// every finding keeps its true line number, whatever the cut points.
+    #[test]
+    fn scan_keeps_the_head_and_tail_with_true_line_numbers() {
+        let log = "GIANTS Engine Runtime 10.0
+Available mod: (Hash: a) (Version: 1.0.0.0) FS25_A
+Error: early in mod 'FS25_A'
+Error: spam 1 in mod 'FS25_Spam'
+Error: spam 2 in mod 'FS25_Spam'
+  mods/FS25_Spam/a.lua(1)
+Error: spam 3 in mod 'FS25_Spam'
+Error: Running LUA method 'update'.
+  mods/FS25_Late/x.lua(9) : nil
+Application quit
+";
+        let full: Vec<&str> = log.lines().collect();
+        let len = log.len() as u64;
+        for head in 0..len {
+            for tail in 0..len - head {
+                let r = scan(std::io::Cursor::new(log), head, tail).unwrap();
+                assert!(r.truncated, "head {head} tail {tail}");
+                let check = |line: usize, msg: &str| {
+                    let first = msg.lines().next().unwrap();
+                    assert_eq!(
+                        strip_prefix(full[line - 1]),
+                        first,
+                        "head {head} tail {tail}"
+                    );
+                };
+                for m in &r.mods {
+                    check(m.sample_line, &m.sample);
+                }
+                // The last line is whole in the tail as soon as the tail can hold it.
+                if tail >= "Application quit\n".len() as u64 {
+                    assert!(r.clean_exit, "head {head} tail {tail}");
+                } else {
+                    assert!(!r.clean_exit, "head {head} tail {tail}");
+                }
+            }
+        }
+        // A realistic cut: the start and the crash at the end survive, the spam doesn't.
+        let tail = (log.len() - log.find("Error: Running").unwrap()) as u64;
+        let r = scan(std::io::Cursor::new(log), 120, tail).unwrap();
+        assert_eq!(r.engine_version.as_deref(), Some("10.0"));
+        assert_eq!(r.mod_count, 1);
+        let late = r.mods.iter().find(|m| m.mod_name == "FS25_Late").unwrap();
+        assert_eq!(late.sample_line, 8);
+        assert!(r.mods.iter().all(|m| m.mod_name != "FS25_Spam"));
+    }
+
+    /// Lines that don't follow on (the gap where a huge log's middle was skipped) never fold
+    /// into the finding above them.
+    #[test]
+    fn a_gap_ends_a_block() {
+        let r = parse_lines([(1, "Error: boom"), (9, "  mods/FS25_B/x.lua(1)")].into_iter());
+        assert_eq!((r.unattributed, r.total_findings), (1, 1));
+        let r = parse_lines([(1, "Error: boom"), (2, "  mods/FS25_B/x.lua(1)")].into_iter());
+        assert_eq!(r.mods[0].mod_name, "FS25_B");
+    }
+
+    /// The fold still stops after 12 continuation lines, as before #351.
+    #[test]
+    fn a_block_folds_at_most_twelve_lines() {
+        let mut log = String::from("Error: boom\n");
+        for i in 0..14 {
+            log.push_str(&format!("  frame{i}.lua\n"));
+        }
+        let r = parse(&log);
+        assert_eq!(r.total_findings, 1);
+        let mut log = String::from("Error: boom\n");
+        for i in 0..12 {
+            log.push_str(&format!("  frame{i}.lua\n"));
+        }
+        log.push_str("  mods/FS25_Thirteen/x.lua\n");
+        // The 13th line isn't folded, so the mod it names isn't blamed.
+        assert_eq!(parse(&log).unattributed, 1);
     }
 
     /// #339: name only the DLCs that actually logged turning themselves off.

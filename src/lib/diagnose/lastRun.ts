@@ -98,11 +98,13 @@ export function logTimeLabel(ms: number, now: number, locale?: string): string {
   return `${day}, ${time}`;
 }
 
-/** "FS25 1.4.0.0 · 737 mods loaded · log from 9:42 PM" (parts it doesn't know are left out). */
+/** "FS25 1.4.0.0 · 737 mods loaded · log from 9:42 PM" (parts it doesn't know are left out), plus a
+ *  note when the log was too big to read whole (#351). */
 export function lastRunMeta(report: LogReport, logTime: string | null): string {
   const parts: string[] = [];
   if (report.engineVersion) parts.push(`FS25 ${report.engineVersion}`);
   parts.push(`${formatCount(report.modCount)} ${plural(report.modCount, { one: "mod", other: "mods" })} loaded`);
   if (logTime) parts.push(`log from ${logTime}`);
+  if (report.truncated) parts.push("very long log: Silo read only its start and end");
   return parts.join(" · ");
 }

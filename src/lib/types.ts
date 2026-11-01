@@ -411,6 +411,8 @@ export interface LogReport {
   fillTypeCap: number | null;
   /** The fill types it skipped because of that limit. */
   droppedFillTypes: string[];
+  /** The log was too big to read whole: only its start and its end were read (#351). */
+  truncated: boolean;
 }
 
 // ── Multiplayer mod-set sync ──

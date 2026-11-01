@@ -18,7 +18,7 @@ function report(crashed: boolean, mods: LogModHealth[], over: Partial<LogReport>
     crashed,
     mods,
     unattributed: 0,
-    totalFindings: 0, groundPileCap: null, groundPileDisabled: [], fillTypeCap: null, droppedFillTypes: [],
+    totalFindings: 0, groundPileCap: null, groundPileDisabled: [], fillTypeCap: null, droppedFillTypes: [], truncated: false,
     ...over,
   };
 }
@@ -138,6 +138,9 @@ describe("Last run", () => {
     );
     expect(lastRunMeta(r, "9:42 PM")).toBe("FS25 1.4.0.0 · 737 mods loaded · log from 9:42 PM");
     expect(lastRunMeta(report(false, [], { engineVersion: null, modCount: 1 }), null)).toBe("1 mod loaded");
+    expect(lastRunMeta(report(false, [], { truncated: true }), null)).toBe(
+      "FS25 1.4.0.0 · 737 mods loaded · very long log: Silo read only its start and end",
+    );
   });
 
   it("log time: the time today, the date before that", () => {

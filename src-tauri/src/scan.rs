@@ -369,6 +369,20 @@ fn build_entry(c: &Candidate) -> ModEntry {
 /// decompresses Lua only until a hit or this budget is spent.
 const LUA_SCAN_BUDGET: u64 = 8 * 1024 * 1024;
 const LUA_MEMBER_CAP: u64 = 4 * 1024 * 1024;
+/// Most Lua files the Tier-B grep opens in one mod. The biggest real script mods ship a few
+/// hundred (Courseplay about 270); past this the rest go unread, as after the byte budget.
+const LUA_MEMBER_LIMIT: usize = 1000;
+
+/// Read at most `cap` bytes of one Lua file for the Tier-B grep. Returns the bytes it consumed,
+/// which the caller charges to the budget whether or not the file fit (an oversized or broken
+/// file still cost the decompression), and the contents when the whole file fit.
+fn read_lua<R: Read>(r: R, cap: u64) -> (u64, Option<Vec<u8>>) {
+    let mut buf = Vec::new();
+    // On an error `read_to_end` keeps what it read, so `buf.len()` is still what it consumed.
+    let ok = r.take(cap + 1).read_to_end(&mut buf).is_ok();
+    let used = buf.len() as u64;
+    (used, (ok && used <= cap).then_some(buf))
+}
 
 /// Detect whether a mod exposes user-configurable settings by looking inside it.
 ///
@@ -429,18 +443,18 @@ fn detect_settings_zip(path: &Path) -> (bool, SettingsSource) {
         }
     }
     let mut budget = LUA_SCAN_BUDGET;
-    for name in lua {
+    for name in lua.into_iter().take(LUA_MEMBER_LIMIT) {
         if budget == 0 {
             break;
         }
         let Ok(f) = archive.by_name(&name) else {
             continue;
         };
-        let cap = budget.min(LUA_MEMBER_CAP);
-        let Ok(bytes) = read_capped(f, cap, "lua") else {
+        let (used, bytes) = read_lua(f, budget.min(LUA_MEMBER_CAP));
+        budget = budget.saturating_sub(used);
+        let Some(bytes) = bytes else {
             continue; // over the per-member cap — skip it, keep scanning the rest
         };
-        budget = budget.saturating_sub(bytes.len() as u64);
         if lua_has_settings_signature(&bytes) {
             return (true, SettingsSource::Runtime);
         }
@@ -467,18 +481,18 @@ fn detect_settings_dir(path: &Path) -> (bool, SettingsSource) {
         }
     }
     let mut budget = LUA_SCAN_BUDGET;
-    for p in lua {
+    for p in lua.into_iter().take(LUA_MEMBER_LIMIT) {
         if budget == 0 {
             break;
         }
         let Ok(file) = fs::File::open(&p) else {
             continue;
         };
-        let cap = budget.min(LUA_MEMBER_CAP);
-        let Ok(bytes) = read_capped(file, cap, "lua") else {
+        let (used, bytes) = read_lua(file, budget.min(LUA_MEMBER_CAP));
+        budget = budget.saturating_sub(used);
+        let Some(bytes) = bytes else {
             continue;
         };
-        budget = budget.saturating_sub(bytes.len() as u64);
         if lua_has_settings_signature(&bytes) {
             return (true, SettingsSource::Runtime);
         }
@@ -719,7 +733,10 @@ mod symlink_tests {
 
 #[cfg(test)]
 mod settings_detect_tests {
-    use super::{detect_settings, is_settings_xml, lua_has_settings_signature, SettingsSource};
+    use super::{
+        detect_settings, is_settings_xml, lua_has_settings_signature, read_lua, SettingsSource,
+        LUA_MEMBER_CAP, LUA_MEMBER_LIMIT,
+    };
 
     #[test]
     fn is_settings_xml_matches_value_and_gui_files_only() {
@@ -777,6 +794,68 @@ mod settings_detect_tests {
         std::fs::create_dir_all(d.join("scripts")).unwrap();
         std::fs::write(d.join("scripts/s.lua"), b"local d = g_modSettingsDirectory").unwrap();
         assert_eq!(detect_settings(&d, "dir"), (true, SettingsSource::Runtime));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_lua_reports_what_it_consumed() {
+        assert_eq!(read_lua(&b"abc"[..], 3), (3, Some(b"abc".to_vec())));
+        // Over the cap: the bytes read still count, the contents don't come back.
+        assert_eq!(read_lua(&b"abcdef"[..], 3), (4, None));
+    }
+
+    /// A zip of Lua members, in order, deflated.
+    fn lua_zip(path: &std::path::Path, members: &[(String, Vec<u8>)]) {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        for (name, bytes) in members {
+            w.start_file(name.as_str(), zip::write::SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(bytes).unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    const SIGNATURE: &[u8] = b"local d = g_modSettingsDirectory";
+
+    /// Oversized members cost their decompressed bytes too (#351): two zero-filled ones just
+    /// over the per-member cap spend the whole budget, so a later member goes unread.
+    #[test]
+    fn oversized_lua_members_spend_the_budget() {
+        let d = tmp("oversized");
+        let big = vec![0u8; LUA_MEMBER_CAP as usize + 1];
+        let sig = ("z.lua".to_string(), SIGNATURE.to_vec());
+        let zip = d.join("m.zip");
+        lua_zip(&zip, std::slice::from_ref(&sig));
+        assert_eq!(
+            detect_settings(&zip, "zip"),
+            (true, SettingsSource::Runtime)
+        );
+        let a = ("a.lua".to_string(), big.clone());
+        let b = ("b.lua".to_string(), big);
+        lua_zip(&zip, &[a, b, sig]);
+        assert_eq!(detect_settings(&zip, "zip"), (false, SettingsSource::None));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Only the first [`LUA_MEMBER_LIMIT`] Lua members are opened (#351).
+    #[test]
+    fn lua_members_past_the_limit_go_unread() {
+        let d = tmp("member_limit");
+        let zip = d.join("m.zip");
+        let with_sig_at = |at: usize| {
+            let mut m: Vec<(String, Vec<u8>)> =
+                (0..at).map(|i| (format!("s/{i}.lua"), vec![])).collect();
+            m.push(("s/last.lua".to_string(), SIGNATURE.to_vec()));
+            m
+        };
+        lua_zip(&zip, &with_sig_at(LUA_MEMBER_LIMIT - 1));
+        assert_eq!(
+            detect_settings(&zip, "zip"),
+            (true, SettingsSource::Runtime)
+        );
+        lua_zip(&zip, &with_sig_at(LUA_MEMBER_LIMIT));
+        assert_eq!(detect_settings(&zip, "zip"), (false, SettingsSource::None));
         let _ = std::fs::remove_dir_all(&d);
     }
 
