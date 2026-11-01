@@ -105,7 +105,8 @@ pub fn folder_key(path: &str) -> String {
 fn silo_folder(line: &str, silo: &[String]) -> Option<String> {
     const OPEN: &str = "Failed to open xml file '";
     let rest = &line[line.find(OPEN)? + OPEN.len()..];
-    let path = &rest[..rest.find('\'')?];
+    // The last quote closes it: a folder name may hold one ("D:/O'Brien/mods").
+    let path = &rest[..rest.rfind('\'')?];
     let (dir, file) = path.rsplit_once(['/', '\\'])?;
     if !file.eq_ignore_ascii_case("modDesc.xml") {
         return None;
@@ -651,6 +652,15 @@ Application quit
             )
             .as_deref(),
             Some("d:\\mods\\ARCHIVE")
+        );
+        let quoted = vec![folder_key("D:/O'Brien/mods/backups")];
+        assert_eq!(
+            silo_folder(
+                "Error: Failed to open xml file 'D:/O'Brien/mods/backups/modDesc.xml'.",
+                &quoted
+            )
+            .as_deref(),
+            Some("D:/O'Brien/mods/backups")
         );
         // Another file in it, a folder inside it, or no closing quote: not this line.
         for line in [

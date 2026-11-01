@@ -130,7 +130,8 @@ pub const MAX_NAME_BYTES: usize = 256;
 /// The most script-loaded lists Silo reads from one mod for its estimate (real mods ship up to
 /// five). Once a mod's names reach [`MAX_LIST_NAMES`] no further list is read, so they stay under
 /// twice that (each list is capped too); the estimate is far past any game cap by then, so where
-/// exactly it stops doesn't change the verdict.
+/// exactly it stops doesn't change the verdict. Lists for one map (under `mod_support/`) have a
+/// budget of their own, so they can't crowd out the lists that count on every map.
 pub const MAX_LIST_FILES: usize = 100;
 
 /// Append the items `seen` doesn't hold yet to `out`, in order, and remember them. Linear, so a
@@ -215,14 +216,21 @@ pub(crate) fn read_estimates(
     let mut scoped_seen: Vec<HashSet<String>> = Vec::new();
     let mut scoped_count = 0usize;
     for m in candidates.into_iter().take(MAX_LIST_FILES) {
-        if seen.len() + scoped_count >= MAX_LIST_NAMES {
+        let plain_full = seen.len() >= MAX_LIST_NAMES;
+        let scoped_full = scoped_count >= MAX_LIST_NAMES;
+        if plain_full && scoped_full {
             break;
         }
         if Some(m.as_str()) == declared {
             continue;
         }
+        let key = support_key(&m);
+        // Each part has its own budget; a full one only stops its own lists.
+        if (key.is_none() && plain_full) || (key.is_some() && scoped_full) {
+            continue;
+        }
         let names = read(&m).map(|b| parse(&b)).unwrap_or_default();
-        let Some(key) = support_key(&m) else {
+        let Some(key) = key else {
             push_new(&mut estimate, &mut seen, names);
             continue;
         };
@@ -1468,6 +1476,36 @@ mod tests {
         with_mod.absorb_scoped(&["witcombe".into()]);
         assert_eq!(with_mod.estimate, ["O1", "W1", "W2", "W3"]);
         assert!(with_mod.scoped.is_empty());
+    }
+
+    /// Many lists for maps that may not load never stop Silo reading the lists that always count.
+    #[test]
+    fn map_specific_lists_have_their_own_budget() {
+        let list = |prefix: &str, n: usize| -> Vec<u8> {
+            let entries: String = (0..n)
+                .map(|i| format!(r#"<densityMapHeightType fillTypeName="{prefix}{i}"/>"#))
+                .collect();
+            format!("<map><densityMapHeightTypes>{entries}</densityMapHeightTypes></map>")
+                .into_bytes()
+        };
+        let read = |name: &str| {
+            if name.starts_with("mod_support/") {
+                Some(list("SHARED", 2_000))
+            } else {
+                Some(list("PLAIN", 80))
+            }
+        };
+        let mut candidates: Vec<String> = (0..10)
+            .map(|i| format!("mod_support/FS25_Map{i}/heightTypes.xml"))
+            .collect();
+        candidates.push("xml/heightTypes.xml".into());
+        let t = mod_types("M", "FS25_M", &ModDesc::default(), &read, &|| {
+            candidates.clone()
+        })
+        .unwrap();
+        assert_eq!(t.estimate.len(), 80);
+        // The map lists stop once their own budget is spent.
+        assert_eq!(t.scoped.len(), 5);
     }
 
     #[test]

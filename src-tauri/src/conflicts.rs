@@ -321,11 +321,13 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
     let mut mod_heights: Vec<heighttypes::ModTypes> = heights.into_iter().flatten().collect();
     let mut mod_fills: Vec<filltypes::ModFills> = fills.into_iter().flatten().collect();
     // A mod's `mod_support/<dir>/` lists load with the mod `<dir>` names (#385). For an active
-    // non-map mod that's every scenario; for a map, only its own (`worst` adds those).
+    // non-map mod that's every scenario; for a map, only its own (`worst` adds those). A non-map
+    // mod matches by tech name only: its title could name a map that isn't loaded.
     let active_keys: Vec<String> = parsed
         .iter()
         .filter(|p| !p.md.is_map)
-        .flat_map(|p| heighttypes::map_keys(&p.tech_name, &p.label))
+        .map(|p| heighttypes::match_key(&p.tech_name))
+        .filter(|k| !k.is_empty())
         .collect();
     for m in &mut mod_heights {
         m.absorb_scoped(&active_keys);
@@ -934,6 +936,27 @@ mod tests {
             path: livestock.to_string_lossy().into_owned(),
             kind: "dir".into(),
         };
+        // A non-map mod titled like the map doesn't load the map's lists; one with its tech
+        // name stands for that mod, so they count everywhere.
+        let mut namesakes = Vec::new();
+        for (tech, title) in [
+            ("FS25_HofPack", "Hof Bergmann"),
+            ("FS25_HofBergmann", "Pack"),
+        ] {
+            let dir = base.join("namesakes").join(tech);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("modDesc.xml"),
+                r#"<modDesc descVersion="92"></modDesc>"#,
+            )
+            .unwrap();
+            namesakes.push(ConflictInput {
+                tech_name: tech.into(),
+                title: Some(title.into()),
+                path: dir.to_string_lossy().into_owned(),
+                kind: "dir".into(),
+            });
+        }
         let heights = heighttypes::GameData {
             base: (0..48).map(|n| format!("BASE{n}")).collect(),
             base_channels: 6,
@@ -955,9 +978,19 @@ mod tests {
         let alone = fill_cap(std::slice::from_ref(&rl));
         let other_map = fill_cap(&[rl.clone(), maps[1].clone()]);
         let its_map = fill_cap(&[rl.clone(), maps[0].clone()]);
+        let by_title = fill_cap(&[rl.clone(), namesakes[0].clone()]);
+        let by_tech = fill_cap(&[rl.clone(), namesakes[1].clone()]);
         let _ = std::fs::remove_dir_all(&base);
         assert!(alone.is_none(), "{alone:?}");
         assert!(other_map.is_none(), "{other_map:?}");
+        assert!(by_title.is_none(), "{by_title:?}");
+        let c = by_tech.expect("budget with the mod the folder names");
+        assert_eq!(c.severity, "warning");
+        assert!(
+            c.explanation.contains("the base game uses"),
+            "{}",
+            c.explanation
+        );
         // 178 + 80 = 258 on Hof Bergmann, from a script-loaded list: a Review.
         let c = its_map.expect("budget on Hof Bergmann");
         assert_eq!(c.severity, "warning");
