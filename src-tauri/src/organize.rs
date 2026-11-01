@@ -426,11 +426,14 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
                 rep.skipped += 1;
             }
         } else {
-            // Nothing at the name and not wanted: a crash between unlinking and recording can
-            // leave `active = true` behind, and the gone projection's record with it (which must
-            // never vouch for a file put at that name later).
-            if row.active {
+            // Nothing at the name and not wanted: a crash between linking or unlinking and
+            // recording can leave `active = true`, or a gone projection's record, behind. The
+            // record must never vouch for a file put at that name later. (Read first: most parked
+            // mods have none, and a delete per mod would be a write per mod on every call.)
+            if db::projection_stats(conn, &key, &row.file_name).is_some() {
                 db::forget_projection(conn, &key, &row.file_name);
+            }
+            if row.active {
                 match db::set_organized_active(conn, &key, &row.tech_name, false) {
                     Ok(()) => rep.changed += 1,
                     Err(e) => rep.errors.push(format!("{}: manifest: {e}", row.tech_name)),
@@ -2628,6 +2631,13 @@ mod tests {
             "the gone projection's record is dropped"
         );
         assert!(!base.join("FS25_Foo.zip").exists());
+
+        // An inactive row can keep a record too (a crash after linking, before the flag, then
+        // the file removed): dropped all the same, and nothing counted as changed.
+        db::record_projection(&conn, &key, "FS25_Foo.zip", 2, 1);
+        let rep = set_active(&conn, &Layout::default_for(&base), &HashSet::new());
+        assert_eq!((rep.changed, rep.skipped), (0, 1));
+        assert!(db::projection_stats(&conn, &key, "FS25_Foo.zip").is_none());
 
         let _ = std::fs::remove_dir_all(&base);
     }
