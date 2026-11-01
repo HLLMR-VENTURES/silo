@@ -186,6 +186,19 @@ pub fn link_for_hash(
         .map(Link::from))
 }
 
+/// The catalog id recorded for the zip named `tech_name` with these bytes, if any.
+pub fn recorded_entry(
+    conn: &Connection,
+    tech_name: &str,
+    sha256: &str,
+) -> Result<Option<String>, String> {
+    let sha = sha256.to_ascii_lowercase();
+    Ok(db::catalog_aliases(conn, tech_name)?
+        .into_iter()
+        .find(|r| r.archive_sha256 == sha)
+        .map(|r| r.catalog_id))
+}
+
 /// Whether any alias is recorded for a zip named `tech_name`.
 pub fn has_any(conn: &Connection, tech_name: &str) -> Result<bool, String> {
     Ok(!db::catalog_aliases(conn, tech_name)?.is_empty())
@@ -533,6 +546,24 @@ mod tests {
         conn.execute_batch("DROP TABLE catalog_alias").unwrap();
         assert!(link_for_file(&conn, "FS25_FieldToDoList", &file).is_err());
         assert!(link_for_hash(&conn, "FS25_FieldToDoList", &file, "ab").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_entry_recorded_for_some_bytes_can_be_asked_for() {
+        let dir = temp_dir("recorded");
+        let conn = conn_in(&dir);
+        installed(&conn, &dir, "FS25_FieldToDoList", b"build one");
+        let id = recorded_entry(
+            &conn,
+            "FS25_FieldToDoList",
+            &sha(b"build one").to_uppercase(),
+        );
+        assert_eq!(id.unwrap().as_deref(), Some("cat-todo"));
+        assert_eq!(
+            recorded_entry(&conn, "FS25_FieldToDoList", &sha(b"other")).unwrap(),
+            None
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

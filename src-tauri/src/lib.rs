@@ -1001,8 +1001,22 @@ async fn download_update(
             },
             (carry, _) => carry,
         };
+        // As for an install: a new record is written before the swap, but replacing another
+        // entry's record for these bytes waits until the swap has succeeded.
+        let mut record_after = None;
         let undo = match &carry {
-            Some((link, sha, size)) => Some(remember_catalog_alias(&db, &dest, sha, *size, link)?),
+            Some((link, sha, size)) => {
+                let held = catalogalias::zip_tech_name(&dest)
+                    .map(|t| catalogalias::recorded_entry(&db::open(&db)?, &t, sha))
+                    .transpose()?
+                    .flatten();
+                if held.is_some_and(|id| id != link.catalog_id) {
+                    record_after = Some((link, sha, *size));
+                    None
+                } else {
+                    Some(remember_catalog_alias(&db, &dest, sha, *size, link)?)
+                }
+            }
             None => None,
         };
         let mut done = match update::swap(&dest, part.path(), &layout.mods, &mut policy) {
@@ -1018,6 +1032,12 @@ async fn download_update(
                 return Err(e);
             }
         };
+        if let Some((link, sha, size)) = record_after {
+            if let Err(e) = remember_catalog_alias(&db, &dest, sha, size, link) {
+                log::warn!("[catalog] {e}");
+                link_problem = Some(LINK_NOT_KEPT.to_string());
+            }
+        }
         done.problems.extend(link_problem);
         if let Some(flat) = &done.relinked {
             if let (Ok(conn), Some(name)) = (db::open(&db), flat.file_name()) {
@@ -1555,20 +1575,43 @@ async fn install_remote_mod(
         // A finished download waits out a busy spell instead of being thrown away.
         let _write = library_write_within(PLACE_WAIT)?;
         install_recheck(&root, &dest)?;
+        // A new record is written before the file is placed (a placed file never lacks it).
+        // A change to a record another entry already holds for these bytes, or dropping one,
+        // waits until the file is placed: an install that never places its file must not move
+        // copies already in other folders to another entry, even if Silo stops in between.
+        let mut after = None;
         let undo = match (&alias, stem.as_deref()) {
-            (Some((link, sha, size)), _) => {
-                Some(remember_catalog_alias(&db, &dest, sha, *size, link)?)
+            (Some((link, sha, size)), Some(stem)) => {
+                let held = catalogalias::recorded_entry(&db::open(&db)?, stem, sha)?;
+                if held.is_some_and(|id| id != link.catalog_id) {
+                    after = Some(AfterPlace::Record(link.clone(), sha.clone(), *size));
+                    None
+                } else {
+                    Some(remember_catalog_alias(&db, &dest, sha, *size, link)?)
+                }
             }
             // Asked under the lock, so an install placing the same name meanwhile is seen. The
             // hash is only taken (under the lock) in that rare case.
             (None, Some(stem)) if catalogalias::has_any(&db::open(&db)?, stem)? => {
-                Some(forget_catalog_alias(&db, stem, &hash_part()?)?)
+                after = Some(AfterPlace::Forget(stem.to_string(), hash_part()?));
+                None
             }
             _ => None,
         };
         if let Err(e) = place_part(part.path(), &dest) {
             undo_catalog_alias(&db, undo);
             return Err(e);
+        }
+        // The file is in place; a failure here only leaves the earlier record (logged).
+        let done = match after {
+            Some(AfterPlace::Record(link, sha, size)) => {
+                remember_catalog_alias(&db, &dest, &sha, size, &link).map(drop)
+            }
+            Some(AfterPlace::Forget(stem, sha)) => forget_catalog_alias(&db, &stem, &sha).map(drop),
+            None => Ok(()),
+        };
+        if let Err(e) = done {
+            log::warn!("[catalog] {e}");
         }
         Ok(resolved.filename)
     })
@@ -1616,6 +1659,14 @@ fn remember_catalog_alias(
              Try again. ({e})"
         )),
     }
+}
+
+/// A change to the catalog alias that `install_remote_mod` makes only once the file is placed.
+enum AfterPlace {
+    /// Record this link for (hash, size), replacing another entry's record for those bytes.
+    Record(catalogalias::Link, String, u64),
+    /// Drop the alias for (techName, hash).
+    Forget(String, String),
 }
 
 /// Drop the alias for the zip `tech_name` with whole-file SHA-256 `sha` (#386): the file is
