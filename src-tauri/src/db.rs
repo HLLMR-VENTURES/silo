@@ -1187,6 +1187,14 @@ pub fn note_alias_check(conn: &Connection, path: &str, check: &AliasCheck) -> Re
     put_alias_check(conn, path, check)
 }
 
+/// The latest try the catalog-link backfill noted for any file, if any.
+pub fn last_alias_attempt(conn: &Connection) -> Result<Option<i64>, String> {
+    conn.query_row("SELECT MAX(attempted_ms) FROM alias_check", [], |r| {
+        r.get(0)
+    })
+    .map_err(|e| e.to_string())
+}
+
 /// `note_alias_check` for several files in one transaction (one wait for the database, not one
 /// per file).
 pub fn note_alias_checks(conn: &Connection, checks: &[(String, AliasCheck)]) -> Result<(), String> {
@@ -2214,6 +2222,7 @@ mod tests {
         note_alias_checks(&conn, &many).unwrap();
         assert!(alias_check(&conn, "m/B.zip").unwrap().is_some());
         note_alias_checks(&conn, &[]).unwrap();
+        assert_eq!(last_alias_attempt(&conn).unwrap(), Some(200));
         conn.execute(
             "DELETE FROM alias_check WHERE path IN ('m/A.zip', 'm/B.zip')",
             [],

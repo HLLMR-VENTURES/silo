@@ -241,6 +241,16 @@ fn run_bounded<G>(
         }
     };
     let now = now_ms();
+    // This run's tries are numbered after every earlier one, whatever the clock says (two runs,
+    // or two stages of one, can fall in the same millisecond): the name batch at `first_try`,
+    // the hashed files after it, so the order of tries is always the order they were made in.
+    let first_try = match db::last_alias_attempt(conn) {
+        Ok(last) => now.max(last.unwrap_or(i64::MIN).saturating_add(1)),
+        Err(e) => {
+            log::warn!("[catalog] link backfill skipped: couldn't read what it checked: {e}");
+            return out;
+        }
+    };
     let mut pending = Vec::new();
     for z in zips {
         if catalogalias::zip_tech_name(&z.path).as_deref() != Some(z.tech_name.as_str())
@@ -330,7 +340,7 @@ fn run_bounded<G>(
             if decided {
                 known.push(p.zip);
             }
-            notes.push((path_key(p.zip), check_of(p, p.sha(), decided)));
+            notes.push((path_key(p.zip), check_of(p, p.sha(), decided, first_try)));
         }
         wait_at_most(conn, until, limits.db_wait);
         if let Err(e) = db::note_alias_checks(conn, &notes) {
@@ -371,7 +381,10 @@ fn run_bounded<G>(
         }
         tried += 1;
         let (got, sha) = bytes_of(p, &hash);
-        notes.push((path_key(p.zip), check_of(p, sha.as_deref(), false)));
+        notes.push((
+            path_key(p.zip),
+            check_of(p, sha.as_deref(), false, first_try + 1),
+        ));
         match got {
             Ok(sha) => asked.push((p.zip, sha)),
             Err(why) => {
@@ -461,7 +474,7 @@ fn run_bounded<G>(
                 sha256: Some(sha.clone()),
                 unnamed_ms: None,
                 decided: true,
-                attempted_ms: now_ms(),
+                attempted_ms: first_try + 1,
             };
             decided.push((path_key(z), check));
         }
@@ -600,16 +613,16 @@ fn log_outcome(z: &LibraryZip, outcome: &Outcome) {
     }
 }
 
-/// What to note about this version of `p`'s file now: `sha` once taken, what the catalog said
-/// lately about its name, and whether it's settled.
-fn check_of(p: &Pending, sha: Option<&str>, decided: bool) -> db::AliasCheck {
+/// What to note about this version of `p`'s file: `sha` once taken, what the catalog said lately
+/// about its name, whether it's settled, and the try's number (`tried`).
+fn check_of(p: &Pending, sha: Option<&str>, decided: bool, tried: i64) -> db::AliasCheck {
     db::AliasCheck {
         size: p.zip.size,
         mtime_ms: p.zip.mtime_ms,
         sha256: sha.map(str::to_string),
         unnamed_ms: p.unnamed_ms,
         decided,
-        attempted_ms: now_ms(),
+        attempted_ms: tried,
     }
 }
 
