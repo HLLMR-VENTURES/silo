@@ -345,7 +345,20 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
                 continue;
             }
         }
-        let linked = link.symlink_metadata().is_ok();
+        // Only a confirmed absence counts as "nothing there": a slot that can't be looked at may
+        // still hold the projection, so it's reported and left (flag and record) as it is.
+        let linked = match link.symlink_metadata() {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                rep.errors.push(format!(
+                    "{}: can't check {}: {e}",
+                    row.tech_name,
+                    link.display()
+                ));
+                continue;
+            }
+        };
 
         if want && !linked {
             match make_link(&src, &link, &row.kind, &mut policy) {
@@ -2639,6 +2652,38 @@ mod tests {
         assert_eq!((rep.changed, rep.skipped), (0, 1));
         assert!(db::projection_stats(&conn, &key, "FS25_Foo.zip").is_none());
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // A slot that can't be looked at isn't "nothing there": the flag and record stay as they are.
+    #[cfg(unix)]
+    #[test]
+    fn a_slot_that_cant_be_checked_is_reported_not_reconciled() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("silo_act_unreadable_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        std::fs::create_dir_all(mods.join(ARCHIVE).join("Vehicles")).unwrap();
+        std::fs::write(mods.join(ARCHIVE).join("Vehicles/FS25_Foo.zip"), b"PK").unwrap();
+        std::fs::write(mods.join("FS25_Foo.zip"), b"PK").unwrap();
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&mods);
+        organize_row(&conn, &mods, "FS25_Foo", "Vehicles", true);
+        db::record_projection(&conn, &key, "FS25_Foo.zip", 2, 1);
+        std::fs::set_permissions(&mods, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if mods.join("FS25_Foo.zip").symlink_metadata().is_ok() {
+            // Running as root: permissions don't stop the look, so there's nothing to test.
+            std::fs::set_permissions(&mods, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        let rep = set_active(&conn, &Layout::default_for(&mods), &HashSet::new());
+        std::fs::set_permissions(&mods, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(rep.errors.len(), 1, "{:?}", rep.errors);
+        assert_eq!(rep.changed, 0);
+        assert!(db::load_organized(&conn, &key)[0].active);
+        assert!(db::projection_stats(&conn, &key, "FS25_Foo.zip").is_some());
+        assert!(mods.join("FS25_Foo.zip").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 
