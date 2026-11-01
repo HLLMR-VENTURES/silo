@@ -11,10 +11,15 @@ use std::path::{Path, PathBuf};
 const APP_ID: &str = "2300320";
 const INSTALL_DIR: &str = "Farming Simulator 25";
 
+/// Game executable names inside the install folder, in preference order.
 #[cfg(windows)]
-const EXE: &str = "FarmingSimulator2025.exe";
+const EXES: &[&str] = &[EXE_WINDOWS];
+/// FS25 has no native Linux build: a Steam install run through Proton holds the Windows
+/// `.exe`. The extensionless name is kept in case a native build ever ships.
 #[cfg(all(unix, not(target_os = "macos")))]
-const EXE: &str = "FarmingSimulator2025";
+const EXES: &[&str] = &[EXE_WINDOWS, "FarmingSimulator2025"];
+#[cfg(any(not(target_os = "macos"), test))]
+const EXE_WINDOWS: &str = "FarmingSimulator2025.exe";
 
 /// Bundle id of the macOS build (the App Store sandbox container is named after it).
 #[cfg(target_os = "macos")]
@@ -42,9 +47,11 @@ pub struct GameInfo {
 
 /// Cheap, name-only pre-filter: could a process with this name be FS25 (or a host for it)?
 /// Anything this lets through is then judged by [`is_fs25_process`] with its command line.
+/// `farmingsimulato` (no final r) on purpose: Linux truncates a process name to 15 characters,
+/// so the game under Proton is reported as `FarmingSimulato`.
 fn is_candidate_name(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    n.contains("farmingsimulator")
+    n.contains("farmingsimulato")
         || n.contains("farming simulator")
         || n.starts_with("dedicatedserver")
         || n.starts_with("wine")
@@ -123,28 +130,55 @@ pub fn fs25_running() -> bool {
     })
 }
 
-/// Candidate Steam install roots per platform.
+/// Candidate Steam install roots per platform (those with a `steamapps` folder).
 fn steam_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     #[cfg(windows)]
-    {
-        for p in ["C:/Program Files (x86)/Steam", "C:/Program Files/Steam"] {
-            roots.push(PathBuf::from(p));
-        }
-    }
+    roots.extend(windows_steam_roots(registry_steam_path()));
     #[cfg(target_os = "macos")]
     if let Some(h) = dirs::home_dir() {
         roots.push(h.join("Library/Application Support/Steam"));
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     if let Some(h) = dirs::home_dir() {
-        roots.push(h.join(".steam/steam"));
-        roots.push(h.join(".local/share/Steam"));
+        roots.extend(crate::fsgame::linux_steam_roots(&h));
     }
     roots
         .into_iter()
         .filter(|r| r.join("steamapps").is_dir())
         .collect()
+}
+
+/// The Steam client folder Windows' registry names (`HKCU\Software\Valve\Steam\SteamPath`,
+/// written by the Steam client, e.g. `d:/steam`). `None` when Steam never ran for this user.
+#[cfg(windows)]
+fn registry_steam_path() -> Option<PathBuf> {
+    let path = windows_registry::CURRENT_USER
+        .open(r"Software\Valve\Steam")
+        .and_then(|k| k.get_string("SteamPath"))
+        .ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// Windows Steam client roots: the registry's path first (a client on any drive), then the two
+/// C: defaults. A default that is the registry's path again (case and slashes aside) is dropped.
+#[cfg(any(windows, test))]
+fn windows_steam_roots(registry: Option<PathBuf>) -> Vec<PathBuf> {
+    let norm = |p: &Path| {
+        p.to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    };
+    let mut roots: Vec<PathBuf> = registry.into_iter().collect();
+    for d in ["C:/Program Files (x86)/Steam", "C:/Program Files/Steam"] {
+        let d = PathBuf::from(d);
+        if !roots.iter().any(|r| norm(r) == norm(&d)) {
+            roots.push(d);
+        }
+    }
+    roots
 }
 
 /// Library paths from a Steam root's `libraryfolders.vdf` (plus the root itself).
@@ -177,18 +211,26 @@ fn steam_install_dirs() -> Vec<PathBuf> {
 /// Locate the FS25 install across all Steam libraries.
 #[cfg(not(target_os = "macos"))]
 pub fn detect() -> Option<GameInfo> {
-    for install in steam_install_dirs() {
-        let exe = install.join(EXE);
-        if exe.is_file() {
-            return Some(GameInfo {
-                app_id: APP_ID.to_string(),
-                exe: exe.to_string_lossy().into_owned(),
-                install_dir: install.to_string_lossy().into_owned(),
-                store: Store::Steam,
-            });
-        }
-    }
-    None
+    steam_install_dirs().into_iter().find_map(|install| {
+        let exe = find_game_exe(&install, EXES, |p| p.is_file())?;
+        Some(GameInfo {
+            app_id: APP_ID.to_string(),
+            exe: exe.to_string_lossy().into_owned(),
+            install_dir: install.to_string_lossy().into_owned(),
+            store: Store::Steam,
+        })
+    })
+}
+
+/// The first of `names` that is a file directly in `install`. `is_file` is injected so this
+/// unit-tests without a real install.
+#[cfg(any(not(target_os = "macos"), test))]
+fn find_game_exe(
+    install: &Path,
+    names: &[&str],
+    is_file: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    names.iter().map(|n| install.join(n)).find(|p| is_file(p))
 }
 
 /// Locate the FS25 `.app` bundle: Steam libraries first, then `/Applications` and
@@ -437,6 +479,94 @@ mod tests {
         assert!(is_app_bundle(&p("/A/X.App")));
         assert!(!is_app_bundle(&p("/A/X.zip")));
     }
+
+    #[test]
+    fn windows_roots_without_registry_are_the_c_defaults() {
+        assert_eq!(
+            windows_steam_roots(None),
+            vec![
+                p("C:/Program Files (x86)/Steam"),
+                p("C:/Program Files/Steam")
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_roots_put_the_registry_path_first() {
+        // Steam client on another drive: found via the registry, defaults still tried after it.
+        assert_eq!(
+            windows_steam_roots(Some(p("d:/steam"))),
+            vec![
+                p("d:/steam"),
+                p("C:/Program Files (x86)/Steam"),
+                p("C:/Program Files/Steam")
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_roots_drop_a_default_the_registry_already_names() {
+        // Steam writes SteamPath lowercased with forward slashes.
+        assert_eq!(
+            windows_steam_roots(Some(p("c:/program files (x86)/steam"))),
+            vec![
+                p("c:/program files (x86)/steam"),
+                p("C:/Program Files/Steam")
+            ]
+        );
+        // Backslashes and a trailing separator are the same folder too.
+        assert_eq!(
+            windows_steam_roots(Some(p(r"C:\Program Files\Steam\"))),
+            vec![
+                p(r"C:\Program Files\Steam\"),
+                p("C:/Program Files (x86)/Steam")
+            ]
+        );
+    }
+
+    #[test]
+    fn game_exe_matching() {
+        let install = p("/lib/steamapps/common/Farming Simulator 25");
+        let only = |name: &'static str| {
+            let want = install.join(name);
+            move |q: &Path| q == want
+        };
+        let linux = [EXE_WINDOWS, "FarmingSimulator2025"];
+
+        // Proton install: only the Windows .exe is there.
+        assert_eq!(
+            find_game_exe(&install, &linux, only(EXE_WINDOWS)),
+            Some(install.join(EXE_WINDOWS))
+        );
+        // A native build's extensionless binary is still found.
+        assert_eq!(
+            find_game_exe(&install, &linux, only("FarmingSimulator2025")),
+            Some(install.join("FarmingSimulator2025"))
+        );
+        // Earlier names win when several exist.
+        assert_eq!(
+            find_game_exe(&install, &linux, |_| true),
+            Some(install.join(EXE_WINDOWS))
+        );
+        // Nothing there, or only a name not in the list.
+        assert_eq!(find_game_exe(&install, &linux, |_| false), None);
+        assert_eq!(
+            find_game_exe(&install, &[EXE_WINDOWS], only("FarmingSimulator2025")),
+            None
+        );
+    }
+
+    /// The real per-platform list finds a Proton / Windows install (the .exe alone).
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn platform_exe_list_finds_the_windows_exe() {
+        let install = p("/lib/steamapps/common/Farming Simulator 25");
+        let exe = install.join(EXE_WINDOWS);
+        assert_eq!(
+            find_game_exe(&install, EXES, |q| q == exe),
+            Some(exe.clone())
+        );
+    }
 }
 
 #[cfg(test)]
@@ -446,24 +576,31 @@ mod process_tests {
     const GAME_EXE: &str =
         "Z:\\SteamLibrary\\steamapps\\common\\Farming Simulator 25\\x64\\FarmingSimulator2025Game.exe";
 
+    /// What [`fs25_running`] decides for one process: the name-only pre-filter, then the
+    /// classifier. Positive cases go through both, so a classifier branch the pre-filter
+    /// never lets reach it fails here.
+    fn seen_as_fs25(name: &str, cmd: &[String], exe: Option<&str>) -> bool {
+        is_candidate_name(name) && is_fs25_process(name, cmd, exe)
+    }
+
     #[test]
     fn matches_fs25_processes_on_every_platform() {
         // Windows
-        assert!(is_fs25_process("FarmingSimulator2025.exe", &[], None));
-        assert!(is_fs25_process("FarmingSimulator2025Game.exe", &[], None));
-        assert!(is_fs25_process("farmingsimulator2025game.exe", &[], None));
+        assert!(seen_as_fs25("FarmingSimulator2025.exe", &[], None));
+        assert!(seen_as_fs25("FarmingSimulator2025Game.exe", &[], None));
+        assert!(seen_as_fs25("farmingsimulator2025game.exe", &[], None));
         // Proton: Linux truncates comm to 15 chars; the command line carries the exe path.
-        assert!(is_fs25_process("FarmingSimulato", &[GAME_EXE.into()], None));
-        assert!(is_fs25_process(
+        assert!(seen_as_fs25("FarmingSimulato", &[GAME_EXE.into()], None));
+        assert!(seen_as_fs25(
             "FarmingSimulato",
             &[],
             Some("/home/u/.steam/Farming Simulator 25/FarmingSimulator2025")
         ));
         // macOS
-        assert!(is_fs25_process("FarmingSimulator2025Game", &[], None));
-        assert!(is_fs25_process("Farming Simulator 25", &[], None));
+        assert!(seen_as_fs25("FarmingSimulator2025Game", &[], None));
+        assert!(seen_as_fs25("Farming Simulator 25", &[], None));
         // Dedicated server when it lives in an FS25 install.
-        assert!(is_fs25_process(
+        assert!(seen_as_fs25(
             "dedicatedServer.exe",
             &[
                 "E:\\SteamLibrary\\steamapps\\common\\Farming Simulator 25\\dedicatedServer.exe"
@@ -472,17 +609,42 @@ mod process_tests {
             None
         ));
         // Linux: the command line is just the relative launcher, the exe path names the install.
-        assert!(is_fs25_process(
+        assert!(seen_as_fs25(
             "dedicatedServer",
             &["./dedicatedServer".into()],
             Some("/opt/Farming Simulator 25/dedicatedServer")
         ));
         // Wine/Proton host process running the game.
-        assert!(is_fs25_process(
-            "wine64-preloader",
-            &[GAME_EXE.into()],
-            None
-        ));
+        assert!(seen_as_fs25("wine64-preloader", &[GAME_EXE.into()], None));
+    }
+
+    #[test]
+    fn truncated_linux_name_alone_is_detected() {
+        // A Linux process table where the game shows up only under its 15-char name (#345).
+        type Proc = (&'static str, Vec<String>, Option<&'static str>);
+        let table: Vec<Proc> = vec![
+            (
+                "systemd",
+                vec!["/sbin/init".into()],
+                Some("/usr/lib/systemd/systemd"),
+            ),
+            (
+                "steam",
+                vec![GAME_EXE.into()],
+                Some("/home/u/.steam/steam/ubuntu12_32/steam"),
+            ),
+            ("FarmingSimulato", vec![GAME_EXE.into()], None),
+        ];
+        // Same two passes as fs25_running: name pre-filter, then the classifier.
+        let detected = |procs: &[Proc]| {
+            procs
+                .iter()
+                .filter(|(name, _, _)| is_candidate_name(name))
+                .any(|(name, cmd, exe)| is_fs25_process(name, cmd, *exe))
+        };
+        assert!(detected(&table));
+        // Without the game in the table nothing is detected.
+        assert!(!detected(&table[..2]));
     }
 
     #[test]

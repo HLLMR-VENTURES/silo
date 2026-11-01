@@ -82,6 +82,9 @@ tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 [target.'cfg(windows)'.dependencies]
 # 1.4.1+: `create` strips the `\\?\` prefix `canonicalize` adds (organize::junction_to relies on it).
 junction = "1.4.1"
+# Read the Steam client folder (HKCU\Software\Valve\Steam\SteamPath) so a Steam client on any
+# drive is found (gamelaunch::steam_roots). Microsoft's crate, already in the tree via hyper-util.
+windows-registry = "0.6"
 
 [profile.dev]
 # Faster incremental dev builds; the heavy work is I/O-bound anyway.
