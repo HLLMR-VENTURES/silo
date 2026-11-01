@@ -628,8 +628,9 @@ fn pick_download(
 
 /// Refuse a download whose file isn't named after the mod asked for: the stem of `filename`
 /// (without `.zip`) must equal `tech_name`, ignoring case. FS25 knows a mod by its file name,
-/// so `FS25_X_v2.zip` installed for `FS25_X` would never be the mod a set or savegame names.
-/// The download is never renamed to fit.
+/// so `FS25_X_v2.zip` installed for `FS25_X` would never be the mod a shared set names. The
+/// download is never renamed to fit. (A Browse install only logs a mismatch: see
+/// `browse_name_note` in lib.rs.)
 pub fn check_download_name(filename: &str, tech_name: &str) -> Result<(), String> {
     let stem = filename
         .len()

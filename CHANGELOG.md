@@ -36,9 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept apart on every system. (#350)
 - An install that finished after you switched to another mods folder no longer adds the mod to
   the old folder. (#350)
-- Installing from **Browse** or from a shared mod set now refuses a download whose file name
-  isn't the mod's name (say `FS25_X_v2.zip` for `FS25_X`), since the game would load it as a
-  different mod and the set could never turn it on. Silo never renames a download. (#350)
+- Applying a shared mod set now refuses a download whose file name isn't the mod's name (say
+  `FS25_X_v2.zip` for `FS25_X`), since the game would load it as a different mod and the set
+  could never turn it on. Silo never renames a download. (#350)
+- When a mod installed from **Browse** comes as a file with a different name from its catalog
+  entry, Silo now says which name it was installed as, shows it as in your library, and
+  **Show in library** goes to the right mod. (#350)
 - When applying a shared mod set, a download that failed because the catalog didn't answer is
   now shown as failed, with the reason, and counted. It used to say the site doesn't allow direct
   downloads. (#350)

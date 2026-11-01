@@ -39,6 +39,8 @@
     catalogErrorCopy,
     emptyResultsTitle,
     installState,
+    withInstalledAs,
+    zipStem,
     type CatalogErrorCopy,
     type InstallProgressEntry,
   } from "../browse";
@@ -91,6 +93,15 @@
     showTitle = true,
     query = $bindable(""),
   }: Props = $props();
+
+  // Mods installed this session whose zip isn't named after the catalog techName: techName →
+  // the library name they went in as (the zip's own name, never renamed). Lets the card and
+  // drawer show "in your library" and find the right library row.
+  let installedAs = $state<Record<string, string>>({});
+  const shownInstalled = $derived(withInstalledAs(installed, installedAs));
+  /** The library name of a catalog techName: what it was installed as, or itself. */
+  const libraryName = (tech: string) => installedAs[tech] ?? tech;
+  const findInLibrary = (tech: string) => onFindInLibrary?.(libraryName(tech));
 
   // Source connection state, for the interactive cards in the drawer.
   let gh = $state<{ connected: boolean; canWrite: boolean }>({
@@ -290,7 +301,7 @@
     else await openSource(s);
   }
 
-  const ctx = $derived({ installed, updates, installingId: installing });
+  const ctx = $derived({ installed: shownInstalled, updates, installingId: installing });
   // Only the installing card reads `progress`, so a progress event re-renders that card alone.
   const stateOf = (m: BrowseMod) =>
     installState(m, { ...ctx, progress: m.id === installing ? progress[m.id] : undefined });
@@ -306,11 +317,11 @@
       case "open":
         return void openSource(st.source);
       case "installed":
-        if (m.techName) onFindInLibrary?.(m.techName);
+        if (m.techName) findInLibrary(m.techName);
         return;
       case "update":
         if (onShowUpdates) onShowUpdates();
-        else if (m.techName) onFindInLibrary?.(m.techName);
+        else if (m.techName) findInLibrary(m.techName);
         return;
       case "none":
         return void openDetail(m);
@@ -320,7 +331,7 @@
   /** The card's accessible name: "Lizard R-Series by Lizard Modding, in your library". */
   function cardLabel(m: BrowseMod): string {
     const by = m.author ? ` by ${m.author}` : "";
-    const here = m.techName != null && installed.has(m.techName);
+    const here = m.techName != null && shownInstalled.has(m.techName);
     return `${m.title}${by}${here ? ", in your library" : ""}`;
   }
 
@@ -457,11 +468,16 @@
     }
     // After the op ends: the rescan it triggers skips while a library write is running.
     if (filename === null) return;
+    // The library knows the mod by the file it went in as, which can differ from the
+    // catalog's techName (the download is never renamed).
+    const name = zipStem(filename);
+    if (m.techName && m.techName.toLowerCase() !== name.toLowerCase()) {
+      installedAs = { ...installedAs, [m.techName]: name };
+    }
     onInstalled(filename);
-    const tech = m.techName;
     success(
-      `Installed ${m.title}.`,
-      tech && onFindInLibrary ? { action: { label: "Show in library", run: () => onFindInLibrary(tech) } } : {},
+      `Installed ${m.title}${name.toLowerCase() === m.techName?.toLowerCase() ? "" : ` as ${name}`}.`,
+      onFindInLibrary ? { action: { label: "Show in library", run: () => onFindInLibrary(name) } } : {},
     );
   }
 
@@ -673,13 +689,13 @@
       busy={installing !== null}
       takeFocus={detailByKey}
       {gh}
-      {installed}
+      installed={shownInstalled}
       {updates}
       onClose={closeDetail}
       onUseSource={(d, s) => useSource(d, s)}
       onOpenDesc={openDesc}
       {onNeedAuth}
-      {onFindInLibrary}
+      onFindInLibrary={onFindInLibrary ? findInLibrary : undefined}
       {onShowUpdates}
     />
   {/if}

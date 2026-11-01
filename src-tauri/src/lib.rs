@@ -1143,13 +1143,11 @@ async fn install_remote_mod(
         // The filename comes from the catalog — validate it's a plain basename so a
         // hostile response can't redirect the write outside the mods folder.
         paths::safe_file_name(&resolved.filename)?;
-        // And it must be the mod the catalog names, never a differently named file.
-        if let Some(tech) = resolved
-            .tech_name
-            .as_deref()
-            .filter(|t| !t.trim().is_empty())
-        {
-            siloapi::check_download_name(&resolved.filename, tech)?;
+        // The user picked this exact mod, so a file named differently from the catalog's
+        // techName still installs, under its own name (never renamed; the game names the mod
+        // after the zip). Only noted in the log. A shared set refuses it instead.
+        if let Some(note) = browse_name_note(&resolved.filename, resolved.tech_name.as_deref()) {
+            log::info!("{note}");
         }
         let dest = root.join(&resolved.filename);
         if path_taken(&dest) {
@@ -1180,6 +1178,16 @@ async fn install_remote_mod(
     .await
     .map_err(|e| e.to_string())?
     .map_err(error::AppError::from)
+}
+
+/// The log line for a Browse install whose file isn't named after the catalog's techName, or
+/// `None` when it is (or the catalog has no techName). The install goes ahead either way.
+fn browse_name_note(filename: &str, tech_name: Option<&str>) -> Option<String> {
+    let tech = tech_name.filter(|t| !t.trim().is_empty())?;
+    siloapi::check_download_name(filename, tech).err()?;
+    Some(format!(
+        "[install] catalog techName {tech} downloads as {filename}; installed under that name"
+    ))
 }
 
 const MODS_FOLDER_CHANGED: &str =
@@ -6955,6 +6963,26 @@ mod tests {
         assert_eq!(rows[1].status, "failed");
         assert_eq!(rows[1].detail.as_deref(), Some(super::LIBRARY_BUSY));
         assert_eq!(rows[3].status, "present");
+    }
+
+    #[test]
+    fn browse_installs_a_differently_named_file_under_its_own_name_and_notes_it() {
+        // Browse: allowed, only noted (the catalog's `FS25_ToDo` ships `FS25_FieldToDoList.zip`).
+        let note = super::browse_name_note("FS25_FieldToDoList.zip", Some("FS25_ToDo")).unwrap();
+        assert!(
+            note.contains("FS25_ToDo") && note.contains("FS25_FieldToDoList.zip"),
+            "{note}"
+        );
+        assert_eq!(
+            super::browse_name_note("FS25_ToDo.zip", Some("fs25_todo")),
+            None
+        );
+        assert_eq!(super::browse_name_note("FS25_X.zip", None), None);
+        assert_eq!(super::browse_name_note("FS25_X.zip", Some("  ")), None);
+        // A shared set: the same file is refused, since the saved set could never turn it on.
+        assert!(
+            crate::siloapi::check_download_name("FS25_FieldToDoList.zip", "FS25_ToDo").is_err()
+        );
     }
 
     #[test]
