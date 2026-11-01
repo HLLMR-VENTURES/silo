@@ -152,7 +152,7 @@ fn classify_on(message: &str, windows: bool) -> &'static str {
 
 /// Fixed texts Silo itself produces for a known condition (lower-cased). Their producers:
 /// lib.rs `STILL_LOADING`, `LIBRARY_BUSY`, `MOVE_LOCK_HELD`, `ensure_no_move`, `launch_game`'s
-/// move refusal, `UPDATE_GAME_RUNNING`,
+/// move refusal, `UPDATE_GAME_RUNNING`, `SWAP_GAME_RUNNING`,
 /// `CONFIG_GAME_RUNNING`, `archive_unavailable`, the collection_apply re-preview refusal;
 /// relocate.rs `GAME_RUNNING` and its "already running"; db.rs `newer_schema`;
 /// github.rs / siloapi.rs / update.rs not-a-mod and not-a-zip texts and GitHub token/rate texts.
