@@ -410,3 +410,183 @@ describe("disconnecting GitHub", () => {
     expect(githubAuth.status.user).toBeNull();
   });
 });
+
+describe("account changes reach the backend in click order", () => {
+  const disconnected = { ...connected, user: null };
+
+  /** A promise the test answers itself. */
+  function later<T>() {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  /** Record each call as the backend would receive it. `holdBegin` makes the next registration wait for the test. */
+  function recordCalls() {
+    const order: string[] = [];
+    let attempts = 0;
+    let held: ReturnType<typeof later<void>> | null = null;
+    vi.mocked(ghSignInBegin).mockImplementation(async () => {
+      const n = ++attempts;
+      order.push(`begin#${n}`);
+      const wait = held;
+      held = null;
+      if (wait) await wait.promise;
+      return n;
+    });
+    vi.mocked(ghDeviceStart).mockImplementation(async (_w, _g, attempt) => {
+      order.push(`start#${attempt}`);
+      return { ...device, deviceCode: `dev-${attempt}` };
+    });
+    vi.mocked(ghSetPat).mockImplementation(async (_pat, attempt) => {
+      order.push(`pat#${attempt}`);
+      return "octocat";
+    });
+    vi.mocked(ghDeviceCancel).mockImplementation(async (code) => {
+      order.push(`cancel:${code}`);
+      return true;
+    });
+    vi.mocked(ghLogout).mockImplementation(async () => {
+      order.push("logout");
+    });
+    vi.mocked(ghDevicePoll).mockResolvedValue(answer("pending"));
+    const holdBegin = () => (held = later<void>());
+    return { order, holdBegin };
+  }
+
+  it("Connect then Disconnect: a slow registration still reaches the backend first", async () => {
+    const { order, holdBegin } = recordCalls();
+    const begin = holdBegin();
+    vi.mocked(ghStatus).mockResolvedValue(disconnected);
+    const connecting = startDeviceFlow();
+    const disconnecting = disconnectGithub();
+    await flush();
+    expect(order).toEqual(["begin#1"]); // Disconnect waits for the registration
+    begin.resolve();
+    await disconnecting;
+    await connecting;
+    expect(order).toEqual(["begin#1", "logout"]); // the Disconnect ended that sign-in: no start
+    expect(githubAuth.flow).toBeNull();
+    expect(githubAuth.status.user).toBeNull();
+  });
+
+  it("Cancel then Connect: the cancel reaches the backend before the new registration", async () => {
+    const { order } = recordCalls();
+    await startDeviceFlow();
+    const cancel = later<boolean>();
+    vi.mocked(ghDeviceCancel).mockImplementationOnce((code) => {
+      order.push(`cancel:${code}`);
+      return cancel.promise;
+    });
+    cancelDeviceFlow();
+    const connecting = startDeviceFlow();
+    await flush();
+    expect(order).toEqual(["begin#1", "start#1", "cancel:dev-1"]); // the new sign-in waits for it
+    cancel.resolve(true);
+    await connecting;
+    expect(order).toEqual([
+      "begin#1",
+      "start#1",
+      "cancel:dev-1",
+      "begin#2",
+      "start#2",
+    ]);
+    expect(githubAuth.flow).not.toBeNull();
+  });
+
+  it("Disconnect during a sign-in: its cancel goes out before the Disconnect", async () => {
+    const { order } = recordCalls();
+    vi.mocked(ghStatus).mockResolvedValue(disconnected);
+    await startDeviceFlow();
+    await disconnectGithub();
+    expect(order).toEqual(["begin#1", "start#1", "cancel:dev-1", "logout"]);
+  });
+
+  it("each sign-in's own command goes out in its turn, before a change clicked after it", async () => {
+    const { order, holdBegin } = recordCalls();
+    const begin = holdBegin();
+    const saving = saveGithubPat("ghp_test");
+    const connecting = startDeviceFlow();
+    await flush();
+    expect(order).toEqual(["begin#1"]);
+    begin.resolve();
+    await saving;
+    await connecting;
+    expect(order).toEqual(["begin#1", "pat#1", "begin#2", "start#2"]);
+  });
+
+  it("Disconnect isn't held up by a sign-in's network work", async () => {
+    const { order } = recordCalls();
+    vi.mocked(ghStatus).mockResolvedValue(disconnected);
+    // GitHub is slow to hand out a code, and slow to check a pasted token.
+    vi.mocked(ghDeviceStart).mockImplementationOnce((_w, _g, attempt) => {
+      order.push(`start#${attempt}`);
+      return new Promise(() => {});
+    });
+    vi.mocked(ghSetPat).mockImplementationOnce((_pat, attempt) => {
+      order.push(`pat#${attempt}`);
+      return new Promise(() => {});
+    });
+    void startDeviceFlow();
+    await flush();
+    void saveGithubPat("ghp_test");
+    await flush();
+    await disconnectGithub();
+    expect(order).toEqual(["begin#1", "start#1", "begin#2", "pat#2", "logout"]);
+    expect(githubAuth.status.user).toBeNull();
+  });
+
+  it("a registration that fails doesn't hold up the changes clicked after it", async () => {
+    const { order, holdBegin } = recordCalls();
+    vi.mocked(ghStatus).mockResolvedValue(disconnected);
+    const begin = holdBegin();
+    const saving = saveGithubPat("ghp_test");
+    const disconnecting = disconnectGithub();
+    await flush();
+    begin.reject("database is locked");
+    await expect(saving).rejects.toBe("database is locked");
+    await disconnecting;
+    expect(order).toEqual(["begin#1", "logout"]);
+
+    // A start GitHub refuses at once: the reason shows, and the next change still goes out.
+    const detach = attachGithubView();
+    vi.mocked(ghDeviceStart).mockImplementationOnce(async (_w, _g, attempt) => {
+      order.push(`start#${attempt}`);
+      throw "GitHub is unreachable";
+    });
+    await startDeviceFlow();
+    expect(githubAuth.message).toContain("GitHub is unreachable");
+    await disconnectGithub();
+    expect(order).toEqual([
+      "begin#1",
+      "logout",
+      "begin#2",
+      "start#2",
+      "logout",
+    ]);
+    detach();
+  });
+
+  it("a cancel that fails doesn't hold up the sign-in clicked after it", async () => {
+    const { order } = recordCalls();
+    await startDeviceFlow();
+    vi.mocked(ghDeviceCancel).mockImplementationOnce(async (code) => {
+      order.push(`cancel:${code}`);
+      throw "session lock poisoned";
+    });
+    cancelDeviceFlow();
+    await startDeviceFlow();
+    expect(order).toEqual([
+      "begin#1",
+      "start#1",
+      "cancel:dev-1",
+      "begin#2",
+      "start#2",
+    ]);
+    expect(githubAuth.flow).not.toBeNull();
+  });
+});
