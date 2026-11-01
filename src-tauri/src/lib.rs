@@ -1074,11 +1074,10 @@ async fn catalog_detail_by_tech(
 /// ModHub thumbnails are never fetched from GIANTS' CDN here: they come from SiloAPI's cache.
 #[tauri::command]
 async fn catalog_image(app: tauri::AppHandle, url: String) -> Result<String, String> {
-    let cache_dir = app
-        .path()
-        .app_cache_dir()
+    // The profile's cache when one is active, the same folder the startup cleanup reads.
+    let cache_dir = profile::app_cache_dir(&app)
         .ok()
-        .map(|d| d.join("catalog_images"));
+        .map(|d| d.join(CATALOG_IMAGES_DIR));
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         if let Some(dir) = &cache_dir {
             let key = format!("{:x}", md5::compute(url.as_bytes()));
@@ -1096,6 +1095,11 @@ async fn catalog_image(app: tauri::AppHandle, url: String) -> Result<String, Str
     .await
     .map_err(|e| e.to_string())?
 }
+
+/// Where catalog thumbnails are cached, under the app cache dir. `-v2`: only entries that decoded
+/// before they were written (`cacheable_image`) live here; the unchecked `catalog_images` of
+/// earlier versions is removed at startup.
+const CATALOG_IMAGES_DIR: &str = "catalog_images_v2";
 
 /// Smallest decoded thumbnail the cache keeps (or accepts back): anything shorter is an empty or
 /// failed fetch, not an image.
@@ -5746,6 +5750,8 @@ pub fn run() {
                 // Icon thumbnails from the old (unstable) cache naming; `icons-v2` replaced it.
                 if let Ok(c) = profile::app_cache_dir(&handle) {
                     let _ = std::fs::remove_dir_all(c.join("icons"));
+                    // Catalog thumbnails cached before they were checked whole (#357).
+                    let _ = std::fs::remove_dir_all(c.join("catalog_images"));
                 }
             });
             Ok(())
