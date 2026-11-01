@@ -375,9 +375,17 @@ fn rename_checked(from: &Path, to: &Path) -> std::io::Result<()> {
 fn rename_noreplace_native(from: &Path, to: &Path) -> Option<std::io::Result<()>> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
-    let wide =
-        |p: &Path| -> Vec<u16> { long_path(p).as_os_str().encode_wide().chain([0]).collect() };
-    let (a, b) = (wide(from), wide(to));
+    let wide = |p: &Path| -> std::io::Result<Vec<u16>> {
+        let w: Vec<u16> = long_path(p).as_os_str().encode_wide().collect();
+        if w.contains(&0) {
+            return Err(nul_in_path());
+        }
+        Ok(w.into_iter().chain([0]).collect())
+    };
+    let (a, b) = match (wide(from), wide(to)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return Some(Err(e)),
+    };
     // SAFETY: both are NUL-terminated UTF-16 strings that outlive the call. Flags 0: no
     // MOVEFILE_REPLACE_EXISTING (an existing `to` fails) and no MOVEFILE_COPY_ALLOWED.
     let ok = unsafe { MoveFileExW(a.as_ptr(), b.as_ptr(), 0) };
@@ -403,12 +411,18 @@ fn long_path(p: &Path) -> PathBuf {
     }
 }
 
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+/// The raw `renameat2` system call, so glibc and musl builds alike get it.
+#[cfg(target_os = "linux")]
 fn rename_noreplace_native(from: &Path, to: &Path) -> Option<std::io::Result<()>> {
-    let (a, b) = (c_path(from)?, c_path(to)?);
-    // SAFETY: both are NUL-terminated C strings that outlive the call.
+    let (a, b) = match (c_path(from), c_path(to)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return Some(Err(e)),
+    };
+    // SAFETY: both are NUL-terminated C strings that outlive the call; the arguments match
+    // renameat2(int, const char *, int, const char *, unsigned int).
     let r = unsafe {
-        libc::renameat2(
+        libc::syscall(
+            libc::SYS_renameat2,
             libc::AT_FDCWD,
             a.as_ptr(),
             libc::AT_FDCWD,
@@ -416,40 +430,47 @@ fn rename_noreplace_native(from: &Path, to: &Path) -> Option<std::io::Result<()>
             libc::RENAME_NOREPLACE,
         )
     };
-    unix_result(r)
+    unix_result(r == 0)
 }
 
 #[cfg(target_os = "macos")]
 fn rename_noreplace_native(from: &Path, to: &Path) -> Option<std::io::Result<()>> {
-    let (a, b) = (c_path(from)?, c_path(to)?);
+    let (a, b) = match (c_path(from), c_path(to)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return Some(Err(e)),
+    };
     // SAFETY: both are NUL-terminated C strings that outlive the call.
     let r = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_EXCL) };
-    unix_result(r)
+    unix_result(r == 0)
 }
 
-#[cfg(not(any(
-    windows,
-    target_os = "macos",
-    all(target_os = "linux", target_env = "gnu")
-)))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn rename_noreplace_native(_from: &Path, _to: &Path) -> Option<std::io::Result<()>> {
     None
 }
 
-/// A path as a C string; `None` (use the fallback) if it holds a NUL byte, which no real path
-/// does.
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-fn c_path(p: &Path) -> Option<std::ffi::CString> {
-    use std::os::unix::ffi::OsStrExt;
-    std::ffi::CString::new(p.as_os_str().as_bytes()).ok()
+/// A path with a NUL byte in it names no real file; refused rather than cut short.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+fn nul_in_path() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "a file path contained a NUL character",
+    )
 }
 
-/// A no-replace rename's result. The flag being unsupported (`EINVAL` from a filesystem that
-/// doesn't know it, `ENOSYS` from an old kernel, `ENOTSUP`/`EOPNOTSUPP`) means "use the
-/// fallback" (`None`).
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-fn unix_result(r: libc::c_int) -> Option<std::io::Result<()>> {
-    if r == 0 {
+/// A path as a C string, refused if it holds a NUL byte.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn c_path(p: &Path) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| nul_in_path())
+}
+
+/// A no-replace rename's result (`ok`: the call returned 0). The flag being unsupported
+/// (`EINVAL` from a filesystem that doesn't know it, `ENOSYS` from an old kernel,
+/// `ENOTSUP`/`EOPNOTSUPP`) means "use the fallback" (`None`).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn unix_result(ok: bool) -> Option<std::io::Result<()>> {
+    if ok {
         return Some(Ok(()));
     }
     let e = std::io::Error::last_os_error();
@@ -1056,13 +1077,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// Windows, Linux (glibc) and macOS take the one-step no-replace rename, never the
+    /// Windows, Linux and macOS take the one-step no-replace rename, never the
     /// check-then-rename fallback, on an ordinary local folder.
-    #[cfg(any(
-        windows,
-        target_os = "macos",
-        all(target_os = "linux", target_env = "gnu")
-    ))]
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
     #[test]
     fn the_native_no_replace_rename_is_used_where_the_system_has_one() {
         // Through the wrapper the placement code calls: never the fallback here (no other test
@@ -1093,6 +1110,23 @@ mod tests {
             .expect("this system has a no-replace rename")
             .unwrap();
         assert_eq!(std::fs::read(d.join("b.zip")).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_path_with_a_nul_byte_is_refused_not_cut_short() {
+        let d = scratch("nul");
+        std::fs::write(d.join("a.part"), b"new").unwrap();
+        let mut bad = d.join("a.part").into_os_string();
+        bad.push("\0ignored");
+        let e = rename_no_replace(Path::new(&bad), &d.join("a.zip")).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        let mut bad_to = d.join("a.zip").into_os_string();
+        bad_to.push("\0ignored");
+        let e = rename_no_replace(&d.join("a.part"), Path::new(&bad_to)).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(d.join("a.part")).unwrap(), b"new");
+        assert!(d.join("a.zip").symlink_metadata().is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
 

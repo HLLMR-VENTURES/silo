@@ -508,7 +508,10 @@ pub fn resolve_download(
     // says it has no hash for this mod either.
     let expected_sha256 = match version {
         Some(v) => {
-            let is_latest = detail.latest_version.as_deref().map(str::trim) == Some(v.trim());
+            let is_latest = detail
+                .latest_version
+                .as_deref()
+                .is_some_and(|l| versions_equal(l, &v));
             let latest_hash = detail.archive_sha256.clone().filter(|_| is_latest);
             manifest(base, id, &v)
                 .map_err(|e| Operational(format!("{MANIFEST_UNCHECKED} {e}")))?
@@ -527,6 +530,37 @@ pub fn resolve_download(
         expected_sha256,
         tech_name: detail.tech_name.clone(),
     })
+}
+
+/// Whether two version strings name the same release, as SiloAPI decides it (its
+/// `versionsEqual`): a leading `v`, `-`/`_`/`+` vs `.` and trailing `.0`s don't matter, so the
+/// GitHub tag `v1.2.0` is the catalog's `1.2.0`. Versions that don't start with a number only
+/// match exactly.
+fn versions_equal(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (version_parts(a), version_parts(b)) {
+        (Some(pa), Some(pb)) => {
+            let n = pa.len().max(pb.len());
+            (0..n).all(|i| pa.get(i).unwrap_or(&0) == pb.get(i).unwrap_or(&0))
+        }
+        _ => false,
+    }
+}
+
+/// `1.2.0` -> [1, 2, 0]; a segment that doesn't start with a digit counts as 0 (SiloAPI's
+/// `parseInt`); `None` unless the first one does.
+fn version_parts(v: &str) -> Option<Vec<u64>> {
+    let v = v.trim();
+    let v = v.strip_prefix(['v', 'V']).unwrap_or(v);
+    let lead = |s: &str| -> Option<u64> {
+        let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    };
+    let segs: Vec<&str> = v.split(['.', '-', '+', '_']).collect();
+    lead(segs.first()?)?;
+    Some(segs.iter().map(|s| lead(s).unwrap_or(0)).collect())
 }
 
 const MANIFEST_UNCHECKED: &str =
@@ -911,6 +945,13 @@ mod tests {
         "sources":[{"source":"github","sourceUrl":"https://github.com/a/b","installable":true,
         "downloadUrl":"https://github.com/a/b/releases/download/v1/FS25_X.zip"}]}"#;
 
+    /// [`DETAIL_HASHED`], with the source naming the same version as a GitHub tag.
+    const DETAIL_HASHED_TAG: &str = r#"{"id":"m1","techName":"FS25_X","title":"X",
+        "latestVersion":"1.0.0.0","archiveSha256":"latest","verified":true,
+        "sources":[{"source":"github","sourceUrl":"https://github.com/a/b","installable":true,
+        "version":"v1.0.0.0",
+        "downloadUrl":"https://github.com/a/b/releases/download/v1/FS25_X.zip"}]}"#;
+
     /// [`DETAIL`], with the latest version's hash on the record.
     const DETAIL_HASHED: &str = r#"{"id":"m1","techName":"FS25_X","title":"X",
         "latestVersion":"1.0.0.0","archiveSha256":"latest","verified":true,
@@ -945,6 +986,16 @@ mod tests {
     }
 
     #[test]
+    fn version_spellings_of_one_release_are_equal() {
+        assert!(versions_equal("v1.2.0", "1.2.0"));
+        assert!(versions_equal("1.2", "1.2.0.0"));
+        assert!(versions_equal("V1-2-0", "1.2.0"));
+        assert!(!versions_equal("1.2.1", "1.2.0"));
+        assert!(!versions_equal("beta", "1.0"));
+        assert!(versions_equal("beta", "beta"));
+    }
+
+    #[test]
     fn a_manifest_without_the_hash_does_not_switch_off_the_records_own() {
         for manifest in [
             ("200 OK", r#"{"manifestHash":"h","archiveSha256":null}"#),
@@ -954,6 +1005,16 @@ mod tests {
             let r = resolve_with(DETAIL_HASHED, manifest).unwrap();
             assert_eq!(r.expected_sha256.as_deref(), Some("latest"), "{manifest:?}");
         }
+        let r = resolve_with(
+            DETAIL_HASHED_TAG,
+            ("200 OK", r#"{"manifestHash":"h","archiveSha256":null}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            r.expected_sha256.as_deref(),
+            Some("latest"),
+            "v-tag of the latest"
+        );
         // The manifest's own hash wins when it has one.
         let r = resolve_with(
             DETAIL_HASHED,

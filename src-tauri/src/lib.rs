@@ -1194,13 +1194,16 @@ impl Drop for PartClaim {
 /// decomposed, lowercased, then uppercased (which also merges `σ`/`ς`, `k`/Kelvin sign and the
 /// like), then recomposed (NFC). Folding too much only over-claims (two such variants can't
 /// download at once, also on a case-sensitive Linux folder), which is harmless. The parent is
-/// kept as given; callers join names onto one root.
+/// resolved (`canonicalize`: real case on Windows, links followed), so two spellings of one
+/// folder share keys; a folder that can't be resolved is kept as given.
 fn same_file_key(p: &std::path::Path) -> PathBuf {
     match p.file_name() {
         Some(name) => {
             let key = fold_file_name(&name.to_string_lossy());
             match p.parent() {
-                Some(parent) => parent.join(key),
+                Some(parent) => std::fs::canonicalize(parent)
+                    .unwrap_or_else(|_| parent.to_path_buf())
+                    .join(key),
                 None => PathBuf::from(key),
             }
         }
@@ -4598,14 +4601,33 @@ async fn collection_apply(
                         continue;
                     }
                     let dest = root.join(&resolved.filename);
-                    // Already there, or another mod in this collection downloads the same file.
-                    let key = same_file_key(&dest);
-                    if path_taken(&dest) || pending.iter().any(|p| same_file_key(&p.dest) == key) {
+                    // Already there, or another mod in this collection downloads that very file.
+                    let same_name = |p: &PendingPlace| {
+                        p.dest.file_name().is_some_and(|n| {
+                            n.to_string_lossy().to_lowercase() == resolved.filename.to_lowercase()
+                        })
+                    };
+                    if path_taken(&dest) || pending.iter().any(same_name) {
                         rows.push(present_row(&m.tech_name, &resolved.filename));
                         continue;
                     }
-                    // Taken only by another download running right now (e.g. from Browse).
                     let Ok(part) = claim_part(&dest) else {
+                        // A different name the claim treats as the same file as one of this
+                        // set's own downloads: never reported as present.
+                        let key = same_file_key(&dest);
+                        if let Some(p) = pending.iter().find(|p| same_file_key(&p.dest) == key) {
+                            rows.push(fail_row(
+                                &m.tech_name,
+                                format!(
+                                    "Its file name can't be told apart from {} in this set. \
+                                     Install it on its own afterwards.",
+                                    file_label(&p.dest)
+                                ),
+                            ));
+                            failed_count += 1;
+                            continue;
+                        }
+                        // Taken only by another download running right now (e.g. from Browse).
                         rows.push(ApplyRow {
                             tech_name: m.tech_name.clone(),
                             filename: Some(resolved.filename.clone()),
@@ -6666,6 +6688,10 @@ mod tests {
         let _sigma = super::claim_part(&mods.join("FS25_\u{3c3}.zip")).unwrap();
         assert!(super::claim_part(&mods.join("FS25_\u{3c2}.zip")).is_err());
         assert!(super::claim_part(&mods.join("FS25_\u{3a3}.zip")).is_err());
+        // Two spellings of one folder share keys.
+        std::fs::create_dir_all(&mods).unwrap();
+        let other_spelling = mods.join(".").join("FS25_Foo.zip");
+        assert!(super::claim_part(&other_spelling).is_err());
         // APFS also treats the two ways of writing an accent as one name.
         let _cafe = super::claim_part(&mods.join("FS25_Caf\u{e9}.zip")).unwrap();
         assert!(super::claim_part(&mods.join("FS25_Cafe\u{301}.zip")).is_err());
