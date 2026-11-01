@@ -66,7 +66,8 @@ capture the forensic baseline from `RC_TESTING.md` first.
 shipping; macOS and Linux are experimental platforms, verified by testers as they report in:
 - [x] `[game]` **Windows, Developer Mode on:** FS25 loads **symlinked active zips** (archive on another drive; the mods folder entry is a symlink into the archive). _Passed 2026-10-17 for v0.9.0: 6 zips symlinked from `E:` into a mods folder on `F:`; `log.txt` listed all 6 as available mods with their hashes and versions._
 - [ ] `[game]` **macOS, Steam install:** FS25 loads symlinked active zips from an archive on another volume.
-- [ ] `[game]` **macOS, Mac App Store install:** the mods folder is inside the app's sandbox container, so active zips and **folder (unzipped) mods** are **copied, not linked** — confirm they load and no symlink is created.
+- [ ] `[game]` **macOS, Mac App Store install:** the mods folder is inside the app's sandbox container, so active zips and **folder (unzipped) mods** are **copied, not linked** — confirm they load and no symlink is created. If macOS asks whether Silo may access data from other apps, allowing it once is enough; note what Silo shows if it's denied.
+- [ ] `[app]` **macOS, in-app update:** an installed release updates itself to the next one through **Update available** (download, signature check, relaunch), with no Gatekeeper warning and no new keychain prompt for the GitHub token.
 - [ ] `[game]` **Linux / Proton:** FS25 loads symlinked active zips (ask the #166 reporter to verify on CachyOS).
 - [x] If symlinked zips do **not** load on Windows, `supports_symlinks` must return `false` on Windows before release (copy only). _Not needed: they load._
 
