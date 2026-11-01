@@ -2,7 +2,13 @@
 //! - an archive move's in-flight copy (`MoveTmp`, `….silo-move-tmp`);
 //! - the old copy an archive move is deleting (`MoveOld`, `….silo-move-old`);
 //! - the temp a relink makes before renaming it over a mods-folder entry (`RelinkTmp`,
-//!   `….silo-relink-tmp`).
+//!   `….silo-relink-tmp`);
+//! - a download's part file (`Part`: `….silo-update.part` for an update, `….part` for an
+//!   install) (#400).
+//!
+//! The journal also lists the update backups Silo made (`UpdateBak`, #400). Those aren't
+//! scratch: no sweep looks at them. Only `update::prune_backups` removes one, and only a
+//! recorded one past the newest few of its mod.
 //!
 //! Each gets a name of its own (`<name>.<token><suffix>`, see [`unique_beside`]), is recorded
 //! in the journal *before* it is made, and is made exclusively (never over anything already
@@ -31,6 +37,10 @@ pub(crate) enum Role {
     MoveTmp,
     MoveOld,
     RelinkTmp,
+    /// A download's part file (an install or an update), made by a `PartClaim`.
+    Part,
+    /// An update backup Silo moved into `backups/` (never swept; see `update::prune_backups`).
+    UpdateBak,
 }
 
 /// One recorded scratch entry.
@@ -40,13 +50,219 @@ pub(crate) struct Entry {
     pub path: PathBuf,
     pub role: Role,
     /// `MoveTmp`: the original being copied. `MoveOld`: the mod's name it was renamed from.
-    /// `RelinkTmp`: the archived copy it links to (or copies).
+    /// `RelinkTmp`: the archived copy it links to (or copies). `Part`: the mod file it
+    /// downloads. `UpdateBak`: the set-aside old version it was moved from.
     pub from: PathBuf,
     /// `MoveTmp`: where the copy is placed. `MoveOld`: its replacement, which must verify
-    /// before the old copy may go. `RelinkTmp`: the mods-folder entry it replaces.
+    /// before the old copy may go. `RelinkTmp`: the mods-folder entry it replaces. `Part`: the
+    /// mod file it becomes. `UpdateBak`: the mod file it's a previous version of.
     pub to: PathBuf,
     /// `zip` or `dir`.
     pub kind: String,
+    /// `Part`, `UpdateBak`: the file Silo made there, read right after it made it. Without it
+    /// nothing proves the file at `path` is still that one, so it's never removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made: Option<Made>,
+}
+
+/// Which file is at a path, and how it was, read right after Silo made it (#400): what proves a
+/// later file there is still Silo's own. The file's number on its volume (Windows: volume serial
+/// and file index; Unix: device and inode) and its birth time where the system keeps one: a file
+/// made, moved or copied there later is another file. Size and last change tell whether it was
+/// changed since; an update backup also keeps its SHA-256 ([`Made::with_sha256`]), so its bytes
+/// are checked too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Made {
+    pub volume: u64,
+    pub index: u64,
+    /// Birth time, ns since 1970.
+    #[serde(default)]
+    pub created: Option<u64>,
+    pub size: u64,
+    /// Last change, ns since 1970.
+    #[serde(default)]
+    pub modified: Option<u64>,
+    /// The bytes' SHA-256 (an update backup's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// A download's part: its length and SHA-256 before the chunk being written, then after it
+    /// (`PartFile`; only the first, before any chunk). A part holds only what Silo wrote while
+    /// its length is one of these and its bytes hash to it, or its length lies between the two
+    /// and its first bytes hash to the one before ([`Made::holds_written`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub written: Vec<Written>,
+}
+
+/// A length a download's part was written to, and the SHA-256 of its bytes then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Written {
+    pub len: u64,
+    pub sha256: String,
+}
+
+fn nanos(t: std::io::Result<std::time::SystemTime>) -> Option<u64> {
+    let d = t.ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    u64::try_from(d.as_nanos()).ok()
+}
+
+impl Made {
+    /// The open file `f` (just made).
+    pub(crate) fn of_file(f: &std::fs::File) -> Option<Made> {
+        let m = f.metadata().ok()?;
+        if !m.is_file() {
+            return None;
+        }
+        let (volume, index) = file_number(f, &m)?;
+        Some(Made {
+            volume,
+            index,
+            created: nanos(m.created()),
+            size: m.len(),
+            modified: nanos(m.modified()),
+            sha256: None,
+            written: Vec::new(),
+        })
+    }
+
+    /// [`Made::of`] plus the bytes' SHA-256, read back after (`None` if the file changed while
+    /// it was read).
+    pub(crate) fn with_sha256(p: &Path) -> Option<Made> {
+        let before = Made::of(p)?;
+        let sha = crate::provenance::sha256_file(p).ok()?;
+        let after = Made::of(p)?;
+        before.unchanged(&after).then_some(Made {
+            sha256: Some(sha),
+            ..before
+        })
+    }
+
+    /// The file at `p` itself: `None` for a link, a folder, or anything that can't be read.
+    pub(crate) fn of(p: &Path) -> Option<Made> {
+        if !p.symlink_metadata().is_ok_and(|m| m.is_file()) {
+            return None;
+        }
+        Made::of_file(&open_no_follow(p).ok()?)
+    }
+
+    /// The same file: same number on the same volume, born at the same time.
+    pub(crate) fn same_file(&self, other: &Made) -> bool {
+        self.volume == other.volume && self.index == other.index && self.created == other.created
+    }
+
+    /// The same file, unchanged since (same size, same last change).
+    pub(crate) fn unchanged(&self, other: &Made) -> bool {
+        self.same_file(other) && self.size == other.size && self.modified == other.modified
+    }
+
+    /// The file at `p` is this one (the same file, read without following a link) and holds
+    /// only what Silo wrote into it, unchanged while it was read. Never without `written`.
+    /// Either:
+    /// - its length is one recorded in `written`, and all its bytes hash to that length's
+    ///   SHA-256; or
+    /// - its length lies strictly between the length recorded before a chunk and the one
+    ///   after it (a crash or a full disk cut that chunk's write off), and its first `before`
+    ///   bytes hash to the SHA-256 recorded before the chunk. The bytes past those are taken to
+    ///   be the start of that chunk: a write that never finished can't be hashed, and only
+    ///   Silo writes into its part (#400).
+    pub(crate) fn holds_written(&self, p: &Path) -> bool {
+        let Some(before) = Made::of(p).filter(|now| self.same_file(now)) else {
+            return false;
+        };
+        let len = before.size;
+        let (count, want) = if let Some(w) = self.written.iter().find(|w| w.len == len) {
+            (u64::MAX, &w.sha256)
+        } else if let Some(w) = self
+            .written
+            .windows(2)
+            .find(|w| w[0].len < len && len < w[1].len)
+            .map(|w| &w[0])
+        {
+            (w.len, &w.sha256)
+        } else {
+            return false;
+        };
+        let sha = sha256_prefix(p, count);
+        let after = Made::of(p);
+        sha.is_some_and(|sha| &sha == want) && after.is_some_and(|a| before.unchanged(&a))
+    }
+
+    /// The file at `p` is this one, unchanged, holding the recorded bytes (when a SHA-256 was
+    /// recorded; without one, never).
+    pub(crate) fn holds_same_bytes(&self, p: &Path) -> bool {
+        let Some(want) = &self.sha256 else {
+            return false;
+        };
+        Made::with_sha256(p)
+            .is_some_and(|now| self.unchanged(&now) && now.sha256.as_ref() == Some(want))
+    }
+}
+
+/// The SHA-256 of `p`'s first `n` bytes (all of them for `u64::MAX`); `None` when it can't be
+/// read or holds fewer.
+fn sha256_prefix(p: &Path, n: u64) -> Option<String> {
+    use sha2::Digest;
+    use std::io::Read;
+    let mut r = std::fs::File::open(p).ok()?.take(n);
+    let mut h = sha2::Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut got = 0u64;
+    loop {
+        let k = r.read(&mut buf).ok()?;
+        if k == 0 {
+            break;
+        }
+        h.update(&buf[..k]);
+        got += k as u64;
+    }
+    (n == u64::MAX || got == n).then(|| format!("{:x}", h.finalize()))
+}
+
+/// Open `p` for its attributes only, never following a link at it (a link opens as itself).
+#[cfg(windows)]
+fn open_no_follow(p: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    };
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(p)
+}
+
+#[cfg(unix)]
+fn open_no_follow(p: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // O_NOFOLLOW: a link at `p` fails to open. Non-blocking, so a FIFO put there can't hang.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(p)
+}
+
+#[cfg(windows)]
+fn file_number(f: &std::fs::File, _: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    // SAFETY: a zeroed plain-data struct, filled by the call; the handle is open for the call.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) };
+    (ok != 0).then(|| {
+        (
+            u64::from(info.dwVolumeSerialNumber),
+            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn file_number(_: &std::fs::File, m: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((m.dev(), m.ino()))
 }
 
 /// Where scratch entries are recorded. Recording comes first: an entry that couldn't be
@@ -74,23 +290,53 @@ impl DbJournal<'_> {
     }
 }
 
+impl DbJournal<'_> {
+    /// Read, change and write the list as one step (`BEGIN IMMEDIATE`, unless the caller's
+    /// transaction is already open): a download records its part outside the library lock, so
+    /// a sweep's `forget` on another connection must never write back a list without it.
+    /// `change` returns whether it changed anything.
+    fn change(&self, change: impl FnOnce(&mut Vec<Entry>) -> bool) -> Result<(), String> {
+        let own = self.0.is_autocommit();
+        if own {
+            self.0
+                .execute_batch("BEGIN IMMEDIATE")
+                .map_err(|e| e.to_string())?;
+        }
+        let mut v = self.entries();
+        let r = if change(&mut v) {
+            self.write(&v)
+        } else {
+            Ok(())
+        };
+        if own {
+            let end = if r.is_ok() { "COMMIT" } else { "ROLLBACK" };
+            if let Err(e) = self.0.execute_batch(end) {
+                let _ = self.0.execute_batch("ROLLBACK");
+                return r.and(Err(e.to_string()));
+            }
+        }
+        r
+    }
+}
+
 impl Journal for DbJournal<'_> {
     fn record(&self, e: &Entry) -> Result<(), String> {
-        let mut v = self.entries();
-        v.retain(|x| x.path != e.path);
-        v.push(e.clone());
-        self.write(&v)
+        self.change(|v| {
+            v.retain(|x| x.path != e.path);
+            v.push(e.clone());
+            true
+        })
     }
 
     fn forget(&self, path: &Path) {
-        let mut v = self.entries();
-        let before = v.len();
-        v.retain(|x| x.path != path);
-        if v.len() != before {
-            if let Err(e) = self.write(&v) {
-                // Only costs a sweep that finds the path gone (or proves it again).
-                log::warn!("couldn't update the scratch journal: {e}");
-            }
+        let r = self.change(|v| {
+            let before = v.len();
+            v.retain(|x| x.path != path);
+            v.len() != before
+        });
+        if let Err(e) = r {
+            // Only costs a sweep that finds the path gone (or proves it again).
+            log::warn!("couldn't update the scratch journal: {e}");
         }
     }
 
@@ -99,6 +345,19 @@ impl Journal for DbJournal<'_> {
         db::get_app_setting(self.0, JOURNAL_KEY)
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default()
+    }
+}
+
+/// No journal: records nothing (so nothing is ever swept), lists nothing.
+pub(crate) struct NoJournal;
+
+impl Journal for NoJournal {
+    fn record(&self, _: &Entry) -> Result<(), String> {
+        Err("Silo has no scratch journal here".into())
+    }
+    fn forget(&self, _: &Path) {}
+    fn entries(&self) -> Vec<Entry> {
+        Vec::new()
     }
 }
 
@@ -141,6 +400,7 @@ pub(crate) fn begin(
         from: from.to_path_buf(),
         to: to.to_path_buf(),
         kind: kind.to_string(),
+        made: None,
     })?;
     Ok(path)
 }
@@ -305,6 +565,40 @@ pub(crate) fn held_by(part: &Path, whole: &Path) -> bool {
     }
 }
 
+/// `copy` (a copy Silo made in the mods folder, not a link) holds nothing its archived copy
+/// `archived` doesn't: a zip with the same bytes (or the same file under another name, a
+/// hardlink), or a marked folder copy whose every file but the marker is in `archived` with the
+/// same bytes. Both must be real copies of the same kind. What a relink temp ([`sweep_where`])
+/// and a mods-folder copy on park or flatten (#399) must be before they're removed.
+pub(crate) fn copy_held_by_archive(copy: &Path, archived: &Path) -> bool {
+    match copy.symlink_metadata() {
+        Ok(m) if m.file_type().is_symlink() => false,
+        Ok(m) if m.is_dir() => {
+            real_copy(archived, "dir")
+                && covered_by(
+                    copy,
+                    archived,
+                    Cover::Exact,
+                    Some(crate::organize::SILO_MARKER),
+                )
+        }
+        Ok(m) if m.is_file() => {
+            real_copy(archived, "zip") && (one_file(copy, archived) || same_bytes(copy, archived))
+        }
+        _ => false,
+    }
+}
+
+/// Two distinct names (`distinct`) of one file: hardlinks, so the bytes are the same without
+/// reading them.
+fn one_file(a: &Path, b: &Path) -> bool {
+    distinct(a, b)
+        && matches!(
+            (same_file::Handle::from_path(a), same_file::Handle::from_path(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
+}
+
 /// Clean up a scratch entry right after the operation that made it failed: the same proof as
 /// [`sweep_where`], so it's removed only when redundant; otherwise it's kept (and stays
 /// recorded in `journal`, when there is one, for a later sweep).
@@ -347,6 +641,10 @@ pub(crate) enum Swept {
     Removed,
     /// An old copy whose replacement didn't verify, put back under the mod's name.
     PutBack,
+    /// No longer the file Silo recorded making (another file is there, or Silo never read
+    /// which file it made): left in place, logged, and the record dropped, since it proves
+    /// nothing any more.
+    Disowned,
     /// Kept: Silo couldn't prove it's safe to remove (logged).
     Kept,
 }
@@ -367,21 +665,45 @@ pub(crate) enum Swept {
 ///   file still left). With no replacement at all it may be the only copy left: a zip is put
 ///   back under its name (`from`) when that's free; a folder (perhaps half-deleted) is kept.
 ///
+/// - `Part`: the very file the claim made (`made`: the same file number and birth time, read
+///   without following a link), holding only what the download wrote (`Made::holds_written`:
+///   its length is one it recorded and its bytes hash to that, or a chunk's write was cut off
+///   and its bytes before that chunk hash to what was recorded), that no download running now
+///   claims (`crate::remove_unclaimed_part` holds the claims across the check and the
+///   removal). A recorded part nothing claims is a download that stopped (a crash, or a
+///   removal that failed). Any other file there, or one with bytes Silo can't prove it wrote
+///   (changed since, or longer than the chunk being written), is left in place and the record
+///   dropped (`Disowned`).
+///
 /// Only the entries `which` picks are looked at (a relink pass sweeps relink temps; a move
-/// sweeps those and its own folders' move scratch, never an older move's).
+/// sweeps those and its own folders' move scratch, never an older move's). Update backups
+/// (`UpdateBak`) are never swept.
 pub(crate) fn sweep_where(
     journal: &dyn Journal,
     which: &dyn Fn(&Entry) -> bool,
 ) -> Vec<(Entry, Swept)> {
     let mut out = Vec::new();
-    for e in journal.entries().into_iter().filter(|e| which(e)) {
+    for e in journal
+        .entries()
+        .into_iter()
+        .filter(|e| e.role != Role::UpdateBak && which(e))
+        // A running download's part: not looked at (not even whether it's there yet, so its
+        // record is never dropped before the download makes it).
+        .filter(|e| e.role != Role::Part || !crate::part_in_flight(&e.path))
+    {
         let s = sweep_one(&e);
         match s {
-            Swept::Gone | Swept::Removed | Swept::PutBack => journal.forget(&e.path),
+            Swept::Gone | Swept::Removed | Swept::PutBack | Swept::Disowned => {
+                journal.forget(&e.path)
+            }
             Swept::Kept => {}
         }
         match s {
             Swept::Gone => {}
+            Swept::Disowned => log::warn!(
+                "left {} in place: it's no longer the file Silo made there",
+                e.path.display()
+            ),
             Swept::Removed => crate::fslog::changed("remove-scratch", &e.path),
             Swept::PutBack => crate::fslog::moved("restore", &e.path, &e.from),
             Swept::Kept => log::warn!(
@@ -415,22 +737,26 @@ fn sweep_one(e: &Entry) -> Swept {
     let removed = match e.role {
         Role::RelinkTmp if link => Some(remove_link_entry(&e.path)),
         // A copy (where no link could be made): its archived copy still holds every byte.
-        Role::RelinkTmp if meta.is_file() => (real_copy(&e.from, "zip")
-            && same_bytes(&e.path, &e.from))
-        .then(|| std::fs::remove_file(&e.path)),
+        Role::RelinkTmp if meta.is_file() => {
+            copy_held_by_archive(&e.path, &e.from).then(|| std::fs::remove_file(&e.path))
+        }
         // A marked folder copy: every file but the marker is still in the archived copy, and
         // `remove_link` checks the marker's listing (an untouched copy).
-        Role::RelinkTmp => (meta.is_dir()
-            && real_copy(&e.from, "dir")
-            && covered_by(
-                &e.path,
-                &e.from,
-                Cover::Exact,
-                Some(crate::organize::SILO_MARKER),
-            ))
-        .then(|| crate::organize::remove_link(&e.path)),
-        // Silo never makes a link as move scratch: a link here isn't its own.
-        Role::MoveTmp | Role::MoveOld if link => None,
+        Role::RelinkTmp => (meta.is_dir() && copy_held_by_archive(&e.path, &e.from))
+            .then(|| crate::organize::remove_link(&e.path)),
+        // Silo never makes a link as move scratch or a part: a link here isn't its own.
+        Role::MoveTmp | Role::MoveOld | Role::Part if link => None,
+        // A download that stopped: the file it made, which no download running now claims.
+        Role::Part => match &e.made {
+            Some(made) => match crate::remove_unclaimed_part(&e.path, made) {
+                crate::PartSweep::Removed(r) => Some(r),
+                crate::PartSweep::Claimed => None,
+                crate::PartSweep::NotIt => return Swept::Disowned,
+            },
+            None => return Swept::Disowned,
+        },
+        // Never swept (`sweep_where` skips them); kept if one ever gets here.
+        Role::UpdateBak => None,
         // A copy that may have stopped part-way: every byte it holds is still in the original
         // (or, a zip placed by hardlink, in the placed copy).
         Role::MoveTmp => {
@@ -491,11 +817,13 @@ fn remove_link_entry(p: &Path) -> std::io::Result<()> {
 
 /// Recorded scratch entries tied to any of `paths` (as their `from` or `to`) that are still
 /// there, plus older-style scratch names beside them (`<path><suffix>`): what to point the user
-/// at when a mod's copy is missing.
+/// at when a mod's copy is missing. A download's part and an update backup are never a copy
+/// of the mod being moved, so they aren't listed.
 pub(crate) fn kept_for(journal: &dyn Journal, paths: &[&Path]) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = journal
         .entries()
         .into_iter()
+        .filter(|e| !matches!(e.role, Role::Part | Role::UpdateBak))
         .filter(|e| paths.iter().any(|p| e.from == *p || e.to == *p))
         .map(|e| e.path)
         .filter(|p| p.symlink_metadata().is_ok())
@@ -579,6 +907,7 @@ pub(crate) mod tests {
             from: from.into(),
             to: to.into(),
             kind: kind.into(),
+            made: None,
         }
     }
 

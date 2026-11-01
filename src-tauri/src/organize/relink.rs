@@ -118,6 +118,12 @@ pub(super) fn relink_with(
                 continue;
             }
         }
+        // A copy is traded for a link only to a real archived zip: one that is itself a link
+        // (to a file elsewhere) isn't a copy Silo can stand behind (#399).
+        if !crate::scratch::real_copy(&src, "zip") {
+            rep.skipped += 1;
+            continue;
+        }
         match same_bytes(&flat, &src) {
             Ok(true) => match relink_over(&src, &flat, hardlinks, Some(&journal)) {
                 Ok(()) => {
@@ -244,6 +250,7 @@ fn discard_relink_tmp(
         from: from.to_path_buf(),
         to: tmp.to_path_buf(),
         kind: kind.to_string(),
+        made: None,
     };
     crate::scratch::discard(journal, &e);
 }

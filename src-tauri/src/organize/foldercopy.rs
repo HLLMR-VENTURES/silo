@@ -98,17 +98,38 @@ pub(super) fn marker_listing(dir: &Path) -> std::io::Result<Option<Vec<ListedFil
     })
 }
 
-/// True only when the marked folder copy at `dir` is provably what Silo wrote. With a v2
-/// listing: the same files with the same sizes and modification times (any added, removed,
-/// resized or re-timed file counts as changed). Limit: an edit that keeps a file's size and
-/// lands within the same timestamp tick as the copy (same millisecond, or FAT's 2 s) can't be
-/// seen; in practice an edit comes much later. A legacy marker has no listing, so the copy is
-/// compared with the archived `src` by relative path, size and SHA-256.
+/// What [`copy_state`] found a marked folder copy to be.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CopyState {
+    /// Provably what Silo wrote.
+    Unchanged,
+    /// Its v2 listing shows a file added, removed, resized or re-timed: the user changed it.
+    Edited,
+    /// A legacy marker (no listing) and the copy doesn't match the archived copy, or couldn't
+    /// be compared with it: an edit and a damaged archive copy look the same (#399).
+    Unproven,
+}
+
+/// Whether the marked folder copy at `dir` is what Silo wrote. With a v2 listing: the same
+/// files with the same sizes and modification times (any added, removed, resized or re-timed
+/// file counts as changed). Limit: an edit that keeps a file's size and lands within the same
+/// timestamp tick as the copy (same millisecond, or FAT's 2 s) can't be seen; in practice an
+/// edit comes much later. A legacy marker has no listing, so the copy is compared with the
+/// archived `src` by relative path, size and SHA-256. `Err` when the marker or the copy can't
+/// be read: nothing is proven either way.
+pub(super) fn copy_state(dir: &Path, src: &Path) -> std::io::Result<CopyState> {
+    Ok(match marker_listing(dir)? {
+        Some(files) if listing_of(dir)? == files => CopyState::Unchanged,
+        Some(_) => CopyState::Edited,
+        None if same_tree_contents(dir, src).unwrap_or(false) => CopyState::Unchanged,
+        None => CopyState::Unproven,
+    })
+}
+
+/// True only when the marked folder copy at `dir` is provably what Silo wrote ([`copy_state`]).
+#[cfg(test)]
 pub(crate) fn copy_unchanged(dir: &Path, src: &Path) -> std::io::Result<bool> {
-    match marker_listing(dir)? {
-        Some(files) => Ok(listing_of(dir)? == files),
-        None => same_tree_contents(dir, src),
-    }
+    copy_state(dir, src).map(|s| s == CopyState::Unchanged)
 }
 
 /// Same relative paths, sizes and SHA-256 contents (the marker is ignored).
@@ -131,8 +152,12 @@ fn same_tree_contents(copy: &Path, src: &Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Remove a marked folder copy only if unchanged; otherwise move it to
-/// `<mods_root>/backups/<name>.<secs>/` and return that path so the caller can tell the user.
+/// Remove a marked folder copy only if unchanged and its archived copy `src` still holds every
+/// file of it (`scratch::copy_held_by_archive`); an unchanged copy the archive doesn't hold is
+/// kept where it is, with an error saying why (it may be the only good copy, #399), and so is a
+/// legacy-marked copy that doesn't match `src` (an edit or a damaged archive copy, which Silo
+/// can't tell apart). A copy its v2 listing shows was changed is moved to
+/// `<mods_root>/backups/<name>.<secs>/` and that path returned so the caller can tell the user.
 /// The kept copy loses Silo's marker: it is the user's folder now.
 pub(crate) fn retire_folder_copy(
     link: &Path,
@@ -152,10 +177,21 @@ pub(super) fn retire_folder_copy_with(
     mods_root: &Path,
     rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> std::io::Result<Option<PathBuf>> {
-    if copy_unchanged(link, src).unwrap_or(false) {
-        std::fs::remove_dir_all(link)?;
-        crate::fslog::changed("unlink", link);
-        return Ok(None);
+    match copy_state(link, src) {
+        Ok(CopyState::Unchanged) => {
+            if !crate::scratch::copy_held_by_archive(link, src) {
+                return Err(not_held_by_archive(link, src));
+            }
+            std::fs::remove_dir_all(link)?;
+            crate::fslog::changed("unlink", link);
+            return Ok(None);
+        }
+        Ok(CopyState::Edited) => {}
+        // Only a v2 listing that was read proves an edit; anything less stays where it is
+        // (#399). A legacy marker only says the copy differs from the archived copy, which
+        // may be the archive's damage.
+        Ok(CopyState::Unproven) => return Err(legacy_copy_differs(link, src)),
+        Err(e) => return Err(couldnt_check(link, &e)),
     }
     let name = link
         .file_name()
@@ -192,16 +228,68 @@ fn backup_move_error(name: &str, e: &std::io::Error) -> String {
 }
 
 /// Free a mods-folder slot holding Silo's projection of `src`. A marked folder copy goes
-/// through [`retire_folder_copy`] (an edited one is kept in backups, its path returned);
-/// anything else through [`remove_link`].
+/// through [`retire_folder_copy`] (an edited one is kept in backups, its path returned). A zip
+/// (a copy, or a hardlink) goes only while the archived `src` is a real zip holding the same
+/// bytes (`scratch::copy_held_by_archive`); otherwise it's kept, with an error saying why
+/// (#399). Anything else (a link) through [`remove_link`].
 pub(super) fn clear_projection(
     link: &Path,
     src: &Path,
     mods_root: &Path,
 ) -> std::io::Result<Option<PathBuf>> {
     let meta = link.symlink_metadata()?;
-    if meta.is_dir() && !meta.file_type().is_symlink() && link.join(SILO_MARKER).is_file() {
+    let real = !meta.file_type().is_symlink();
+    if real && meta.is_dir() && link.join(SILO_MARKER).is_file() {
         return retire_folder_copy(link, src, mods_root);
     }
+    if real && meta.is_file() && !crate::scratch::copy_held_by_archive(link, src) {
+        return Err(not_held_by_archive(link, src));
+    }
     remove_link(link).map(|()| None)
+}
+
+/// What the user is told when Silo couldn't read a marked copy (or its marker) to tell whether it
+/// changed: it's left where it is.
+fn couldnt_check(link: &Path, e: &std::io::Error) -> std::io::Error {
+    let name = link
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| link.display().to_string());
+    std::io::Error::other(format!(
+        "Silo couldn't check whether {name} changed since it was copied ({e}), so it left it in your mods folder."
+    ))
+}
+
+/// What the user is told when a legacy-marked copy (no listing of what Silo wrote) doesn't match
+/// its archived copy: it may have been changed, or the archive copy may be damaged.
+fn legacy_copy_differs(link: &Path, src: &Path) -> std::io::Error {
+    log::warn!(
+        "kept {}: it doesn't match the archived copy at {} and has no listing to tell why",
+        link.display(),
+        src.display()
+    );
+    let name = link
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| link.display().to_string());
+    std::io::Error::other(format!(
+        "{name} stays in your mods folder: it doesn't match the copy in your library archive, and Silo can't tell whether it was changed or the archive copy is damaged. To turn the mod off, move it out of your mods folder yourself."
+    ))
+}
+
+/// What the user is told when a copy in the mods folder is kept because its archived copy is
+/// missing, a link, or doesn't hold the same bytes: removing it could lose the only good copy.
+fn not_held_by_archive(link: &Path, src: &Path) -> std::io::Error {
+    log::warn!(
+        "kept {}: the archived copy at {} doesn't hold the same bytes",
+        link.display(),
+        src.display()
+    );
+    let name = link
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| link.display().to_string());
+    std::io::Error::other(format!(
+        "{name} stays in your mods folder: Silo couldn't confirm the copy in your library archive matches it (it may be missing, damaged or incomplete), so removing this one could lose the only good copy."
+    ))
 }
