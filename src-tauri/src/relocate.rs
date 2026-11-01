@@ -628,18 +628,35 @@ fn right_kind(m: &std::fs::Metadata, kind: &str) -> bool {
     }
 }
 
-/// The new copy is still in place right before its old copy is deleted: itself (not a link) and
-/// of the mod's kind. A copy that vanished or was swapped for a link after it was verified (a
-/// sync client, say) stops the step with the old copy kept. An observation, not a lock.
-fn still_there(new: &Path, kind: &str) -> Result<(), StepErr> {
-    let real = new
-        .symlink_metadata()
-        .is_ok_and(|m| !m.file_type().is_symlink() && right_kind(&m, kind));
-    if real {
+/// Right before the old copy `old` is deleted, both copies are still themselves (not links), of
+/// the mod's kind, and still match as they did when verified: the same size for a zip, the same
+/// files and sizes for a folder mod (`Check::Listing`; no second hash of every byte). A copy
+/// that vanished, was swapped for a link, or was replaced by something else since (a sync
+/// client, say) stops the step with both kept. An observation, not a lock: an identical-size
+/// swap in between isn't caught.
+fn still_there(old: &Path, new: &Path, kind: &str) -> Result<(), StepErr> {
+    let real = |p: &Path| {
+        p.symlink_metadata()
+            .ok()
+            .filter(|m| !m.file_type().is_symlink() && right_kind(m, kind))
+    };
+    let Some(n) = real(new) else {
+        return Err(StepErr::Failed(format!(
+            "move: the new copy at {} is gone, so Silo kept the original. Check that folder, then resume.",
+            new.display()
+        )));
+    };
+    let same = match real(old) {
+        Some(_) if kind == "dir" => verify(old, new, kind, Check::Listing).unwrap_or(false),
+        Some(o) => o.len() == n.len(),
+        None => false,
+    };
+    if same {
         Ok(())
     } else {
         Err(StepErr::Failed(format!(
-            "move: the new copy at {} is gone, so Silo kept the original. Check that folder, then resume.",
+            "move: {} and {} no longer match, so Silo kept both. Check them, then resume.",
+            old.display(),
             new.display()
         )))
     }
@@ -770,7 +787,7 @@ fn forward_one(
     if abort() {
         return Err(StepErr::Interrupted);
     }
-    still_there(&dst, &row.kind)?;
+    still_there(&src, &dst, &row.kind)?;
     delete_source(&src).map_err(StepErr::Failed)?;
     Ok(Step::Moved)
 }
@@ -814,7 +831,7 @@ fn back_one(
     if abort() {
         return Err(StepErr::Interrupted);
     }
-    still_there(&home, &row.kind)?;
+    still_there(&src, &home, &row.kind)?;
     delete_source(&src).map_err(StepErr::Failed)?;
     env.unrecord(marker, &row.tech_name)?;
     Ok(Step::Moved)
@@ -2689,18 +2706,39 @@ mod tests {
         let dst = zip_at(&f.new, "FS25_A");
         std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
         std::fs::copy(&src, &dst).unwrap();
-        assert!(still_there(&dst, "zip").is_ok());
-        assert!(still_there(&dst, "dir").is_err());
-        assert!(still_there(&f.new, "zip").is_err());
+        assert!(still_there(&src, &dst, "zip").is_ok());
+        assert!(still_there(&src, &dst, "dir").is_err());
+        assert!(still_there(&src, &f.new, "zip").is_err());
         let gone = zip_at(&f.new, "FS25_Gone");
-        match still_there(&gone, "zip") {
+        match still_there(&src, &gone, "zip") {
             Err(StepErr::Failed(e)) => assert!(e.contains("so Silo kept the original"), "{e}"),
             other => panic!("{other:?}"),
         }
+        // Replaced since it was verified (another size), on either side: both kept.
+        std::fs::write(&dst, b"something else entirely").unwrap();
+        match still_there(&src, &dst, "zip") {
+            Err(StepErr::Failed(e)) => assert!(e.contains("so Silo kept both"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        std::fs::copy(&src, &dst).unwrap();
+        let other = f.base.join("other.zip");
+        std::fs::write(&other, b"a different file").unwrap();
+        assert!(still_there(&other, &dst, "zip").is_err());
+        // A folder mod: a folder with other files than the original isn't it.
+        let (fa, fb) = (f.base.join("fa"), f.base.join("fb"));
+        std::fs::create_dir_all(&fa).unwrap();
+        std::fs::create_dir_all(&fb).unwrap();
+        std::fs::write(fa.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        assert!(
+            still_there(&fa, &fb, "dir").is_err(),
+            "an empty folder isn't the copy"
+        );
+        std::fs::write(fb.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        assert!(still_there(&fa, &fb, "dir").is_ok());
         // Swapped for a link back to the original: refused, and a step keeps the original.
         std::fs::remove_file(&dst).unwrap();
         if organize::symlink_file(&src, &dst).is_ok() {
-            assert!(still_there(&dst, "zip").is_err());
+            assert!(still_there(&src, &dst, "zip").is_err());
             let mut m = marker(&f);
             env(&f).record(&mut m, "FS25_A").unwrap();
             let layout = dest(&f);
