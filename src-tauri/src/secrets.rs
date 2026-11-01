@@ -500,12 +500,51 @@ fn drop_row(conn: &Connection, key: &str, row: Option<&str>) -> Result<bool, Str
     }
 }
 
-/// A keychain error saying the platform's store itself failed (in keyring 3.6: no Secret
-/// Service on D-Bus, or another backend error). `NoStorageAccess` is not this: it means a store
-/// exists but is locked or refused access, so the user can fix it and Silo must not fall back.
-/// The other variants are about this one entry (too long, ambiguous, bad encoding).
+/// A keychain error that positively shows there's no keychain service to use: on Linux, no
+/// Secret Service on the session bus, or no session bus at all. Only this lets a token go to
+/// the SQLite fallback. keyring 3.6 reports every other Secret Service failure as
+/// `PlatformFailure` too (a D-Bus `AccessDenied`, a broken reply), and those are refusals or
+/// faults of a store that exists, so they're errors, never a plaintext fallback.
+/// `NoStorageAccess` (locked, refused) and the entry-level variants never count. On macOS and
+/// Windows the store always exists, so nothing counts there.
 fn no_keychain_service(err: &keyring::Error) -> bool {
-    matches!(err, keyring::Error::PlatformFailure(_))
+    match err {
+        keyring::Error::PlatformFailure(inner) => service_absent(inner.as_ref()),
+        _ => false,
+    }
+}
+
+/// D-Bus error names that mean nobody provides the Secret Service, or there's no session bus to
+/// ask (`NoServer`, `FileNotFound`, `BadAddress`: no bus at that address; `NotSupported`: no
+/// bus to autolaunch, as on a headless box).
+#[cfg(target_os = "linux")]
+const SERVICE_ABSENT_NAMES: &[&str] = &[
+    "org.freedesktop.DBus.Error.ServiceUnknown",
+    "org.freedesktop.DBus.Error.NameHasNoOwner",
+    "org.freedesktop.DBus.Error.NoServer",
+    "org.freedesktop.DBus.Error.FileNotFound",
+    "org.freedesktop.DBus.Error.BadAddress",
+    "org.freedesktop.DBus.Error.NotSupported",
+];
+
+/// Whether the error keyring wrapped in a `PlatformFailure` says there's no Secret Service.
+fn service_absent(inner: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
+    #[cfg(test)]
+    if inner.is::<tests::NoServiceForTest>() {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    match inner.downcast_ref::<dbus_secret_service::Error>() {
+        Some(dbus_secret_service::Error::Dbus(e)) => {
+            return e.name().is_some_and(|n| SERVICE_ABSENT_NAMES.contains(&n));
+        }
+        // "No D-Bus session or Secret Service provider found" (unused in 4.1, but that's
+        // what it means).
+        Some(dbus_secret_service::Error::Unavailable) => return true,
+        _ => {}
+    }
+    let _ = inner;
+    false
 }
 
 #[derive(Debug, PartialEq)]
@@ -590,17 +629,33 @@ mod tests {
 
     #[derive(Clone, Copy)]
     enum Fail {
-        /// No service, or a broken backend.
+        /// A platform failure that shows there's no keychain service.
         Platform,
+        /// A platform failure from a service that exists (denied by policy, a broken reply).
+        Refused,
         /// Locked, or access denied.
         NoAccess,
         /// A problem with this one entry.
         Invalid,
     }
 
+    /// Stands in, in tests on every platform, for the D-Bus "no Secret Service" errors that
+    /// `service_absent` recognizes on Linux.
+    #[derive(Debug)]
+    pub(super) struct NoServiceForTest;
+
+    impl std::fmt::Display for NoServiceForTest {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("fake: no Secret Service")
+        }
+    }
+
+    impl std::error::Error for NoServiceForTest {}
+
     fn err(f: Fail) -> keyring::Error {
         match f {
-            Fail::Platform => keyring::Error::PlatformFailure("fake platform".into()),
+            Fail::Platform => keyring::Error::PlatformFailure(Box::new(NoServiceForTest)),
+            Fail::Refused => keyring::Error::PlatformFailure("fake: access denied".into()),
             Fail::NoAccess => keyring::Error::NoStorageAccess("fake locked".into()),
             Fail::Invalid => keyring::Error::Invalid("fake".into(), "invalid".into()),
         }
@@ -1370,6 +1425,82 @@ mod tests {
     fn macos_and_windows_never_count_as_having_no_keychain() {
         if cfg!(any(target_os = "macos", target_os = "windows")) {
             assert!(!keychain_missing());
+        }
+    }
+
+    #[test]
+    fn a_service_that_refuses_at_the_platform_level_never_gets_a_plaintext_fallback() {
+        // Every call fails with a PlatformFailure that isn't "no service" (e.g. D-Bus
+        // AccessDenied), and the probe agrees the store is missing: still an error.
+        let conn = mem_db();
+        let k = FakeKeychain::with(|s| {
+            s.set_fails = Some(Fail::Refused);
+            s.get_fails = Some(Fail::Refused);
+            s.delete_fails = Some(Fail::Refused);
+        });
+        let e = store_with(&conn, KEY, "tok", Some(&k.entry()), NO_KEYCHAIN);
+        assert!(matches!(e, Err(SaveError { ref message, .. }) if message == SAVE_FAILED));
+        assert_eq!(row(&conn), None, "never in plaintext");
+        // A Disconnect there can't count the keychain copy as gone either.
+        db::set_app_setting(&conn, KEY, Some("row")).unwrap();
+        assert_eq!(
+            clear_with(&conn, KEY, Some(&k.entry()), NO_KEYCHAIN),
+            Ok(Removal {
+                keychain_kept: true,
+                row_kept: false
+            })
+        );
+    }
+
+    #[test]
+    fn only_a_missing_service_counts_as_no_keychain() {
+        let absent = keyring::Error::PlatformFailure(Box::new(NoServiceForTest));
+        assert!(no_keychain_service(&absent));
+        assert!(!no_keychain_service(&keyring::Error::PlatformFailure(
+            "some other backend failure".into()
+        )));
+        assert!(!no_keychain_service(&keyring::Error::NoStorageAccess(
+            "locked".into()
+        )));
+        assert!(!no_keychain_service(&keyring::Error::NoEntry));
+    }
+
+    /// The real error types keyring's Linux backend wraps (no D-Bus connection is made).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_dbus_errors_are_classified_by_name() {
+        fn dbus_err(name: &str) -> keyring::Error {
+            keyring::Error::PlatformFailure(Box::new(dbus_secret_service::Error::Dbus(
+                dbus::Error::new_custom(name, "test"),
+            )))
+        }
+        for name in SERVICE_ABSENT_NAMES {
+            assert!(
+                no_keychain_service(&dbus_err(name)),
+                "{name} means no service"
+            );
+        }
+        assert!(no_keychain_service(&keyring::Error::PlatformFailure(
+            Box::new(dbus_secret_service::Error::Unavailable)
+        )));
+        for name in [
+            "org.freedesktop.DBus.Error.AccessDenied",
+            "org.freedesktop.DBus.Error.AuthFailed",
+            "org.freedesktop.DBus.Error.NoReply",
+            "org.freedesktop.DBus.Error.Timeout",
+            "org.freedesktop.DBus.Error.Failed",
+            "org.freedesktop.Secret.Error.IsLocked",
+        ] {
+            assert!(!no_keychain_service(&dbus_err(name)), "{name} is a refusal");
+        }
+        // The crate's other errors aren't evidence of absence either.
+        for other in [
+            dbus_secret_service::Error::Parse,
+            dbus_secret_service::Error::Locked,
+            dbus_secret_service::Error::Path("bad".into()),
+        ] {
+            let e = keyring::Error::PlatformFailure(Box::new(other));
+            assert!(!no_keychain_service(&e));
         }
     }
 

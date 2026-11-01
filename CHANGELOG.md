@@ -246,6 +246,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   system's credential store and says when it refuses. If GitHub approves a sign-in but Silo
   can't confirm which account it is, Silo no longer connects with no account name shown (and
   no Disconnect button); it asks you to try again. (#370)
+- On Linux, Silo only keeps your GitHub token in its own database when your system has no
+  keyring service at all. If the keyring is there but refuses (for example a security policy
+  blocks Silo), Silo now says it couldn't store the sign-in there, instead of saving the token
+  in plain text. (#370)
 
 ### Security
 
