@@ -160,7 +160,6 @@ fn backfill_zips(mods: &[scan::ModEntry]) -> Vec<aliasbackfill::LibraryZip> {
             tech_name: m.tech_name.clone(),
             size: m.size,
             mtime_ms: m.mtime_ms,
-            version: m.version.clone(),
         })
         .collect()
 }
@@ -2373,8 +2372,8 @@ struct LocalMod {
     /// The mod's file, for a catalog alias (#386). Absent: joined by techName only.
     #[serde(default)]
     path: Option<String>,
-    /// The file's size and modified time when the library scan read `version` from it, so the
-    /// catalog-link backfill (#402) only takes the file that version belongs to.
+    /// The file's size and modified time when the library scan read it, so the catalog-link
+    /// backfill (#402) only takes the file the scan saw.
     #[serde(default)]
     size: Option<u64>,
     #[serde(default)]
@@ -2382,8 +2381,8 @@ struct LocalMod {
 }
 
 /// The mods in an update check's list as the catalog-link backfill takes them: those with a
-/// file, with the size and modified time the scan saw when it read their version (a file that
-/// has changed since then is left to a run after the next scan).
+/// file, with the size and modified time the scan saw (a file that has changed since then is
+/// left to a run after the next scan).
 fn local_zips(mods: &[LocalMod]) -> Vec<aliasbackfill::LibraryZip> {
     mods.iter()
         .filter_map(|m| {
@@ -2392,7 +2391,6 @@ fn local_zips(mods: &[LocalMod]) -> Vec<aliasbackfill::LibraryZip> {
                 tech_name: m.tech_name.clone(),
                 size: m.size?,
                 mtime_ms: m.mtime_ms?,
-                version: m.version.clone(),
             })
         })
         .collect()
@@ -8016,10 +8014,9 @@ mod tests {
         };
         let zips = super::local_zips(&[m(Some(9), Some(77)), m(None, Some(77)), m(Some(9), None)]);
         // Only a mod with the scan's size and time is taken, keyed on them (never on what the
-        // file has now): a file changed since the scan isn't judged by the old version's number.
+        // file has now): a file changed since the scan waits for the next scan's look.
         assert_eq!(zips.len(), 1);
         assert_eq!((zips[0].size, zips[0].mtime_ms), (9, 77));
-        assert_eq!(zips[0].version.as_deref(), Some("1.0"));
         let none = super::LocalMod {
             path: None,
             ..m(Some(9), Some(77))

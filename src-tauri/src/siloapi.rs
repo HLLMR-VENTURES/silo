@@ -312,103 +312,6 @@ pub fn browse(
     }
 }
 
-/// The most rows `GET /mods` returns per page.
-const LIST_PAGE: u32 = 100;
-
-/// A listing read part of the way: the rows so far and the total its first page reported. Kept
-/// by a caller between tries, so a listing cut short goes on where it stopped.
-#[derive(Debug, Clone, Default)]
-pub struct PartialListing {
-    total: Option<u64>,
-    mods: Vec<BrowseMod>,
-    seen: std::collections::HashSet<String>,
-}
-
-impl PartialListing {
-    /// How many rows it has so far.
-    pub fn len(&self) -> usize {
-        self.mods.len()
-    }
-
-    /// Whether it has no rows yet.
-    pub fn is_empty(&self) -> bool {
-        self.mods.is_empty()
-    }
-}
-
-/// Every catalog entry with a source of kind `source` (`github`, say), read page by page from
-/// `GET /mods?source=<source>&sort=name` (name order, tie-broken by id on the server), going on
-/// from `partial`. Anything short of the whole listing is an error, never a partial list: a
-/// caller counting the entries that list some bytes must see them all (see `all_pages`).
-/// `out_of_time` is asked before each page; once it says so, no further request starts.
-pub fn list_source(
-    base: &str,
-    source: &str,
-    max_pages: u32,
-    out_of_time: &dyn Fn() -> bool,
-    partial: &mut PartialListing,
-) -> Result<Vec<BrowseMod>, String> {
-    let fetch = |offset: u32| -> Result<BrowsePage, String> {
-        let url = format!(
-            "{}/mods?source={}&sort=name&limit={LIST_PAGE}&offset={offset}",
-            base.trim_end_matches('/'),
-            urlencode(source)
-        );
-        let parsed: BrowseResponse = get(&url)?.into_json().map_err(|e| e.to_string())?;
-        Ok(BrowsePage {
-            mods: parsed.mods,
-            total: parsed.total,
-        })
-    };
-    all_pages(fetch, max_pages, out_of_time, partial)
-}
-
-/// Read pages of `LIST_PAGE` rows from `fetch(offset)`, going on from `partial`, until the total
-/// the first page reported; the whole listing then, with `partial` emptied. An error when a page
-/// fails or `out_of_time` says so before a page (`partial` keeps the pages read, for the next
-/// try); when the listing changed while it was read (another total, a page shorter or longer
-/// than the rest of the total, an entry seen twice: `partial` starts over); or when it runs past
-/// `max_pages` pages.
-pub(crate) fn all_pages(
-    fetch: impl Fn(u32) -> Result<BrowsePage, String>,
-    max_pages: u32,
-    out_of_time: &dyn Fn() -> bool,
-    partial: &mut PartialListing,
-) -> Result<Vec<BrowseMod>, String> {
-    let changed = |partial: &mut PartialListing| {
-        *partial = PartialListing::default();
-        "Silo's catalog changed while Silo was reading it.".to_string()
-    };
-    let first = (partial.mods.len() / LIST_PAGE as usize) as u32;
-    for page in first..max_pages {
-        if out_of_time() {
-            return Err("Silo stopped reading its catalog: it took too long.".to_string());
-        }
-        let got = fetch(page * LIST_PAGE)?;
-        let want = *partial.total.get_or_insert(got.total);
-        let left = want
-            .saturating_sub(partial.mods.len() as u64)
-            .min(u64::from(LIST_PAGE));
-        if got.total != want || got.mods.len() as u64 != left {
-            return Err(changed(partial));
-        }
-        for m in got.mods {
-            if !partial.seen.insert(m.id.clone()) {
-                return Err(changed(partial));
-            }
-            partial.mods.push(m);
-        }
-        if partial.mods.len() as u64 == want {
-            return Ok(std::mem::take(partial).mods);
-        }
-    }
-    *partial = PartialListing::default();
-    Err(format!(
-        "Silo's catalog listed more than {} mods; Silo stopped reading it.",
-        max_pages * LIST_PAGE
-    ))
-}
-
 /// SiloAPI's `POST /mods/lookup` accepts at most this many tech names per request.
 pub const LOOKUP_BATCH: usize = 500;
 
@@ -444,6 +347,98 @@ fn lookup_one(base: &str, tech_names: &[&str]) -> Result<Vec<LookupResult>, Stri
     let resp = crate::net::refuse_redirect(resp).map_err(not_answering)?;
     let parsed: LookupResponse = resp.into_json().map_err(|e| e.to_string())?;
     Ok(parsed.results)
+}
+
+/// SiloAPI's `POST /mods/by-hash` accepts at most this many hashes per request.
+pub const BY_HASH_BATCH: usize = 100;
+
+/// One catalog build whose whole-zip SHA-256 is the one asked about (`POST /mods/by-hash`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HashMatch {
+    /// The catalog entry's id.
+    pub id: String,
+    #[serde(default)]
+    pub tech_name: Option<String>,
+    /// The version the build is stored under.
+    pub version: String,
+    pub source: String,
+    /// The file name the build downloads as.
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub download_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HashResult {
+    sha256: String,
+    #[serde(default)]
+    matches: Vec<HashMatch>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ByHashResponse {
+    results: Vec<HashResult>,
+}
+
+/// Every catalog build whose whole-zip SHA-256 is one of `hashes` (lowercase hex), by hash: one
+/// consistent answer per request (silo-api#39). Every hash asked has an entry, empty when no
+/// build has it. `Ok(None)` when the catalog has no such route yet (404: a server from before
+/// it). An answer that leaves out a hash asked about is an error, never "no match".
+pub fn by_hash(
+    base: &str,
+    hashes: &[String],
+) -> Result<Option<std::collections::HashMap<String, Vec<HashMatch>>>, String> {
+    let mut asked: Vec<String> = hashes.iter().map(|h| h.to_ascii_lowercase()).collect();
+    asked.sort();
+    asked.dedup();
+    let mut out = std::collections::HashMap::new();
+    for batch in asked.chunks(BY_HASH_BATCH) {
+        match by_hash_one(base, batch)? {
+            Some(found) => out.extend(found),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(out))
+}
+
+fn by_hash_one(
+    base: &str,
+    hashes: &[String],
+) -> Result<Option<std::collections::HashMap<String, Vec<HashMatch>>>, String> {
+    let resp = match crate::net::catalog()
+        .post(&format!("{}/mods/by-hash", base.trim_end_matches('/')))
+        .header("Content-Type", "application/json")
+        .send_json_checked(serde_json::json!({ "hashes": hashes }))
+    {
+        Ok(r) => r,
+        Err(HttpError::Status(404, _)) => return Ok(None),
+        Err(e) => return Err(catalog_err(e)),
+    };
+    let resp = crate::net::refuse_redirect(resp).map_err(not_answering)?;
+    let parsed: ByHashResponse = resp.into_json().map_err(|e| e.to_string())?;
+    by_hash_answer(hashes, parsed)
+}
+
+/// The answer to one `by-hash` request for `hashes`, by hash. An error when it leaves out one
+/// asked about or answers one not asked.
+fn by_hash_answer(
+    hashes: &[String],
+    parsed: ByHashResponse,
+) -> Result<Option<std::collections::HashMap<String, Vec<HashMatch>>>, String> {
+    let mut out = std::collections::HashMap::new();
+    for r in parsed.results {
+        let h = r.sha256.to_ascii_lowercase();
+        if !hashes.contains(&h) {
+            return Err("Silo's catalog answered about a file it wasn't asked about.".into());
+        }
+        out.insert(h, r.matches);
+    }
+    if hashes.iter().any(|h| !out.contains_key(h)) {
+        return Err("Silo's catalog left a file out of its answer.".into());
+    }
+    Ok(Some(out))
 }
 
 /// Catalog categories with counts (whole catalog, most-populated first).
@@ -750,7 +745,7 @@ pub fn check_download_name(filename: &str, tech_name: &str) -> Result<(), String
 }
 
 /// Last path segment if it looks like a .zip.
-pub(crate) fn filename_from_url(url: &str) -> Option<String> {
+fn filename_from_url(url: &str) -> Option<String> {
     let clean = url.split(['?', '#']).next().unwrap_or(url);
     let name = clean.rsplit('/').next().unwrap_or("");
     if name.to_lowercase().ends_with(".zip") && name.len() > 4 {
@@ -1009,124 +1004,122 @@ mod tests {
         }
     }
 
-    /// `all_pages` from the start.
-    fn whole(
-        fetch: impl Fn(u32) -> Result<BrowsePage, String>,
-        max_pages: u32,
-        out_of_time: &dyn Fn() -> bool,
-    ) -> Result<Vec<BrowseMod>, String> {
-        all_pages(
-            fetch,
-            max_pages,
-            out_of_time,
-            &mut PartialListing::default(),
-        )
-    }
+    const H1: &str = "d1b428b296f93906ad8a297e07726f3fe7f70c1828452909791b0b8cf798be18";
+    const H2: &str = "ee6c655fe2e61d2dc0a19b14884ac316c802f106c1729d85a31095ba2450643c";
 
-    /// A list page of `n` bare rows numbered from `from`, of `total` overall.
-    fn list_page(from: u32, n: u32, total: u64) -> BrowsePage {
-        BrowsePage {
-            mods: (from..from + n)
-                .map(|i| {
-                    serde_json::from_value(serde_json::json!({"id": format!("m{i}"), "title": "x"}))
-                        .unwrap()
-                })
-                .collect(),
-            total,
-        }
-    }
-
-    #[test]
-    fn a_source_listing_reads_every_page_and_no_more() {
-        let asked = std::cell::RefCell::new(Vec::new());
-        let fetch = |offset: u32| {
-            asked.borrow_mut().push(offset);
-            let n = 250u32.saturating_sub(offset).min(LIST_PAGE);
-            Ok(list_page(offset, n, 250))
-        };
-        let all = whole(fetch, 10, &|| false).unwrap();
-        assert_eq!(all.len(), 250);
-        assert_eq!(all[249].id, "m249");
-        assert_eq!(*asked.borrow(), [0, 100, 200]);
-        // Exactly a page, and nothing at all.
-        assert_eq!(
-            whole(|o| Ok(list_page(o, 100, 100)), 10, &|| false)
-                .unwrap()
-                .len(),
-            100
-        );
-        assert!(whole(|o| Ok(list_page(o, 0, 0)), 10, &|| false)
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn a_source_listing_that_fails_or_changes_or_runs_long_is_an_error_not_a_partial_list() {
-        let failing = |o: u32| {
-            if o == 0 {
-                Ok(list_page(0, 100, 300))
-            } else {
-                Err("offline".to_string())
+    /// Answer one request on a local port with (status line, body); the base to ask and the
+    /// request line plus body that came in.
+    fn serve_once(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = s.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&req).to_string();
+                if let Some(at) = text.find("\r\n\r\n") {
+                    let len = text
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if req.len() >= at + 4 + len {
+                        break;
+                    }
+                }
             }
-        };
-        assert_eq!(whole(failing, 10, &|| false).unwrap_err(), "offline");
-        // A page that comes back empty or short before the total is reached.
-        let empty = |o: u32| Ok(list_page(o, if o == 0 { 100 } else { 0 }, 900));
-        assert!(whole(empty, 10, &|| false).is_err());
-        let short = |o: u32| Ok(list_page(o, if o == 0 { 100 } else { 50 }, 300));
-        assert!(whole(short, 10, &|| false).is_err());
-        // More rows than the total said, or the total moves between pages.
-        assert!(whole(|o| Ok(list_page(o, 100, 50)), 10, &|| false).is_err());
-        let moving = |o: u32| Ok(list_page(o, 100, if o == 0 { 300 } else { 301 }));
-        assert!(whole(moving, 10, &|| false).is_err());
-        // An entry seen on two pages (the order shifted while paging).
-        let overlap = |o: u32| Ok(list_page(o.saturating_sub(1), 100, 200));
-        assert!(whole(overlap, 10, &|| false).is_err());
-        let endless = |o: u32| Ok(list_page(o, 100, 1_000_000));
-        assert!(whole(endless, 3, &|| false).is_err());
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = s.write_all(resp.as_bytes());
+            String::from_utf8_lossy(&req).to_string()
+        });
+        (base, handle)
     }
 
     #[test]
-    fn a_source_listing_cut_short_goes_on_where_it_stopped() {
-        let asked = std::cell::RefCell::new(Vec::new());
-        let fetch = |o: u32| {
-            asked.borrow_mut().push(o);
-            Ok(list_page(o, 250u32.saturating_sub(o).min(LIST_PAGE), 250))
-        };
-        let mut partial = PartialListing::default();
-        // Out of time after two pages: an error, with those pages kept.
-        let late = || asked.borrow().len() >= 2;
-        assert!(all_pages(fetch, 10, &late, &mut partial).is_err());
-        assert_eq!(partial.len(), 200);
-        let all = all_pages(fetch, 10, &|| false, &mut partial).unwrap();
-        assert_eq!(all.len(), 250);
-        assert_eq!(*asked.borrow(), [0, 100, 200], "no page read twice");
-        assert!(partial.is_empty());
-        // A listing that changed meanwhile starts over.
-        let first = |o: u32| Ok(list_page(o, 100, 300));
-        let mut partial = PartialListing::default();
-        let once = std::cell::Cell::new(false);
-        let cut = || once.replace(true);
-        assert!(all_pages(first, 10, &cut, &mut partial).is_err());
-        assert_eq!(partial.len(), 100);
-        let moved = |o: u32| Ok(list_page(o, 100, 301));
-        assert!(all_pages(moved, 10, &|| false, &mut partial).is_err());
-        assert!(partial.is_empty(), "a changed listing isn't continued");
+    fn by_hash_asks_once_for_every_hash_and_reads_each_answer() {
+        let body = r#"{"results":[
+            {"sha256":"d1b428b296f93906ad8a297e07726f3fe7f70c1828452909791b0b8cf798be18","matches":[
+              {"id":"cat-todo","techName":"FS25_ToDo","version":"v0.1.0.17","source":"github",
+               "fileName":"FS25_FieldToDoList.zip","downloadUrl":"https://github.com/k/r/releases/download/v1/FS25_FieldToDoList.zip"}]},
+            {"sha256":"ee6c655fe2e61d2dc0a19b14884ac316c802f106c1729d85a31095ba2450643c","matches":[]}]}"#;
+        let (base, server) = serve_once("200 OK", body);
+        let asked = [H1.to_uppercase(), H2.to_string(), H1.to_string()];
+        let got = by_hash(&base, &asked).unwrap().unwrap();
+        let req = server.join().unwrap();
+        assert!(req.starts_with("POST /mods/by-hash "), "{req}");
+        // Each hash once, lowercase, in one request.
+        assert!(
+            req.contains(&format!(r#"{{"hashes":["{H1}","{H2}"]}}"#)),
+            "{req}"
+        );
+        assert_eq!(got[H1].len(), 1);
+        assert_eq!(got[H1][0].id, "cat-todo");
+        assert_eq!(
+            got[H1][0].file_name.as_deref(),
+            Some("FS25_FieldToDoList.zip")
+        );
+        assert!(got[H2].is_empty());
     }
 
     #[test]
-    fn a_source_listing_out_of_time_starts_no_further_request() {
-        let asked = std::cell::Cell::new(0);
-        let fetch = |o: u32| {
-            asked.set(asked.get() + 1);
-            Ok(list_page(o, 100, 300))
-        };
-        // Time runs out after the first page.
-        let late = || asked.get() >= 1;
-        assert!(whole(fetch, 10, &late).is_err());
-        assert_eq!(asked.get(), 1);
-        assert!(whole(fetch, 10, &|| true).is_err());
-        assert_eq!(asked.get(), 1, "none started once out of time");
+    fn by_hash_on_a_catalog_without_the_route_is_none_not_an_error() {
+        let (base, server) = serve_once(
+            "404 Not Found",
+            r#"{"message":"Route POST:/mods/by-hash not found"}"#,
+        );
+        assert_eq!(by_hash(&base, &[H1.to_string()]).unwrap(), None);
+        server.join().unwrap();
+        // Any other failure is an error.
+        let (base, server) = serve_once("500 Internal Server Error", "{}");
+        assert!(by_hash(&base, &[H1.to_string()]).is_err());
+        server.join().unwrap();
+        // So is an answer in another shape.
+        let (base, server) = serve_once("200 OK", r#"{"mods":[]}"#);
+        assert!(by_hash(&base, &[H1.to_string()]).is_err());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_by_hash_answer_must_cover_exactly_the_hashes_asked() {
+        let parse = |json: &str| -> ByHashResponse { serde_json::from_str(json).unwrap() };
+        let asked = [H1.to_string(), H2.to_string()];
+        let one = format!(r#"{{"results":[{{"sha256":"{H1}","matches":[]}}]}}"#);
+        assert!(
+            by_hash_answer(&asked, parse(&one)).is_err(),
+            "a hash left out"
+        );
+        let extra = format!(
+            r#"{{"results":[{{"sha256":"{H1}","matches":[]}},{{"sha256":"{H2}","matches":[]}},{{"sha256":"{}","matches":[]}}]}}"#,
+            "0".repeat(64)
+        );
+        assert!(
+            by_hash_answer(&asked, parse(&extra)).is_err(),
+            "a hash not asked"
+        );
+        let both = format!(
+            r#"{{"results":[{{"sha256":"{}","matches":[]}},{{"sha256":"{H2}"}}]}}"#,
+            H1.to_uppercase()
+        );
+        let got = by_hash_answer(&asked, parse(&both)).unwrap().unwrap();
+        assert!(got[H1].is_empty() && got[H2].is_empty());
     }
 
     #[test]
