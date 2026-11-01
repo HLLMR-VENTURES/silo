@@ -1446,15 +1446,20 @@ async fn gh_logout(app: tauri::AppHandle) -> Result<(), String> {
     off_main(move || {
         let conn = db::open(&db)?;
         GH_SIGN_OUTS.sign_out(|| {
-            // When the keychain keeps the token, say so and stay "Connected as …": every later
-            // GitHub call would still use it, so showing it as disconnected would be wrong.
-            secrets::set(&conn, "gh_token", None)?;
+            // Silo stops using the token even when the keychain keeps a copy it couldn't
+            // delete (it's distrusted, and removed once the store allows), so the account is
+            // disconnected either way; that leftover is still reported below.
+            let removed = secrets::clear(&conn, "gh_token")?;
             db::set_app_setting(&conn, "gh_user", None)?;
             db::set_app_setting(&conn, "gh_scopes", None)?;
             // Legacy flags from before scope capture — clear them too so nothing lingers.
             db::set_app_setting(&conn, "gh_write", None)?;
             db::set_app_setting(&conn, "gh_gist", None)?;
-            Ok(())
+            if removed {
+                Ok(())
+            } else {
+                Err(secrets::REMOVE_FAILED.to_string())
+            }
         })
     })
     .await

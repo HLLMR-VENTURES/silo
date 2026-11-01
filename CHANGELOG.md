@@ -28,8 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Connecting GitHub** no longer quietly saves your token in Silo's database when your system's
   credential store refuses it (for example while it's locked). Silo now says the store couldn't
   save it, and only uses the database on systems that have no credential store at all. (#349)
-- **Disconnecting GitHub** now tells you when your system's credential store kept the token,
-  instead of showing you as disconnected while Silo still used it. (#349)
+- **Disconnecting GitHub** now tells you when your system's credential store kept the token.
+  Before, Silo said it was disconnected but kept using that token. Now Silo stops using it and
+  removes it from the store as soon as the store allows. (#349)
 - **Disconnect** now also cancels a GitHub sign-in that's still waiting for its code, so
   approving it later, or just before, can't reconnect the account. (#349)
 - **Update checks** now treat a prerelease such as `1.2.3-rc.1` as older than `1.2.3`, and ignore

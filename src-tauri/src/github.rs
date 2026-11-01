@@ -175,21 +175,29 @@ pub fn is_newer(latest_tag: &str, current: &str) -> bool {
 fn split_version(s: &str) -> (Vec<u64>, Option<&str>) {
     let s = s.trim().trim_start_matches(['v', 'V']);
     let s = s.split_once('+').map_or(s, |(v, _build)| v);
-    // The prerelease starts at the first `-` whose next part has a word in it; the parts
-    // before it, `-`-separated or not, are the version (`1-2-4-rc.1` is 1.2.4, prerelease rc.1).
     let numeric = |part: &str| {
         part.bytes()
-            .all(|b| b.is_ascii_digit() || b == b'.' || b == b'_')
+            .all(|b| b.is_ascii_digit() || b == b'.' || b == b'_' || b == b'-')
     };
-    let mut cut = None;
-    let mut at = 0;
-    for part in s.split('-') {
-        if at > 0 && !numeric(part) {
-            cut = Some(at - 1);
-            break;
+    let cut = match s.split_once('-') {
+        // A dotted version (`1.2.3-…`): semver, so everything after the first `-` is the
+        // prerelease (`1.2.3-1-alpha` is prerelease 1-alpha), unless it's all numbers.
+        Some((first, rest)) if first.contains('.') => (!numeric(rest)).then_some(first.len()),
+        // `-`-separated numbers (`1-2-4-rc.1`): the prerelease starts at the first part with a
+        // word in it (rc.1), and the parts before it are the version (1.2.4).
+        _ => {
+            let mut at = 0;
+            let mut cut = None;
+            for part in s.split('-') {
+                if at > 0 && !numeric(part) {
+                    cut = Some(at - 1);
+                    break;
+                }
+                at += part.len() + 1;
+            }
+            cut
         }
-        at += part.len() + 1;
-    }
+    };
     let (core, pre) = match cut {
         Some(i) => (&s[..i], Some(&s[i + 1..])),
         None => (s, None),
@@ -1336,6 +1344,11 @@ mod tests {
         assert!(is_newer("1-2-3", "1-2-3-rc.1"));
         assert!(!is_newer("1-2-3-rc.1", "1.2.3"));
         assert!(is_newer("1-2-3-rc.2", "1.2.3-rc.1"));
+        // A dotted version keeps semver's whole prerelease, hyphens and all.
+        assert!(is_newer("1.2.3", "1.2.3-1-alpha"));
+        assert!(!is_newer("1.2.3-1-alpha", "1.2.3"));
+        assert!(is_newer("1.2.3-1-beta", "1.2.3-1-alpha"));
+        assert!(is_newer("1.2.3-1-alpha", "1.2.2"));
         // A leading word is skipped, as before.
         assert!(is_newer("release-1.3", "1.2"));
         assert!(!is_newer("release-1.2", "1.2"));

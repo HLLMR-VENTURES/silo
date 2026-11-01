@@ -247,11 +247,11 @@ describe("disconnecting GitHub", () => {
 
   it("shows the backend's reason when the credential store kept the token", async () => {
     const reason =
-      "Silo couldn't remove the token from your system's credential store, so you're still signed in. If it's locked, unlock it and try again.";
+      "Silo couldn't remove the token from your system's credential store. Silo won't use it, and removes it once the store allows (for example after you unlock it). You can also delete the com.hllmr.silo entry there yourself.";
     vi.mocked(ghLogout).mockRejectedValue(reason);
-    vi.mocked(ghStatus).mockResolvedValue(connected);
+    vi.mocked(ghStatus).mockResolvedValue(disconnected);
     await disconnectGithub();
     expect(githubAuth.message).toContain("couldn't remove the token from your system's credential store");
-    expect(githubAuth.status.user).toBe("octocat");
+    expect(githubAuth.status.user).toBeNull();
   });
 });
