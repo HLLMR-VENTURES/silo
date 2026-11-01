@@ -3,7 +3,7 @@
 
 import { invoke as rawInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { save, open, confirm as pluginConfirm } from "@tauri-apps/plugin-dialog";
+import { save, open, confirm as pluginConfirm, message as pluginMessage } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
 import { toAppError } from "./errors";
 import { serial } from "./serial";
@@ -78,6 +78,25 @@ export async function confirmDialog(
   opts: { okLabel?: string; cancelLabel?: string; kind?: "info" | "warning" | "error" } = {},
 ): Promise<boolean> {
   return await pluginConfirm(message, { title: "Silo", kind: opts.kind ?? "warning", ...opts });
+}
+
+/**
+ * A system dialog whose default answer is the safe one (#392): the safe label is the first
+ * button, which the system dialog focuses, then the verb, then Cancel, which closing the dialog
+ * also picks. ALWAYS `await` this.
+ * @returns true only when the verb button is pressed
+ */
+export async function safeFirstDialog(
+  message: string,
+  opts: { safe: string; verb: string; kind?: "info" | "warning" | "error" },
+): Promise<boolean> {
+  const close = opts.safe === "Cancel" ? "Close" : "Cancel";
+  const picked = await pluginMessage(message, {
+    title: "Silo",
+    kind: opts.kind ?? "warning",
+    buttons: { yes: opts.safe, no: opts.verb, cancel: close },
+  });
+  return picked === opts.verb || picked === "No";
 }
 
 export type ModsRootSource = "user" | "gameOverride" | "default";

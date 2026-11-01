@@ -9,7 +9,7 @@
 // was mounted and then went away (its view boundary caught a failure), `ask()` uses the OS dialog
 // and `askText()` gives null with an error toast, so nothing waits on a dialog that can't show.
 import type { Snippet } from "svelte";
-import { confirmDialog } from "../api";
+import { confirmDialog, safeFirstDialog } from "../api";
 import { toast } from "./toasts.svelte";
 
 export interface ConfirmFact {
@@ -149,22 +149,27 @@ export function osConfirmText(opts: ConfirmOptions): string {
 /**
  * Ask with the OS dialog, with the same text and labels as the in-app one.
  * @param opts the in-app confirm options
- * @returns true only when the confirm (verb) button is pressed; false if the dialog fails, and
- *   for a prompt that asked for Cancel to have focus (its verb changes something outside Silo):
- *   the OS dialog can't choose its default button, so Enter would pick the verb. Such a prompt
- *   gets the safe answer instead; its action stays available where it normally lives.
+ * A prompt whose Cancel has focus in-app (a danger tone, or `focus: "cancel"`) keeps the safe
+ * answer as the default here too (#392): a plain OK/Cancel system dialog always defaults to the
+ * verb.
+ * @param opts the in-app confirm options
+ * @returns true only when the confirm (verb) button is pressed; false if the dialog fails
  */
 export async function askOs(opts: ConfirmOptions): Promise<boolean> {
-  if (opts.focus === "cancel") {
-    const answer = opts.cancel ?? "Cancel";
-    console.warn(`[Silo] no dialog host for "${opts.title}"; answered "${answer}"`);
-    return false;
-  }
+  const kind = opts.tone === "danger" ? "warning" : "info";
+  const cancelFirst = (opts.focus ?? (opts.tone === "danger" ? "cancel" : "confirm")) === "cancel";
   try {
+    if (cancelFirst) {
+      return await safeFirstDialog(osConfirmText(opts), {
+        safe: opts.cancel ?? "Cancel",
+        verb: opts.confirm,
+        kind,
+      });
+    }
     return await confirmDialog(osConfirmText(opts), {
       okLabel: opts.confirm,
       cancelLabel: opts.cancel ?? "Cancel",
-      kind: opts.tone === "danger" ? "warning" : "info",
+      kind,
     });
   } catch (e) {
     console.error("[Silo] the OS confirm dialog failed", e);
