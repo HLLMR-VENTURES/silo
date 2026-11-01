@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On Linux, Silo didn't notice Farming Simulator 25 running under Proton, so it let you move
+  your mods archive or change game and mod settings while the game was open. It now waits for
+  the game to close, as it does on Windows and macOS. (#345)
+- Silo now finds the game, and shows the **Play** button, when the Steam client is installed on
+  a drive other than C: (Windows), and when FS25 runs through Proton, including Flatpak Steam
+  (Linux). (#346)
 - Folder mods can no longer make Silo read files outside the mod's own folder.
 
 ## [1.0.3] - 2026-10-29
