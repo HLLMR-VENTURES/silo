@@ -122,6 +122,7 @@
     checkBlockedReason,
     installBlockedReason,
     recheckRow,
+    heldRecheck,
     recheckOnLink,
     runUpdateCheck,
     updateAll,
@@ -2160,25 +2161,36 @@
     }
   }
 
-  /** Silo linked mods to their catalog entries while a check couldn't start (#402). */
-  let recheckAfterLink = $state(false);
+  /** Silo linked mods to their catalog entries while a check couldn't start (#402): the folder
+   *  generation the check again is for, or null. */
+  let recheckAfterLink = $state<number | null>(null);
 
-  /** Mods Silo just linked to their catalog entries (#402) get checked again. */
-  function onCatalogLinkedMods() {
+  /** Mods Silo just linked to their catalog entries (#402) get checked again, when a check the
+   *  user allowed asked about them in this folder. */
+  function onCatalogLinkedMods(linked: string[]) {
     const when = recheckOnLink({
+      linked,
       checking: updateChecking,
       blocked: !!updateCheckBlocked,
-      checked: updateCheckedAt != null,
+      asked: updateCheckedTechs,
+      asking: new Set(
+        mods.filter((m) => !cur(m.techName).skipUpdates).map((m) => m.techName),
+      ),
     });
     if (when === "now") void checkAllUpdates(true, false);
-    else if (when === "after") recheckAfterLink = true;
+    else if (when === "after") recheckAfterLink = updateFolderGen;
   }
 
-  // The check held back by links meanwhile, once nothing keeps one from starting.
+  // The check held back by links meanwhile, once nothing keeps one from starting, and only in
+  // the folder it was for.
   $effect(() => {
-    if (!recheckAfterLink || updateChecking || updateCheckBlocked) return;
-    recheckAfterLink = false;
-    void checkAllUpdates(true, false);
+    const held = heldRecheck(
+      recheckAfterLink,
+      updateFolderGen,
+      updateChecking || !!updateCheckBlocked,
+    );
+    if (held.pending !== recheckAfterLink) recheckAfterLink = held.pending;
+    if (held.run) void checkAllUpdates(true, false);
   });
 
   /** "Couldn't check" → Try again: that mod's linked repo only. */
@@ -2884,6 +2896,7 @@
     for (const t of dropToasts.splice(0)) t.dismiss();
     // The last update check was of the other folder's files (and one still running is too).
     updateFolderGen++;
+    recheckAfterLink = null;
     updateResults = [];
     updateCheckedAt = null;
     updateCatalogError = null;

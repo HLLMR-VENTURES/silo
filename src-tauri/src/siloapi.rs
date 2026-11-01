@@ -373,7 +373,7 @@ pub struct HashMatch {
 #[derive(Debug, Deserialize)]
 struct HashResult {
     sha256: String,
-    #[serde(default)]
+    /// Required: an answer without it says nothing about the hash, not "no build".
     matches: Vec<HashMatch>,
 }
 
@@ -422,7 +422,7 @@ fn by_hash_one(
 }
 
 /// The answer to one `by-hash` request for `hashes`, by hash. An error when it leaves out one
-/// asked about or answers one not asked.
+/// asked about, answers one not asked, or answers one twice.
 fn by_hash_answer(
     hashes: &[String],
     parsed: ByHashResponse,
@@ -433,7 +433,9 @@ fn by_hash_answer(
         if !hashes.contains(&h) {
             return Err("Silo's catalog answered about a file it wasn't asked about.".into());
         }
-        out.insert(h, r.matches);
+        if out.insert(h, r.matches).is_some() {
+            return Err("Silo's catalog answered twice about one file.".into());
+        }
     }
     if hashes.iter().any(|h| !out.contains_key(h)) {
         return Err("Silo's catalog left a file out of its answer.".into());
@@ -1114,12 +1116,22 @@ mod tests {
             by_hash_answer(&asked, parse(&extra)).is_err(),
             "a hash not asked"
         );
+        let twice = format!(
+            r#"{{"results":[{{"sha256":"{H1}","matches":[]}},{{"sha256":"{H2}","matches":[]}},{{"sha256":"{H1}","matches":[]}}]}}"#
+        );
+        assert!(
+            by_hash_answer(&asked, parse(&twice)).is_err(),
+            "a hash answered twice"
+        );
         let both = format!(
-            r#"{{"results":[{{"sha256":"{}","matches":[]}},{{"sha256":"{H2}"}}]}}"#,
+            r#"{{"results":[{{"sha256":"{}","matches":[]}},{{"sha256":"{H2}","matches":[]}}]}}"#,
             H1.to_uppercase()
         );
         let got = by_hash_answer(&asked, parse(&both)).unwrap().unwrap();
         assert!(got[H1].is_empty() && got[H2].is_empty());
+        // A result without its matches doesn't read as "no build".
+        let bare = format!(r#"{{"results":[{{"sha256":"{H1}"}}]}}"#);
+        assert!(serde_json::from_str::<ByHashResponse>(&bare).is_err());
     }
 
     #[test]

@@ -98,19 +98,39 @@ async function checkLinked(
 }
 
 /**
- * What the Updates list does when Silo links mods to their catalog entries in the background
- * (#402): check again now, once nothing keeps a check from starting (one running, or an update
- * installing), or nothing (no check has run yet, and the first one sees the links). That check
- * doesn't link more mods itself, so links never set off check after check.
+ * What the Updates list does when Silo links mods (`linked`, techNames) to their catalog entries
+ * in the background (#402): check again now, once nothing keeps a check from starting (one
+ * running, or an update installing), or not at all. Only for mods of this library that a check
+ * the user allowed asked about (`asked`, the last check of this folder, failed or not) or that
+ * the running one asks about (`asking`); otherwise no check has asked about them, and the
+ * first one sees the links. That check doesn't link more mods itself, so links never set off
+ * check after check.
  */
 export function recheckOnLink(s: {
+  linked: string[];
   checking: boolean;
   /** Something keeps a check from starting now (an update installing). */
   blocked: boolean;
-  checked: boolean;
+  asked: ReadonlySet<string> | undefined;
+  asking: ReadonlySet<string>;
 }): "now" | "after" | "no" {
-  if (!s.checked && !s.checking) return "no";
-  return s.checking || s.blocked ? "after" : "now";
+  if (s.checking) return s.linked.some((n) => s.asking.has(n)) ? "after" : "no";
+  if (!s.asked || !s.linked.some((n) => s.asked!.has(n))) return "no";
+  return s.blocked ? "after" : "now";
+}
+
+/**
+ * Whether the check held back by links (`pending`: the folder generation it was for) may run now,
+ * and what stays pending. One held back for another folder is dropped, never run here.
+ */
+export function heldRecheck(
+  pending: number | null,
+  gen: number,
+  busy: boolean,
+): { run: boolean; pending: number | null } {
+  if (pending === null) return { run: false, pending: null };
+  if (pending !== gen) return { run: false, pending: null };
+  return busy ? { run: false, pending } : { run: true, pending: null };
 }
 
 /**

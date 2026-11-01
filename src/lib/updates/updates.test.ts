@@ -23,6 +23,7 @@ import {
 import {
   checkBlockedReason,
   installBlockedReason,
+  heldRecheck,
   recheckOnLink,
   recheckRow,
   runUpdateCheck,
@@ -600,20 +601,39 @@ describe("automatic update checks (opt-in)", () => {
 });
 
 describe("checking again when Silo links mods to the catalog (#402)", () => {
-  const at = (checking: boolean, blocked: boolean, checked: boolean) =>
-    recheckOnLink({ checking, blocked, checked });
+  const lib = new Set(["FS25_FieldToDoList", "FS25_Other"]);
+  const at = (o: Partial<Parameters<typeof recheckOnLink>[0]>) =>
+    recheckOnLink({
+      linked: ["FS25_FieldToDoList"],
+      checking: false,
+      blocked: false,
+      asked: lib,
+      asking: lib,
+      ...o,
+    });
 
-  it("checks now after a check, and once nothing holds one back otherwise", () => {
-    expect(at(false, false, true)).toBe("now");
-    expect(at(true, false, true)).toBe("after");
-    expect(at(true, false, false)).toBe("after");
+  it("checks now after a check that asked about the mod, and once nothing holds one back", () => {
+    expect(at({})).toBe("now");
+    expect(at({ checking: true })).toBe("after");
     // An update installing keeps a check from starting: it waits, it isn't dropped.
-    expect(at(false, true, true)).toBe("after");
+    expect(at({ blocked: true })).toBe("after");
   });
 
-  it("does nothing before any check (the first one sees the links)", () => {
-    expect(at(false, false, false)).toBe("no");
-    expect(at(false, true, false)).toBe("no");
+  it("only for mods a check of this folder asked about, or the running one asks about", () => {
+    // No check of this folder yet: the first one sees the links.
+    expect(at({ asked: undefined })).toBe("no");
+    expect(at({ asked: undefined, blocked: true })).toBe("no");
+    // Mods of another folder, or left out of the check.
+    expect(at({ linked: ["FS25_Elsewhere"] })).toBe("no");
+    expect(at({ checking: true, asking: new Set(["FS25_Other"]) })).toBe("no");
+  });
+
+  it("drops a held-back check when the folder changed, and runs it once nothing is busy", () => {
+    expect(heldRecheck(null, 3, false)).toEqual({ run: false, pending: null });
+    expect(heldRecheck(3, 3, true)).toEqual({ run: false, pending: 3 });
+    expect(heldRecheck(3, 3, false)).toEqual({ run: true, pending: null });
+    // Held for folder 3, now in folder 4: never run against folder 4's mods.
+    expect(heldRecheck(3, 4, false)).toEqual({ run: false, pending: null });
   });
 
   it("tells the catalog the size and time each mod's version was read at", async () => {

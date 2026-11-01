@@ -42,10 +42,12 @@ use std::path::{Path, PathBuf};
 /// The most files one run hashes and looks up.
 pub const MAX_HASHED: usize = 25;
 
-/// How much one run may do: files hashed, and time (checked before each file is hashed, so a
-/// run ends within about one file's hashing plus its one lookup).
+/// How much one run may do: files looked up by name (one request), files hashed (or tried),
+/// and time (checked before each request and each file, so a run ends within about one
+/// request or one file's hashing of it).
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
+    pub max_named: usize,
     pub max_hashed: usize,
     pub time: std::time::Duration,
 }
@@ -53,6 +55,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Limits {
+            max_named: siloapi::LOOKUP_BATCH,
             max_hashed: MAX_HASHED,
             time: std::time::Duration::from_secs(60),
         }
@@ -202,6 +205,15 @@ pub fn run_with<G>(
     // Files never tried first, then the ones that have waited longest, so a file that keeps
     // failing never holds up the rest.
     pending.sort_by_key(|p| p.noted.as_ref().map(|n| n.attempted_ms));
+    // At most one name lookup's worth this run; the rest wait their turn.
+    if pending.len() > limits.max_named {
+        let later = pending.split_off(limits.max_named);
+        retry_all(later.iter().map(|p| p.zip), BUDGET_USED, &mut out);
+    }
+    if std::time::Instant::now() >= until {
+        retry_all(pending.iter().map(|p| p.zip), BUDGET_USED, &mut out);
+        return out;
+    }
 
     // A zip the catalog knows by its own name is joined by that and needs no link.
     let names: Vec<String> = pending.iter().map(|p| p.zip.tech_name.clone()).collect();
@@ -230,6 +242,10 @@ pub fn run_with<G>(
         }
     }
     if asked.is_empty() {
+        return out;
+    }
+    if std::time::Instant::now() >= until {
+        retry_all(asked.iter().map(|(z, _)| *z), BUDGET_USED, &mut out);
         return out;
     }
 
@@ -953,10 +969,38 @@ mod tests {
             out.iter().all(|(_, o)| matches!(o, Outcome::Retry(_))),
             "{out:?}"
         );
-        assert!(fake2.asked_by_hash.borrow().is_empty());
+        assert_eq!(fake2.asked(), 0, "no request at all");
         assert!(!zips2.iter().any(|z| settled(&conn2, z)));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn one_run_looks_up_a_bounded_number_of_names_and_the_next_goes_on() {
+        let (dir, conn) = setup("named_bound");
+        let (zips, mut fake) = many(&dir, 3);
+        fake.known.insert("FS25_File00".into());
+        let two = Limits {
+            max_named: 2,
+            ..Limits::default()
+        };
+        let hash = crate::provenance::sha256_file;
+        let out = run_with(&conn, &zips, &fake, hash, || Ok(()), two);
+        assert_eq!(out.len(), 3);
+        assert_eq!(fake.asked_known.get(), 1);
+        let last = out.iter().find(|(p, _)| *p == zips[2].path).unwrap();
+        assert!(matches!(last.1, Outcome::Retry(_)), "{out:?}");
+        assert_eq!(
+            out.iter().find(|(p, _)| *p == zips[0].path).unwrap().1,
+            Outcome::InCatalog
+        );
+        // The next run takes the one left.
+        let out = run_with(&conn, &zips, &fake, hash, || Ok(()), two);
+        assert_eq!(
+            out,
+            [(zips[2].path.clone(), Outcome::Linked("cat-2".into()))]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
