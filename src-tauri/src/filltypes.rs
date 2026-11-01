@@ -19,14 +19,14 @@
 //!   (RealisticLivestock, MoreRealistic, Corn Production Pack and others load theirs from a
 //!   script) are an estimate. A list under `mod_support/<dir>/` counts only with the map `<dir>`
 //!   names (Realistic Livestock ships one per map it supports, #385; see
-//!   [`heighttypes::support_key`](crate::heighttypes::support_key)).
+//!   [`heighttypes::support_dir`](crate::heighttypes::support_dir)).
 //!
 //! A fill type that already exists is updated in place, never added again
 //! (`FillTypeManager:loadFillTypes`), so each name counts once.
 
 use crate::heighttypes::{
     absorb_scoped, dlc_names, foliage_names, for_map, installed_dlc, map_own_file, named_list,
-    read_estimates, severity_rank, Scoped, MAX_LIST_NAMES,
+    read_estimates, severity_rank, Loads, Scoped, MAX_LIST_NAMES,
 };
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
@@ -196,7 +196,7 @@ pub struct ModFills {
     pub exact: Vec<String>,
     /// From other `*fillTypes*.xml` lists it ships: a script may load them.
     pub estimate: Vec<String>,
-    /// Lists under `mod_support/<dir>/`: estimates only on the map `<dir>` names (#385).
+    /// Lists under `mod_support/<dir>/`: estimates only where `<dir>` loads (#385).
     pub scoped: Scoped,
 }
 
@@ -205,10 +205,10 @@ impl ModFills {
         self.exact.iter().chain(&self.estimate).map(String::as_str)
     }
 
-    /// Count the map-specific lists for `keys` (a map's, or the active mods') as estimates from
-    /// now on.
-    pub fn absorb_scoped(&mut self, keys: &[String]) {
-        absorb_scoped(&self.exact, &mut self.estimate, &mut self.scoped, keys);
+    /// Count the map-specific lists that load per `loads` (a map, or the active mods) as
+    /// estimates from now on.
+    pub fn absorb_scoped(&mut self, loads: Loads) {
+        absorb_scoped(&self.exact, &mut self.estimate, &mut self.scoped, loads);
     }
 }
 
@@ -553,12 +553,18 @@ mod tests {
             (vec!["A".to_string()], vec!["B".to_string()])
         );
         // A `mod_support/<map>/` list is set aside for that map (#385), without the exact names.
-        assert_eq!(f.scoped, [("valley".to_string(), vec!["B".to_string()])]);
+        assert_eq!(
+            f.scoped,
+            [("FS25_Valley".to_string(), vec!["B".to_string()])]
+        );
         let script = mod_fills("M", "FS25_M", &Default::default(), &read, &candidates).unwrap();
         assert_eq!(script.estimate, ["A", "B"]);
         assert_eq!(
             script.scoped,
-            [("valley".to_string(), vec!["A".to_string(), "B".to_string()])]
+            [(
+                "FS25_Valley".to_string(),
+                vec!["A".to_string(), "B".to_string()]
+            )]
         );
         let map = crate::moddesc::ModDesc {
             is_map: true,
@@ -663,8 +669,8 @@ mod tests {
         let mut livestock = m("Livestock", vec![]);
         livestock.estimate = many("RL", 10);
         livestock.scoped = vec![
-            ("hofbergmann".into(), many("HOF", 70)),
-            ("themechet".into(), many("MECHET", 2)),
+            ("FS25_HofBergmann".into(), many("HOF", 70)),
+            ("FS25_The_Mechet".into(), many("MECHET", 2)),
         ];
         let mods = [livestock];
         // The base-game maps match no folder: 178 + 10.

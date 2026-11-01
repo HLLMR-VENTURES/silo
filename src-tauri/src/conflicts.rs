@@ -322,18 +322,18 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
     let mut mod_fills: Vec<filltypes::ModFills> = fills.into_iter().flatten().collect();
     // A mod's `mod_support/<dir>/` lists load with the mod `<dir>` names (#385). For an active
     // non-map mod that's every scenario; for a map, only its own (`worst` adds those). A non-map
-    // mod matches by tech name only: its title could name a map that isn't loaded.
-    let active_keys: Vec<String> = parsed
+    // mod matches by its exact tech name, as a script looks it up: its title could name a map
+    // that isn't loaded.
+    let active_techs: Vec<String> = parsed
         .iter()
         .filter(|p| !p.md.is_map)
-        .map(|p| heighttypes::match_key(&p.tech_name))
-        .filter(|k| !k.is_empty())
+        .map(|p| p.tech_name.clone())
         .collect();
     for m in &mut mod_heights {
-        m.absorb_scoped(&active_keys);
+        m.absorb_scoped(heighttypes::Loads::Mods(&active_techs));
     }
     for m in &mut mod_fills {
-        m.absorb_scoped(&active_keys);
+        m.absorb_scoped(heighttypes::Loads::Mods(&active_techs));
     }
 
     // One candidate per map: a mod can ship several, each with its own map.xml.

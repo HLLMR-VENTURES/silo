@@ -149,8 +149,8 @@ pub(crate) fn push_new(
     }
 }
 
-/// A mod's map-specific estimate lists: (the [`match_key`] of their `mod_support/<dir>/` folder,
-/// their names). They count only where that folder's map is the one loading (#385).
+/// A mod's map-specific estimate lists: (their `mod_support/<dir>/` folder name as the mod spells
+/// it, their names). They count only where the mod or map that folder names loads (#385).
 pub type Scoped = Vec<(String, Vec<String>)>;
 
 /// The form Silo compares a `mod_support/<dir>/` folder with a map's tech name or title in:
@@ -181,27 +181,54 @@ pub fn map_keys(tech_name: &str, title: &str) -> Vec<String> {
     keys
 }
 
-/// The [`match_key`] of the folder a member sits in under a `mod_support/` directory, as in
-/// `mod_support/FS25_HofBergmann/v1.4/fillTypes.xml`: mods like Realistic Livestock ship one
-/// such folder per map they support and load it only when that map does. `None` for any other
-/// member, and when the folder's key is empty (it can't name a map, so its lists count as usual).
-/// Pure.
-pub fn support_key(member: &str) -> Option<String> {
+/// The folder a member sits in under a `mod_support/` directory, as in
+/// `mod_support/FS25_HofBergmann/v1.4/fillTypes.xml` (`FS25_HofBergmann`): mods like Realistic
+/// Livestock ship one such folder per map or mod they support and load it only when that one
+/// loads. `None` for any other member, and when the folder's [`match_key`] is empty (it can't
+/// name anything, so its lists count as usual). Pure.
+pub fn support_dir(member: &str) -> Option<String> {
     let parts: Vec<&str> = member.split(['/', '\\']).collect();
     let at = parts
         .iter()
         .position(|p| p.eq_ignore_ascii_case("mod_support"))?;
-    // The folder, and something inside it: a file directly in mod_support/ has no map.
+    // The folder, and something inside it: a file directly in mod_support/ has no owner.
     if parts.len() < at + 3 {
         return None;
     }
-    Some(match_key(parts[at + 1])).filter(|k| !k.is_empty())
+    let dir = parts[at + 1];
+    (!match_key(dir).is_empty()).then(|| dir.to_string())
+}
+
+/// What makes a mod's `mod_support/<dir>/` lists load.
+#[derive(Debug, Clone, Copy)]
+pub enum Loads<'a> {
+    /// The scenario's map, by its [`map_keys`]: the folder's [`match_key`] is one of them.
+    Map(&'a [String]),
+    /// Active non-map mods, by tech name: the folder is spelled as one of them (ASCII case
+    /// aside), the way a script looks a mod up by name.
+    Mods(&'a [String]),
+}
+
+impl Loads<'_> {
+    /// Does the folder `dir` load here?
+    pub fn hit(&self, dir: &str) -> bool {
+        match self {
+            Loads::Map(keys) => {
+                let k = match_key(dir);
+                keys.iter().any(|m| *m == k)
+            }
+            Loads::Mods(techs) => techs.iter().any(|t| t.eq_ignore_ascii_case(dir)),
+        }
+    }
 }
 
 /// Read a mod's script-loaded lists for its estimate: every candidate but the declared file,
 /// capped as [`MAX_LIST_FILES`] and [`MAX_LIST_NAMES`] say. Lists under `mod_support/<dir>/` (see
-/// [`support_key`]) go to the map-specific part, the rest to the plain estimate. Neither repeats
-/// an exact name. Pure.
+/// [`support_dir`]) go to the map-specific part, the rest to the plain estimate. Neither repeats
+/// an exact name. The plain lists are read first, so lists for maps that may not load never use
+/// up their budget. When Silo can't read all the map-specific lists (past the file cap, or more
+/// names than it keeps), which of them load where is unknown, so the ones it read count on every
+/// map, as they did before #385. Pure.
 pub(crate) fn read_estimates(
     exact: &[String],
     declared: Option<&str>,
@@ -209,62 +236,80 @@ pub(crate) fn read_estimates(
     read: &dyn Fn(&str) -> Option<Vec<u8>>,
     parse: fn(&[u8]) -> Vec<String>,
 ) -> (Vec<String>, Scoped) {
+    let (mut ordered, for_maps): (Vec<(String, Option<String>)>, Vec<_>) = candidates
+        .into_iter()
+        .filter(|m| Some(m.as_str()) != declared)
+        .map(|m| {
+            let dir = support_dir(&m);
+            (m, dir)
+        })
+        .partition(|(_, dir)| dir.is_none());
+    let plain_files = ordered.len();
+    ordered.extend(for_maps);
+    // Map-specific lists past the file cap go unread.
+    let mut incomplete = plain_files < MAX_LIST_FILES && ordered.len() > MAX_LIST_FILES;
+
     let mut estimate: Vec<String> = Vec::new();
     let mut scoped: Scoped = Vec::new();
     // Seeded with the exact names, so an estimate never repeats one.
     let mut seen: HashSet<String> = exact.iter().cloned().collect();
     let mut scoped_seen: Vec<HashSet<String>> = Vec::new();
-    let mut scoped_count = 0usize;
-    for m in candidates.into_iter().take(MAX_LIST_FILES) {
-        let plain_full = seen.len() >= MAX_LIST_NAMES;
-        let scoped_full = scoped_count >= MAX_LIST_NAMES;
-        if plain_full && scoped_full {
-            break;
-        }
-        if Some(m.as_str()) == declared {
-            continue;
-        }
-        let key = support_key(&m);
-        // Each part has its own budget; a full one only stops its own lists.
-        if (key.is_none() && plain_full) || (key.is_some() && scoped_full) {
-            continue;
-        }
-        let names = read(&m).map(|b| parse(&b)).unwrap_or_default();
-        let Some(key) = key else {
-            push_new(&mut estimate, &mut seen, names);
+    // The map-specific names: distinct across folders, and as kept (a name in two folders twice).
+    let mut scoped_distinct: HashSet<String> = HashSet::new();
+    let mut scoped_kept = 0usize;
+    for (m, dir) in ordered.into_iter().take(MAX_LIST_FILES) {
+        let Some(dir) = dir else {
+            if seen.len() < MAX_LIST_NAMES {
+                let names = read(&m).map(|b| parse(&b)).unwrap_or_default();
+                push_new(&mut estimate, &mut seen, names);
+            }
             continue;
         };
-        let i = match scoped.iter().position(|(k, _)| *k == key) {
+        if scoped_distinct.len() >= MAX_LIST_NAMES || scoped_kept >= 4 * MAX_LIST_NAMES {
+            incomplete = true;
+            break;
+        }
+        let names = read(&m).map(|b| parse(&b)).unwrap_or_default();
+        let i = match scoped
+            .iter()
+            .position(|(d, _)| d.eq_ignore_ascii_case(&dir))
+        {
             Some(i) => i,
             None => {
-                scoped.push((key, Vec::new()));
+                scoped.push((dir, Vec::new()));
                 scoped_seen.push(exact.iter().cloned().collect());
                 scoped.len() - 1
             }
         };
         let before = scoped[i].1.len();
         push_new(&mut scoped[i].1, &mut scoped_seen[i], names);
-        scoped_count += scoped[i].1.len() - before;
+        scoped_kept += scoped[i].1.len() - before;
+        scoped_distinct.extend(scoped[i].1[before..].iter().cloned());
+    }
+    if incomplete {
+        for (_, names) in scoped.drain(..) {
+            push_new(&mut estimate, &mut seen, names);
+        }
     }
     scoped.retain(|(_, names)| !names.is_empty());
     (estimate, scoped)
 }
 
-/// Move the map-specific lists whose folder matches one of `keys` into the plain estimate,
-/// skipping names already counted. Pure.
+/// Move the map-specific lists that load per `loads` into the plain estimate, skipping names
+/// already counted. Pure.
 pub(crate) fn absorb_scoped(
     exact: &[String],
     estimate: &mut Vec<String>,
     scoped: &mut Scoped,
-    keys: &[String],
+    loads: Loads,
 ) {
-    if !scoped.iter().any(|(k, _)| keys.contains(k)) {
+    if !scoped.iter().any(|(d, _)| loads.hit(d)) {
         return;
     }
     let mut seen: HashSet<String> = exact.iter().chain(estimate.iter()).cloned().collect();
     let (hit, keep): (Scoped, Scoped) = std::mem::take(scoped)
         .into_iter()
-        .partition(|(k, _)| keys.contains(k));
+        .partition(|(d, _)| loads.hit(d));
     *scoped = keep;
     for (_, names) in hit {
         push_new(estimate, &mut seen, names);
@@ -276,18 +321,19 @@ pub(crate) fn absorb_scoped(
 pub(crate) fn for_map<'a, T: Clone>(
     mods: &'a [T],
     keys: &[String],
-    absorb: fn(&mut T, &[String]),
+    absorb: fn(&mut T, Loads),
     scoped: fn(&T) -> &Scoped,
 ) -> std::borrow::Cow<'a, [T]> {
+    let loads = Loads::Map(keys);
     if !mods
         .iter()
-        .any(|m| scoped(m).iter().any(|(k, _)| keys.contains(k)))
+        .any(|m| scoped(m).iter().any(|(d, _)| loads.hit(d)))
     {
         return std::borrow::Cow::Borrowed(mods);
     }
     let mut out = mods.to_vec();
     for m in &mut out {
-        absorb(m, keys);
+        absorb(m, loads);
     }
     std::borrow::Cow::Owned(out)
 }
@@ -567,7 +613,7 @@ pub struct ModTypes {
     pub exact: Vec<String>,
     /// Found in other `*heightType*.xml` files the mod ships: a script may load them.
     pub estimate: Vec<String>,
-    /// Lists under `mod_support/<dir>/`: estimates only on the map `<dir>` names (#385).
+    /// Lists under `mod_support/<dir>/`: estimates only where `<dir>` loads (#385).
     pub scoped: Scoped,
 }
 
@@ -576,10 +622,10 @@ impl ModTypes {
         self.exact.iter().chain(&self.estimate).map(String::as_str)
     }
 
-    /// Count the map-specific lists for `keys` (a map's, or the active mods') as estimates from
-    /// now on.
-    pub fn absorb_scoped(&mut self, keys: &[String]) {
-        absorb_scoped(&self.exact, &mut self.estimate, &mut self.scoped, keys);
+    /// Count the map-specific lists that load per `loads` (a map, or the active mods) as
+    /// estimates from now on.
+    pub fn absorb_scoped(&mut self, loads: Loads) {
+        absorb_scoped(&self.exact, &mut self.estimate, &mut self.scoped, loads);
     }
 
     /// Move declared entries whose fill type Silo can't find to the estimates. The game rejects a
@@ -1370,23 +1416,36 @@ mod tests {
     }
 
     #[test]
-    fn support_keys_only_inside_a_mod_support_folder() {
+    fn support_dirs_only_inside_a_mod_support_folder() {
         assert_eq!(
-            support_key("mod_support/FS25_HofBergmann/v1.4/fillTypes.xml").as_deref(),
-            Some("hofbergmann")
+            support_dir("mod_support/FS25_HofBergmann/v1.4/fillTypes.xml").as_deref(),
+            Some("FS25_HofBergmann")
         );
         assert_eq!(
-            support_key("Mod_Support\\FS25_Witcombe\\heightTypes.xml").as_deref(),
-            Some("witcombe")
+            support_dir("Mod_Support\\FS25_Witcombe\\heightTypes.xml").as_deref(),
+            Some("FS25_Witcombe")
         );
         assert_eq!(
-            support_key("xml/mod_support/The_Mechet/a.xml").as_deref(),
-            Some("themechet")
+            support_dir("xml/mod_support/The_Mechet/a.xml").as_deref(),
+            Some("The_Mechet")
         );
         // Directly in mod_support/, elsewhere, or a folder name with no letters: not map-specific.
-        assert_eq!(support_key("mod_support/fillTypes.xml"), None);
-        assert_eq!(support_key("xml/fillTypes.xml"), None);
-        assert_eq!(support_key("mod_support/__/fillTypes.xml"), None);
+        assert_eq!(support_dir("mod_support/fillTypes.xml"), None);
+        assert_eq!(support_dir("xml/fillTypes.xml"), None);
+        assert_eq!(support_dir("mod_support/__/fillTypes.xml"), None);
+    }
+
+    /// A map matches loosely (title or tech name); a non-map mod only by its exact tech name, the
+    /// way a script looks it up.
+    #[test]
+    fn maps_match_loosely_and_mods_by_tech_name() {
+        let keys = map_keys("FS25_Mechet_v2", "The Mechet");
+        assert!(Loads::Map(&keys).hit("FS25_The_Mechet"));
+        assert!(!Loads::Map(&keys).hit("FS25_Witcombe"));
+        let techs = vec!["FS25_Hof_Bergmann".to_string()];
+        assert!(!Loads::Mods(&techs).hit("FS25_HofBergmann"));
+        assert!(Loads::Mods(&techs).hit("fs25_hof_bergmann"));
+        assert!(!Loads::Map(&[]).hit("FS25_HofBergmann"));
     }
 
     /// #385: lists under `mod_support/<map>/` count only with that map; the base-game maps match
@@ -1428,10 +1487,10 @@ mod tests {
             t.scoped,
             [
                 (
-                    "witcombe".to_string(),
+                    "FS25_Witcombe".to_string(),
                     vec!["W1".into(), "W2".into(), "W3".into()]
                 ),
-                ("othermod".to_string(), vec!["O1".to_string()]),
+                ("FS25_OtherMod".to_string(), vec!["O1".to_string()]),
             ]
         );
         // Only map-specific lists: still an entry.
@@ -1467,20 +1526,21 @@ mod tests {
 
         // An active mod the folder names: those lists count on every map.
         let mut with_mod = t.clone();
-        with_mod.absorb_scoped(&map_keys("FS25_OtherMod", "Other Mod"));
+        with_mod.absorb_scoped(Loads::Mods(&["FS25_OtherMod".to_string()]));
         assert_eq!(with_mod.estimate, ["O1"]);
         assert_eq!(with_mod.scoped.len(), 1);
         assert_eq!(evaluate(&g, None, &[with_mod.clone()]).total, 50);
         // Absorbing again, or a folder already counted, adds nothing twice.
-        with_mod.absorb_scoped(&["othermod".into(), "witcombe".into()]);
-        with_mod.absorb_scoped(&["witcombe".into()]);
+        with_mod.absorb_scoped(Loads::Map(&["othermod".into(), "witcombe".into()]));
+        with_mod.absorb_scoped(Loads::Map(&["witcombe".into()]));
         assert_eq!(with_mod.estimate, ["O1", "W1", "W2", "W3"]);
         assert!(with_mod.scoped.is_empty());
     }
 
-    /// Many lists for maps that may not load never stop Silo reading the lists that always count.
+    /// Lists for maps that may not load never stop Silo reading the lists that always count, and
+    /// when Silo can't read all of them, the ones it read count everywhere, as before #385.
     #[test]
-    fn map_specific_lists_have_their_own_budget() {
+    fn map_specific_lists_never_crowd_out_the_others() {
         let list = |prefix: &str, n: usize| -> Vec<u8> {
             let entries: String = (0..n)
                 .map(|i| format!(r#"<densityMapHeightType fillTypeName="{prefix}{i}"/>"#))
@@ -1488,24 +1548,47 @@ mod tests {
             format!("<map><densityMapHeightTypes>{entries}</densityMapHeightTypes></map>")
                 .into_bytes()
         };
-        let read = |name: &str| {
-            if name.starts_with("mod_support/") {
-                Some(list("SHARED", 2_000))
-            } else {
-                Some(list("PLAIN", 80))
-            }
+        let plain = "xml/heightTypes.xml".to_string();
+        let for_map = |i: usize| format!("mod_support/FS25_Map{i}/heightTypes.xml");
+        let run = |candidates: Vec<String>, per_map: usize, shared: bool| {
+            let read = |name: &str| {
+                if name == "xml/heightTypes.xml" {
+                    return Some(list("PLAIN", 80));
+                }
+                let prefix = if shared {
+                    "SHARED".to_string()
+                } else {
+                    name.split('/').nth(1).unwrap().to_string()
+                };
+                Some(list(&prefix, per_map))
+            };
+            mod_types("M", "FS25_M", &ModDesc::default(), &read, &|| {
+                candidates.clone()
+            })
+            .unwrap()
         };
-        let mut candidates: Vec<String> = (0..10)
-            .map(|i| format!("mod_support/FS25_Map{i}/heightTypes.xml"))
-            .collect();
-        candidates.push("xml/heightTypes.xml".into());
-        let t = mod_types("M", "FS25_M", &ModDesc::default(), &read, &|| {
-            candidates.clone()
-        })
-        .unwrap();
-        assert_eq!(t.estimate.len(), 80);
-        // The map lists stop once their own budget is spent.
-        assert_eq!(t.scoped.len(), 5);
+
+        // The same names in ten folders: kept per folder, read in full.
+        let mut c: Vec<String> = (0..10).map(for_map).collect();
+        c.push(plain.clone());
+        let t = run(c.clone(), 2_000, true);
+        assert_eq!((t.estimate.len(), t.scoped.len()), (80, 10));
+
+        // Distinct names past the budget: what was read counts everywhere.
+        let t = run(c, 2_000, false);
+        assert!(t.scoped.is_empty());
+        assert_eq!(t.estimate.len(), 80 + 10_000);
+
+        // Past the file cap the plain list is still read, first.
+        let mut c: Vec<String> = (0..MAX_LIST_FILES + 20).map(for_map).collect();
+        c.push(plain);
+        let t = run(c.clone(), 1, false);
+        assert!(t.scoped.is_empty());
+        assert_eq!(t.estimate.len(), 80 + MAX_LIST_FILES - 1);
+        assert!(t.estimate.contains(&"PLAIN0".to_string()));
+        // Within the cap nothing is lost.
+        c.truncate(10);
+        assert_eq!(run(c, 1, false).scoped.len(), 10);
     }
 
     #[test]
