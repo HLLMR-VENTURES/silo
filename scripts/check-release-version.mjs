@@ -22,35 +22,82 @@ import { fileURLToPath } from "node:url";
 const PLAIN_VERSION = /^\d+\.\d+\.\d+$/;
 
 /**
+ * TOML text as trimmed lines of code: comments removed and every string literal (basic, literal
+ * and both multi-line kinds, escapes included) replaced by a `\0<n>\0` placeholder whose raw
+ * text is `strings[n]`. A `#`, quote, `[header]` or `key =` inside a string or a comment then
+ * can't pass for code. Null for text this can't lex (an unterminated string, or a NUL), so the
+ * caller fails closed.
+ * @param {string} toml
+ * @returns {{ lines: string[], strings: string[] } | null}
+ */
+export function tomlCodeLines(toml) {
+  if (toml.includes("\u0000")) return null;
+  const strings = [];
+  let code = "";
+  let i = 0;
+  while (i < toml.length) {
+    const c = toml[i];
+    if (c === "#") {
+      while (i < toml.length && toml[i] !== "\n") i++;
+      continue;
+    }
+    if (c !== '"' && c !== "'") {
+      code += c;
+      i++;
+      continue;
+    }
+    const multi = toml.startsWith(c.repeat(3), i);
+    const close = multi ? c.repeat(3) : c;
+    let j = i + close.length;
+    let text = "";
+    for (;;) {
+      if (j >= toml.length) return null;
+      if (!multi && toml[j] === "\n") return null;
+      if (c === '"' && toml[j] === "\\") {
+        text += toml.slice(j, j + 2); // an escape never closes the string
+        j += 2;
+        continue;
+      }
+      if (toml.startsWith(close, j)) break;
+      text += toml[j];
+      j++;
+    }
+    if (multi) {
+      // Up to two quotes right before the closing delimiter belong to the content.
+      let extra = 0;
+      while (extra < 2 && toml[j + close.length] === c) {
+        text += c;
+        j++;
+        extra++;
+      }
+    }
+    strings.push(text);
+    code += `\u0000${strings.length - 1}\u0000`;
+    i = j + close.length;
+  }
+  return { lines: code.split(/\r?\n/).map((l) => l.trim()), strings };
+}
+
+/**
  * The `version` of Cargo.toml's `[package]` table, or null when it has none (or inherits it with
- * `version.workspace = true`, which this check doesn't follow). Reads the plain `key = "value"`
- * (or `'value'`) form Cargo writes, with optional trailing comments; anything fancier reads as
- * no version, so the guard fails closed. Lines inside a multi-line `"""`/`'''` string are text,
- * never keys or headers.
+ * `version.workspace = true`, which this check doesn't follow). Reads `version = <string>` lines
+ * of the `[package]` table, as Cargo writes them; any other spelling reads as no version, so the
+ * guard fails closed. The string's raw text is returned, so an escape fails the X.Y.Z check.
  * @param {string} toml Cargo.toml text
  * @returns {string | null}
  */
 export function cargoPackageVersion(toml) {
+  const lexed = tomlCodeLines(toml);
+  if (!lexed) return null;
   let inPackage = false;
-  let openString = null; // the delimiter of a multi-line string still open, if any
-  for (const raw of toml.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (openString) {
-      if (line.split(openString).length % 2 === 0) openString = null;
-      continue;
-    }
-    const opens = ['"""', "'''"].find((q) => line.split(q).length % 2 === 0);
-    if (opens) {
-      openString = opens;
-      continue;
-    }
+  for (const line of lexed.lines) {
     if (line.startsWith("[")) {
-      inPackage = /^\[\s*package\s*\]\s*(?:#.*)?$/.test(line);
+      inPackage = /^\[\s*package\s*\]$/.test(line);
       continue;
     }
     if (!inPackage) continue;
-    const m = /^version\s*=\s*(?:"([^"\\]*)"|'([^']*)')\s*(?:#.*)?$/.exec(line);
-    if (m) return m[1] ?? m[2];
+    const m = /^version\s*=\s*\u0000(\d+)\u0000$/.exec(line);
+    if (m) return lexed.strings[Number(m[1])];
   }
   return null;
 }

@@ -6,6 +6,7 @@ import {
   jsonVersion,
   readVersionFiles,
   releaseVersionProblems,
+  tomlCodeLines,
 } from "../../scripts/check-release-version.mjs";
 import {
   digestLines,
@@ -84,6 +85,28 @@ describe("check-release-version", () => {
     const literal = `[package]\nreadme = '''\nversion = "9.9.9"'''\nversion = "1.0.0"\n`;
     expect(cargoPackageVersion(literal)).toBe("1.0.0");
     expect(cargoPackageVersion(`[package]\ndescription = """one line"""\nversion = "1.0.0"\n`)).toBe("1.0.0");
+  });
+
+  it("ignores string delimiters, headers and keys inside comments and strings", () => {
+    const commented = `[package]\nname = "silo"\n# """\nversion = "1.2.2"\n\n[package.metadata.release]\n# """\nversion = "1.2.3"\n`;
+    expect(cargoPackageVersion(commented)).toBe("1.2.2");
+    expect(
+      releaseVersionProblems({ tag: "v1.2.3", ...files({}), cargoToml: commented }).some((s) =>
+        s.startsWith("The version files disagree"),
+      ),
+    ).toBe(true);
+    const quoted = `[package]\nname = "a # b \\" c"\nkeywords = ['x"""', "y'''"]\nversion = "1.2.2" # was "1.2.3"\n`;
+    expect(cargoPackageVersion(quoted)).toBe("1.2.2");
+    expect(cargoPackageVersion(`[package]\ndescription = """ends with quotes"""""\nversion = "1.0.1"\n`)).toBe("1.0.1");
+  });
+
+  it("fails closed on what it can't lex or read", () => {
+    expect(cargoPackageVersion(`[package]\nname = "unterminated\nversion = "1.2.3"\n`)).toBeNull();
+    expect(cargoPackageVersion(`[package]\ndescription = """never closed\nversion = "1.2.3"\n`)).toBeNull();
+    expect(cargoPackageVersion(`["package"]\nversion = "1.2.3"\n`)).toBeNull();
+    expect(cargoPackageVersion(`[package]\nversion = "1.2.\\u0033"\n`)).toBe("1.2.\\u0033");
+    expect(tomlCodeLines("a = \u0000")).toBeNull();
+    expect(tomlCodeLines(`a = "x" # c\nb = 'y'`)).toEqual({ lines: ["a = \u00000\u0000", "b = \u00001\u0000"], strings: ["x", "y"] });
   });
 
   it("reads a JSON version only when it is a string", () => {
