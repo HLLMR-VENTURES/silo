@@ -125,6 +125,8 @@
   let catalog = $state<CatalogModDetail | null>(null);
   let catalogUpd = $state<CatalogUpdate | null>(null);
   let catalogChecked = $state(false);
+  /** The catalog request itself failed: Silo can't say whether the mod is in it. */
+  let catalogFailed = $state(false);
   /** The last game log's triage; null until read (or when there's no log). */
   let report = $state<LogReport | null>(null);
   $effect(() => {
@@ -135,6 +137,7 @@
       catalog = null;
       catalogUpd = null;
       catalogChecked = false;
+      catalogFailed = false;
       report = null;
       const still = () => provKey(mod) === id;
       if (!icon) void loadModIcon(m).then((u) => {
@@ -152,7 +155,9 @@
           catalogChecked = true;
         })
         .catch(() => {
-          if (still()) catalogChecked = true;
+          if (!still()) return;
+          catalogFailed = true;
+          catalogChecked = true;
         });
       scanLog()
         .then((r) => {
@@ -276,7 +281,7 @@
         <p class="skip-note">Off: Silo leaves this mod out of update checks and Update all.</p>
       {/if}
     </div>
-    <ModStatus {mod} catalog={catalogUpd} checked={catalogChecked} pageUrl={catalog?.pageUrl ?? null} />
+    <ModStatus {mod} catalog={catalogUpd} checked={catalogChecked} failed={catalogFailed} pageUrl={catalog?.pageUrl ?? null} />
     <ModSourceLink {mod} {source} {onSourceChange} {onRepoChange} />
     <ModRepoLink {mod} {repo} {onRepoChange} {onInstalled} />
   </section>

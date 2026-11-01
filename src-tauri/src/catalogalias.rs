@@ -237,19 +237,6 @@ pub fn another_release_of(link: &Link, asset_url: &str) -> bool {
     }
 }
 
-/// Whether the download at `url` is a file named exactly as `dest` (its last path segment,
-/// without query or fragment).
-pub fn url_names_file(url: &str, dest: &Path) -> bool {
-    let Ok(u) = url::Url::parse(url) else {
-        return false;
-    };
-    let last = u.path_segments().and_then(|mut s| s.next_back());
-    match (last, dest.file_name().and_then(|n| n.to_str())) {
-        (Some(a), Some(b)) => !a.is_empty() && a == b,
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,20 +527,6 @@ mod tests {
         assert!(link_for_file(&conn, "FS25_FieldToDoList", &file).is_err());
         assert!(link_for_hash(&conn, "FS25_FieldToDoList", &file, "ab").is_err());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_download_names_the_file_only_by_its_exact_name() {
-        let dest = Path::new("mods/FS25_FieldToDoList.zip");
-        assert!(url_names_file(TODO_URL, dest));
-        assert!(url_names_file(&format!("{TODO_URL}?raw=1#x"), dest));
-        let renamed = "https://github.com/k/r/releases/download/v2/FS25_FieldToDoList2.zip";
-        assert!(!url_names_file(renamed, dest));
-        assert!(!url_names_file(
-            "https://github.com/k/r/releases/download/v2/fs25_fieldtodolist.zip",
-            dest
-        ));
-        assert!(!url_names_file("not a url", dest));
     }
 
     #[test]

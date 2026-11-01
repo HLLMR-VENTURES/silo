@@ -233,6 +233,14 @@ describe("drawer lookups", () => {
     expect(screen.queryByText(/Not in Silo's catalog/)).toBeNull();
   });
 
+  it("says Silo couldn't reach the catalog when the request fails, not that the mod isn't in it", async () => {
+    vi.mocked(catalogCheckUpdates).mockImplementation(() => Promise.reject(new Error("offline")));
+    render(ModDetail, props(entry(25, { path: "C:/mods/off25.zip" })));
+    await settle();
+    expect(screen.getByText(/couldn't reach its catalog/)).toBeInTheDocument();
+    expect(screen.queryByText(/Not in Silo's catalog/)).toBeNull();
+  });
+
   it("doesn't call a mod with no version outdated on the catalog's word alone", async () => {
     vi.mocked(catalogCheckUpdates).mockImplementation(() =>
       Promise.resolve([{ techName: "FS25_Mod22", latest: "1.0.0.0", hasUpdate: true, downloadUrl: null, source: null }]),

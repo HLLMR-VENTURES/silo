@@ -943,13 +943,10 @@ async fn download_update(
             return Err(p);
         }
         // The catalog link of the file there now (#386), checked against its hash.
+        // A release file named differently from the installed one is a different mod to FS25,
+        // so it's never written over this one under this name (#391).
+        update::check_asset_name(&asset_url, &dest)?;
         let old_link = current_link(&db, &dest)?;
-        // A linked file is one the catalog names differently (#386), so its updates come from
-        // the catalog: one published under another file name is a different mod to FS25 and
-        // is never written over this one.
-        if old_link.is_some() && !catalogalias::url_names_file(&asset_url, &dest) {
-            return Err(renamed_release(&dest));
-        }
         // Public release assets don't need auth, and a download must never carry the user's
         // GitHub credential — keep the token for explicit API actions only.
         let part = update::fetch(&asset_url, &dest)?;
@@ -957,7 +954,7 @@ async fn download_update(
         // outside the lock, and recorded before the swap so the updated file always has it.
         let mut link_problem = None;
         let carry = match old_link {
-            Some(link) => match carried_link(&app, link, &asset_url, &dest) {
+            Some(link) => match carried_link(&app, link, &asset_url) {
                 Some(link) => Some(alias_record(link, part.path())?),
                 None => {
                     link_problem = Some(LINK_NOT_KEPT.to_string());
@@ -1076,26 +1073,15 @@ const LINK_NOT_KEPT: &str = "Silo couldn't confirm this update came from the mod
      entry, so it may show as not in Silo's catalog. To link it again, remove it and install it \
      from Browse.";
 
-/// Why an update of the linked file `dest` (#386) was refused: the release has another name.
-fn renamed_release(dest: &std::path::Path) -> String {
-    format!(
-        "This release isn't named {}, so FS25 would load it as a different mod. Silo didn't \
-         replace your copy. Install the new release from Browse instead.",
-        file_label(dest)
-    )
-}
-
-/// The link for the file an update from `asset_url` writes over `dest`, a file linked by
-/// `link`: kept when the update is a release asset with the same file name from the same GitHub
-/// repository the linked file came from, or a download with `dest`'s file name that the catalog
-/// entry lists right now. None when neither holds, or when the catalog can't be asked for the
-/// second. A download under another file name never keeps the link: FS25 would know that
-/// release by its own name.
+/// The link for the file an update from `asset_url` writes over a file linked by `link`: kept
+/// when the update is a release asset with the same file name from the same GitHub repository
+/// the linked file came from, or a download the catalog entry lists right now. None when
+/// neither holds, or when the catalog can't be asked for the second. (`download_update` has
+/// already refused a release under another file name.)
 fn carried_link(
     app: &tauri::AppHandle,
     link: catalogalias::Link,
     asset_url: &str,
-    dest: &std::path::Path,
 ) -> Option<catalogalias::Link> {
     let with_url = |link: catalogalias::Link| catalogalias::Link {
         download_url: Some(asset_url.to_string()),
@@ -1103,9 +1089,6 @@ fn carried_link(
     };
     if catalogalias::another_release_of(&link, asset_url) {
         return Some(with_url(link));
-    }
-    if !catalogalias::url_names_file(asset_url, dest) {
-        return None;
     }
     let base = siloapi_base(app).ok()?;
     match siloapi::detail(&base, &link.catalog_id) {
@@ -8824,17 +8807,6 @@ mod tests {
         .unwrap();
         let dl = super::lookup_from_detail(detail).download.unwrap();
         assert!(dl.url.contains("/k/b/"), "{}", dl.url);
-    }
-
-    #[test]
-    fn a_renamed_release_of_a_linked_file_is_refused_by_name() {
-        let dest = std::path::Path::new("mods/FS25_FieldToDoList.zip");
-        let msg = super::renamed_release(dest);
-        assert!(msg.contains("FS25_FieldToDoList.zip"), "{msg}");
-        let same = "https://github.com/k/FS25_ToDo/releases/download/v2/FS25_FieldToDoList.zip";
-        let renamed = "https://github.com/k/FS25_ToDo/releases/download/v2/FS25_ToDo.zip";
-        assert!(crate::catalogalias::url_names_file(same, dest));
-        assert!(!crate::catalogalias::url_names_file(renamed, dest));
     }
 
     #[test]

@@ -38,6 +38,57 @@ pub fn old_path(dest: &Path) -> PathBuf {
     with_suffix(dest, OLD_SUFFIX)
 }
 
+/// The file name a download address names: its last path segment, percent-decoded, without
+/// query or fragment. None when there is none, or it isn't valid UTF-8 once decoded.
+pub(crate) fn asset_file_name(url: &str) -> Option<String> {
+    let u = url::Url::parse(url).ok()?;
+    let last = u.path_segments()?.next_back()?;
+    let bytes = last.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (
+            bytes[i],
+            bytes.get(i + 1).and_then(|&b| hex(b)),
+            bytes.get(i + 2).and_then(|&b| hex(b)),
+        ) {
+            (b'%', Some(h), Some(l)) => {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            }
+            (b, _, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok().filter(|n| !n.is_empty())
+}
+
+/// Refuse an update whose release file isn't named exactly like the installed file `dest`
+/// (#391). FS25 knows a mod by its file name, so writing `FS25_X_v2.zip` over `FS25_X.zip`
+/// would be renaming a mod zip: the game, and every multiplayer peer, would see a different
+/// mod. Silo never renames one; the user can install that release from Browse instead.
+pub(crate) fn check_asset_name(url: &str, dest: &Path) -> Result<(), String> {
+    let installed = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match asset_file_name(url) {
+        Some(asset) if asset == installed => Ok(()),
+        Some(asset) => Err(format!(
+            "The new release file is named {asset}, not {installed}. Installing it would make \
+             the game see a different mod, so Silo didn't update {installed}. If you want it, \
+             install it from Browse."
+        )),
+        None => Err(format!(
+            "Silo couldn't tell what the new release file is called, so it didn't update \
+             {installed}: a file with a different name would make the game see a different mod."
+        )),
+    }
+}
+
 fn with_suffix(p: &Path, suffix: &str) -> PathBuf {
     let mut s = p.as_os_str().to_owned();
     s.push(suffix);
@@ -50,6 +101,7 @@ fn with_suffix(p: &Path, suffix: &str) -> PathBuf {
 /// left of it when dropped, so a failed or abandoned download leaves nothing behind.
 pub fn fetch(url: &str, dest: &Path) -> Result<crate::PartClaim, String> {
     crate::github::check_update_url(url)?;
+    check_asset_name(url, dest)?;
     let claim = crate::claim_part_at(dest, part_path(dest))?;
     // Release assets redirect (github.com → release-assets.githubusercontent.com); every hop
     // must pass the same check as the first URL.
@@ -562,6 +614,45 @@ fn in_folder(p: &Path, folder: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_release_named_differently_from_the_installed_file_is_refused() {
+        // #391: never written over the installed file under its name.
+        let dest = Path::new("mods/FS25_X.zip");
+        let same = "https://github.com/o/r/releases/download/v2/FS25_X.zip";
+        assert!(super::check_asset_name(same, dest).is_ok());
+        assert!(super::check_asset_name(&format!("{same}?raw=1#frag"), dest).is_ok());
+        let err = super::check_asset_name(
+            "https://github.com/o/r/releases/download/v2/FS25_X_v2.zip",
+            dest,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("FS25_X_v2.zip") && err.contains("different mod"),
+            "{err}"
+        );
+        assert!(err.contains("Browse"), "{err}");
+        // A different case is a different name to the game.
+        assert!(super::check_asset_name(
+            "https://github.com/o/r/releases/download/v2/fs25_x.zip",
+            dest
+        )
+        .is_err());
+        // Percent-encoding is read as the name it encodes.
+        let spaced = Path::new("mods/FS25 X.zip");
+        assert!(super::check_asset_name(
+            "https://github.com/o/r/releases/download/v2/FS25%20X.zip",
+            spaced
+        )
+        .is_ok());
+        assert_eq!(
+            super::asset_file_name("https://github.com/o/r/releases/download/v2/a%2"),
+            Some("a%2".to_string())
+        );
+        // No file name at all: refused, never guessed.
+        assert!(super::check_asset_name("https://github.com/", dest).is_err());
+        assert!(super::check_asset_name("not a url", dest).is_err());
+    }
+
     use super::*;
     use crate::organize::Layout;
     use std::io::Write;
