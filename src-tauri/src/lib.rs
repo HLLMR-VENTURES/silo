@@ -1116,22 +1116,23 @@ fn cached_image_ok(s: &str) -> bool {
         .is_ok_and(|b| b.len() >= MIN_CACHED_IMAGE_BYTES && image_looks_whole(&b))
 }
 
-/// Pure: whether image bytes end the way their format says a whole file ends (PNG's `IEND`
-/// chunk, JPEG's end-of-image marker, GIF's trailer, WebP's RIFF length), so a cut-off file isn't
-/// taken for an image. A format it doesn't know passes.
+/// Pure: whether image bytes are a whole file of a format whose end can be checked: PNG ending
+/// in its `IEND` chunk, JPEG ending in its end-of-image marker that also decodes (a cut can land
+/// right after an embedded EXIF thumbnail's own marker), WebP whose RIFF length matches. Any
+/// other format (GIF, SVG, ...) is false: it is shown, but not cached, since a cut-off copy
+/// couldn't be told apart.
 fn image_looks_whole(b: &[u8]) -> bool {
     const PNG_END: [u8; 8] = [0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82];
     if b.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
         b.ends_with(&PNG_END)
     } else if b.starts_with(&[0xFF, 0xD8]) {
         b.ends_with(&[0xFF, 0xD9])
-    } else if b.starts_with(b"GIF8") {
-        b.ends_with(&[0x3B])
+            && image::load_from_memory_with_format(b, image::ImageFormat::Jpeg).is_ok()
     } else if b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP") {
         let size = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize;
         size.checked_add(8) == Some(b.len())
     } else {
-        true
+        false
     }
 }
 
@@ -2740,9 +2741,10 @@ async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<ModsRootStatus, String> {
-        config_write_refusal(gamelaunch::fs25_running())?;
         // Pointing FS25 at the folder can unblock it, which publishes a new layout.
         let _write = mods_root_switch_lock()?;
+        // Checked once the lock is held: FS25 may have started while this waited for it.
+        config_write_refusal(gamelaunch::fs25_running())?;
         let folder = game_point_target(
             modsroot::active().as_ref(),
             modsroot::blocked_detail().as_ref(),
@@ -6509,12 +6511,12 @@ mod tests {
             "data:image/jpeg;base64,{}",
             enc(&jpeg)
         )));
-        // GIF and WebP are told whole by their trailer and RIFF length.
+        // A GIF can't be told whole from a cut-off one, so it isn't cached at all.
         let mut gif = b"GIF89a".to_vec();
         gif.extend([0u8; 20]);
         gif.push(0x3B);
-        assert!(super::image_looks_whole(&gif));
-        assert!(!super::image_looks_whole(&gif[..gif.len() - 1]));
+        assert!(!super::image_looks_whole(&gif));
+        // WebP is told whole by its RIFF length.
         let mut webp = b"RIFF".to_vec();
         webp.extend(24u32.to_le_bytes());
         webp.extend(b"WEBP");
@@ -6529,6 +6531,16 @@ mod tests {
             // Cut off on a four-character boundary: valid base64 of part of the file.
             format!("data:image/png;base64,{}", &b64[..b64.len() / 8 * 4]),
             format!("data:image/jpeg;base64,{}", enc(&jpeg[..jpeg.len() - 30])),
+            // A JPEG cut just after an embedded thumbnail's end marker.
+            format!(
+                "data:image/jpeg;base64,{}",
+                enc(&[&jpeg[..20], &[0xFF, 0xD9][..]].concat())
+            ),
+            // Text labelled as an image.
+            format!(
+                "data:image/png;base64,{}",
+                enc(b"<html>not found, but long enough</html>")
+            ),
             // Too small to be an image.
             "data:image/png;base64,AAAA".into(),
             format!("data:text/html;base64,{b64}"),
