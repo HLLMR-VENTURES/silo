@@ -298,9 +298,10 @@ fn migrate_3_to_4(tx: &Connection) -> Result<(), String> {
 /// keyed by path with the size and modified time it saw (as the scan cache is). `decided` = that
 /// version of the file is settled and isn't hashed or looked up again; a changed file has another
 /// size or time and is looked at once more. `sha256` keeps the hash once taken, so a lookup that
-/// failed is retried without hashing the file again. `attempted_ms` orders retries behind files
-/// never looked at. Rows for files the scan no longer has are dropped with `prune_alias_checks`.
-/// Additive.
+/// failed is retried without hashing the file again; `asked` keeps the catalog's answers for that
+/// hash so far (JSON, entry id to whether it lists the bytes), so a search cut short goes on where
+/// it stopped. `attempted_ms` orders retries behind files never looked at. Rows for files the scan
+/// no longer has are dropped with `prune_alias_checks`. Additive.
 fn migrate_4_to_5(tx: &Connection) -> Result<(), String> {
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS alias_check (
@@ -308,6 +309,7 @@ fn migrate_4_to_5(tx: &Connection) -> Result<(), String> {
              size         INTEGER NOT NULL,
              mtime_ms     INTEGER NOT NULL,
              sha256       TEXT,
+             asked        TEXT,
              decided      INTEGER NOT NULL DEFAULT 0,
              attempted_ms INTEGER NOT NULL
          );",
@@ -1149,6 +1151,8 @@ pub struct AliasCheck {
     pub mtime_ms: u64,
     /// The file's whole-file SHA-256 at that size and time, once taken (lowercase hex).
     pub sha256: Option<String>,
+    /// The catalog's answers about those bytes so far (JSON), for a search cut short.
+    pub asked: Option<String>,
     /// Settled: not looked at again until the file changes.
     pub decided: bool,
     /// When it was last looked at (unix milliseconds).
@@ -1159,15 +1163,17 @@ pub struct AliasCheck {
 /// last saw.
 pub fn alias_check(conn: &Connection, path: &str) -> Result<Option<AliasCheck>, String> {
     conn.query_row(
-        "SELECT size, mtime_ms, sha256, decided, attempted_ms FROM alias_check WHERE path = ?1",
+        "SELECT size, mtime_ms, sha256, asked, decided, attempted_ms
+         FROM alias_check WHERE path = ?1",
         [path],
         |r| {
             Ok(AliasCheck {
                 size: r.get::<_, i64>(0)? as u64,
                 mtime_ms: r.get::<_, i64>(1)? as u64,
                 sha256: r.get(2)?,
-                decided: r.get(3)?,
-                attempted_ms: r.get(4)?,
+                asked: r.get(3)?,
+                decided: r.get(4)?,
+                attempted_ms: r.get(5)?,
             })
         },
     )
@@ -1179,16 +1185,18 @@ pub fn alias_check(conn: &Connection, path: &str) -> Result<Option<AliasCheck>, 
 /// for an earlier version of the file.
 pub fn note_alias_check(conn: &Connection, path: &str, check: &AliasCheck) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO alias_check(path, size, mtime_ms, sha256, decided, attempted_ms)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO alias_check(path, size, mtime_ms, sha256, asked, decided, attempted_ms)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(path) DO UPDATE SET
              size = excluded.size, mtime_ms = excluded.mtime_ms, sha256 = excluded.sha256,
-             decided = excluded.decided, attempted_ms = excluded.attempted_ms",
+             asked = excluded.asked, decided = excluded.decided,
+             attempted_ms = excluded.attempted_ms",
         rusqlite::params![
             path,
             check.size as i64,
             check.mtime_ms as i64,
             check.sha256.as_deref().map(str::to_ascii_lowercase),
+            check.asked,
             check.decided,
             check.attempted_ms
         ],
@@ -2151,6 +2159,7 @@ mod tests {
             size: 10,
             mtime_ms: 5,
             sha256: Some("ABCD".into()),
+            asked: Some("{\"cat-1\":false}".into()),
             decided: false,
             attempted_ms: 100,
         };
@@ -2171,6 +2180,7 @@ mod tests {
             size: 11,
             mtime_ms: 6,
             sha256: None,
+            asked: None,
             decided: true,
             attempted_ms: 200,
         };

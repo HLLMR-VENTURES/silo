@@ -50,10 +50,10 @@ use std::path::{Path, PathBuf};
 /// The most files one run hashes and looks up.
 pub const MAX_HASHED: usize = 25;
 
-/// How much one run may do: files hashed, manifest requests, and time. They're checked before
-/// each catalog request a run starts for the whole library (the listing's pages, the name
-/// lookup) and before each file; a file once started has all its manifest requests (one per
-/// entry downloading a file of its name), so every run finishes at least one file.
+/// How much one run may do: files hashed, manifest requests, and time, checked before every
+/// catalog request a run starts and before each file. A file's search cut short keeps the answers
+/// it got (`alias_check.asked`) and goes on from there in a later run, so every run that starts
+/// a file makes progress.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     pub max_hashed: usize,
@@ -89,14 +89,18 @@ impl Budget {
         std::time::Instant::now() >= self.until
     }
 
-    /// Whether the run may start another file.
+    /// Whether the run may start another file, or another manifest request.
     fn has_room(&self) -> bool {
         self.manifests.get() > 0 && !self.out_of_time()
     }
 
-    /// Count one manifest request.
-    fn spend_manifest(&self) {
-        self.manifests.set(self.manifests.get().saturating_sub(1));
+    /// Take one manifest request, if the run has room for it.
+    fn take_manifest(&self) -> bool {
+        if !self.has_room() {
+            return false;
+        }
+        self.manifests.set(self.manifests.get() - 1);
+        true
     }
 }
 
@@ -186,10 +190,56 @@ pub struct SiloApi {
     pub base: String,
 }
 
+/// How long a whole listing read from the catalog is reused, so a run that spent its time on
+/// the listing leaves the next run its time for the files.
+const LISTING_FRESH: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// The last whole listing read this session, by catalog address.
+static LISTING: ListingCache = ListingCache::new();
+
+/// One whole catalog listing, kept for a while (only ever a complete one).
+pub struct ListingCache {
+    kept: std::sync::Mutex<Option<(String, std::time::Instant, Vec<Entry>)>>,
+}
+
+impl ListingCache {
+    pub const fn new() -> Self {
+        ListingCache {
+            kept: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The listing for `key` read within `fresh`, or `read`'s answer (kept when it's one).
+    pub fn get(
+        &self,
+        key: &str,
+        fresh: std::time::Duration,
+        read: impl FnOnce() -> Result<Vec<Entry>, String>,
+    ) -> Result<Vec<Entry>, String> {
+        let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((k, at, entries)) = kept.as_ref() {
+            if k == key && at.elapsed() < fresh {
+                return Ok(entries.clone());
+            }
+        }
+        let entries = read()?;
+        *kept = Some((key.to_string(), std::time::Instant::now(), entries.clone()));
+        Ok(entries)
+    }
+}
+
+impl Default for ListingCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Catalog for SiloApi {
     fn entries(&self, out_of_time: &dyn Fn() -> bool) -> Result<Vec<Entry>, String> {
-        let mods = siloapi::list_source(&self.base, "github", MAX_LIST_PAGES, out_of_time)?;
-        Ok(mods.iter().map(Entry::from).collect())
+        LISTING.get(&self.base, LISTING_FRESH, || {
+            let mods = siloapi::list_source(&self.base, "github", MAX_LIST_PAGES, out_of_time)?;
+            Ok(mods.iter().map(Entry::from).collect())
+        })
     }
 
     fn known_tech_names(&self, names: &[String]) -> Result<HashSet<String>, String> {
@@ -380,14 +430,22 @@ fn check_bytes<G>(
 ) -> (Outcome, Option<String>) {
     let z = p.zip;
     let noted_sha = p.noted.as_ref().and_then(|n| n.sha256.clone());
+    // The catalog's answers about the noted hash so far, from a search cut short.
+    let mut asked: Asked = p
+        .noted
+        .as_ref()
+        .filter(|_| noted_sha.is_some())
+        .and_then(|n| n.asked.as_deref())
+        .and_then(|a| serde_json::from_str(a).ok())
+        .unwrap_or_default();
     // A file that can't be read, or isn't what the scan saw, waits behind the rest next time
-    // (any hash noted for this version is kept).
-    let not_now = |why: String| {
-        note(conn, z, noted_sha.as_deref(), false);
+    // (what was noted for this version is kept).
+    let not_now = |why: String, asked: &Asked| {
+        note(conn, z, noted_sha.as_deref(), asked, false);
         (Outcome::Retry(why), None)
     };
     if let Err(why) = unchanged(z) {
-        return not_now(why);
+        return not_now(why, &asked);
     }
     let sha = match noted_sha.clone() {
         Some(h) => h,
@@ -395,24 +453,36 @@ fn check_bytes<G>(
             let taken = hash(&z.path).map(|h| h.to_ascii_lowercase());
             // Hashed as the scan saw it, not mid-change.
             if let Err(why) = unchanged(z) {
-                return not_now(why);
+                return not_now(why, &asked);
             }
             // Noted now, so a try that fails from here on doesn't hash the file again, and the
             // file waits behind the rest next time.
-            note(conn, z, taken.as_ref().ok().map(String::as_str), false);
+            note(
+                conn,
+                z,
+                taken.as_ref().ok().map(String::as_str),
+                &asked,
+                false,
+            );
             match taken {
                 Ok(h) => h,
                 Err(e) => return (Outcome::Retry(format!("couldn't read it: {e}")), None),
             }
         }
     };
-    let outcome = match_bytes(conn, z, &sha, by_name, entries, catalog, lock, budget);
-    if !outcome.decided() && p.noted.is_some() {
-        // A retry with a hash noted earlier: it waits behind the rest next time too.
-        note(conn, z, Some(&sha), false);
+    let outcome = match_bytes(
+        conn, z, &sha, by_name, entries, catalog, lock, budget, &mut asked,
+    );
+    if !outcome.decided() {
+        // A retry keeps the hash and the answers so far, and waits behind the rest next time.
+        note(conn, z, Some(&sha), &asked, false);
     }
     (outcome, Some(sha))
 }
+
+/// The catalog's answers about one file's bytes: entry id to whether its build of the file's
+/// version is those bytes.
+type Asked = std::collections::BTreeMap<String, bool>;
 
 /// What the catalog says about the bytes `sha` of the zip `z`.
 #[allow(clippy::too_many_arguments)]
@@ -425,6 +495,7 @@ fn match_bytes<G>(
     catalog: &impl Catalog,
     lock: &impl Fn() -> Result<G, String>,
     budget: &Budget,
+    asked: &mut Asked,
 ) -> Outcome {
     match catalogalias::recorded_entry(conn, &z.tech_name, sha) {
         Ok(Some(_)) => return Outcome::AlreadyLinked,
@@ -447,11 +518,24 @@ fn match_bytes<G>(
             if entry.lists_latest(sha) {
                 continue;
             }
-            budget.spend_manifest();
-            match catalog.archive_sha256(&entry.id, version) {
-                Ok(Some(h)) if h.eq_ignore_ascii_case(sha) => add_once(&mut matched, entry),
-                Ok(_) => {}
-                Err(e) => return Outcome::Retry(e),
+            let lists = match asked.get(&entry.id) {
+                Some(&lists) => lists,
+                None => {
+                    if !budget.take_manifest() {
+                        return Outcome::Retry(BUDGET_USED.to_string());
+                    }
+                    match catalog.archive_sha256(&entry.id, version) {
+                        Ok(h) => {
+                            let lists = h.is_some_and(|h| h.eq_ignore_ascii_case(sha));
+                            asked.insert(entry.id.clone(), lists);
+                            lists
+                        }
+                        Err(e) => return Outcome::Retry(e),
+                    }
+                }
+            };
+            if lists {
+                add_once(&mut matched, entry);
             }
         }
     }
@@ -525,17 +609,20 @@ fn settle(
         other => log::debug!("[catalog] {label}: not linked ({other:?})"),
     }
     if outcome.decided() {
-        note(conn, z, sha, true);
+        note(conn, z, sha, &Asked::new(), true);
     }
     out.push((z.path.clone(), outcome));
 }
 
 /// Save what was noted about this version of `z`, now. A failure only means it's looked at again.
-fn note(conn: &Connection, z: &LibraryZip, sha: Option<&str>, decided: bool) {
+fn note(conn: &Connection, z: &LibraryZip, sha: Option<&str>, asked: &Asked, decided: bool) {
     let check = db::AliasCheck {
         size: z.size,
         mtime_ms: z.mtime_ms,
         sha256: sha.map(str::to_string),
+        asked: (!asked.is_empty())
+            .then(|| serde_json::to_string(asked).ok())
+            .flatten(),
         decided,
         attempted_ms: now_ms(),
     };
@@ -1304,8 +1391,8 @@ mod tests {
     }
 
     #[test]
-    fn a_file_once_started_gets_all_its_requests_so_every_run_finishes_one() {
-        let (dir, conn) = setup("one_file");
+    fn a_search_cut_short_goes_on_where_it_stopped() {
+        let (dir, conn) = setup("resume");
         let file = write_zip(&dir, "FS25_FieldToDoList.zip", b"build one");
         // Three entries ship this file name; only the last lists the build of this version.
         let mut fake = Fake::default();
@@ -1323,17 +1410,123 @@ mod tests {
             ..Limits::default()
         };
         let hash = crate::provenance::sha256_file;
+        let zips = [scanned(&file, Some("1.0"))];
+        // One request per run, none past it, and none asked twice.
+        for want in 1..=2 {
+            let out = run_with(&conn, &zips, &fake, hash, || Ok(()), one);
+            assert!(matches!(out[0].1, Outcome::Retry(_)), "{out:?}");
+            assert_eq!(fake.asked_builds.borrow().len(), want);
+            assert!(!catalogalias::has_any(&conn, "FS25_FieldToDoList").unwrap());
+        }
+        let out = run_with(&conn, &zips, &fake, hash, || Ok(()), one);
+        assert_eq!(out[0].1, Outcome::Linked("cat-2".into()));
+        let asked: Vec<String> = fake
+            .asked_builds
+            .borrow()
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert_eq!(asked, ["cat-0", "cat-1", "cat-2"]);
+        // No time at all: no request starts.
+        let other = write_zip(&dir, "FS25_StatsExtended_update.zip", b"x");
+        let stats = Entry {
+            id: "cat-stats".into(),
+            tech_name: Some("FS25_statsExtended".into()),
+            archive_sha256: None,
+            download_urls: vec![
+                "https://github.com/e/r/releases/download/1/FS25_StatsExtended_update.zip".into(),
+            ],
+        };
+        let fake = Fake::with(vec![stats]);
+        let none = Limits {
+            time: std::time::Duration::ZERO,
+            ..Limits::default()
+        };
         let out = run_with(
             &conn,
-            &[scanned(&file, Some("1.0"))],
+            &[scanned(&other, Some("1"))],
             &fake,
             hash,
             || Ok(()),
-            one,
+            none,
         );
-        assert_eq!(out[0].1, Outcome::Linked("cat-2".into()));
-        assert_eq!(fake.asked_builds.borrow().len(), 3);
+        assert!(matches!(out[0].1, Outcome::Retry(_)), "{out:?}");
+        assert_eq!(fake.asked_known.get() + fake.asked_builds.borrow().len(), 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `Fake` behind a listing cache, the way the real catalog is.
+    struct Cached<'a> {
+        fake: &'a Fake,
+        cache: &'a ListingCache,
+        slow: std::time::Duration,
+    }
+
+    impl Catalog for Cached<'_> {
+        fn entries(&self, out_of_time: &dyn Fn() -> bool) -> Result<Vec<Entry>, String> {
+            self.cache.get("base", LISTING_FRESH, || {
+                std::thread::sleep(self.slow);
+                self.fake.entries(out_of_time)
+            })
+        }
+        fn known_tech_names(&self, names: &[String]) -> Result<HashSet<String>, String> {
+            self.fake.known_tech_names(names)
+        }
+        fn archive_sha256(&self, id: &str, version: &str) -> Result<Option<String>, String> {
+            self.fake.archive_sha256(id, version)
+        }
+    }
+
+    #[test]
+    fn a_run_that_spent_its_time_on_the_listing_leaves_the_next_one_its_time() {
+        let (dir, conn) = setup("slow_listing");
+        let file = write_zip(&dir, "FS25_FieldToDoList.zip", b"build one");
+        let zips = [scanned(&file, None)];
+        let fake = Fake::with(vec![todo(Some(b"build one"))]);
+        let cache = ListingCache::new();
+        let slow = Cached {
+            fake: &fake,
+            cache: &cache,
+            slow: std::time::Duration::from_millis(600),
+        };
+        let short = Limits {
+            time: std::time::Duration::from_millis(300),
+            ..Limits::default()
+        };
+        let hash = crate::provenance::sha256_file;
+        let out = run_with(&conn, &zips, &slow, hash, || Ok(()), short);
+        assert!(matches!(out[0].1, Outcome::Retry(_)), "{out:?}");
+        // The next run reads the kept listing and gets to the file.
+        let out = run_with(&conn, &zips, &slow, hash, || Ok(()), short);
+        assert_eq!(out[0].1, Outcome::Linked("cat-todo".into()));
+        assert_eq!(fake.asked_entries.get(), 1, "the listing was read once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_kept_listing_is_reused_while_fresh_and_only_when_whole() {
+        let cache = ListingCache::new();
+        let reads = Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            Ok(vec![todo(None)])
+        };
+        let fresh = std::time::Duration::from_secs(60);
+        assert_eq!(cache.get("a", fresh, read).unwrap().len(), 1);
+        assert_eq!(cache.get("a", fresh, read).unwrap().len(), 1);
+        assert_eq!(reads.get(), 1);
+        // Another catalog address, or a stale one, is read again.
+        cache.get("b", fresh, read).unwrap();
+        assert_eq!(reads.get(), 2);
+        cache.get("b", std::time::Duration::ZERO, read).unwrap();
+        assert_eq!(reads.get(), 3);
+        // A failed read keeps nothing, and the next is read afresh.
+        let cache = ListingCache::new();
+        assert!(cache
+            .get("a", fresh, || Err("offline".to_string()))
+            .is_err());
+        cache.get("a", fresh, read).unwrap();
+        assert_eq!(reads.get(), 4);
     }
 
     #[test]
