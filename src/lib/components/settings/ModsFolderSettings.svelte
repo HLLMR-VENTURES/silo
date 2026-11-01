@@ -109,8 +109,9 @@
     </p>
   {:else if profile?.detected}
     <p class="hint">
-      This folder is in a separate FS25 profile (<span class="tnum">{profile.dir}</span>). Starting
-      the game with it from Silo works on Windows only for now, so Play starts your main profile.
+      This folder is in a separate FS25 profile (<span class="tnum">{profile.dir}</span>).
+      {profile.unsupportedReason ?? "Silo can't start the game with it on this system."} Play starts
+      your main profile.
     </p>
   {/if}
   {#if modsStatus?.gameSettingProblem}

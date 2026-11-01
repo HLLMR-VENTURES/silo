@@ -343,7 +343,7 @@ fn pick_mac_install(steam_dirs: &[PathBuf], bundles: &[PathBuf]) -> Option<(Path
 /// GIANTS-direct install — by opening the detected `.app` bundle. Guided bisection uses
 /// this same entry point.
 ///
-/// With `profile` (an FS25 profile folder, #387, Windows only: see `gameprofile::SUPPORTED`)
+/// With `profile` (an FS25 profile folder, #387, Windows only: see `gameprofile::unsupported_reason`)
 /// the game executable is started directly with `-profile "<dir>"`, so FS25 uses that folder's
 /// mods, settings, savegames and log. A hands-on test (2026-11-01) confirmed this loads the
 /// profile with Steam running. If the executable can't be found or started, the Steam URL with
@@ -501,11 +501,8 @@ pub fn profile_launch_refusal(
 /// would start a new, empty profile there instead of the user's setup. One launch at a time,
 /// checked against the process list right before the spawn ([`profile_launch_refusal`]).
 fn launch_profile(dir: &Path) -> Result<(), String> {
-    if !crate::gameprofile::SUPPORTED {
-        return Err(
-            "Launching Farming Simulator 25 with a separate profile works on Windows only for now."
-                .into(),
-        );
+    if let Some(why) = crate::gameprofile::UNSUPPORTED {
+        return Err(why.into());
     }
     if !dir.is_dir() {
         return Err(format!(

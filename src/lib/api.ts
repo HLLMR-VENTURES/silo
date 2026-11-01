@@ -143,6 +143,8 @@ export interface GameProfileStatus {
   chosen: boolean;
   /** Launching on a profile works on this platform (Windows only for now). */
   supported: boolean;
+  /** Where it doesn't, why, in plain words (shown as the note under the folder). */
+  unsupportedReason?: string | null;
 }
 
 export function modsRootStatus(): Promise<ModsRootStatus> {
