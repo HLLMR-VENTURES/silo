@@ -56,6 +56,8 @@ pub struct Limits {
     pub max_named: usize,
     pub max_hashed: usize,
     pub time: std::time::Duration,
+    /// The longest one database write waits for a busy database (rusqlite's own wait).
+    pub db_wait: std::time::Duration,
 }
 
 impl Default for Limits {
@@ -64,6 +66,7 @@ impl Default for Limits {
             max_named: siloapi::LOOKUP_BATCH,
             max_hashed: MAX_HASHED,
             time: std::time::Duration::from_secs(60),
+            db_wait: DB_WAIT,
         }
     }
 }
@@ -203,11 +206,17 @@ pub fn run_with<G>(
 /// rusqlite's own wait for a busy database, which `run_with` narrows to the run's time.
 const DB_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Let the next database write wait for a busy database no longer than the run has left (and
-/// not at all once it has none left: a free database still takes it at once).
-fn wait_at_most(conn: &Connection, until: std::time::Instant) {
+/// Let the next database write wait for a busy database no longer than the run has left, nor
+/// `most` (and not at all once it has none left: a free database still takes it at once).
+fn wait_at_most(conn: &Connection, until: std::time::Instant, most: std::time::Duration) {
     let left = until.saturating_duration_since(std::time::Instant::now());
-    let _ = conn.busy_timeout(left.min(DB_WAIT));
+    let _ = conn.busy_timeout(left.min(most));
+}
+
+/// The mods the user left out of update checks, read again before a request goes out, so one
+/// left out while the run was going isn't sent (#333).
+fn left_out(conn: &Connection) -> Result<HashSet<String>, String> {
+    db::skip_update_names(conn).map_err(|e| format!("couldn't read which mods to leave out: {e}"))
 }
 
 fn run_bounded<G>(
@@ -285,6 +294,16 @@ fn run_bounded<G>(
         retry_all(pending.iter().map(|p| p.zip), BUDGET_USED, &mut out);
         return out;
     }
+    // Read again just before anything is sent: a mod left out meanwhile isn't asked about.
+    match left_out(conn) {
+        Ok(skip) => pending.retain(|p| !skip.contains(&p.zip.tech_name)),
+        Err(e) => {
+            log::warn!("[catalog] link backfill stopped: {e}");
+            retry_all(pending.iter().map(|p| p.zip), &e, &mut out);
+            return out;
+        }
+    }
+    let to_name = pending.iter().filter(|p| p.unnamed_ms.is_none()).count();
     if to_name > 0 {
         let names: Vec<String> = pending
             .iter()
@@ -313,7 +332,7 @@ fn run_bounded<G>(
             }
             notes.push((path_key(p.zip), check_of(p, p.sha(), decided)));
         }
-        wait_at_most(conn, until);
+        wait_at_most(conn, until, limits.db_wait);
         if let Err(e) = db::note_alias_checks(conn, &notes) {
             log::warn!("[catalog] link backfill stopped: couldn't note what it looked up: {e}");
             retry_all(pending.iter().map(|p| p.zip), &e, &mut out);
@@ -364,7 +383,7 @@ fn run_bounded<G>(
             }
         }
     }
-    wait_at_most(conn, until);
+    wait_at_most(conn, until, limits.db_wait);
     if let Err(e) = db::note_alias_checks(conn, &notes) {
         log::warn!("[catalog] link backfill stopped: couldn't note the files it hashed: {e}");
         retry_all(asked.iter().map(|(z, _)| *z), &e, &mut out);
@@ -375,6 +394,19 @@ fn run_bounded<G>(
     }
     if late() {
         retry_all(asked.iter().map(|(z, _)| *z), BUDGET_USED, &mut out);
+        return out;
+    }
+    // Read again just before the hashes go out: a mod left out while they were taken isn't
+    // looked up (nor linked).
+    match left_out(conn) {
+        Ok(skip) => asked.retain(|(z, _)| !skip.contains(&z.tech_name)),
+        Err(e) => {
+            log::warn!("[catalog] link backfill stopped: {e}");
+            retry_all(asked.iter().map(|(z, _)| *z), &e, &mut out);
+            return out;
+        }
+    }
+    if asked.is_empty() {
         return out;
     }
 
@@ -400,8 +432,10 @@ fn run_bounded<G>(
     // database), no further record is tried this run. A record's write waits for the database
     // no longer than the run has left.
     let stop = std::cell::Cell::new(false);
+    // Set when the database failed a record: then nothing more is written this run.
+    let db_down = std::cell::Cell::new(false);
     let take = || -> Result<G, String> {
-        if stop.get() {
+        if stop.get() || db_down.get() {
             return Err(LIBRARY_BUSY.to_string());
         }
         let left = until.saturating_duration_since(std::time::Instant::now());
@@ -409,14 +443,14 @@ fn run_bounded<G>(
             return Err(BUDGET_USED.to_string());
         }
         let guard = lock(left).inspect_err(|_| stop.set(true))?;
-        wait_at_most(conn, until);
+        wait_at_most(conn, until, limits.db_wait);
         Ok(guard)
     };
     let mut decided = Vec::new();
     let mut outcomes = Vec::new();
     for (z, sha) in asked {
         let outcome = match found.get(&sha) {
-            Some(matches) => judge(conn, z, &sha, matches, &take, &stop),
+            Some(matches) => judge(conn, z, &sha, matches, &take, &db_down),
             None => Outcome::Retry("Silo's catalog left this file out of its answer".to_string()),
         };
         log_outcome(z, &outcome);
@@ -436,7 +470,12 @@ fn run_bounded<G>(
     // What it decided, in one transaction, waiting no longer than the run has left. When that
     // fails, those files are looked at again next time (a link recorded meanwhile is then found
     // as already there).
-    wait_at_most(conn, until);
+    if db_down.get() {
+        log::warn!("[catalog] link backfill stopped writing: the database is busy");
+        out.extend(outcomes);
+        return out;
+    }
+    wait_at_most(conn, until, limits.db_wait);
     if let Err(e) = db::note_alias_checks(conn, &decided) {
         log::warn!(
             "[catalog] couldn't note what the link backfill decided, so it will look again: {e}"
@@ -1395,6 +1434,91 @@ mod tests {
             .filter(|(_, o)| matches!(o, Outcome::Linked(_)))
             .count();
         assert_eq!(linked, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn after_the_database_failed_a_record_nothing_more_is_written() {
+        let (dir, conn) = setup("db_down");
+        let (zips, mut fake) = many(&dir, 2);
+        // The second file's bytes are no entry's: a decision to note.
+        fake.builds
+            .remove(&crate::provenance::sha256_file(&zips[1].path).unwrap());
+        let other = db::open(&dir.join("silo.db")).unwrap();
+        let catalog = LocksDb {
+            fake: &fake,
+            other: &other,
+        };
+        // Time to spare, short database waits: only one of them may happen.
+        let limits = Limits {
+            time: std::time::Duration::from_secs(5),
+            db_wait: std::time::Duration::from_millis(500),
+            ..Limits::default()
+        };
+        let started = std::time::Instant::now();
+        let out = run_with(
+            &conn,
+            &zips,
+            &catalog,
+            crate::provenance::sha256_file,
+            |_| Ok(()),
+            limits,
+        );
+        let took = started.elapsed();
+        // One wait of 500 ms; a second would make it at least a second.
+        assert!(took < std::time::Duration::from_millis(950), "{took:?}");
+        let of = |i: usize| {
+            out.iter()
+                .find(|(p, _)| *p == zips[i].path)
+                .unwrap()
+                .1
+                .clone()
+        };
+        assert!(matches!(of(0), Outcome::Retry(_)), "{out:?}");
+        other.execute_batch("ROLLBACK").unwrap();
+        // The decision wasn't written either: the file is looked at again.
+        assert!(!settled(&conn, &zips[1]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_mod_left_out_while_the_run_goes_is_not_sent() {
+        let (dir, conn) = setup("left_out_late");
+        let (zips, fake) = many(&dir, 2);
+        let skip = |name: &str| {
+            db::set_curation(
+                &conn,
+                &db::CurationRow {
+                    tech_name: name.into(),
+                    favorite: false,
+                    hidden: false,
+                    broken: false,
+                    rating: 0,
+                    note: None,
+                    skip_updates: true,
+                },
+            )
+            .unwrap()
+        };
+        // The user leaves the first mod out of update checks while the run hashes.
+        let hash = |p: &Path| {
+            skip("FS25_File00");
+            crate::provenance::sha256_file(p)
+        };
+        let out = run(&conn, &zips, &fake, hash, |_| Ok(()));
+        let sent: Vec<String> = fake
+            .asked_by_hash
+            .borrow()
+            .iter()
+            .flatten()
+            .cloned()
+            .collect();
+        assert_eq!(
+            sent,
+            [crate::provenance::sha256_file(&zips[1].path).unwrap()]
+        );
+        assert!(!catalogalias::has_any(&conn, "FS25_File00").unwrap());
+        assert!(out.iter().all(|(p, _)| *p != zips[0].path), "{out:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
