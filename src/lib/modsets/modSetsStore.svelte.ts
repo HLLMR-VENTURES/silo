@@ -451,6 +451,7 @@ export function createModSets(deps: ModSetsDeps): ModSets {
     if (edits.length === 0) return true;
     if (deps.editRefused()) return false;
     if (!(await deps.settle())) return false;
+    if (deps.editRefused()) return false; // a write that started during the wait
     const st = currentState();
     const change = activeChange(edits, st.kind === "none" ? null : st.id, deps.active());
     const previous = [...deps.active()];

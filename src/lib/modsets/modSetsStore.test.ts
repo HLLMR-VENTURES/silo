@@ -457,6 +457,18 @@ describe("applyMembership (the Library's Mod sets… dialog, #323)", () => {
     expect(replaceLoadoutMods).not.toHaveBeenCalled();
   });
 
+  it("saves nothing when a library change started while it waited for the scan (#347)", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    t.settle.mockImplementationOnce(async () => {
+      t.editRefused.mockReturnValue(true);
+      return true;
+    });
+    expect(await t.store.applyMembership(["A"], editsFor(t, ["A"], [[2, "all"]]))).toBe(false);
+    expect(t.setActiveSetTo).not.toHaveBeenCalled();
+    expect(replaceLoadoutMods).not.toHaveBeenCalled();
+  });
+
   it("saves nothing while a library change runs", async () => {
     const t = setup(["A", "B"]);
     await t.store.load();
