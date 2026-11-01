@@ -337,16 +337,16 @@ fn parking_a_legacy_marked_copy_compares_it_with_the_archive() {
 
         let rep = set_active(&conn, &Layout::default_for(&base), &HashSet::new());
 
-        assert_eq!(rep.changed, 1, "errors: {:?}", rep.errors);
-        assert!(flat.symlink_metadata().is_err());
         assert_eq!(std::fs::read(src.join("a.lua")).unwrap(), b"print(1)");
+        assert!(!base.join("backups").exists());
+        assert!(rep.notices.is_empty());
         if edited {
-            let kept = only_backup(&base);
-            assert_eq!(std::fs::read(kept.join("a.lua")).unwrap(), b"print(9)");
-            assert_eq!(rep.notices.len(), 1);
+            // No listing to prove an edit (it may be the archive copy that changed): kept as is.
+            assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+            assert_eq!(std::fs::read(flat.join("a.lua")).unwrap(), b"print(9)");
         } else {
-            assert!(!base.join("backups").exists());
-            assert!(rep.notices.is_empty());
+            assert_eq!(rep.changed, 1, "errors: {:?}", rep.errors);
+            assert!(flat.symlink_metadata().is_err());
         }
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
@@ -608,6 +608,46 @@ fn an_untouched_folder_copy_goes_while_the_archive_holds_its_files() {
             .unwrap(),
             b"print(1)"
         );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+/// A legacy-marked copy has no listing, so the archived copy is its only reference: one that
+/// doesn't match it may be an edit or a damaged archive copy, and Silo can't tell which. Park and
+/// flatten leave it where it is, as it was, and say so (#399).
+#[test]
+fn a_legacy_copy_that_doesnt_match_the_archive_stays_put() {
+    for flattening in [false, true] {
+        let base = temp_dir_for(&format!("legacy_unproven_{flattening}"));
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let (src, flat) = folder_copy_fixture(&base, &conn);
+        std::fs::remove_dir_all(&flat).unwrap();
+        copy_dir_all(&src, &flat).unwrap();
+        std::fs::write(flat.join(SILO_MARKER), b"silo\n").unwrap();
+        std::fs::write(src.join("a.lua"), b"pri").unwrap(); // the archive copy is cut short
+        let layout = Layout::default_for(&base);
+        let rep = if flattening {
+            flatten(&conn, &layout)
+        } else {
+            set_active(&conn, &layout, &HashSet::new())
+        };
+        assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+        assert!(flattening || rep.errors.len() == 1, "{:?}", rep.errors);
+        assert!(
+            rep.errors[0].starts_with(
+                "FS25_Dir: FS25_Dir stays in your mods folder: it doesn't match the copy in your library archive"
+            ),
+            "{:?}",
+            rep.errors
+        );
+        assert!(rep.notices.is_empty(), "{:?}", rep.notices);
+        assert_eq!(std::fs::read(flat.join("a.lua")).unwrap(), b"print(1)");
+        assert_eq!(std::fs::read(flat.join(SILO_MARKER)).unwrap(), b"silo\n");
+        assert_eq!(std::fs::read(src.join("a.lua")).unwrap(), b"pri");
+        assert!(!base.join("backups").exists());
+        let rows = db::load_organized(&conn, &crate::modsroot::canonical_key(&base));
+        assert!(rows.len() == 1 && rows[0].active);
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -739,17 +739,17 @@ fn a_zip_copy_is_kept_when_the_archived_copy_doesnt_match() {
                 set_active(&conn, &layout, &HashSet::new())
             };
             assert_eq!(rep.changed, 0, "{tag}: {:?}", rep.errors);
-            // Flatten refuses it as not Silo's (no recorded provenance there), and also lists
-            // what it left in the archive.
-            assert!(!rep.errors.is_empty(), "{tag}");
-            if !flattening {
-                assert_eq!(rep.errors.len(), 1, "{tag}: {:?}", rep.errors);
-                assert!(
-                    rep.errors[0].starts_with(&format!("FS25_Foo: FS25_Foo.zip {KEPT_UNPROVEN}")),
-                    "{tag}: {:?}",
-                    rep.errors
-                );
-            }
+            // Flatten also lists what it left in the archive.
+            assert!(
+                flattening || rep.errors.len() == 1,
+                "{tag}: {:?}",
+                rep.errors
+            );
+            assert!(
+                rep.errors[0].starts_with(&format!("FS25_Foo: FS25_Foo.zip {KEPT_UNPROVEN}")),
+                "{tag}: {:?}",
+                rep.errors
+            );
             assert_eq!(
                 std::fs::read(&flat).unwrap(),
                 b"PK\x03\x04 the archived build",

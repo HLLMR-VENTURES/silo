@@ -334,8 +334,13 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             let occupied = link.symlink_metadata().is_ok();
             // If a file occupies the root slot but it isn't Silo's projection (the user swapped
             // their own build in), don't remove it and don't overwrite it with the archived
-            // copy — leave both in place and report the anomaly for the user to resolve.
-            if occupied && !is_silo_projection(&link, &src, &row.kind) {
+            // copy — leave both in place and report the anomaly for the user to resolve. The
+            // same ownership proof as deactivate: a recorded untouched copy is Silo's even when
+            // the archived copy no longer matches it (then `clear_projection` keeps it, #399).
+            if occupied
+                && !(matches_provenance(conn, &key, &link, &row.file_name)
+                    || is_silo_projection(&link, &src, &row.kind))
+            {
                 rep.errors.push(format!(
                     "{}: the file in your mods folder isn't the one Silo linked, so Silo left it and the copy in your library archive alone.",
                     row.tech_name

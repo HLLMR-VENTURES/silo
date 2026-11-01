@@ -133,9 +133,11 @@ fn same_tree_contents(copy: &Path, src: &Path) -> std::io::Result<bool> {
 
 /// Remove a marked folder copy only if unchanged and its archived copy `src` still holds every
 /// file of it (`scratch::copy_held_by_archive`); an unchanged copy the archive doesn't hold is
-/// kept where it is, with an error saying why (it may be the only good copy, #399). A changed
-/// copy is moved to `<mods_root>/backups/<name>.<secs>/` and that path returned so the caller
-/// can tell the user. The kept copy loses Silo's marker: it is the user's folder now.
+/// kept where it is, with an error saying why (it may be the only good copy, #399), and so is a
+/// legacy-marked copy that doesn't match `src` (an edit or a damaged archive copy, which Silo
+/// can't tell apart). A copy its v2 listing shows was changed is moved to
+/// `<mods_root>/backups/<name>.<secs>/` and that path returned so the caller can tell the user.
+/// The kept copy loses Silo's marker: it is the user's folder now.
 pub(crate) fn retire_folder_copy(
     link: &Path,
     src: &Path,
@@ -161,6 +163,11 @@ pub(super) fn retire_folder_copy_with(
         std::fs::remove_dir_all(link)?;
         crate::fslog::changed("unlink", link);
         return Ok(None);
+    }
+    // Only a v2 listing proves an edit. A legacy marker only says the copy differs from the
+    // archived copy, which may be the archive's damage: it stays where it is (#399).
+    if !matches!(marker_listing(link), Ok(Some(_))) {
+        return Err(legacy_copy_differs(link, src));
     }
     let name = link
         .file_name()
@@ -215,6 +222,23 @@ pub(super) fn clear_projection(
         return Err(not_held_by_archive(link, src));
     }
     remove_link(link).map(|()| None)
+}
+
+/// What the user is told when a legacy-marked copy (no listing of what Silo wrote) doesn't match
+/// its archived copy: it may have been changed, or the archive copy may be damaged.
+fn legacy_copy_differs(link: &Path, src: &Path) -> std::io::Error {
+    log::warn!(
+        "kept {}: it doesn't match the archived copy at {} and has no listing to tell why",
+        link.display(),
+        src.display()
+    );
+    let name = link
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| link.display().to_string());
+    std::io::Error::other(format!(
+        "{name} stays in your mods folder: it doesn't match the copy in your library archive, and Silo can't tell whether it was changed or the archive copy is damaged. To turn the mod off, move it out of your mods folder yourself."
+    ))
 }
 
 /// What the user is told when a copy in the mods folder is kept because its archived copy is

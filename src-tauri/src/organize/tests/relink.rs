@@ -317,3 +317,37 @@ fn a_folder_repoint_to_a_missing_copy_keeps_the_old_link() {
     assert!(journal.entries().is_empty());
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// An archived zip that is a link (to an identical file elsewhere) isn't a copy Silo can stand
+/// behind: the relink pass leaves the real copy in the mods folder alone (#399).
+#[test]
+fn relink_never_trades_a_copy_for_a_link_to_an_archived_link() {
+    let base = std::env::temp_dir().join(format!("silo_relink_archlink_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let cat = base.join(ARCHIVE).join("Vehicles");
+    std::fs::create_dir_all(&cat).unwrap();
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    organize_row(&conn, &base, "FS25_Foo", "Vehicles", true);
+    let bytes = b"PK\x03\x04 the archived build";
+    let elsewhere = base.join("elsewhere.zip");
+    std::fs::write(&elsewhere, bytes).unwrap();
+    let src = cat.join("FS25_Foo.zip");
+    if symlink_file(&elsewhere, &src).is_err() {
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+        return; // no file symlinks here (Windows without Developer Mode)
+    }
+    let flat = base.join("FS25_Foo.zip");
+    std::fs::write(&flat, bytes).unwrap();
+    for mode in [RelinkMode::Hardlink, RelinkMode::Symlink] {
+        let rep = relink_with(&conn, &Layout::default_for(&base), mode, |_, _| {});
+        assert_eq!(rep.upgraded, 0, "{mode:?}: {:?}", rep.errors);
+        assert_eq!(rep.skipped, 1, "{mode:?}");
+        let m = flat.symlink_metadata().unwrap();
+        assert!(m.is_file() && !m.file_type().is_symlink(), "{mode:?}");
+        assert_eq!(std::fs::read(&flat).unwrap(), bytes);
+    }
+    drop(conn);
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_dir_all(&base);
+}
