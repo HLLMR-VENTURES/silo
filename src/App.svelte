@@ -966,6 +966,7 @@
     toast,
     blocked: (expected) => activeUndoBlocked(expected),
     reapply: (previous) => switchActiveSet(previous, "Switching back"),
+    settle: settleScanOrRefuse,
   });
 
   /**
@@ -982,6 +983,11 @@
     // the old active set back on screen, and the next toggle would re-apply that (#347). Wait for
     // it, then plan from what it found.
     if (!(await settleScanOrRefuse())) return null;
+    const start = activeSet;
+    /** The switch stopped short: null when the active mods are still the ones it started from;
+     *  false when filing already changed them (a mod it couldn't link back is parked now), so the
+     *  caller keeps its snapshot and Undo can put that mod back. */
+    const stopped = () => (sameMods(start, activeSet) ? null : false);
     const { loose } = parkPlan(mods, activeSet, target);
     if (loose.length > 0) {
       const one = loose.length === 1 ? loose[0] : null;
@@ -997,7 +1003,7 @@
       if (filed === null) return null; // refused, and said why: nothing changed
       // Filing rescans, but skips that when a scan was already running (the dialog was open
       // meanwhile): wait for that one too, so it can't land on top of the switch.
-      if (!(await settleScanOrRefuse())) return null;
+      if (!(await settleScanOrRefuse())) return stopped();
     }
     // Whatever is still active and can't be parked (folder mods, a zip that couldn't be filed)
     // stays in the set, so what Silo shows is what the game loads.
@@ -1006,7 +1012,7 @@
     const result = await setActiveSetTo([...target, ...stay.map((m) => m.techName)], label);
     if (result !== null && fixed.length > 0)
       toast({ message: fixedOnText(fixed.map((m) => m.title ?? m.techName)), tone: "warn" });
-    return result === null ? null : result && stay.length === 0;
+    return result === null ? stopped() : result && stay.length === 0;
   }
 
   /**

@@ -349,6 +349,20 @@ describe("useSave", () => {
     expect(t.store.lastApplied).toBeNull();
   });
 
+  it("reads the library after a running scan, so a mod it finds counts (#347)", async () => {
+    const library = ["A", "B", "C"];
+    const t = setup(["A", "B"], library);
+    await t.store.load();
+    // The scan running when the user clicked finds Q.
+    t.settle.mockImplementationOnce(async () => {
+      library.push("Q");
+      return true;
+    });
+    await t.store.useSave(save);
+    expect(t.setActiveSetTo).toHaveBeenCalledWith(["C", "Q"], "Switching to Riverbend");
+    expect(saveLoadout).toHaveBeenCalledWith(null, "Riverbend", ["C", "Q"]);
+  });
+
   it("asks nothing while a scan still runs (#347)", async () => {
     const t = setup();
     await t.store.load();
@@ -485,6 +499,25 @@ describe("applyMembership (the Library's Mod sets… dialog, #323)", () => {
       ["A", "B"],
       ["C", "D", "Z"],
     ]);
+  });
+
+  it("Undo waits for a running scan before its check, and comes back when the scan still runs (#347)", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    await t.store.applyMembership(["B"], editsFor(t, ["B"], [[1, "none"]]));
+    const opts = lastToast();
+    vi.mocked(toast).mockClear();
+    vi.mocked(replaceLoadoutMods).mockClear();
+    t.setActiveSetTo.mockClear();
+    t.settle.mockResolvedValueOnce(false);
+    await opts.action!.run();
+    expect(t.activeUndoBlocked).not.toHaveBeenCalled();
+    expect(t.setActiveSetTo).not.toHaveBeenCalled();
+    expect(replaceLoadoutMods).not.toHaveBeenCalled();
+    // The same Undo again, to try once the scan is done.
+    expect(lastToast()).toMatchObject({ message: opts.message, action: { label: "Undo" } });
+    await lastToast().action!.run();
+    expect(t.setActiveSetTo).toHaveBeenLastCalledWith(["A", "B"], "Switching back");
   });
 
   it("Undo refuses once a set changed since", async () => {

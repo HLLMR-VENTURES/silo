@@ -63,6 +63,37 @@ describe("switch Undo", () => {
   });
 });
 
+describe("switch Undo, a running scan (#347)", () => {
+  it("waits for it before the staleness check, so the check sees what the scan found", async () => {
+    let active = ["A"];
+    const blocked = vi.fn((expected: string[]) => (expected.join() === active.join() ? null : "stale"));
+    const { toast, reapply, shown } = setup();
+    // The scan lands while Undo waits: someone changed the mods outside Silo.
+    const settle = vi.fn(async () => {
+      active = ["A", "X"];
+      return true;
+    });
+    const undo = createSwitchUndo({ toast, blocked, reapply, settle });
+    undo.offer({ message: "Parked B.", previous: ["A", "B"], expected: ["A"] });
+    await shown[0].opts.action!.run();
+    expect(settle).toHaveBeenCalled();
+    expect(reapply).not.toHaveBeenCalled();
+    expect(shown[1].opts).toMatchObject({ message: "stale", tone: "warn" });
+  });
+
+  it("brings the Undo toast back when the scan still runs", async () => {
+    const { toast, reapply, shown } = setup();
+    const settle = vi.fn(() => Promise.resolve(false));
+    const blocked = vi.fn(() => null);
+    const undo = createSwitchUndo({ toast, blocked, reapply, settle });
+    undo.offer({ message: "Parked B.", previous: ["A", "B"], expected: ["A"] });
+    await shown[0].opts.action!.run();
+    expect(blocked).not.toHaveBeenCalled();
+    expect(reapply).not.toHaveBeenCalled();
+    expect(shown[1].opts).toMatchObject({ message: "Parked B.", action: { label: "Undo" } });
+  });
+});
+
 describe("switch Undo, refused", () => {
   it("brings the Undo toast back when the re-apply is refused (Silo busy)", async () => {
     const { undo, shown, reapply } = setup();

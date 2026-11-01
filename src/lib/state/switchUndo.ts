@@ -19,6 +19,9 @@ export interface SwitchUndoDeps {
    *  when the write was refused (another one is running, the refusal was shown): the Undo toast
    *  comes back so it can be tried again. */
   reapply: (previous: string[]) => Promise<unknown>;
+  /** Wait briefly for a running library scan before the staleness check (it may change the
+   *  active mods). False when it still runs (refused, said why): the Undo toast comes back. */
+  settle?: () => Promise<boolean>;
 }
 
 export interface SwitchUndoOffer {
@@ -62,6 +65,11 @@ export function createSwitchUndo(deps: SwitchUndoDeps): SwitchUndo {
         label: "Undo",
         run: async () => {
           if (current === handle) current = null;
+          // A scan landing after the check could bring other active mods than the switch left.
+          if (deps.settle && !(await deps.settle())) {
+            offer({ ...o, previous, expected });
+            return;
+          }
           const why = deps.blocked(expected);
           if (why) {
             deps.toast({ message: why, tone: "warn" });

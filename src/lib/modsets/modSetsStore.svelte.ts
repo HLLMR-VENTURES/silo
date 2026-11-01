@@ -373,6 +373,9 @@ export function createModSets(deps: ModSetsDeps): ModSets {
   }
 
   async function useSave(s: Savegame) {
+    // Which of the save's mods are in the library, and the diff, are read from the last scan:
+    // not while a scan may replace it.
+    if (!(await deps.settle())) return;
     const library = deps.library();
     if (!library) {
       deps.refuse("Wait for Silo to finish reading your library.");
@@ -384,7 +387,6 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       return;
     }
     if (deps.editRefused()) return;
-    if (!(await deps.settle())) return;
     const target = present.map((m) => m.modName);
     // Reuse a set of the same name only when it already holds exactly these mods.
     const reuse = () =>
@@ -510,6 +512,8 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       }
       if (deps.editRefused()) return;
       if (switched !== null) {
+        // A scan landing after the check could bring other active mods than the save left.
+        if (!(await deps.settle())) return offer();
         const why = deps.activeUndoBlocked(expected);
         if (why) {
           toast({ message: why, tone: "warn" });
