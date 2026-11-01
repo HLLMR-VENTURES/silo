@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Mod downloads and updates no longer delete files just by their name. Each download now gets a
+  file name of its own, and Silo only removes one it noted making that no download is still
+  using. Silo also keeps only its own update backups to three per mod: backups it didn't note
+  making, such as ones from older versions of Silo or your own files in `backups`, are left
+  where they are and noted in the log. A temporary link Silo makes while finishing an
+  interrupted update is now noted too, so it's cleaned up if Silo stops partway. (#400)
 - Clicking **Connect**, **Cancel** or **Disconnect** for GitHub in quick succession now always
   reaches Silo in the order you clicked. Before, cancelling a sign-in and connecting or
   disconnecting right after could arrive the other way round. (#403)
