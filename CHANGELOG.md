@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counting mods that load their materials from a script too, and names the mods adding the most.
   **Last run** lists the materials the game skipped. (#341)
 
+### Fixed
+
+- Mod downloads, updates and catalog images now check every redirect, not just the first
+  address: Silo won't follow one to plain `http` or to an address on your own network, and it
+  refuses a web address whose name points at your own network. GitHub downloads work as
+  before. (#348)
+
 ## [1.0.3] - 2026-10-29
 
 The library database moves to version 3 (one added column, for the per-mod update switch). Silo

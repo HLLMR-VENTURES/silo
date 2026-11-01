@@ -571,12 +571,12 @@ fn fetch_and_validate(
 ) -> Result<(), String> {
     const CAP: u64 = crate::update::MAX_BYTES;
     // SSRF guard: the URL is catalog/frontend-influenced. Downloads must be public https —
-    // never a private/loopback host (no dev localhost exception for a mod download).
+    // never a private/loopback host (no dev localhost exception for a mod download). The same
+    // check runs on every redirect, and the download agent never connects to a private address.
     crate::net::validate_outbound_url(url, false)?;
-    let resp = crate::net::download()
-        .get(url)
-        .call()
-        .map_err(|e| e.to_string())?;
+    let resp =
+        crate::net::get_guarded(crate::net::download(), url, &crate::net::public_https, None)
+            .map_err(|e| e.to_string())?;
     let total: Option<u64> = resp
         .header("Content-Length")
         .and_then(|s| s.parse().ok())
@@ -672,16 +672,23 @@ pub(crate) fn is_catalog_image_host(url: &str) -> bool {
     }
 }
 
+/// A hop of an image fetch: public https (see `net::public_https`) on an allowed image host.
+fn check_image_hop(u: &url::Url) -> Result<(), String> {
+    crate::net::public_https(u)?;
+    if !is_catalog_image_host(u.as_str()) {
+        return Err("not an allowed image host".to_string());
+    }
+    Ok(())
+}
+
 /// Fetch a catalog mod image in Rust and return it as a `data:` URL the webview can render
 /// directly (the CSP keeps the webview from loading arbitrary image hosts). Sends Silo's
-/// own User-Agent and no Referer. Host-allowlisted and size-capped.
+/// own User-Agent and no Referer. Host-allowlisted (every redirect too) and size-capped.
 pub fn fetch_image(url: &str) -> Result<String, String> {
     if !is_catalog_image_host(url) {
         return Err("not an allowed image host".to_string());
     }
-    let resp = crate::net::api()
-        .get(url)
-        .call()
+    let resp = crate::net::get_guarded(crate::net::guarded_api(), url, &check_image_hop, None)
         .map_err(|e| e.to_string())?;
     let mime = resp
         .header("Content-Type")

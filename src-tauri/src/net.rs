@@ -5,10 +5,18 @@
 //! frontend or upstream from steering a native request at cloud metadata (169.254.169.254) or
 //! an internal service.
 //!
-//! Also home to the shared HTTP agents (`api()`, `download()`): every native request goes
-//! through one of them, so each has connect/read timeouts and Silo's User-Agent.
+//! Also home to the shared HTTP agents: every native request goes through one of them, so each
+//! has connect/read timeouts and Silo's User-Agent.
+//!
+//! - `api()` talks only to fixed hosts (api.github.com, the catalog base). It keeps ureq's
+//!   redirect handling, which GitHub's API uses for renamed repos.
+//! - `download()` and `guarded_api()` fetch URLs the catalog or GitHub handed us. They are
+//!   HTTPS-only, follow no redirects on their own (use [`get_guarded`], which checks every
+//!   hop), and resolve names through [`public_addrs`], so a public-looking name that resolves
+//!   to a private address is refused and the address that was checked is the one connected to.
 
-use std::net::IpAddr;
+use std::io;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::OnceLock;
 use std::time::Duration;
 use url::{Host, Url};
@@ -20,13 +28,17 @@ pub const USER_AGENT: &str = concat!(
     " (+https://silo.hllmr.com)"
 );
 
-/// Build an agent with connect / read / write timeouts and an optional overall cap, so a
+/// Most redirects a guarded fetch follows. A GitHub release asset takes one
+/// (`github.com` → `release-assets.githubusercontent.com`), or two when the repo was renamed.
+pub(crate) const MAX_REDIRECTS: usize = 5;
+
+/// An agent builder with connect / read / write timeouts and an optional overall cap, so a
 /// silent or stalled server makes the request fail instead of hanging forever.
-pub(crate) fn build_agent(
+fn agent_builder(
     connect: Duration,
     read: Duration,
     overall: Option<Duration>,
-) -> ureq::Agent {
+) -> ureq::AgentBuilder {
     let mut b = ureq::AgentBuilder::new()
         .timeout_connect(connect)
         .timeout_read(read)
@@ -35,10 +47,35 @@ pub(crate) fn build_agent(
     if let Some(t) = overall {
         b = b.timeout(t);
     }
-    b.build()
+    b
 }
 
-/// For API calls: a request that hasn't finished in 60 s fails.
+/// Build an agent with [`agent_builder`]'s timeouts.
+pub(crate) fn build_agent(
+    connect: Duration,
+    read: Duration,
+    overall: Option<Duration>,
+) -> ureq::Agent {
+    agent_builder(connect, read, overall).build()
+}
+
+/// Build an agent for URLs Silo didn't choose itself: HTTPS only, no automatic redirects
+/// (follow them with [`get_guarded`]), and a resolver that never hands ureq an address the
+/// guard refuses.
+pub(crate) fn build_guarded_agent(
+    connect: Duration,
+    read: Duration,
+    overall: Option<Duration>,
+) -> ureq::Agent {
+    agent_builder(connect, read, overall)
+        .https_only(true)
+        .redirects(0)
+        .resolver(|netloc: &str| public_addrs(netloc, system_lookup))
+        .build()
+}
+
+/// For API calls to fixed hosts (GitHub's API, the catalog): a request that hasn't finished
+/// in 60 s fails. Never give it a URL from the catalog or the webview; use `guarded_api()`.
 pub fn api() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
@@ -50,10 +87,124 @@ pub fn api() -> &'static ureq::Agent {
     })
 }
 
-/// For file downloads: no overall cap (large mods), but a stalled read fails after 30 s.
+/// `api()`'s timeouts, guarded (see [`build_guarded_agent`]): for small fetches of URLs the
+/// catalog or GitHub handed us (catalog images, a gist's raw file). Use with [`get_guarded`].
+pub fn guarded_api() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        build_guarded_agent(
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+            Some(Duration::from_secs(60)),
+        )
+    })
+}
+
+/// For file downloads (mods, updates), guarded (see [`build_guarded_agent`]): no overall cap
+/// (large mods), but a stalled read fails after 30 s. Use with [`get_guarded`].
 pub fn download() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    AGENT.get_or_init(|| build_agent(Duration::from_secs(10), Duration::from_secs(30), None))
+    AGENT
+        .get_or_init(|| build_guarded_agent(Duration::from_secs(10), Duration::from_secs(30), None))
+}
+
+/// The system resolver (what ureq uses by default).
+fn system_lookup(netloc: &str) -> io::Result<Vec<SocketAddr>> {
+    netloc.to_socket_addrs().map(Iterator::collect)
+}
+
+/// Resolve `netloc` (`host:port`) with `lookup` and keep only the addresses the guard allows,
+/// so a public name that resolves to 10.x / 192.168.x / 169.254.x / loopback can't be
+/// reached. Fails when nothing is left.
+pub(crate) fn public_addrs(
+    netloc: &str,
+    lookup: impl Fn(&str) -> io::Result<Vec<SocketAddr>>,
+) -> io::Result<Vec<SocketAddr>> {
+    let kept: Vec<SocketAddr> = lookup(netloc)?
+        .into_iter()
+        .filter(|a| reject_bad_ip(a.ip(), false).is_ok())
+        .collect();
+    if kept.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("refusing {netloc}: it has no public address"),
+        ));
+    }
+    Ok(kept)
+}
+
+/// Why a guarded fetch failed: ureq's own error (a status or transport failure), or a URL the
+/// guard refused (the first one or a redirect).
+#[derive(Debug)]
+pub enum FetchError {
+    Http(Box<ureq::Error>),
+    Refused(String),
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchError::Http(e) => write!(f, "{e}"),
+            FetchError::Refused(s) => f.write_str(s),
+        }
+    }
+}
+
+/// GET `url` with a guarded agent, following up to [`MAX_REDIRECTS`] redirects by hand.
+/// `check` runs on the first URL and on every redirect target before anything is sent there.
+/// `auth` (an `Authorization` value) is sent only to the first URL's origin, never across
+/// hosts or schemes.
+pub(crate) fn get_guarded(
+    agent: &ureq::Agent,
+    url: &str,
+    check: &dyn Fn(&Url) -> Result<(), String>,
+    auth: Option<&str>,
+) -> Result<ureq::Response, FetchError> {
+    follow_redirects(url, check, |u, same_origin| {
+        let mut req = agent.get(u.as_str());
+        if let (Some(a), true) = (auth, same_origin) {
+            req = req.set("Authorization", a);
+        }
+        req.call().map_err(Box::new)
+    })
+}
+
+/// A `check` for [`get_guarded`]: [`validate_outbound_url`] without the localhost exception.
+pub(crate) fn public_https(url: &Url) -> Result<(), String> {
+    validate_outbound_url(url.as_str(), false).map(drop)
+}
+
+/// The redirect loop behind [`get_guarded`], with the request injected so it can be tested
+/// without a network. `send(url, same_origin)` performs one request; `same_origin` says
+/// whether `url` has the starting URL's scheme, host and port.
+fn follow_redirects(
+    start: &str,
+    check: &dyn Fn(&Url) -> Result<(), String>,
+    mut send: impl FnMut(&Url, bool) -> Result<ureq::Response, Box<ureq::Error>>,
+) -> Result<ureq::Response, FetchError> {
+    let first = Url::parse(start).map_err(|_| FetchError::Refused("not a valid URL".into()))?;
+    check(&first).map_err(FetchError::Refused)?;
+    let origin = first.origin();
+    let mut url = first;
+    let mut hops = 0;
+    loop {
+        let resp = send(&url, url.origin() == origin).map_err(FetchError::Http)?;
+        if !matches!(resp.status(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(resp);
+        }
+        hops += 1;
+        if hops > MAX_REDIRECTS {
+            return Err(FetchError::Refused(format!(
+                "too many redirects (more than {MAX_REDIRECTS})"
+            )));
+        }
+        let next = resp
+            .header("Location")
+            .and_then(|loc| url.join(loc).ok())
+            .ok_or_else(|| FetchError::Refused("a redirect had no usable Location".into()))?;
+        check(&next).map_err(|e| FetchError::Refused(format!("Silo refused a redirect: {e}")))?;
+        url = next;
+    }
 }
 
 /// True when `s` is safe to hand to `Url::path_segments_mut` as ONE path segment: not
@@ -203,6 +354,209 @@ mod tests {
         // non-loopback private is still blocked even in dev mode
         assert!(validate_outbound_url("http://10.0.0.5/x", true).is_err());
         assert!(validate_outbound_url("https://192.168.0.2/x", true).is_err());
+    }
+
+    /// A canned response with `status` and, when given, a `Location` header.
+    fn reply(status: u16, location: Option<&str>) -> Result<ureq::Response, Box<ureq::Error>> {
+        let loc = location
+            .map(|l| format!("Location: {l}\r\n"))
+            .unwrap_or_default();
+        Ok(
+            format!("HTTP/1.1 {status} X\r\n{loc}Content-Length: 0\r\n\r\n")
+                .parse::<ureq::Response>()
+                .unwrap(),
+        )
+    }
+
+    /// Run `follow_redirects` from `start` against canned replies (in order), recording each
+    /// URL requested and whether it would carry the credential.
+    fn run_chain(
+        start: &str,
+        replies: Vec<(u16, Option<&str>)>,
+    ) -> (Result<u16, String>, Vec<(String, bool)>) {
+        let mut sent = Vec::new();
+        let mut replies = replies.into_iter();
+        let res = follow_redirects(start, &public_https, |u, same_origin| {
+            sent.push((u.to_string(), same_origin));
+            let (status, loc) = replies.next().expect("more requests than replies");
+            reply(status, loc)
+        })
+        .map(|r| r.status())
+        .map_err(|e| e.to_string());
+        (res, sent)
+    }
+
+    #[test]
+    fn a_redirect_to_a_private_http_address_is_refused_unsent() {
+        let (res, sent) = run_chain(
+            "https://cdn.example.com/a.zip",
+            vec![(302, Some("http://192.168.1.1/admin"))],
+        );
+        assert!(res.unwrap_err().contains("refused a redirect"));
+        assert_eq!(sent.len(), 1, "nothing may be sent to the redirect target");
+        // Same for https to a private / loopback / metadata address.
+        for target in [
+            "https://10.0.0.1/x",
+            "https://127.0.0.1/x",
+            "https://169.254.169.254/latest/meta-data",
+            "https://localhost/x",
+        ] {
+            let (res, sent) = run_chain("https://cdn.example.com/a.zip", vec![(307, Some(target))]);
+            assert!(res.is_err(), "should refuse {target}");
+            assert_eq!(sent.len(), 1);
+        }
+    }
+
+    #[test]
+    fn an_https_to_http_downgrade_is_refused() {
+        let (res, sent) = run_chain(
+            "https://cdn.example.com/a.zip",
+            vec![(301, Some("http://cdn.example.com/a.zip"))],
+        );
+        assert!(res.unwrap_err().contains("https"));
+        assert_eq!(sent.len(), 1);
+    }
+
+    #[test]
+    fn redirects_are_followed_and_auth_stays_on_the_first_origin() {
+        let (res, sent) = run_chain(
+            "https://github.com/o/r/releases/download/v1/a.zip",
+            vec![
+                // A relative Location is resolved against the current URL.
+                (301, Some("/o2/r/releases/download/v1/a.zip")),
+                (
+                    302,
+                    Some("https://release-assets.githubusercontent.com/x?sig=1"),
+                ),
+                (200, None),
+            ],
+        );
+        assert_eq!(res, Ok(200));
+        assert_eq!(
+            sent,
+            vec![
+                (
+                    "https://github.com/o/r/releases/download/v1/a.zip".into(),
+                    true
+                ),
+                (
+                    "https://github.com/o2/r/releases/download/v1/a.zip".into(),
+                    true
+                ),
+                (
+                    "https://release-assets.githubusercontent.com/x?sig=1".into(),
+                    false
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_redirect_loop_or_a_missing_location_fails() {
+        let looped = vec![(302, Some("https://a.example.com/next")); MAX_REDIRECTS + 1];
+        let (res, sent) = run_chain("https://a.example.com/", looped);
+        assert!(res.unwrap_err().contains("too many redirects"));
+        assert_eq!(sent.len(), MAX_REDIRECTS + 1);
+
+        let (res, _) = run_chain("https://a.example.com/", vec![(302, None)]);
+        assert!(res.unwrap_err().contains("Location"));
+    }
+
+    #[test]
+    fn the_first_url_is_checked_too() {
+        let (res, sent) = run_chain("http://10.0.0.1/a.zip", vec![]);
+        assert!(res.is_err());
+        assert!(sent.is_empty());
+    }
+
+    #[test]
+    fn the_resolver_drops_private_addresses() {
+        let stub = |answer: Vec<&'static str>| {
+            move |_: &str| -> io::Result<Vec<SocketAddr>> {
+                Ok(answer.iter().map(|a| a.parse().unwrap()).collect())
+            }
+        };
+        // A public name that resolves only to private / loopback / link-local addresses.
+        for private in [
+            "10.0.0.1:443",
+            "192.168.1.1:443",
+            "169.254.169.254:443",
+            "127.0.0.1:443",
+            "[::1]:443",
+            "[fd00::1]:443",
+            "[::ffff:10.0.0.1]:443",
+        ] {
+            let res = public_addrs("evil.example.com:443", stub(vec![private]));
+            assert!(res.is_err(), "should drop {private}");
+        }
+        // Mixed answers keep only the public addresses.
+        let kept = public_addrs(
+            "mixed.example.com:443",
+            stub(vec!["10.0.0.1:443", "140.82.112.3:443", "[fe80::1]:443"]),
+        )
+        .unwrap();
+        assert_eq!(
+            kept,
+            vec!["140.82.112.3:443".parse::<SocketAddr>().unwrap()]
+        );
+        // A lookup failure passes through.
+        let failed = public_addrs("x:443", |_: &str| Err(io::Error::other("no such host")));
+        assert!(failed.is_err());
+    }
+
+    #[test]
+    fn the_guarded_agent_refuses_http_and_private_addresses() {
+        let agent =
+            build_guarded_agent(Duration::from_millis(500), Duration::from_millis(500), None);
+        // Plain http is refused before any connection.
+        let http = agent.get("http://127.0.0.1:9/").call().unwrap_err();
+        assert_eq!(http.kind(), ureq::ErrorKind::InsecureRequestHttpsOnly);
+        // https to a loopback address is refused by the resolver, before any connection.
+        let lo = agent.get("https://127.0.0.1:9/").call().unwrap_err();
+        assert_eq!(lo.kind(), ureq::ErrorKind::Dns);
+    }
+
+    #[test]
+    fn a_real_redirect_to_a_private_address_is_not_followed() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Answer one request with a redirect to a LAN address.
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let Some(mut s) = accept_within(&listener, deadline) else {
+                return;
+            };
+            let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut req = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                match s.read(&mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => req.extend_from_slice(&buf[..n]),
+                }
+            }
+            let _ = s.write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: http://192.168.1.1/\r\n\
+                  Content-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        });
+        // The guarded agents refuse loopback outright, so drive the same loop with a plain
+        // agent that, like them, doesn't follow redirects, and a check that allows this
+        // loopback test server (and still refuses every private address).
+        let agent = agent_builder(Duration::from_millis(500), Duration::from_millis(500), None)
+            .redirects(0)
+            .build();
+        let res = get_guarded(
+            &agent,
+            &format!("http://{addr}/a.zip"),
+            &|u| validate_outbound_url(u.as_str(), true).map(drop),
+            None,
+        );
+        server.join().unwrap();
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("refused a redirect"), "{err}");
     }
 
     /// Accept one connection, giving up at `deadline` so a test server thread always ends.
