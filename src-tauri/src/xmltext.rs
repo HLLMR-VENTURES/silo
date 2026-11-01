@@ -81,6 +81,33 @@ pub fn check_chars(s: &str) -> Result<(), String> {
     }
 }
 
+/// XML 1.0's `NameStartChar` (and, with `rest`, `NameChar`) productions.
+fn is_name_char(c: char, rest: bool) -> bool {
+    let start = matches!(c,
+        ':' | 'A'..='Z' | '_' | 'a'..='z' | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}'
+        | '\u{F8}'..='\u{2FF}' | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}'
+        | '\u{200C}'..='\u{200D}' | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}'
+        | '\u{3001}'..='\u{D7FF}' | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}'
+        | '\u{10000}'..='\u{EFFFF}');
+    start
+        || (rest
+            && matches!(c,
+                '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}'))
+}
+
+/// Refuse an element or attribute name that isn't an XML `Name` (`1value`, `a b`, ``).
+pub fn check_name(name: &[u8]) -> Result<(), String> {
+    let name = std::str::from_utf8(name).map_err(|_| "a name isn't valid text".to_string())?;
+    let mut chars = name.chars();
+    let ok = chars.next().is_some_and(|c| is_name_char(c, false))
+        && chars.all(|c| is_name_char(c, true));
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("\"{name}\" isn't a valid XML name"))
+    }
+}
+
 /// Check one reference's name (what sits between `&` and `;`): it must be one of the five
 /// predefined entities or a character reference to a character XML allows. Settings files
 /// have no DTD, so any other entity is undeclared and the game's parser rejects the file.
@@ -105,14 +132,15 @@ pub fn check_reference(name: &str) -> Result<(), String> {
     }
 }
 
-/// Check every attribute of a tag the way the game's parser does: each one quoted and named
-/// once (`with_checks`), no `<` in a value, and every `&` starting a reference that
-/// [`check_reference`] accepts.
+/// Check every attribute of a tag the way the game's parser does: each one a valid name,
+/// quoted and named once (`with_checks`), no `<` in a value, and every `&` starting a
+/// reference that [`check_reference`] accepts.
 pub fn check_attributes(e: &BytesStart) -> Result<(), String> {
     let mut attrs = e.attributes();
     attrs.with_checks(true);
     for a in attrs {
         let a = a.map_err(|err| err.to_string())?;
+        check_name(a.key.as_ref())?;
         let key = String::from_utf8_lossy(a.key.as_ref()).into_owned();
         let value = String::from_utf8_lossy(&a.value);
         if value.contains('<') {
@@ -283,6 +311,18 @@ mod tests {
             "#x110000",
         ] {
             assert!(super::check_reference(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn only_xml_names_pass() {
+        for ok in [
+            "settings", "a", "_x", "xsi:nil", "intValue", "a-b.c1", "été",
+        ] {
+            assert!(super::check_name(ok.as_bytes()).is_ok(), "{ok}");
+        }
+        for bad in ["", "1value", "-a", ".a", "a b", "a\"", "a=b", "a/"] {
+            assert!(super::check_name(bad.as_bytes()).is_err(), "{bad:?}");
         }
     }
 

@@ -4951,10 +4951,11 @@ async fn save_mod_settings_raw(path: String, content: String) -> Result<(), Stri
 }
 
 /// Refuse text that isn't one well-formed XML document (parsed to the end: every tag closed
-/// and matched, one root element, nothing but whitespace or comments around it; every
-/// attribute quoted and named once; only the five predefined entities and character
-/// references). The raw editor writes what the user typed, and a broken settings file makes
-/// the mod fall back to its defaults or fail to load.
+/// and matched, one root element, nothing but whitespace or comments around it; valid
+/// names; every attribute quoted and named once; only the five predefined entities and
+/// character references; an XML declaration only at the very start and a DOCTYPE only
+/// before the root). The raw editor writes what the user typed, and a broken settings file
+/// makes the mod fall back to its defaults or fail to load.
 fn ensure_well_formed(xml: &str) -> Result<(), String> {
     use quick_xml::events::Event;
     let refuse = |why: String| {
@@ -4968,18 +4969,30 @@ fn ensure_well_formed(xml: &str) -> Result<(), String> {
     let mut reader = quick_xml::Reader::from_str(xml);
     let mut depth = 0usize;
     let mut roots = 0usize;
+    let mut first = true;
+    let mut doctype = false;
     loop {
         let event = reader.read_event();
         if let Ok(Event::Start(e) | Event::Empty(e)) = &event {
-            if let Err(why) = xmltext::check_attributes(e) {
+            if let Err(why) =
+                xmltext::check_name(e.name().as_ref()).and_then(|()| xmltext::check_attributes(e))
+            {
                 return refuse(format!("before byte {}: {why}", reader.buffer_position()));
             }
         }
+        let at_start = std::mem::replace(&mut first, false);
         match event {
             Err(e) => {
                 return refuse(format!("at byte {}: {e}", reader.error_position()));
             }
             Ok(Event::Eof) => break,
+            Ok(Event::Decl(_)) if !at_start => {
+                return refuse("the <?xml ...?> declaration must come first".into());
+            }
+            Ok(Event::DocType(_)) if doctype || depth > 0 || roots > 0 => {
+                return refuse("a <!DOCTYPE> can only come once, before the root element".into());
+            }
+            Ok(Event::DocType(_)) => doctype = true,
             Ok(Event::Start(_)) => {
                 if depth == 0 {
                     roots += 1;
@@ -5469,6 +5482,7 @@ mod tests {
             "<!-- c --><settings/>\n",
             "  <settings>\n  <x>a &amp; b</x>\n</settings>  ",
             r#"<settings><a v='say "hi"' w="&lt;&#10;&#x9;&quot;"/>&apos;&#233;</settings>"#,
+            "\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<!DOCTYPE settings>\n<settings xsi:x=\"1\"><x-y.z/></settings>\n",
         ] {
             assert!(super::ensure_well_formed(good).is_ok(), "{good}");
         }
@@ -5493,6 +5507,13 @@ mod tests {
             "<settings value=\"\u{1}\"/>",
             "<settings>a\u{1}b</settings>",
             "<settings><![CDATA[\u{FFFF}]]></settings>",
+            r#"<settings 1value="5"/>"#,
+            r#"<1settings/>"#,
+            r#"<settings><?xml version="1.0"?></settings>"#,
+            r#"<settings/><?xml version="1.0"?>"#,
+            "<!-- c --><?xml version=\"1.0\"?><settings/>",
+            "<settings><!DOCTYPE settings></settings>",
+            "<!DOCTYPE a><!DOCTYPE b><settings/>",
         ] {
             let e = super::ensure_well_formed(bad).unwrap_err();
             assert!(e.contains("didn't save it"), "{bad}: {e}");

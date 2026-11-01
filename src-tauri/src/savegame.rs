@@ -79,20 +79,22 @@ fn parse(xml: &str, index: u32, folder: &str) -> Result<Savegame, String> {
         Ok(local)
     };
 
-    // A `<mod>` entry. One whose attributes are damaged fails the parse rather than being
-    // skipped, which would leave a partial list.
-    let read_mod = |e: &BytesStart, mods: &mut Vec<SaveMod>| {
+    // A `<mod>` entry. One whose attributes are damaged, or a save-level entry (a child of
+    // the root) with no `modName`, fails the parse rather than being skipped, which would
+    // leave a partial list.
+    let read_mod = |e: &BytesStart, stack: &[String], mods: &mut Vec<SaveMod>| {
         crate::xmltext::check_attributes(e).map_err(|_| cut_off())?;
-        if let Some(mod_name) = attr(e, b"modName") {
-            let is_dlc = mod_name.starts_with("pdlc_");
-            mods.push(SaveMod {
-                is_dlc,
+        match attr(e, b"modName").filter(|n| !n.trim().is_empty()) {
+            Some(mod_name) => mods.push(SaveMod {
+                is_dlc: mod_name.starts_with("pdlc_"),
                 title: attr(e, b"title"),
                 version: attr(e, b"version"),
                 required: attr(e, b"required").as_deref() == Some("true"),
                 file_hash: attr(e, b"fileHash"),
                 mod_name,
-            });
+            }),
+            None if stack.len() == 1 => return Err(cut_off()),
+            None => {}
         }
         Ok::<(), String>(())
     };
@@ -125,7 +127,7 @@ fn parse(xml: &str, index: u32, folder: &str) -> Result<Savegame, String> {
                 take_text(&stack, &mut run);
                 let local = open(&e, &stack, &mut root_seen)?;
                 if local == "mod" {
-                    read_mod(&e, &mut mods)?;
+                    read_mod(&e, &stack, &mut mods)?;
                 }
                 stack.push(local); // real elements have a matching End
             }
@@ -133,7 +135,7 @@ fn parse(xml: &str, index: u32, folder: &str) -> Result<Savegame, String> {
                 // Self-closing (e.g. <mod .../>): handle attrs, don't push.
                 take_text(&stack, &mut run);
                 if open(&e, &stack, &mut root_seen)? == "mod" {
-                    read_mod(&e, &mut mods)?;
+                    read_mod(&e, &stack, &mut mods)?;
                 }
             }
             Ok(Event::End(_)) => {
@@ -403,6 +405,8 @@ mod tests {
             "<mod modName=FS25_x/>",
             "<mod modName=\"FS25_x\" modName=\"FS25_y\"/>",
             "<mod modName=\"a & b\"/>",
+            "<mod title=\"Missing identity\" required=\"true\"/>",
+            "<mod modName=\" \" title=\"Blank\"/>",
         ] {
             let xml = format!("{}    {extra}\n{}", &full[..end], &full[end..]);
             let err = parse(&xml, 1, "savegame1").unwrap_err();
