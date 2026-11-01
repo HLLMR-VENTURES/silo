@@ -944,6 +944,12 @@ async fn download_update(
         }
         // The catalog link of the file there now (#386), checked against its hash.
         let old_link = current_link(&db, &dest)?;
+        // A linked file is one the catalog names differently (#386), so its updates come from
+        // the catalog: one published under another file name is a different mod to FS25 and
+        // is never written over this one.
+        if old_link.is_some() && !catalogalias::url_names_file(&asset_url, &dest) {
+            return Err(renamed_release(&dest));
+        }
         // Public release assets don't need auth, and a download must never carry the user's
         // GitHub credential — keep the token for explicit API actions only.
         let part = update::fetch(&asset_url, &dest)?;
@@ -998,12 +1004,25 @@ async fn download_update(
             },
             (carry, _) => carry,
         };
-        // Kept even if the swap then fails: a swap can fail after the new file is in place
-        // (recovery then finishes it), and the record is true of those bytes either way.
-        if let Some((link, sha, size)) = &carry {
-            remember_catalog_alias(&db, &dest, sha, *size, link)?;
-        }
-        let mut done = update::swap(&dest, part.path(), &layout.mods, &mut policy)?;
+        let undo = match &carry {
+            Some((link, sha, size)) => Some(remember_catalog_alias(&db, &dest, sha, *size, link)?),
+            None => None,
+        };
+        let mut done = match update::swap(&dest, part.path(), &layout.mods, &mut policy) {
+            Ok(done) => done,
+            Err(e) => {
+                // A swap can fail after the new file is in place (recovery then finishes it):
+                // the record stays only while `dest` holds the new bytes.
+                if let Some((_, sha, _)) = &carry {
+                    let placed =
+                        provenance::sha256_file(&dest).is_ok_and(|h| h.eq_ignore_ascii_case(sha));
+                    if !placed {
+                        undo_catalog_alias(&db, undo);
+                    }
+                }
+                return Err(e);
+            }
+        };
         done.problems.extend(link_problem);
         if let Some(flat) = &done.relinked {
             if let (Ok(conn), Some(name)) = (db::open(&db), flat.file_name()) {
@@ -1054,7 +1073,17 @@ fn current_link(
 /// What an update says when the file it replaced was linked to its catalog entry (#386) and
 /// the new one can't be shown to come from that entry.
 const LINK_NOT_KEPT: &str = "Silo couldn't confirm this update came from the mod's catalog \
-     entry, so it may show as not in Silo's catalog. Installing it from Browse links it again.";
+     entry, so it may show as not in Silo's catalog. To link it again, remove it and install it \
+     from Browse.";
+
+/// Why an update of the linked file `dest` (#386) was refused: the release has another name.
+fn renamed_release(dest: &std::path::Path) -> String {
+    format!(
+        "This release isn't named {}, so FS25 would load it as a different mod. Silo didn't \
+         replace your copy. Install the new release from Browse instead.",
+        file_label(dest)
+    )
+}
 
 /// The link for the file an update from `asset_url` writes over `dest`, a file linked by
 /// `link`: kept when the update is a release asset with the same file name from the same GitHub
@@ -8795,6 +8824,17 @@ mod tests {
         .unwrap();
         let dl = super::lookup_from_detail(detail).download.unwrap();
         assert!(dl.url.contains("/k/b/"), "{}", dl.url);
+    }
+
+    #[test]
+    fn a_renamed_release_of_a_linked_file_is_refused_by_name() {
+        let dest = std::path::Path::new("mods/FS25_FieldToDoList.zip");
+        let msg = super::renamed_release(dest);
+        assert!(msg.contains("FS25_FieldToDoList.zip"), "{msg}");
+        let same = "https://github.com/k/FS25_ToDo/releases/download/v2/FS25_FieldToDoList.zip";
+        let renamed = "https://github.com/k/FS25_ToDo/releases/download/v2/FS25_ToDo.zip";
+        assert!(crate::catalogalias::url_names_file(same, dest));
+        assert!(!crate::catalogalias::url_names_file(renamed, dest));
     }
 
     #[test]
