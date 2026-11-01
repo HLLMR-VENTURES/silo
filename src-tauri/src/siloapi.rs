@@ -417,8 +417,25 @@ fn by_hash_one(
         Err(e) => return Err(catalog_err(e)),
     };
     let resp = crate::net::refuse_redirect(resp).map_err(not_answering)?;
-    let parsed: ByHashResponse = resp.into_json().map_err(|e| e.to_string())?;
+    // Read at most BY_HASH_LIMIT bytes: a longer answer is an error, never a cut-short list.
+    let mut body = Vec::new();
+    crate::net::RespExt::into_reader(resp)
+        .take(BY_HASH_LIMIT + 1)
+        .read_to_end(&mut body)
+        .map_err(|e| e.to_string())?;
+    let parsed = by_hash_parse(&body)?;
     by_hash_answer(hashes, parsed)
+}
+
+/// The most bytes a `by-hash` answer may have (some thousands of builds for a run's files).
+const BY_HASH_LIMIT: u64 = 1 << 20;
+
+/// A `by-hash` answer's body read: an error when it's over [`BY_HASH_LIMIT`] or not the shape.
+fn by_hash_parse(body: &[u8]) -> Result<ByHashResponse, String> {
+    if body.len() as u64 > BY_HASH_LIMIT {
+        return Err("Silo's catalog sent too long an answer.".into());
+    }
+    serde_json::from_slice(body).map_err(|e| format!("Failed to read JSON: {e}"))
 }
 
 /// The answer to one `by-hash` request for `hashes`, by hash. An error when it leaves out one
@@ -1097,6 +1114,19 @@ mod tests {
         let (base, server) = serve_once("200 OK", r#"{"mods":[]}"#);
         assert!(by_hash(&base, &[H1.to_string()]).is_err());
         server.join().unwrap();
+    }
+
+    #[test]
+    fn a_by_hash_answer_too_long_is_an_error_not_a_shorter_list() {
+        let padding = " ".repeat(BY_HASH_LIMIT as usize);
+        let long = format!(r#"{{"results":[{{"sha256":"{H1}","matches":[]}}]}}{padding}"#);
+        assert!(by_hash_parse(long.as_bytes()).is_err());
+        let fits = format!(r#"{{"results":[{{"sha256":"{H1}","matches":[]}}]}}"#);
+        assert!(by_hash_parse(fits.as_bytes()).is_ok()); // Over the wire too: the whole answer is refused.
+        let body: &'static str = Box::leak(long.into_boxed_str());
+        let (base, server) = serve_once("200 OK", body);
+        assert!(by_hash(&base, &[H1.to_string()]).is_err());
+        let _ = server.join();
     }
 
     #[test]

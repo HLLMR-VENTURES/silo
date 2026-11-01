@@ -186,8 +186,9 @@ fn backfill_catalog_links(app: &tauri::AppHandle, zips: &[aliasbackfill::Library
         let catalog = aliasbackfill::SiloApi {
             base: siloapi_base(app)?,
         };
-        let out = aliasbackfill::run(&conn, zips, &catalog, provenance::sha256_file, || {
-            library_write_within(ALIAS_BACKFILL_WAIT)
+        // A record waits for the library lock at most this long, and never past the run's time.
+        let out = aliasbackfill::run(&conn, zips, &catalog, provenance::sha256_file, |left| {
+            library_write_within(left.min(ALIAS_BACKFILL_WAIT))
         });
         let linked = linked_tech_names(zips, &out);
         if !out.is_empty() {
