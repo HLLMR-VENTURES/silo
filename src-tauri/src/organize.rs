@@ -708,21 +708,44 @@ pub(crate) fn replace_zip_link(
 /// `replace_zip_link`, but only for a real link: a hardlink to `dst`, else a symlink where
 /// `policy` allows one — never a copy. `Ok(false)` when neither could be made: `link` is left
 /// exactly as it was (for a move, the mod's hardlink then stays as its standalone copy instead
-/// of being traded for a second full copy). Never replaces anything at the temp name's target
-/// but `link` itself.
+/// of being traded for a second full copy). A `dst` that isn't there (any more) is an error,
+/// never a link to nothing: like `link_zip`, a `NotFound` or `AlreadyExists` from the hardlink
+/// stops here, and the new entry must reach a file before it replaces `link` and again after,
+/// so a caller never deletes the old copy behind a dangling link.
 pub(crate) fn replace_zip_link_if_linkable(
     link: &Path,
     dst: &Path,
     policy: &mut LinkPolicy,
 ) -> std::io::Result<bool> {
-    use std::io::ErrorKind::AlreadyExists;
-    std::fs::metadata(dst)?;
+    replace_zip_link_if_linkable_with(
+        link,
+        dst,
+        || policy.allow_symlink(),
+        |s, l| std::fs::hard_link(s, l),
+        symlink_file,
+    )
+}
+
+/// `replace_zip_link_if_linkable` with the link strategies injected (tests).
+fn replace_zip_link_if_linkable_with(
+    link: &Path,
+    dst: &Path,
+    allow_symlink: impl FnOnce() -> bool,
+    hard: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    soft: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<bool> {
+    use std::io::ErrorKind::{AlreadyExists, NotFound};
+    let reaches_a_file = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.is_file());
+    let gone = || std::io::Error::new(NotFound, "the new copy of the mod isn't there");
+    if !reaches_a_file(dst) {
+        return Err(gone());
+    }
     let tmp = relink_tmp(link);
     let _ = remove_path(&tmp);
-    let linked = match std::fs::hard_link(dst, &tmp) {
+    let linked = match hard(dst, &tmp) {
         Ok(()) => true,
-        Err(e) if e.kind() == AlreadyExists => return Err(e),
-        Err(_) if policy.allow_symlink() => match symlink_file(dst, &tmp) {
+        Err(e) if matches!(e.kind(), AlreadyExists | NotFound) => return Err(e),
+        Err(_) if allow_symlink() => match soft(dst, &tmp) {
             Ok(()) => true,
             Err(e) if e.kind() == AlreadyExists => return Err(e),
             Err(_) => false,
@@ -732,10 +755,17 @@ pub(crate) fn replace_zip_link_if_linkable(
     if !linked {
         return Ok(false);
     }
+    if !reaches_a_file(&tmp) {
+        let _ = remove_path(&tmp);
+        return Err(gone());
+    }
     std::fs::rename(&tmp, link).inspect_err(|_| {
         let _ = remove_path(&tmp);
     })?;
     crate::fslog::moved("link", dst, link);
+    if !reaches_a_file(link) {
+        return Err(gone());
+    }
     Ok(true)
 }
 
@@ -1740,19 +1770,25 @@ pub(crate) fn sweep_link_probes(dir: &Path, min_age: std::time::Duration) {
 /// are `C:\`, and `Path::starts_with` treats those prefixes as different.
 fn mount_in(disks: &sysinfo::Disks, p: &Path) -> Option<(PathBuf, u64)> {
     let c = std::fs::canonicalize(p).ok()?;
-    let windows = cfg!(windows);
-    let key = crate::modsroot::normalize_key(&c.to_string_lossy(), windows);
-    let list = disks.list();
-    let mounts: Vec<(PathBuf, Option<u64>)> = list
-        .iter()
-        .map(|d| {
-            let mount = crate::modsroot::normalize_key(&d.mount_point().to_string_lossy(), windows);
-            (PathBuf::from(mount), device_of(d.mount_point()))
-        })
-        .collect();
+    let key = crate::modsroot::normalize_key(&c.to_string_lossy(), cfg!(windows));
+    let (mounts, list) = listed_mounts(disks);
     let i = pick_mount(Path::new(&key), device_of(&c), &mounts)?;
     let d = &list[i];
     Some((d.mount_point().to_path_buf(), d.available_space()))
+}
+
+/// The disk list's mount points (normalized keys) with their device ids, and the disks.
+fn listed_mounts(disks: &sysinfo::Disks) -> (Vec<(PathBuf, Option<u64>)>, &[sysinfo::Disk]) {
+    let list = disks.list();
+    let mounts = list
+        .iter()
+        .map(|d| {
+            let mount =
+                crate::modsroot::normalize_key(&d.mount_point().to_string_lossy(), cfg!(windows));
+            (PathBuf::from(mount), device_of(d.mount_point()))
+        })
+        .collect();
+    (mounts, list)
 }
 
 /// The filesystem's device id for `p` (Unix); `None` elsewhere or when it can't be read.
@@ -1808,13 +1844,50 @@ pub(crate) fn hardlink_known(cross_volume: bool, probe: impl FnOnce() -> Option<
     !cross_volume && probe() == Some(true)
 }
 
-/// What the disk list says about `a` and `b` (one enumeration for both): `Some(same)` when it
-/// knows both mounts, `None` when it doesn't know one of them (a network share, …).
+/// What the disk list says about `a` and `b` for linking (one enumeration for both):
+/// `Some(same)` when it can tell, `None` when it can't (a network share, …) — see
+/// `link_relation`.
 pub(crate) fn volume_relation(a: &Path, b: &Path) -> Option<bool> {
     let disks = sysinfo::Disks::new_with_refreshed_list();
-    match (mount_in(&disks, a), mount_in(&disks, b)) {
-        (Some((ma, _)), Some((mb, _))) => Some(ma == mb),
-        _ => None,
+    let (mounts, _) = listed_mounts(&disks);
+    let at = |p: &Path| {
+        let c = std::fs::canonicalize(p).ok()?;
+        let key = crate::modsroot::normalize_key(&c.to_string_lossy(), cfg!(windows));
+        Some((PathBuf::from(key), device_of(&c)))
+    };
+    let ((ka, da), (kb, db)) = (at(a)?, at(b)?);
+    link_relation((&ka, da), (&kb, db), &mounts)
+}
+
+/// Pure: whether two paths (normalized key, device id) are one volume for linking. Different
+/// device ids: different volumes. The same device id: one volume only when both sit under the
+/// same listed mount point of that device — a hardlink can't cross mount points even within one
+/// filesystem (a bind-mounted alias fails with `EXDEV`), so otherwise it's unknown and gets
+/// probed. Without device ids (Windows): the longest listed mount point of each, when both are
+/// listed.
+fn link_relation(
+    a: (&Path, Option<u64>),
+    b: (&Path, Option<u64>),
+    mounts: &[(PathBuf, Option<u64>)],
+) -> Option<bool> {
+    let longest = |key: &Path, dev: Option<u64>| {
+        mounts
+            .iter()
+            .enumerate()
+            .filter(|(_, (m, d))| key.starts_with(m) && (dev.is_none() || *d == dev))
+            .max_by_key(|(_, (m, _))| m.components().count())
+            .map(|(i, _)| i)
+    };
+    match (a.1, b.1) {
+        (Some(da), Some(db)) if da != db => Some(false),
+        (Some(_), Some(_)) => match (longest(a.0, a.1), longest(b.0, b.1)) {
+            (Some(ia), Some(ib)) if ia == ib => Some(true),
+            _ => None,
+        },
+        _ => match (longest(a.0, None), longest(b.0, None)) {
+            (Some(ia), Some(ib)) => Some(ia == ib),
+            _ => None,
+        },
     }
 }
 
@@ -4321,6 +4394,115 @@ mod tests {
             archive: archive.clone(),
         };
         assert!(!dir_link_may_copy(&layout));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// For linking, one device under two listed mount points (a bind-mounted alias) is unknown —
+    /// hardlinks can't cross mount points — so it gets probed; different devices are different
+    /// volumes; one mount point is one volume. Without device ids, the listed mounts decide.
+    #[test]
+    fn link_relation_never_assumes_a_hardlink_across_mount_points() {
+        let m = |p: &str, d: Option<u64>| (PathBuf::from(p), d);
+        let mounts = vec![
+            m("/", Some(1)),
+            m("/data", Some(5)),
+            m("/mnt/library", Some(5)),
+        ];
+        let rel = |a: &str, da, b: &str, db| {
+            link_relation((Path::new(a), da), (Path::new(b), db), &mounts)
+        };
+        assert_eq!(rel("/data/mods", Some(5), "/data/lib", Some(5)), Some(true));
+        assert_eq!(rel("/data/mods", Some(5), "/mnt/library/x", Some(5)), None);
+        assert_eq!(rel("/data/mods", Some(5), "/home/me", Some(1)), Some(false));
+        // An unlisted mount of a device: unknown.
+        assert_eq!(rel("/data/mods", Some(5), "/srv/x", Some(5)), None);
+        let no_dev = vec![m("/c", None), m("/d", None)];
+        let rel =
+            |a: &str, b: &str| link_relation((Path::new(a), None), (Path::new(b), None), &no_dev);
+        assert_eq!(rel("/c/mods", "/c/lib"), Some(true));
+        assert_eq!(rel("/c/mods", "/d/lib"), Some(false));
+        assert_eq!(rel("/c/mods", "/e/lib"), None);
+    }
+
+    /// The policy says a hardlink works (a probe made one), but this mod's own link fails (a
+    /// cloud provider that started refusing) and no symlink is allowed, or the symlink fails
+    /// too: the working entry is kept exactly as it was, never swapped for a copy (#188).
+    #[test]
+    fn a_failed_link_keeps_the_working_entry() {
+        let base = std::env::temp_dir().join(format!("silo_linkfails_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let link = base.join("FS25_A.zip");
+        std::fs::write(&link, b"PK A").unwrap();
+        let dst = base.join("new.zip");
+        std::fs::write(&dst, b"PK A").unwrap();
+        let refused = |_: &Path, _: &Path| Err(std::io::Error::from_raw_os_error(396));
+        for allow in [false, true] {
+            let r = replace_zip_link_if_linkable_with(&link, &dst, || allow, refused, refused);
+            assert!(!r.unwrap(), "no link, so nothing replaced");
+            assert!(!crate::relocate::same_file(&link, &dst));
+            assert_eq!(std::fs::read(&link).unwrap(), b"PK A");
+            assert!(!base.join("FS25_A.zip.silo-relink-tmp").exists());
+        }
+        // A link that works replaces the entry.
+        let r = replace_zip_link_if_linkable_with(
+            &link,
+            &dst,
+            || false,
+            |s, l| std::fs::hard_link(s, l),
+            refused,
+        );
+        assert!(r.unwrap());
+        assert!(crate::relocate::same_file(&link, &dst));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A new copy that vanishes before or while it's linked is an error, never a link to nothing
+    /// in place of the working entry — with symlinks allowed too (#188).
+    #[test]
+    fn a_vanished_new_copy_never_replaces_the_working_entry() {
+        let base = std::env::temp_dir().join(format!("silo_vanished_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let link = base.join("FS25_A.zip");
+        std::fs::write(&link, b"PK A").unwrap();
+        let dst = base.join("new.zip");
+        std::fs::write(&dst, b"PK A").unwrap();
+        let soft_called = std::cell::Cell::new(false);
+        let r = replace_zip_link_if_linkable_with(
+            &link,
+            &dst,
+            || true,
+            |_, _| Err(std::io::ErrorKind::NotFound.into()),
+            |_, _| {
+                soft_called.set(true);
+                Ok(())
+            },
+        );
+        assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert!(!soft_called.get(), "never falls through to a symlink");
+        // A "link" that reaches no file (the copy went while it was made) is refused too.
+        let r = replace_zip_link_if_linkable_with(
+            &link,
+            &dst,
+            || true,
+            |_, _| Err(std::io::ErrorKind::Unsupported.into()),
+            |_, l| std::fs::create_dir(l),
+        );
+        assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read(&link).unwrap(), b"PK A");
+        assert!(!base.join("FS25_A.zip.silo-relink-tmp").exists());
+        // Missing from the start: an error, and nothing is attempted.
+        std::fs::remove_file(&dst).unwrap();
+        let r = replace_zip_link_if_linkable_with(
+            &link,
+            &dst,
+            || true,
+            |_, _| panic!("no hardlink to a missing copy"),
+            |_, _| panic!("no symlink to a missing copy"),
+        );
+        assert!(r.is_err());
+        assert_eq!(std::fs::read(&link).unwrap(), b"PK A");
         let _ = std::fs::remove_dir_all(&base);
     }
 

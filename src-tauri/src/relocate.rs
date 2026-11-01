@@ -2602,26 +2602,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
-    /// The policy says a hardlink works (a probe made one), but this mod's link can't be made
-    /// (a cloud provider that started refusing, a symlink the OS refuses): the hardlink is kept,
-    /// never swapped for a full copy (#188).
-    #[test]
-    fn a_hardlink_is_kept_when_its_new_link_fails_despite_the_probe() {
-        let f = fx("probelied");
-        let flat = add_hardlinked(&f, "FS25_A");
-        let before = same_file::Handle::from_path(&flat).unwrap();
-        // A destination that can't be hardlinked to: a missing file is refused before any
-        // copy, so use a destination on which `hard_link` fails — a folder.
-        let dst_dir = f.new.join("Tools/FS25_A.zip");
-        std::fs::create_dir_all(&dst_dir).unwrap();
-        let layout = dest(&f);
-        let mut pol = LinkPolicy::decided_for_tests(&layout, false, false, true);
-        assert!(!organize::replace_zip_link_if_linkable(&flat, &dst_dir, &mut pol).unwrap());
-        assert_eq!(same_file::Handle::from_path(&flat).unwrap(), before);
-        assert!(!f.mods.join("FS25_A.zip.silo-relink-tmp").exists());
-        let _ = std::fs::remove_dir_all(&f.base);
-    }
-
     /// A symlink of the user's own in the mods folder, under an active mod's name, pointing at
     /// a file that isn't there (an unplugged drive): a move leaves it exactly as it is.
     #[test]
