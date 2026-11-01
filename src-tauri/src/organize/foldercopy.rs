@@ -58,7 +58,7 @@ pub(super) fn listing_of(dir: &Path) -> std::io::Result<Vec<ListedFile>> {
 /// built and flushed under a Silo temp sibling (`.{name}.silo-tmp`), marker included, and only
 /// then renamed to `dst`: a copy that stops part-way never leaves a partial mod under its real
 /// name, and a failed copy removes its temp. Never merges into an existing `dst`.
-pub(super) fn copy_dir_projection(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_dir_projection(src: &Path, dst: &Path) -> std::io::Result<()> {
     if dst.symlink_metadata().is_ok() {
         return Err(std::io::ErrorKind::AlreadyExists.into());
     }

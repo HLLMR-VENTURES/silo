@@ -165,10 +165,39 @@ pub(crate) fn real_copy(p: &Path, kind: &str) -> bool {
     })
 }
 
-/// Same size and SHA-256. `false` when either can't be read.
+/// Two names for files that are not one name reached twice: both resolve, to different paths.
+/// (Two hardlinks of one file are distinct names: removing one keeps the data under the other.
+/// One name reached through a link, or a folder link into the tree being removed, is not.)
+fn distinct(a: &Path, b: &Path) -> bool {
+    matches!(
+        (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+        (Ok(x), Ok(y)) if x != y
+    )
+}
+
+/// `rel` under `root` is reached without following any link: every folder on the way is a real
+/// folder, and the end is a real file.
+fn real_file_under(root: &Path, rel: &Path) -> bool {
+    let mut p = root.to_path_buf();
+    let parts: Vec<_> = rel.components().collect();
+    for (i, c) in parts.iter().enumerate() {
+        p.push(c);
+        let last = i + 1 == parts.len();
+        let ok = p.symlink_metadata().is_ok_and(|m| {
+            !m.file_type().is_symlink() && if last { m.is_file() } else { m.is_dir() }
+        });
+        if !ok {
+            return false;
+        }
+    }
+    !parts.is_empty()
+}
+
+/// `a` and `b` are distinct names (`distinct`) holding the same bytes: same size, then SHA-256.
+/// `false` when either can't be read.
 fn same_bytes(a: &Path, b: &Path) -> bool {
     let size = |p: &Path| std::fs::metadata(p).ok().map(|m| m.len());
-    if size(a).is_none() || size(a) != size(b) {
+    if !distinct(a, b) || size(a).is_none() || size(a) != size(b) {
         return false;
     }
     matches!(
@@ -177,10 +206,46 @@ fn same_bytes(a: &Path, b: &Path) -> bool {
     )
 }
 
-/// Every file left in `part` (a folder that may be half-deleted) is in `whole` at the same
-/// relative path with the same bytes. A link anywhere in `part` fails it.
-fn covered_by(part: &Path, whole: &Path) -> bool {
-    fn walk(root: &Path, dir: &Path, whole: &Path) -> bool {
+/// Every byte of `part` (a copy that may have stopped part-way) is in `whole` at the same
+/// offset, and the two are distinct names (`distinct`). `false` when either can't be read.
+fn prefix_of(part: &Path, whole: &Path) -> bool {
+    use std::io::Read;
+    if !distinct(part, whole) {
+        return false;
+    }
+    let (Ok(mut a), Ok(mut b)) = (std::fs::File::open(part), std::fs::File::open(whole)) else {
+        return false;
+    };
+    let (mut x, mut y) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    loop {
+        let n = match a.read(&mut x) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if n == 0 {
+            return true;
+        }
+        if b.read_exact(&mut y[..n]).is_err() || x[..n] != y[..n] {
+            return false;
+        }
+    }
+}
+
+/// How [`covered_by`] compares each file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cover {
+    /// The same bytes (an old copy: its files are whole, a delete only removes some of them).
+    Exact,
+    /// A prefix of the other's bytes (a copy that may have stopped part-way through a file).
+    Prefix,
+}
+
+/// Every file in `part` (a folder that may be half-deleted, or half-copied) has a counterpart
+/// at the same relative path in `whole`, reached without following any link
+/// (`real_file_under`), a distinct name, with its bytes (`cover`). A link anywhere in `part`
+/// fails it. `skip` is a top-level file name not compared (Silo's marker in a marked copy).
+fn covered_by(part: &Path, whole: &Path, cover: Cover, skip: Option<&str>) -> bool {
+    fn walk(root: &Path, dir: &Path, whole: &Path, cover: Cover, skip: Option<&str>) -> bool {
         let Ok(rd) = std::fs::read_dir(dir) else {
             return false;
         };
@@ -188,13 +253,20 @@ fn covered_by(part: &Path, whole: &Path) -> bool {
             let Ok(e) = e else { return false };
             let Ok(ft) = e.file_type() else { return false };
             let p = e.path();
+            let rel = p.strip_prefix(root).unwrap_or(&p).to_path_buf();
             let ok = if ft.is_symlink() {
                 false
             } else if ft.is_dir() {
-                walk(root, &p, whole)
+                walk(root, &p, whole, cover, None)
+            } else if dir == root && skip.is_some_and(|s| e.file_name() == s) {
+                true
             } else {
-                let rel = p.strip_prefix(root).unwrap_or(&p);
-                real_copy(&whole.join(rel), "zip") && same_bytes(&p, &whole.join(rel))
+                let other = whole.join(&rel);
+                real_file_under(whole, &rel)
+                    && match cover {
+                        Cover::Exact => same_bytes(&p, &other),
+                        Cover::Prefix => prefix_of(&p, &other),
+                    }
             };
             if !ok {
                 return false;
@@ -202,7 +274,7 @@ fn covered_by(part: &Path, whole: &Path) -> bool {
         }
         true
     }
-    walk(part, part, whole)
+    distinct(part, whole) && walk(part, part, whole, cover, skip)
 }
 
 /// [`sweep_where`] over every entry.
@@ -236,11 +308,13 @@ pub(crate) enum Swept {
 /// library lock (no operation is making scratch right now). An entry whose folder can't be
 /// reached (a drive that isn't plugged in) is kept recorded for later.
 ///
-/// Proof, by role:
-/// - `RelinkTmp`: a link (it holds no data); or a copy whose archived copy (`from`) is still
-///   there with the same bytes (a file) or that is Silo's untouched marked copy (a folder).
-/// - `MoveTmp`: the original (`from`) is still there; or (a zip) it's the same file as the
-///   placed copy (`to`), a hardlink left by a crash right after placing.
+/// Proof, by role. Every comparison is against a distinct name reached without following a
+/// link into the entry itself (`distinct`, `real_file_under`):
+/// - `RelinkTmp`: a link (it holds no data); or a copy whose archived copy (`from`) holds the
+///   same bytes (a file), or every file of Silo's untouched marked copy (a folder).
+/// - `MoveTmp`: every byte it holds is at the same offset in the original (`from`), file by
+///   file for a folder (a copy cut off part-way is a prefix); or (a zip) it holds the same bytes
+///   as the placed copy (`to`): a hardlink left by a crash right after placing.
 /// - `MoveOld`: its replacement (`to`) is a real copy holding the same bytes (a folder: every
 ///   file still left). With no replacement at all it may be the only copy left: a zip is put
 ///   back under its name (`from`) when that's free; a folder (perhaps half-deleted) is kept.
@@ -286,25 +360,41 @@ fn sweep_one(e: &Entry) -> Swept {
     let link = meta.file_type().is_symlink();
     let removed = match e.role {
         Role::RelinkTmp if link => Some(remove_link_entry(&e.path)),
+        // A copy (where no link could be made): its archived copy still holds every byte.
         Role::RelinkTmp if meta.is_file() => (real_copy(&e.from, "zip")
-            && (crate::relocate::same_file(&e.path, &e.from) || same_bytes(&e.path, &e.from)))
+            && same_bytes(&e.path, &e.from))
         .then(|| std::fs::remove_file(&e.path)),
-        Role::RelinkTmp => {
-            (real_copy(&e.from, "dir")).then(|| crate::organize::remove_link(&e.path))
-        }
+        // A marked folder copy: every file but the marker is still in the archived copy, and
+        // `remove_link` checks the marker's listing (an untouched copy).
+        Role::RelinkTmp => (meta.is_dir()
+            && real_copy(&e.from, "dir")
+            && covered_by(
+                &e.path,
+                &e.from,
+                Cover::Exact,
+                Some(crate::organize::SILO_MARKER),
+            ))
+        .then(|| crate::organize::remove_link(&e.path)),
         // Silo never makes a link as move scratch: a link here isn't its own.
         Role::MoveTmp | Role::MoveOld if link => None,
+        // A copy that may have stopped part-way: every byte it holds is still in the original
+        // (or, a zip placed by hardlink, in the placed copy).
         Role::MoveTmp => {
-            let redundant = real_copy(&e.from, &e.kind)
-                || (e.kind != "dir"
-                    && real_copy(&e.to, "zip")
-                    && crate::relocate::same_file(&e.path, &e.to));
+            let redundant = if e.kind == "dir" {
+                meta.is_dir()
+                    && real_copy(&e.from, "dir")
+                    && covered_by(&e.path, &e.from, Cover::Prefix, None)
+            } else {
+                meta.is_file()
+                    && ((real_copy(&e.from, "zip") && prefix_of(&e.path, &e.from))
+                        || (real_copy(&e.to, "zip") && same_bytes(&e.path, &e.to)))
+            };
             redundant.then(|| remove_real(&e.path, meta.is_dir()))
         }
         Role::MoveOld => {
             let verified = real_copy(&e.to, &e.kind)
                 && if e.kind == "dir" {
-                    meta.is_dir() && covered_by(&e.path, &e.to)
+                    meta.is_dir() && covered_by(&e.path, &e.to, Cover::Exact, None)
                 } else {
                     meta.is_file() && same_bytes(&e.path, &e.to)
                 };
@@ -640,6 +730,113 @@ pub(crate) mod tests {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         assert_eq!(sweep(&j)[0].1, Swept::Gone);
         assert!(j.entries().is_empty());
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn a_move_temp_stays_when_its_original_was_replaced_by_something_else() {
+        let b = base("movetmpswap");
+        let src = b.join("FS25_A.zip");
+        std::fs::write(&src, b"PK mod B, same name").unwrap();
+        let dst = b.join("new.zip");
+        let tmp = unique_beside(&dst, MOVE_TMP);
+        std::fs::write(&tmp, b"PK mod A").unwrap(); // a full copy of what was there before
+        let j = MemJournal::default();
+        j.record(&entry(&tmp, Role::MoveTmp, &src, &dst, "zip"))
+            .unwrap();
+        assert_eq!(sweep(&j)[0].1, Swept::Kept);
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"PK mod A");
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn a_folder_move_temp_goes_only_when_the_original_holds_every_byte() {
+        let b = base("movetmpdir");
+        let src = b.join("FS25_D");
+        std::fs::create_dir_all(src.join("xml")).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::write(src.join("xml/a.xml"), b"<a>long</a>").unwrap();
+        let dst = b.join("new").join("FS25_D");
+        let tmp = unique_beside(&src, MOVE_TMP);
+        std::fs::create_dir_all(tmp.join("xml")).unwrap();
+        std::fs::write(tmp.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::write(tmp.join("xml/a.xml"), b"<a>lo").unwrap(); // cut off part-way
+        std::fs::write(tmp.join("extra.txt"), b"not in the original").unwrap();
+        let j = MemJournal::default();
+        j.record(&entry(&tmp, Role::MoveTmp, &src, &dst, "dir"))
+            .unwrap();
+        assert_eq!(
+            sweep(&j)[0].1,
+            Swept::Kept,
+            "a file the original doesn't have"
+        );
+        std::fs::remove_file(tmp.join("extra.txt")).unwrap();
+        assert_eq!(sweep(&j)[0].1, Swept::Removed);
+        assert!(!tmp.exists() && src.join("xml/a.xml").is_file());
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn a_marked_folder_relink_temp_goes_only_while_the_archive_holds_its_files() {
+        let b = base("relinkdir");
+        let archived = b.join("archive").join("FS25_D");
+        std::fs::create_dir_all(&archived).unwrap();
+        std::fs::write(archived.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::write(archived.join("a.xml"), b"<a/>").unwrap();
+        let link = b.join("mods").join("FS25_D");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        let tmp = unique_beside(&link, RELINK_TMP);
+        crate::organize::copy_dir_projection(&archived, &tmp).unwrap();
+        let j = MemJournal::default();
+        j.record(&entry(&tmp, Role::RelinkTmp, &archived, &link, "dir"))
+            .unwrap();
+        // The archive lost a file: the temp now holds its only copy.
+        std::fs::remove_file(archived.join("a.xml")).unwrap();
+        assert_eq!(sweep(&j)[0].1, Swept::Kept);
+        assert!(tmp.join("a.xml").is_file());
+        std::fs::write(archived.join("a.xml"), b"<a/>").unwrap();
+        assert_eq!(sweep(&j)[0].1, Swept::Removed);
+        assert!(!tmp.exists());
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn an_old_folder_is_never_verified_against_itself_through_a_link() {
+        let b = base("moveoldloop");
+        let src = b.join("FS25_D");
+        let old = unique_beside(&src, MOVE_OLD);
+        std::fs::create_dir_all(old.join("sub")).unwrap();
+        std::fs::write(old.join("sub/data.xml"), b"the only copy").unwrap();
+        let dst = b.join("new").join("FS25_D");
+        std::fs::create_dir_all(&dst).unwrap();
+        // The replacement's `sub` is a link back into the old copy.
+        if crate::organize::link_dir_native(&old.join("sub"), &dst.join("sub")).is_err() {
+            let _ = std::fs::remove_dir_all(&b);
+            return; // no folder links here
+        }
+        let j = MemJournal::default();
+        j.record(&entry(&old, Role::MoveOld, &src, &dst, "dir"))
+            .unwrap();
+        assert_eq!(sweep(&j)[0].1, Swept::Kept);
+        assert_eq!(
+            std::fs::read(old.join("sub/data.xml")).unwrap(),
+            b"the only copy"
+        );
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn a_file_is_never_proven_redundant_by_itself() {
+        let b = base("selfproof");
+        let f = b.join("FS25_A.zip");
+        std::fs::write(&f, b"PK").unwrap();
+        assert!(!same_bytes(&f, &f) && !prefix_of(&f, &f));
+        let h = b.join("hard.zip");
+        std::fs::hard_link(&f, &h).unwrap();
+        assert!(
+            same_bytes(&f, &h),
+            "a second name of the same file is a distinct name"
+        );
         let _ = std::fs::remove_dir_all(&b);
     }
 }

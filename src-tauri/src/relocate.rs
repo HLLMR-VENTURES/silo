@@ -448,8 +448,17 @@ fn copy_to_temp_and_place(
 /// remove it. If the check fails it's put back under its name. A crash mid-delete leaves only
 /// the recorded old copy, which `scratch::sweep_where` removes on the next start once
 /// `replacement` verifies against it (a zip whose replacement is gone is put back instead).
-fn delete_source(env: &Env, src: &Path, replacement: &Path, kind: &str) -> Result<(), StepErr> {
+fn delete_source(
+    env: &Env,
+    src: &Path,
+    replacement: &Path,
+    root: &Path,
+    kind: &str,
+) -> Result<(), StepErr> {
     let fail = |e: String| StepErr::Failed(format!("remove old copy: {e}"));
+    // The replacement's placement is on disk first: a power cut can't keep the delete without
+    // the copy.
+    make_durable(replacement, root).map_err(|e| fail(e.to_string()))?;
     let journal = env.journal();
     let old = scratch::begin(
         &journal,
@@ -465,7 +474,20 @@ fn delete_source(env: &Env, src: &Path, replacement: &Path, kind: &str) -> Resul
         journal.forget(&old);
         return Err(fail(e.to_string()));
     }
-    if let Err(e) = still_there(&old, replacement, kind) {
+    // The last look before the old copy goes: the replacement is still the real thing and
+    // holds the same bytes (every file's SHA-256, not just sizes).
+    let checked = still_there(&old, replacement, kind).and_then(|()| {
+        match verify(&old, replacement, kind, Check::Contents) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(StepErr::Failed(format!(
+                "move: {} and {} no longer match, so Silo kept both. Check them, then resume.",
+                src.display(),
+                replacement.display()
+            ))),
+            Err(e) => Err(StepErr::Failed(e)),
+        }
+    });
+    if let Err(e) = checked {
         if crate::paths::rename_no_replace(&old, src).is_ok() {
             journal.forget(&old);
         }
@@ -476,6 +498,25 @@ fn delete_source(env: &Env, src: &Path, replacement: &Path, kind: &str) -> Resul
     removed.map_err(|e| fail(e.to_string()))?;
     crate::fslog::changed("delete-moved", src);
     Ok(())
+}
+
+/// Flush a placed copy and every folder entry its placement made (inside a folder mod, and up to
+/// the archive `root`) to disk.
+fn make_durable(p: &Path, root: &Path) -> std::io::Result<()> {
+    fn subdirs(dir: &Path) -> std::io::Result<()> {
+        for e in std::fs::read_dir(dir)? {
+            let e = e?;
+            if e.file_type()?.is_dir() {
+                subdirs(&e.path())?;
+                organize::sync_dir(&e.path())?;
+            }
+        }
+        Ok(())
+    }
+    if p.symlink_metadata()?.is_dir() {
+        subdirs(p)?;
+    }
+    organize::sync_placement(p, Some(root))
 }
 
 /// Keep an active mod's mods-folder entry valid as its archived copy moves from `src` to `dst`:
@@ -867,7 +908,7 @@ fn forward_one(
         return Err(StepErr::Interrupted);
     }
     still_there(&src, &dst, &row.kind)?;
-    delete_source(env, &src, &dst, &row.kind)?;
+    delete_source(env, &src, &dst, &marker.to, &row.kind)?;
     Ok(Step::Moved)
 }
 
@@ -907,7 +948,7 @@ fn back_one(
         return Err(StepErr::Interrupted);
     }
     still_there(&src, &home, &row.kind)?;
-    delete_source(env, &src, &home, &row.kind)?;
+    delete_source(env, &src, &home, &marker.from, &row.kind)?;
     env.unrecord(marker, &row.tech_name)?;
     Ok(Step::Moved)
 }
@@ -971,8 +1012,16 @@ fn is_move_scratch(name: &str) -> bool {
 /// - forward: any previous version still set aside (moving around it would leave it behind);
 /// - back (a cancel): only one whose mod is missing. Otherwise the mod is in place and nothing
 ///   deletes the leftover, so the cancel must be able to finish and give the library back.
-fn settle_updates(mods: &Path, marker: &MoveMarker, direction: Direction) -> Option<String> {
+fn settle_updates(env: &Env, marker: &MoveMarker, direction: Direction) -> Option<String> {
+    let mods = env.mods;
     let mut all = crate::update::Recovery::default();
+    // Recovery re-links like the move does: its temps recorded, a fallback copy checked for
+    // room first (a short drive leaves the update set aside, which pauses the move, saying so).
+    let journal = env.journal();
+    let room = |src: &Path, entry: &Path| {
+        env.room(size_of(src), entry)
+            .map_err(|why| std::io::Error::other(organize::NoRoom(why)))
+    };
     for archive in [&marker.from, &marker.to] {
         let layout = Layout {
             mods: mods.to_path_buf(),
@@ -985,7 +1034,9 @@ fn settle_updates(mods: &Path, marker: &MoveMarker, direction: Direction) -> Opt
         let r = crate::update::settle(
             &dirs,
             mods,
-            &mut LinkPolicy::new(&layout),
+            &mut LinkPolicy::new(&layout)
+                .with_journal(&journal)
+                .with_room_check(&room),
             crate::update::Attempt::UserAsked,
         );
         for n in &r.notices {
@@ -1149,13 +1200,13 @@ pub(crate) fn note_archive(mods: &Path, archive: Option<&Path>) {
 }
 
 /// The note Silo wrote in a folder it no longer uses as this mods folder's archive (a finished
-/// move away from it, or a cancelled move into it). Nothing reads it any more: rediscovery
+/// move away from it, a cancelled move into it, or a re-point away from an empty archive). Nothing reads it any more: rediscovery
 /// starts from the mods folder's own note (`rediscover_archive`), which now names another
 /// archive or is gone, and a folder picked as an archive again gets a fresh note
 /// (`note_archive`). So it's removed (#394), but only when it is Silo's note naming this mods
 /// folder, and only once the folder holds no mods Silo filed (`filed_mods`, which must read the
 /// folder). The folder and everything else in it are left as they are.
-fn retire_note(left: &Path, mods: &Path) {
+pub(crate) fn retire_note(left: &Path, mods: &Path) {
     let ours = read_note(left)
         .and_then(|n| n.mods_folder)
         .is_some_and(|m| crate::modsroot::same_folder(&m, mods));
@@ -1472,7 +1523,13 @@ pub fn start(ctx: &mut RunCtx, from: PathBuf, to: PathBuf) -> Result<Option<Move
     let marker = MoveMarker::new(from, to);
     // Before any marker exists: a leftover that can't be put away refuses the move outright,
     // so it can never leave an unfinished move (which blocks every library change) behind.
-    if let Some(reason) = settle_updates(ctx.mods, &marker, Direction::Forward) {
+    let env = Env {
+        conn: ctx.conn,
+        mods: ctx.mods,
+        mods_key: ctx.mods_key,
+        free_space: ctx.free_space,
+    };
+    if let Some(reason) = settle_updates(&env, &marker, Direction::Forward) {
         return Err(reason);
     }
     run_locked(ctx, &held, marker)
@@ -1525,7 +1582,7 @@ fn run_locked(
     marker.pause_reason = None;
     marker.errors.clear();
     save_marker(env.conn, env.mods_key, &marker)?;
-    if let Some(reason) = settle_updates(env.mods, &marker, marker.direction) {
+    if let Some(reason) = settle_updates(&env, &marker, marker.direction) {
         marker.pause_reason = Some(reason);
         return pause(&env, marker);
     }
@@ -1684,6 +1741,16 @@ fn run_locked(
         if !marker.errors.is_empty() {
             return pause(&env, marker);
         }
+        // The folder being left gets no more mods: its archive note goes now, while the marker
+        // still exists, so a crash here is finished by Resume (`retire_note` is idempotent).
+        let leaving_default = Layout {
+            mods: env.mods.to_path_buf(),
+            archive: src_root.clone(),
+        }
+        .archive_is_default();
+        if !leaving_default {
+            retire_note(&src_root, env.mods);
+        }
         // Finished: switch the setting (only on a completed forward move) and clear the marker
         // together, then tidy the folder we left.
         let tx = env
@@ -1712,7 +1779,6 @@ fn run_locked(
                 _ => rows.iter().map(|r| r.category.clone()).collect(),
             };
             organize::remove_empty_category_dirs(&src_root, &categories);
-            retire_note(&src_root, env.mods);
         }
         return Ok(None);
     }
@@ -2848,6 +2914,24 @@ mod tests {
             std::fs::read(left.join(ARCHIVE_NOTE)).unwrap(),
             b"the user's own file"
         );
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// The last look before an old copy goes compares bytes, not sizes: a replacement swapped
+    /// for different bytes of the same length (a sync client, say) keeps the original.
+    #[test]
+    fn a_same_size_swap_of_the_new_copy_keeps_the_original() {
+        let f = fx("samesize");
+        add_zip(&f, "FS25_A", false);
+        let (src, dst) = (zip_at(&f.old, "FS25_A"), zip_at(&f.new, "FS25_A"));
+        copy_verify_place(&env(&f), &src, &dst, "zip", &|| false).unwrap();
+        let same_len = vec![b'X'; std::fs::metadata(&src).unwrap().len() as usize];
+        std::fs::remove_file(&dst).unwrap();
+        std::fs::write(&dst, &same_len).unwrap();
+        let e = delete_source(&env(&f), &src, &dst, &f.new, "zip").unwrap_err();
+        assert!(failed(e).contains("no longer match"));
+        assert_eq!(std::fs::read(&src).unwrap(), b"PK FS25_A");
+        assert!(env(&f).journal().entries().is_empty());
         let _ = std::fs::remove_dir_all(&f.base);
     }
 

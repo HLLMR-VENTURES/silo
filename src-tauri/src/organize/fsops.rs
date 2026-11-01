@@ -204,7 +204,7 @@ fn flush_file(p: &Path) -> std::io::Result<()> {
 /// included), then on Unix every folder from the one holding `to` up to `anchor`, the nearest
 /// one that existed before the move (`move_path_as` may have created the folders below it,
 /// e.g. a new archive category). Without an anchor, only the folder holding `to`.
-fn sync_placement(to: &Path, anchor: Option<&Path>) -> std::io::Result<()> {
+pub(crate) fn sync_placement(to: &Path, anchor: Option<&Path>) -> std::io::Result<()> {
     if to.symlink_metadata()?.is_dir() {
         sync_dir(to)?;
     } else {
@@ -266,7 +266,7 @@ pub(super) fn place_new(tmp: &Path, dst: &Path) -> std::io::Result<()> {
 /// own flush doesn't cover its name; a filesystem that can't flush a folder (`EINVAL`,
 /// unsupported) is let through, any other failure is returned. On Windows it's best effort:
 /// the folder is flushed through a backup-semantics handle where NTFS allows it.
-pub(super) fn sync_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::ErrorKind::{InvalidInput, Unsupported};

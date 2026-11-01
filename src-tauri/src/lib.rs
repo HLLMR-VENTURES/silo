@@ -4951,6 +4951,10 @@ async fn archive_repoint(
             modsroot::validate_folder(&new)?;
         }
         relocate::store_archive_setting(&conn, &key, &layout.mods, &new)?;
+        // The folder left behind holds no mods (checked above), so its note is stale (#394).
+        if !layout.archive_is_default() && !modsroot::same_folder(&layout.archive, &new) {
+            relocate::retire_note(&layout.archive, &layout.mods);
+        }
         if path.is_some() {
             picked::forget(picked::Purpose::Archive);
         }
