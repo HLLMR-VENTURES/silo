@@ -52,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Moving a mod to another drive (Organize, Flatten) now writes the copy to disk before deleting
   the original, so a power cut right after the move can't lose the mod. (#343)
 - Folder mods can no longer make Silo read files outside the mod's own folder.
+- Mod downloads, updates and catalog images now check every redirect, not just the first
+  address: Silo won't follow one to plain `http` or to an address on your own network, and it
+  refuses a web address whose name points at your own network. GitHub downloads work as
+  before. (#348)
 
 ### Security
 
