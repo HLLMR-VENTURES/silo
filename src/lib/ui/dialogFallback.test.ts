@@ -86,6 +86,9 @@ describe("ask() without a dialog host", () => {
     // Only the verb button says yes.
     vi.mocked(pluginMessage).mockResolvedValueOnce("Update the game's setting");
     await expect(ask(point)).resolves.toBe(true);
+    // A safe label that happens to be a default button name is still the safe answer.
+    vi.mocked(pluginMessage).mockResolvedValueOnce("No");
+    await expect(ask({ ...point, cancel: "No" })).resolves.toBe(false);
     // A danger tone counts too; its safe label "Cancel" gets "Close" for the third button.
     vi.mocked(pluginMessage).mockResolvedValueOnce("Delete");
     await expect(ask(opts)).resolves.toBe(true);

@@ -433,7 +433,7 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
             .fills
             .map(|fg| fg.known_exact(if overflow { &[] } else { &fills_here }))
             .unwrap_or_default();
-        if let (Some(f), false) = (map_fill, overflow) {
+        if let (Some(f), Some(_), false) = (map_fill, game.fills, overflow) {
             known.extend(f.types.iter().cloned());
         }
         let map_here = i.map(|i| {
@@ -975,13 +975,26 @@ mod tests {
                 fills: Some(&fill_base),
             }),
         );
+        // Without the game's fill list nobody knows whether the map's fill types fit.
+        let blind = detect_with(
+            &inputs,
+            Some(GameLists {
+                heights: &heights,
+                fills: None,
+            }),
+        );
         let _ = std::fs::remove_dir_all(&base);
         // On the map its 16 fill types exist, so 48 + 16 = 64 piles is certain.
-        let piles = found
-            .iter()
-            .find(|c| c.kind == "heightTypes")
-            .expect("piles");
-        assert_eq!(piles.severity, "critical");
+        let piles = |found: &[Conflict]| {
+            found
+                .iter()
+                .find(|c| c.kind == "heightTypes")
+                .expect("piles")
+                .severity
+                .clone()
+        };
+        assert_eq!(piles(&found), "critical");
+        assert_eq!(piles(&blind), "warning");
     }
 
     /// #341: when the game may run out of fill types, a mod's declared fill types may be the

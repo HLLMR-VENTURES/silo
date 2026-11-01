@@ -96,7 +96,8 @@ export async function safeFirstDialog(
     kind: opts.kind ?? "warning",
     buttons: { yes: opts.safe, no: opts.verb, cancel: close },
   });
-  return picked === opts.verb || picked === "No";
+  // The plugin answers with the clicked button's custom label, so only the verb's label is yes.
+  return picked === opts.verb;
 }
 
 export type ModsRootSource = "user" | "gameOverride" | "default";
