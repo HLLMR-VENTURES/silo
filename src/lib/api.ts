@@ -531,6 +531,13 @@ export function ghDeviceStart(write = false, gist = false): Promise<DeviceCode> 
 export function ghDevicePoll(deviceCode: string): Promise<PollResult> {
   return invoke<PollResult>("gh_device_poll", { deviceCode });
 }
+/**
+ * Cancel a device flow so its polls can't store a token. False when it was already over (it may
+ * have just connected), so the caller re-reads the status.
+ */
+export function ghDeviceCancel(deviceCode: string): Promise<boolean> {
+  return invoke<boolean>("gh_device_cancel", { deviceCode });
+}
 export function ghLogout(): Promise<void> {
   return invoke("gh_logout");
 }

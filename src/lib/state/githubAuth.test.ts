@@ -7,11 +7,12 @@ vi.mock("../api", async (importOriginal) => ({
   ghStatus: vi.fn(),
   ghDeviceStart: vi.fn(),
   ghDevicePoll: vi.fn(),
+  ghDeviceCancel: vi.fn(),
   ghLogout: vi.fn(),
   openExternal: vi.fn(() => Promise.resolve()),
   logFrontendError: vi.fn(() => Promise.resolve()),
 }));
-import { ghDevicePoll, ghDeviceStart, ghLogout, ghStatus, openExternal } from "../api";
+import { ghDeviceCancel, ghDevicePoll, ghDeviceStart, ghLogout, ghStatus, openExternal } from "../api";
 import type { PollResult } from "../types";
 import { dismissToast, toasts } from "../ui/toasts.svelte";
 import { activity, clearActivity } from "./activity.svelte";
@@ -37,6 +38,7 @@ beforeEach(() => {
   resetGithubAuth();
   vi.mocked(ghDeviceStart).mockResolvedValue(device);
   vi.mocked(ghStatus).mockResolvedValue(connected);
+  vi.mocked(ghDeviceCancel).mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -130,6 +132,59 @@ describe("githubAuth device flow", () => {
     await flush();
     expect(pollArmed()).toBe(false); // the late answer didn't re-arm
     expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(ghDevicePoll).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancel tells the backend which flow ended, so a poll already there can't store", async () => {
+    vi.mocked(ghDevicePoll).mockResolvedValue(answer("pending"));
+    await startDeviceFlow();
+    cancelDeviceFlow();
+    await flush();
+    expect(vi.mocked(ghDeviceCancel).mock.calls).toEqual([["dev-1"]]);
+    expect(ghStatus).not.toHaveBeenCalled(); // the backend cancelled it: nothing changed
+    // Nothing on screen: a second cancel has no flow to name.
+    cancelDeviceFlow();
+    await flush();
+    expect(ghDeviceCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("a cancel that arrives after the sign-in landed re-reads the status", async () => {
+    // The poll stored the token on the backend just before the cancel got there.
+    let resolvePoll!: (r: PollResult) => void;
+    vi.mocked(ghDevicePoll).mockImplementation(() => new Promise((r) => (resolvePoll = r)));
+    vi.mocked(ghDeviceCancel).mockResolvedValue(false);
+    await startDeviceFlow();
+    await vi.advanceTimersByTimeAsync(5_000);
+    cancelDeviceFlow();
+    resolvePoll(answer("ok"));
+    await flush();
+    expect(ghStatus).toHaveBeenCalledTimes(1);
+    expect(githubAuth.status.user).toBe("octocat");
+    expect(toasts).toHaveLength(0);
+  });
+
+  it("a start that answers after a cancel is cancelled on the backend too", async () => {
+    let resolveStart!: (d: typeof device) => void;
+    vi.mocked(ghDeviceStart).mockImplementation(() => new Promise((r) => (resolveStart = r)));
+    const p = startDeviceFlow();
+    cancelDeviceFlow();
+    expect(ghDeviceCancel).not.toHaveBeenCalled(); // no code yet
+    resolveStart(device);
+    await p;
+    await flush();
+    expect(vi.mocked(ghDeviceCancel).mock.calls).toEqual([["dev-1"]]);
+    expect(ghStatus).not.toHaveBeenCalled();
+  });
+
+  it("a flow the backend ended (a newer sign-in) stops quietly", async () => {
+    vi.mocked(ghDevicePoll).mockResolvedValue(answer("cancelled"));
+    await startDeviceFlow();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(githubAuth.flow).toBeNull();
+    expect(githubAuth.message).toBeNull();
+    expect(pollArmed()).toBe(false);
+    expect(toasts).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(ghDevicePoll).toHaveBeenCalledTimes(1);
   });

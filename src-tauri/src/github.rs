@@ -6,6 +6,7 @@
 //! Unauthenticated (60 req/hr per IP) is fine for on-demand checks; a PAT can lift
 //! that to 5000/hr later. All network stays in Rust (the webview CSP blocks it).
 
+use crate::gh_session::{admit_optional, Admitted, Bearer};
 use crate::net::{CallExt, HttpError, RespExt, SendExt};
 use serde::Serialize;
 
@@ -100,21 +101,26 @@ pub struct UpdateInfo {
 
 /// Fetch the latest release for `owner/repo`. A token (when present) raises the
 /// rate limit to 5000/hr and allows private repos.
-pub fn latest_release(owner: &str, repo: &str, token: Option<&str>) -> Result<ReleaseInfo, String> {
+pub fn latest_release(
+    owner: &str,
+    repo: &str,
+    token: Option<&Bearer>,
+) -> Result<ReleaseInfo, String> {
     check_repo(owner, repo)?;
     let url = api_url(&["repos", owner, repo, "releases", "latest"])?;
     let mut req = crate::net::api()
         .get(url.as_str())
         .header("Accept", "application/vnd.github+json");
-    if let Some(t) = token {
-        req = req.header("Authorization", &format!("Bearer {t}"));
+    let auth = admit_optional(token);
+    if let Some(a) = &auth {
+        req = req.header("Authorization", a.header());
     }
     let resp = req.call_checked().map_err(|e| match e {
         HttpError::Status(404, _) => not_found_text(owner, repo, repo_exists(owner, repo, token)),
         HttpError::Status(403, r) => forbidden_text(
             r.header("x-ratelimit-remaining"),
             r.header("retry-after").is_some(),
-            token.is_some(),
+            auth.is_some(),
         ),
         other => transport_text(other),
     })?;
@@ -251,7 +257,7 @@ pub fn check(
     owner: &str,
     repo: &str,
     current: &str,
-    token: Option<&str>,
+    token: Option<&Bearer>,
 ) -> Result<UpdateInfo, String> {
     let release = latest_release(owner, repo, token)?;
     Ok(UpdateInfo {
@@ -276,85 +282,13 @@ pub struct DeviceCode {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PollResult {
-    /// "ok" | "pending" | "slow_down" | "expired" | "denied" | "error"
+    /// "ok" | "pending" | "slow_down" | "expired" | "denied" | "error" | "cancelled" (a newer
+    /// sign-in, a cancel or a Disconnect ended this flow; nothing was stored)
     pub status: String,
     pub token: Option<String>,
     /// The scopes GitHub actually granted (space-separated), from the token response.
     pub scope: Option<String>,
     pub error: Option<String>,
-}
-
-/// Orders sign-ins against Disconnect. A sign-in takes a ticket when it starts (a device flow:
-/// when its code is requested) and may store its token only while no sign-out has happened
-/// since; both run under one lock, so a sign-in the user approved just before clicking
-/// Disconnect can't land after it, however late its poll runs.
-pub struct SignOutGate(std::sync::Mutex<GateState>);
-
-struct GateState {
-    sign_outs: u64,
-    /// Device codes handed out, with the ticket each was issued under (newest last).
-    flows: Vec<(String, u64)>,
-}
-
-/// Device codes remembered at once; older ones are long expired (GitHub's last 15 minutes).
-const MAX_FLOWS: usize = 8;
-
-impl SignOutGate {
-    pub const fn new() -> Self {
-        Self(std::sync::Mutex::new(GateState {
-            sign_outs: 0,
-            flows: Vec::new(),
-        }))
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, GateState> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Note when a sign-in starts.
-    pub fn ticket(&self) -> u64 {
-        self.lock().sign_outs
-    }
-
-    /// Remember the ticket a device flow started under, for its polls.
-    pub fn remember_flow(&self, device_code: &str, ticket: u64) {
-        let mut g = self.lock();
-        g.flows.retain(|(c, _)| c != device_code);
-        g.flows.push((device_code.to_string(), ticket));
-        let excess = g.flows.len().saturating_sub(MAX_FLOWS);
-        g.flows.drain(..excess);
-    }
-
-    /// The ticket a device flow started under; None for a code from before a sign-out (or one
-    /// Silo never issued).
-    pub fn flow_ticket(&self, device_code: &str) -> Option<u64> {
-        let g = self.lock();
-        g.flows
-            .iter()
-            .find(|(c, _)| c == device_code)
-            .map(|(_, t)| *t)
-    }
-
-    /// Run `store` only if no sign-out happened since `ticket`; None (and nothing ran) when one
-    /// did.
-    pub fn store_if_current<T>(&self, ticket: u64, store: impl FnOnce() -> T) -> Option<T> {
-        let g = self.lock();
-        (g.sign_outs == ticket).then(store)
-    }
-
-    /// Sign out: every sign-in already started loses its right to store, then `clear` runs.
-    pub fn sign_out<T>(&self, clear: impl FnOnce() -> T) -> T {
-        let mut g = self.lock();
-        g.sign_outs += 1;
-        g.flows.clear();
-        clear()
-    }
-}
-
-impl Default for SignOutGate {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// Step 1: request a device + user code for the given OAuth App client id.
@@ -529,7 +463,7 @@ pub(crate) fn verify_update_identity(
 }
 
 /// The authenticated user's login name (verifies a token).
-pub fn whoami(token: &str) -> Result<String, String> {
+pub fn whoami(token: &Bearer) -> Result<String, String> {
     Ok(whoami_scoped(token)?.0)
 }
 
@@ -537,11 +471,12 @@ pub fn whoami(token: &str) -> Result<String, String> {
 /// response header, comma-separated). OAuth tokens and classic PATs populate it; a
 /// fine-grained PAT uses a different permission model and reports an empty header — the
 /// caller decides how to treat "unknown" scopes.
-pub fn whoami_scoped(token: &str) -> Result<(String, String), String> {
+pub fn whoami_scoped(token: &Bearer) -> Result<(String, String), String> {
+    let auth = token.admit()?;
     let resp = crate::net::api()
         .get("https://api.github.com/user")
         .header("Accept", "application/vnd.github+json")
-        .header("Authorization", &format!("Bearer {token}"))
+        .header("Authorization", auth.header())
         .call_checked()
         .map_err(gh_err)?;
     let scopes = resp.header("X-OAuth-Scopes").unwrap_or("").to_string();
@@ -572,12 +507,22 @@ pub struct RepoStats {
     pub you_watching: Option<bool>,
 }
 
-fn gh_get(url: &str, token: Option<&str>) -> Result<serde_json::Value, String> {
+/// A GET that also works without an account: the token goes along only while it's admitted.
+fn gh_get(url: &str, token: Option<&Bearer>) -> Result<serde_json::Value, String> {
+    get_json(url, admit_optional(token).as_ref())
+}
+
+/// A GET that needs the account: refused (never sent anonymously) once the token isn't admitted.
+fn gh_get_as(url: &str, token: &Bearer) -> Result<serde_json::Value, String> {
+    get_json(url, Some(&token.admit()?))
+}
+
+fn get_json(url: &str, auth: Option<&Admitted>) -> Result<serde_json::Value, String> {
     let mut req = crate::net::api()
         .get(url)
         .header("Accept", "application/vnd.github+json");
-    if let Some(t) = token {
-        req = req.header("Authorization", &format!("Bearer {t}"));
+    if let Some(a) = auth {
+        req = req.header("Authorization", a.header());
     }
     req.call_checked()
         .map_err(gh_err)?
@@ -601,13 +546,14 @@ fn not_found_text(owner: &str, repo: &str, exists: Option<bool>) -> String {
 
 /// Whether `owner/repo` is visible on GitHub: Some(false) on a 404, None when the question itself
 /// failed (offline, rate limit), so the caller doesn't claim a repo is gone when it isn't sure.
-fn repo_exists(owner: &str, repo: &str, token: Option<&str>) -> Option<bool> {
+fn repo_exists(owner: &str, repo: &str, token: Option<&Bearer>) -> Option<bool> {
     let url = api_url(&["repos", owner, repo]).ok()?;
     let mut req = crate::net::api()
         .get(url.as_str())
         .header("Accept", "application/vnd.github+json");
-    if let Some(t) = token {
-        req = req.header("Authorization", &format!("Bearer {t}"));
+    let auth = admit_optional(token);
+    if let Some(a) = &auth {
+        req = req.header("Authorization", a.header());
     }
     match req.call_checked() {
         Ok(_) => Some(true),
@@ -687,7 +633,7 @@ pub fn clean_pat(input: &str) -> Result<String, String> {
 }
 
 /// GET /repos/{owner}/{repo} plus (when authenticated) the user's star/watch state.
-pub fn repo_stats(owner: &str, repo: &str, token: Option<&str>) -> Result<RepoStats, String> {
+pub fn repo_stats(owner: &str, repo: &str, token: Option<&Bearer>) -> Result<RepoStats, String> {
     check_repo(owner, repo)?;
     let v = gh_get(api_url(&["repos", owner, repo])?.as_str(), token)?;
     if v["full_name"].as_str().unwrap_or("").is_empty() {
@@ -721,11 +667,12 @@ pub fn repo_stats(owner: &str, repo: &str, token: Option<&str>) -> Result<RepoSt
 
 /// A GET that treats 204 as true and 404 as false — the shape GitHub uses for
 /// "is this thing in the user's set?" checks.
-fn present_check(url: &str, token: &str) -> Result<bool, String> {
+fn present_check(url: &str, token: &Bearer) -> Result<bool, String> {
+    let auth = token.admit()?;
     match crate::net::api()
         .get(url)
         .header("Accept", "application/vnd.github+json")
-        .header("Authorization", &format!("Bearer {token}"))
+        .header("Authorization", auth.header())
         .call_checked()
     {
         Ok(_) => Ok(true),
@@ -735,20 +682,21 @@ fn present_check(url: &str, token: &str) -> Result<bool, String> {
 }
 
 /// GET /user/starred/{owner}/{repo} — 204 starred, 404 not.
-pub fn star_state(owner: &str, repo: &str, token: &str) -> Result<bool, String> {
+pub fn star_state(owner: &str, repo: &str, token: &Bearer) -> Result<bool, String> {
     check_repo(owner, repo)?;
     present_check(api_url(&["user", "starred", owner, repo])?.as_str(), token)
 }
 
 /// GET /repos/{owner}/{repo}/subscription — 404 not watching. A 200 is a subscription record,
 /// which also exists when the user set the repo to Ignore on github.com, so read its flags.
-pub fn watch_state(owner: &str, repo: &str, token: &str) -> Result<bool, String> {
+pub fn watch_state(owner: &str, repo: &str, token: &Bearer) -> Result<bool, String> {
     check_repo(owner, repo)?;
     let url = api_url(&["repos", owner, repo, "subscription"])?;
+    let auth = token.admit()?;
     match crate::net::api()
         .get(url.as_str())
         .header("Accept", "application/vnd.github+json")
-        .header("Authorization", &format!("Bearer {token}"))
+        .header("Authorization", auth.header())
         .call_checked()
     {
         Ok(resp) => {
@@ -767,23 +715,23 @@ fn watching_from(v: &serde_json::Value) -> bool {
 
 /// PUT/DELETE /user/starred/{owner}/{repo}. Needs `public_repo` (OAuth) or a PAT with
 /// the Starring permission. Returns the new starred state (= `on`).
-pub fn set_star(owner: &str, repo: &str, token: &str, on: bool) -> Result<bool, String> {
+pub fn set_star(owner: &str, repo: &str, token: &Bearer, on: bool) -> Result<bool, String> {
     check_repo(owner, repo)?;
     let url = api_url(&["user", "starred", owner, repo])?;
-    let auth = format!("Bearer {token}");
+    let auth = token.admit()?;
     if on {
         crate::net::api()
             .put(url.as_str())
             .header("Accept", "application/vnd.github+json")
             .header("Content-Length", "0")
-            .header("Authorization", &auth)
+            .header("Authorization", auth.header())
             .send_empty_checked()
     } else {
         crate::net::api()
             .delete(url.as_str())
             .header("Accept", "application/vnd.github+json")
             .header("Content-Length", "0")
-            .header("Authorization", &auth)
+            .header("Authorization", auth.header())
             .call_checked()
     }
     .map_err(gh_err)?;
@@ -791,14 +739,15 @@ pub fn set_star(owner: &str, repo: &str, token: &str, on: bool) -> Result<bool, 
 }
 
 /// PUT (subscribe) / DELETE (unsubscribe) /repos/{owner}/{repo}/subscription.
-pub fn set_watch(owner: &str, repo: &str, token: &str, on: bool) -> Result<bool, String> {
+pub fn set_watch(owner: &str, repo: &str, token: &Bearer, on: bool) -> Result<bool, String> {
     check_repo(owner, repo)?;
     let url = api_url(&["repos", owner, repo, "subscription"])?;
+    let auth = token.admit()?;
     if on {
         crate::net::api()
             .put(url.as_str())
             .header("Accept", "application/vnd.github+json")
-            .header("Authorization", &format!("Bearer {token}"))
+            .header("Authorization", auth.header())
             .send_json_checked(serde_json::json!({ "subscribed": true, "ignored": false }))
             .map_err(gh_err)?;
     } else {
@@ -806,7 +755,7 @@ pub fn set_watch(owner: &str, repo: &str, token: &str, on: bool) -> Result<bool,
             .delete(url.as_str())
             .header("Accept", "application/vnd.github+json")
             .header("Content-Length", "0")
-            .header("Authorization", &format!("Bearer {token}"))
+            .header("Authorization", auth.header())
             .call_checked()
             .map_err(gh_err)?;
     }
@@ -830,7 +779,7 @@ pub struct GistRef {
 
 /// POST /gists — create a secret gist holding a single named file. Needs `gist` scope.
 pub fn create_secret_gist(
-    token: &str,
+    token: &Bearer,
     description: &str,
     filename: &str,
     content: &str,
@@ -840,10 +789,11 @@ pub fn create_secret_gist(
         "public": false,
         "files": { filename: { "content": content } },
     });
+    let auth = token.admit()?;
     let v = crate::net::api()
         .post("https://api.github.com/gists")
         .header("Accept", "application/vnd.github+json")
-        .header("Authorization", &format!("Bearer {token}"))
+        .header("Authorization", auth.header())
         .send_json_checked(body)
         .map_err(gh_err)?
         .into_json::<serde_json::Value>()
@@ -859,16 +809,18 @@ pub fn create_secret_gist(
 /// PATCH /gists/{id} — add or replace a named file in a gist we own. Used to attach a README
 /// after creation (the README links the handoff page, whose URL needs the server-assigned id).
 pub fn update_gist_file(
-    token: &str,
+    token: &Bearer,
     id: &str,
     filename: &str,
     content: &str,
 ) -> Result<(), String> {
     check_gist_id(id)?;
+    let url = api_url(&["gists", id])?;
+    let auth = token.admit()?;
     crate::net::api()
-        .patch(api_url(&["gists", id])?.as_str())
+        .patch(url.as_str())
         .header("Accept", "application/vnd.github+json")
-        .header("Authorization", &format!("Bearer {token}"))
+        .header("Authorization", auth.header())
         .send_json_checked(serde_json::json!({ "files": { filename: { "content": content } } }))
         .map_err(gh_err)?;
     Ok(())
@@ -887,8 +839,8 @@ pub struct GistListItem {
 }
 
 /// GET /gists — the authenticated user's own gists (first page, newest first). Needs `gist`.
-pub fn list_user_gists(token: &str) -> Result<Vec<GistListItem>, String> {
-    let v = gh_get("https://api.github.com/gists?per_page=100", Some(token))?;
+pub fn list_user_gists(token: &Bearer) -> Result<Vec<GistListItem>, String> {
+    let v = gh_get_as("https://api.github.com/gists?per_page=100", token)?;
     let arr = v
         .as_array()
         .ok_or("Unexpected gists response from GitHub")?;
@@ -908,12 +860,14 @@ pub fn list_user_gists(token: &str) -> Result<Vec<GistListItem>, String> {
 }
 
 /// DELETE /gists/{id} — unpublish a gist we own. Needs `gist`.
-pub fn delete_gist(token: &str, id: &str) -> Result<(), String> {
+pub fn delete_gist(token: &Bearer, id: &str) -> Result<(), String> {
     check_gist_id(id)?;
+    let url = api_url(&["gists", id])?;
+    let auth = token.admit()?;
     crate::net::api()
-        .delete(api_url(&["gists", id])?.as_str())
+        .delete(url.as_str())
         .header("Accept", "application/vnd.github+json")
-        .header("Authorization", &format!("Bearer {token}"))
+        .header("Authorization", auth.header())
         .call_checked()
         .map_err(gh_err)?;
     Ok(())
@@ -933,10 +887,10 @@ pub struct RepoListItem {
 /// GET /user/repos (owned, newest first) — needs the `public_repo`/repo scope Silo already
 /// requests. Deleting a repo would need the separate `delete_repo` scope (not requested), so
 /// collection repos are list-only in-app; deletion happens on GitHub.
-pub fn list_owned_repos(token: &str) -> Result<Vec<RepoListItem>, String> {
-    let v = gh_get(
+pub fn list_owned_repos(token: &Bearer) -> Result<Vec<RepoListItem>, String> {
+    let v = gh_get_as(
         "https://api.github.com/user/repos?per_page=100&affiliation=owner&sort=created&direction=desc",
-        Some(token),
+        token,
     )?;
     let arr = v
         .as_array()
@@ -955,7 +909,7 @@ pub fn list_owned_repos(token: &str) -> Result<Vec<RepoListItem>, String> {
 /// GET /gists/{id} and return the named file's content. Reads are unauthenticated-capable,
 /// but pass the owner token when available (higher rate limit; required for a secret gist
 /// the anonymous API won't return). Errors if the file is absent from the gist.
-pub fn read_gist_file(id: &str, filename: &str, token: Option<&str>) -> Result<String, String> {
+pub fn read_gist_file(id: &str, filename: &str, token: Option<&Bearer>) -> Result<String, String> {
     check_gist_id(id)?;
     let v = gh_get(api_url(&["gists", id])?.as_str(), token)?;
     let file = &v["files"][filename];
@@ -981,16 +935,16 @@ pub fn read_gist_file(id: &str, filename: &str, token: Option<&str>) -> Result<S
 /// Guarded by `is_github_host` — the URL comes from GitHub's own response, but we never
 /// attach a bearer token to a non-GitHub host regardless. A redirect must stay on GitHub too,
 /// and the token goes only to the first URL's host.
-fn fetch_gist_raw(url: &str, token: Option<&str>) -> Result<String, String> {
+fn fetch_gist_raw(url: &str, token: Option<&Bearer>) -> Result<String, String> {
     if !is_github_host(url) {
         return Err("Refusing to fetch gist content from a non-GitHub host".into());
     }
-    let auth = token.map(|t| format!("Bearer {t}"));
+    let auth = admit_optional(token);
     crate::net::get_guarded(
         crate::net::guarded_api(),
         url,
         &check_github_hop,
-        auth.as_deref(),
+        auth.as_ref().map(Admitted::header),
     )
     .map_err(|e| match e {
         crate::net::FetchError::Http(e) => gh_err(e),
@@ -1018,9 +972,10 @@ pub fn read_repo_file(
     owner: &str,
     repo: &str,
     path: &str,
-    token: Option<&str>,
+    token: Option<&Bearer>,
 ) -> Result<String, String> {
-    repo_file_request(owner, repo, path, token)?
+    let auth = admit_optional(token);
+    repo_file_request(owner, repo, path, auth.as_ref())?
         .call_checked()
         .map_err(gh_err)?
         .into_string()
@@ -1034,9 +989,10 @@ pub fn read_repo_file_if_present(
     owner: &str,
     repo: &str,
     path: &str,
-    token: Option<&str>,
+    token: Option<&Bearer>,
 ) -> Result<Option<String>, String> {
-    match repo_file_request(owner, repo, path, token)?.call_checked() {
+    let auth = admit_optional(token);
+    match repo_file_request(owner, repo, path, auth.as_ref())?.call_checked() {
         Ok(resp) => resp.into_string().map(Some).map_err(|e| e.to_string()),
         Err(HttpError::Status(404, _)) => Ok(None),
         Err(e) => Err(gh_err(e)),
@@ -1048,15 +1004,15 @@ fn repo_file_request(
     owner: &str,
     repo: &str,
     path: &str,
-    token: Option<&str>,
+    auth: Option<&Admitted>,
 ) -> Result<ureq::RequestBuilder<ureq::typestate::WithoutBody>, String> {
     check_repo(owner, repo)?;
     let url = contents_url(owner, repo, path)?;
     let mut req = crate::net::api()
         .get(url.as_str())
         .header("Accept", "application/vnd.github.raw");
-    if let Some(t) = token {
-        req = req.header("Authorization", &format!("Bearer {t}"));
+    if let Some(a) = auth {
+        req = req.header("Authorization", a.header());
     }
     Ok(req)
 }
@@ -1079,19 +1035,25 @@ const REPO_NAME_TAKEN: &str =
 /// When the name is taken by a repo Silo made earlier whose first upload failed (the user's
 /// own, public, still empty, with Silo's description), that repo is returned instead, so a
 /// retry carries on rather than failing with "name taken" (#355).
-pub fn create_public_repo(token: &str, name: &str, description: &str) -> Result<RepoRef, String> {
+pub fn create_public_repo(
+    token: &Bearer,
+    name: &str,
+    description: &str,
+) -> Result<RepoRef, String> {
     let body = serde_json::json!({
         "name": name,
         "description": description,
         "private": false,
         "auto_init": false,
     });
-    let v = match crate::net::api()
+    let auth = token.admit()?;
+    let sent = crate::net::api()
         .post("https://api.github.com/user/repos")
         .header("Accept", "application/vnd.github+json")
-        .header("Authorization", &format!("Bearer {token}"))
-        .send_json_checked(body)
-    {
+        .header("Authorization", auth.header())
+        .send_json_checked(body);
+    drop(auth);
+    let v = match sent {
         Ok(resp) => resp
             .into_json::<serde_json::Value>()
             .map_err(|e| e.to_string())?,
@@ -1120,12 +1082,12 @@ pub fn create_public_repo(token: &str, name: &str, description: &str) -> Result<
 /// and has no commits. `None` when it's anything else, so Silo never writes into a repo it
 /// didn't start.
 fn unfinished_collection_repo(
-    token: &str,
+    token: &Bearer,
     name: &str,
     description: &str,
 ) -> Result<Option<RepoRef>, String> {
     let login = whoami(token)?;
-    let v = gh_get(api_url(&["repos", &login, name])?.as_str(), Some(token))?;
+    let v = gh_get_as(api_url(&["repos", &login, name])?.as_str(), token)?;
     let Some(repo) = resumable_repo(&v, &login, name, description) else {
         return Ok(None);
     };
@@ -1163,13 +1125,14 @@ fn resumable_repo(
 /// Whether a repo has no commits. GitHub answers the commit list of an empty repository with
 /// 409 "Git Repository is empty." (checked live 2026-10-31); a repo's `size` can't tell, as it
 /// reads 0 for some repos that hold commits.
-fn repo_is_empty(token: &str, owner: &str, repo: &str) -> Result<bool, String> {
+fn repo_is_empty(token: &Bearer, owner: &str, repo: &str) -> Result<bool, String> {
     let mut url = api_url(&["repos", owner, repo, "commits"])?;
     url.set_query(Some("per_page=1"));
+    let auth = token.admit()?;
     match crate::net::api()
         .get(url.as_str())
         .header("Accept", "application/vnd.github+json")
-        .header("Authorization", &format!("Bearer {token}"))
+        .header("Authorization", auth.header())
         .call_checked()
     {
         Ok(_) => Ok(false),
@@ -1182,7 +1145,7 @@ fn repo_is_empty(token: &str, owner: &str, repo: &str) -> Result<bool, String> {
 /// Contents API requires base64-encoded content; on an auto_init:false repo the first PUT
 /// bootstraps the branch. Needs `public_repo` scope.
 pub fn put_repo_file(
-    token: &str,
+    token: &Bearer,
     owner: &str,
     repo: &str,
     path: &str,
@@ -1196,7 +1159,7 @@ pub fn put_repo_file(
 /// refuses (422) instead of replacing a file someone else wrote meanwhile. For a new
 /// collection's list, which must never overwrite a link already handed out (#355).
 pub fn create_repo_file(
-    token: &str,
+    token: &Bearer,
     owner: &str,
     repo: &str,
     path: &str,
@@ -1207,7 +1170,7 @@ pub fn create_repo_file(
 }
 
 fn write_repo_file(
-    token: &str,
+    token: &Bearer,
     owner: &str,
     repo: &str,
     path: &str,
@@ -1230,10 +1193,12 @@ fn write_repo_file(
             body["sha"] = serde_json::Value::String(sha);
         }
     }
+    let url = contents_url(owner, repo, path)?;
+    let auth = token.admit()?;
     crate::net::api()
-        .put(contents_url(owner, repo, path)?.as_str())
+        .put(url.as_str())
         .header("Accept", "application/vnd.github+json")
-        .header("Authorization", &format!("Bearer {token}"))
+        .header("Authorization", auth.header())
         .send_json_checked(body)
         .map_err(gh_err)?;
     Ok(())
@@ -1241,9 +1206,9 @@ fn write_repo_file(
 
 /// The current blob sha of a repo file, if it exists — needed to replace it via the Contents
 /// API. Best-effort: any error (missing file, empty repo, network) yields `None` → treat as new.
-fn repo_file_sha(token: &str, owner: &str, repo: &str, path: &str) -> Option<String> {
+fn repo_file_sha(token: &Bearer, owner: &str, repo: &str, path: &str) -> Option<String> {
     check_repo(owner, repo).ok()?;
-    let v = gh_get(contents_url(owner, repo, path).ok()?.as_str(), Some(token)).ok()?;
+    let v = gh_get_as(contents_url(owner, repo, path).ok()?.as_str(), token).ok()?;
     v["sha"].as_str().map(String::from)
 }
 
@@ -1639,42 +1604,6 @@ mod tests {
         assert!(is_newer("1.2.4+b1", "1.2.3+b9"));
         assert!(is_newer("1.2.3", "1.2.3-rc.1+b5"));
         assert!(!is_newer("v1.2.3-rc.1+b5", "1.2.3"));
-    }
-
-    #[test]
-    fn a_device_flow_keeps_the_ticket_it_started_under() {
-        let gate = SignOutGate::new();
-        gate.remember_flow("code-1", gate.ticket());
-        // A sign-out forgets its flows: a poll that only runs afterwards finds no ticket.
-        gate.sign_out(|| ());
-        assert_eq!(gate.flow_ticket("code-1"), None);
-        // Remembered under a ticket from before the sign-out: storing is refused.
-        let stale = 0;
-        gate.remember_flow("code-2", stale);
-        assert_eq!(gate.store_if_current(stale, || ()), None);
-        // A new flow after the sign-out works; unknown codes have no ticket.
-        gate.remember_flow("code-3", gate.ticket());
-        let t = gate.flow_ticket("code-3").unwrap();
-        assert_eq!(gate.store_if_current(t, || "stored"), Some("stored"));
-        assert_eq!(gate.flow_ticket("never-issued"), None);
-        // Only the newest few are kept.
-        for i in 0..20 {
-            gate.remember_flow(&format!("c{i}"), gate.ticket());
-        }
-        assert!(gate.flow_ticket("c19").is_some());
-        assert!(gate.flow_ticket("c0").is_none());
-    }
-
-    #[test]
-    fn a_sign_out_beats_a_sign_in_that_started_before_it() {
-        let gate = SignOutGate::new();
-        let before = gate.ticket();
-        assert_eq!(gate.store_if_current(before, || "stored"), Some("stored"));
-        gate.sign_out(|| ());
-        assert_eq!(gate.store_if_current(before, || "stored"), None);
-        // A sign-in started after the sign-out stores normally.
-        let after = gate.ticket();
-        assert_eq!(gate.store_if_current(after, || "stored"), Some("stored"));
     }
 
     #[test]

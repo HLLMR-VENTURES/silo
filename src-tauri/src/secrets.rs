@@ -81,6 +81,60 @@ fn set_distrust(conn: &Connection, key: &str, on: bool) -> Result<(), String> {
     db::set_app_setting(conn, &distrust_key(key), on.then_some("1"))
 }
 
+/// The (non-secret) setting that names a SQLite row Silo must not use: a fingerprint of the
+/// token a disconnect couldn't delete from the database. Only that exact value is refused, so a
+/// later reconnect through the fallback (a new row) is used as normal.
+fn revoked_key(key: &str) -> String {
+    format!("{key}:revoked_row")
+}
+
+/// A one-way fingerprint of a secret, for `revoked_key`.
+fn fingerprint(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"silo-revoked-row\0");
+    h.update(value.as_bytes());
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Whether `row` is the value a disconnect revoked. A marker Silo can't read counts as a match,
+/// so a database read error never brings a revoked token back.
+fn row_revoked(conn: &Connection, key: &str, row: &str) -> bool {
+    use rusqlite::OptionalExtension;
+    let marker: Result<Option<String>, _> = conn
+        .query_row(
+            "SELECT value FROM app_setting WHERE key = ?1",
+            [revoked_key(key)],
+            |r| r.get(0),
+        )
+        .optional();
+    match marker {
+        Ok(None) => false,
+        Ok(Some(f)) => f == fingerprint(row),
+        Err(_) => true,
+    }
+}
+
+/// Revoke `row` (`Some`) or lift the revocation (`None`). Lifting one that isn't set writes
+/// nothing.
+fn set_revoked(conn: &Connection, key: &str, row: Option<&str>) -> Result<(), String> {
+    match row {
+        Some(r) => db::set_app_setting(conn, &revoked_key(key), Some(&fingerprint(r))),
+        None if db::get_app_setting(conn, &revoked_key(key)).is_none() => Ok(()),
+        None => db::set_app_setting(conn, &revoked_key(key), None),
+    }
+}
+
+/// Store `v` in the SQLite fallback. A revocation naming this very value (the user reconnects
+/// with the token a failed disconnect left behind) is lifted, or the save fails.
+fn write_fallback(conn: &Connection, key: &str, v: &str) -> Result<(), String> {
+    db::set_app_setting(conn, key, Some(v))?;
+    if row_revoked(conn, key, v) {
+        set_revoked(conn, key, None)?;
+    }
+    Ok(())
+}
+
 /// Whether this machine has no keychain service at all, as far as keyring can tell: a write to a
 /// throwaway entry fails at the platform level. Any other answer (it works, it's locked, access
 /// is denied) means a store exists, so a failure there is the user's to fix, not a reason to
@@ -104,8 +158,8 @@ fn keychain_missing() -> bool {
 /// Read a secret. A SQLite row wins over the keychain: every keychain write clears the row, and
 /// the row is only written when the keychain can't be used, so it's never the older of the two.
 /// A row is moved into the keychain once the keychain works (this is also how a token written
-/// by a pre-keychain build is migrated). A distrusted keychain copy is never returned; Silo
-/// deletes it as soon as the store allows.
+/// by a pre-keychain build is migrated). A distrusted keychain copy and a revoked row are never
+/// returned; Silo deletes them as soon as the store allows.
 pub fn get(conn: &Connection, key: &str) -> Option<String> {
     get_with(conn, key, entry(key).as_ref())
 }
@@ -113,17 +167,23 @@ pub fn get(conn: &Connection, key: &str) -> Option<String> {
 fn get_with(conn: &Connection, key: &str, keychain: Option<&keyring::Entry>) -> Option<String> {
     let _held = store_lock();
     if let Some(row) = db::get_app_setting(conn, key) {
-        // Best-effort promotion into the keychain, then drop the plaintext copy AND VACUUM so
-        // the token isn't left carve-able in the DB's free pages (SQLite doesn't zero deletes).
-        // The marker goes first: a row dropped while it stayed would make the next read delete
-        // the keychain copy just written.
-        if let Some(e) = keychain {
-            if e.set_password(&row).is_ok() && set_distrust(conn, key, false).is_ok() {
-                let _ = db::set_app_setting(conn, key, None);
-                db::vacuum(conn);
+        if row_revoked(conn, key, &row) {
+            // A disconnect couldn't delete this row. Never use it; remove it once the database
+            // allows, and go on to the keychain (whose copy, if any, is newer, or distrusted).
+            let _ = clear_fallback(conn, key);
+        } else {
+            // Best-effort promotion into the keychain, then drop the plaintext copy AND VACUUM
+            // so the token isn't left carve-able in the DB's free pages (SQLite doesn't zero
+            // deletes). The marker goes first: a row dropped while it stayed would make the
+            // next read delete the keychain copy just written.
+            if let Some(e) = keychain {
+                if e.set_password(&row).is_ok() && set_distrust(conn, key, false).is_ok() {
+                    let _ = db::set_app_setting(conn, key, None);
+                    db::vacuum(conn);
+                }
             }
+            return Some(row);
         }
-        return Some(row);
     }
     let e = keychain?;
     if keychain_distrusted(conn, key) {
@@ -142,6 +202,10 @@ const SAVE_FAILED: &str = "Silo couldn't save the token in your system's credent
 pub(crate) const REMOVE_FAILED: &str = "Silo couldn't remove the token from your system's \
      credential store. Silo won't use it, and removes it once the store allows (for example \
      after you unlock it). You can also delete the com.hllmr.silo entry there yourself.";
+
+/// Shown when disconnecting couldn't delete the database copy, but revoked it.
+pub(crate) const REMOVE_ROW_FAILED: &str = "Silo couldn't remove the token from its database. \
+     Silo won't use it, and removes it the next time it can.";
 
 /// Store (`Some`) or clear (`None`) a secret. Keychain-primary; SQLite only when this machine
 /// has no usable keychain at all. Any other keychain failure is returned, never swallowed.
@@ -169,7 +233,7 @@ fn set_with(
     let _held = store_lock();
     match (value, keychain) {
         // Demo profile, or no keychain backend at all.
-        (Some(v), None) => db::set_app_setting(conn, key, Some(v)),
+        (Some(v), None) => write_fallback(conn, key, v),
         (Some(v), Some(e)) => save(conn, key, v, e, missing),
         (None, keychain) => match clear_with(conn, key, keychain, missing)? {
             true => Ok(()),
@@ -207,7 +271,7 @@ fn save(
                 Ok(()) => saved_to_keychain(conn, key),
                 Err(again) if no_keychain_service(&again) => {
                     log::warn!("{key}: no usable keychain ({err}); storing it in the database");
-                    db::set_app_setting(conn, key, Some(v))
+                    write_fallback(conn, key, v)
                 }
                 Err(again) => {
                     log::warn!("{key}: the keychain answered, but refused the write: {again}");
@@ -253,18 +317,19 @@ fn clear_keychain(e: &keyring::Entry) -> Cleared {
 
 /// Disconnect: remove the keychain copy and the SQLite row. Only a copy confirmed gone counts
 /// as removed, except where there's no keychain service and the token lived in SQLite. When
-/// the keychain may keep a copy, it's distrusted first, so Silo stops using it regardless.
+/// the keychain may keep a copy, it's distrusted first, and the row is revoked before it's
+/// deleted, so Silo stops using either even when a delete fails.
 fn clear_with(
     conn: &Connection,
     key: &str,
     keychain: Option<&keyring::Entry>,
     missing: impl Fn() -> bool,
 ) -> Result<bool, String> {
+    let row = db::get_app_setting(conn, key);
     let Some(e) = keychain else {
-        clear_fallback(conn, key)?;
+        drop_row(conn, key, row.as_deref())?;
         return Ok(true);
     };
-    let had_row = db::get_app_setting(conn, key).is_some();
     let removed = match clear_keychain(e) {
         Cleared::Gone => {
             set_distrust(conn, key, false)?;
@@ -273,15 +338,31 @@ fn clear_with(
         cleared => {
             // Distrust before dropping the row, so a failure here leaves everything as it was.
             set_distrust(conn, key, true)?;
-            cleared == Cleared::NoService && had_row && missing()
+            cleared == Cleared::NoService && row.is_some() && missing()
         }
     };
     if !removed {
         log::warn!("{key}: couldn't remove it from the keychain; it won't be used");
     }
     // The plaintext copy goes either way.
-    clear_fallback(conn, key)?;
+    drop_row(conn, key, row.as_deref())?;
     Ok(removed)
+}
+
+/// Delete the SQLite row (`row`, as read just before). It's revoked first, so a row the delete
+/// leaves behind is never read back; if even that write fails, the delete may still work.
+fn drop_row(conn: &Connection, key: &str, row: Option<&str>) -> Result<(), String> {
+    let revoked = match row {
+        Some(r) => set_revoked(conn, key, Some(r)),
+        None => Ok(()),
+    };
+    clear_fallback(conn, key).map_err(|e| {
+        log::warn!("{key}: couldn't delete it from the database: {e}");
+        match revoked {
+            Ok(()) => REMOVE_ROW_FAILED.to_string(),
+            Err(_) => e,
+        }
+    })
 }
 
 /// A keychain error saying the platform's store itself failed (in keyring 3.6: no Secret
@@ -314,11 +395,13 @@ fn keychain_copy(e: &keyring::Entry) -> KeychainCopy {
 /// Delete `key`'s plaintext SQLite fallback row, and when there was one, VACUUM so the old
 /// value isn't left carve-able in the database's free pages (as the keychain migration in
 /// `get` does). No row, no VACUUM: saving a token doesn't rewrite the database every time.
+/// With the row gone, a revocation naming it has nothing left to guard (best effort).
 fn clear_fallback(conn: &Connection, key: &str) -> Result<(), String> {
     if db::get_app_setting(conn, key).is_none() {
         return Ok(());
     }
     db::set_app_setting(conn, key, None)?;
+    let _ = set_revoked(conn, key, None);
     db::vacuum(conn);
     Ok(())
 }
@@ -883,6 +966,122 @@ mod tests {
         db::set_app_setting(&conn, KEY, Some("row")).unwrap();
         set_with(&conn, KEY, None, None, NO_KEYCHAIN).unwrap();
         assert_eq!(row(&conn), None);
+    }
+
+    /// Make deleting the test key's row fail, as a busy or read-only database would.
+    fn refuse_row_delete(conn: &Connection) {
+        let sql = format!(
+            "CREATE TRIGGER no_row_delete BEFORE DELETE ON app_setting WHEN old.key = '{KEY}' \
+             BEGIN SELECT RAISE(FAIL, 'busy'); END"
+        );
+        conn.execute_batch(&sql).unwrap();
+    }
+
+    fn allow_row_delete(conn: &Connection) {
+        conn.execute_batch("DROP TRIGGER no_row_delete").unwrap();
+    }
+
+    #[test]
+    fn a_row_a_failed_disconnect_left_behind_is_never_read_back() {
+        // Both deletes fail: the keychain is locked and the database won't drop the row.
+        for get in [None, Some(Fail::NoAccess)] {
+            let conn = mem_db();
+            db::set_app_setting(&conn, KEY, Some("tok")).unwrap();
+            refuse_row_delete(&conn);
+            let k = FakeKeychain::with(|s| {
+                s.stored = Some("tok".into());
+                s.set_fails = Some(Fail::NoAccess);
+                s.delete_fails = Some(Fail::NoAccess);
+                s.get_fails = get;
+            });
+            let e = set_with(&conn, KEY, None, Some(&k.entry()), KEYCHAIN_WORKS);
+            assert_eq!(e, Err(REMOVE_ROW_FAILED.to_string()));
+            assert_eq!(
+                row(&conn).as_deref(),
+                Some("tok"),
+                "the delete really failed"
+            );
+            // Neither copy is used, before or after the store unlocks.
+            assert_eq!(get_with(&conn, KEY, Some(&k.entry())), None);
+            k.0.lock().unwrap().get_fails = None;
+            assert_eq!(get_with(&conn, KEY, Some(&k.entry())), None);
+            assert_eq!(get_with(&conn, KEY, None), None, "nor without a keychain");
+            // Both are removed once the stores allow.
+            allow_row_delete(&conn);
+            k.0.lock().unwrap().delete_fails = None;
+            assert_eq!(get_with(&conn, KEY, Some(&k.entry())), None);
+            assert_eq!(row(&conn), None);
+            assert_eq!(k.stored(), None);
+            assert_eq!(db::get_app_setting(&conn, &revoked_key(KEY)), None);
+        }
+    }
+
+    #[test]
+    fn a_reconnect_through_the_fallback_works_after_a_failed_disconnect() {
+        // No keychain at all; the token lives in SQLite and the row can't be deleted.
+        let no_service = || {
+            FakeKeychain::with(|s| {
+                s.set_fails = Some(Fail::Platform);
+                s.get_fails = Some(Fail::Platform);
+                s.delete_fails = Some(Fail::Platform);
+            })
+        };
+        for reconnect in ["new-token", "tok"] {
+            let conn = mem_db();
+            let k = no_service();
+            set_with(&conn, KEY, Some("tok"), Some(&k.entry()), NO_KEYCHAIN).unwrap();
+            refuse_row_delete(&conn);
+            let e = set_with(&conn, KEY, None, Some(&k.entry()), NO_KEYCHAIN);
+            assert_eq!(e, Err(REMOVE_ROW_FAILED.to_string()));
+            assert_eq!(get_with(&conn, KEY, Some(&k.entry())), None);
+            // Connecting again stores a row (a new token, or the same one pasted again): used.
+            set_with(&conn, KEY, Some(reconnect), Some(&k.entry()), NO_KEYCHAIN).unwrap();
+            assert_eq!(
+                get_with(&conn, KEY, Some(&k.entry())).as_deref(),
+                Some(reconnect)
+            );
+            // Demo profile (no keychain entry) too.
+            set_with(&conn, KEY, None, None, NO_KEYCHAIN).unwrap_err();
+            assert_eq!(get_with(&conn, KEY, None), None);
+            set_with(&conn, KEY, Some(reconnect), None, NO_KEYCHAIN).unwrap();
+            assert_eq!(get_with(&conn, KEY, None).as_deref(), Some(reconnect));
+        }
+    }
+
+    #[test]
+    fn a_keychain_reconnect_wins_over_a_revoked_row() {
+        // A failed disconnect left a revoked row; the next connect goes to the keychain, whose
+        // own row clear fails too. The new keychain token is used, the old row never.
+        let conn = mem_db();
+        db::set_app_setting(&conn, KEY, Some("old")).unwrap();
+        refuse_row_delete(&conn);
+        let k = FakeKeychain::default();
+        assert_eq!(
+            set_with(&conn, KEY, None, Some(&k.entry()), KEYCHAIN_WORKS),
+            Err(REMOVE_ROW_FAILED.to_string())
+        );
+        assert!(set_with(&conn, KEY, Some("new"), Some(&k.entry()), KEYCHAIN_WORKS).is_err());
+        assert_eq!(k.stored().as_deref(), Some("new"));
+        assert_eq!(
+            get_with(&conn, KEY, Some(&k.entry())).as_deref(),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn an_unreadable_revocation_counts_as_revoked() {
+        let conn = mem_db();
+        db::set_app_setting(&conn, KEY, Some("tok")).unwrap();
+        assert!(!row_revoked(&conn, KEY, "tok"));
+        set_revoked(&conn, KEY, Some("tok")).unwrap();
+        assert!(row_revoked(&conn, KEY, "tok"));
+        assert!(!row_revoked(&conn, KEY, "other"));
+        // The marker holds a fingerprint, never the token.
+        let marker = db::get_app_setting(&conn, &revoked_key(KEY)).unwrap();
+        assert!(!marker.contains("tok"));
+        // A database Silo can't read the marker from: the row isn't trusted.
+        let broken = Connection::open_in_memory().unwrap();
+        assert!(row_revoked(&broken, KEY, "tok"));
     }
 
     #[test]
