@@ -904,41 +904,46 @@ fn flatten_matches_a_kept_mods_zip_under_other_casing_as_the_filesystem_does() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// In a case-sensitive folder, a second file whose name differs from a kept mod's zip only in
-/// case is a different file: it's still listed as unrecognized (#410). (Skipped where names
-/// ignore case: the two can't both exist.)
+/// In a case-sensitive folder, a second entry whose name differs from a kept mod's zip only in
+/// case is a different entry, even as a hardlink to the same file: it's still listed as
+/// unrecognized (#410). (Skipped where names ignore case: the two can't both exist.)
 #[test]
-fn flatten_lists_a_file_differing_from_a_kept_mods_zip_only_in_case() {
-    let base = temp_dir_for("flatten_kept_case_twin");
-    let conn = db::open(&base.join("silo.db")).unwrap();
-    let (src, flat) = zip_copy_fixture(&base, &conn);
-    let cat = src.parent().unwrap();
-    if folds_case(cat) {
+fn flatten_lists_an_entry_differing_from_a_kept_mods_zip_only_in_case() {
+    for hardlink in [false, true] {
+        let base = temp_dir_for(&format!("flatten_kept_case_twin_{hardlink}"));
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let (src, flat) = zip_copy_fixture(&base, &conn);
+        let cat = src.parent().unwrap();
+        if folds_case(cat) {
+            drop(conn);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        std::fs::write(&src, b"PK\x03\x04 the arch").unwrap(); // cut short: the copy is kept
+        let twin = cat.join("fs25_foo.zip");
+        if hardlink {
+            std::fs::hard_link(&src, &twin).unwrap();
+        } else {
+            std::fs::write(&twin, b"PK theirs").unwrap();
+        }
+
+        let rep = flatten(&conn, &Layout::default_for(&base));
+
+        assert_eq!(rep.changed, 0, "{hardlink}: {:?}", rep.errors);
+        assert_eq!(rep.errors.len(), 2, "{hardlink}: {:?}", rep.errors);
+        assert!(rep.errors[0].contains(KEPT_UNPROVEN), "{:?}", rep.errors);
+        assert_eq!(
+            rep.errors[1],
+            format!("{UNRECOGNIZED} fs25_foo.zip. Nothing was deleted.")
+        );
+        assert!(flat.is_file() && twin.is_file());
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
-        return;
     }
-    std::fs::write(&src, b"PK\x03\x04 the arch").unwrap(); // cut short: the copy is kept
-    std::fs::write(cat.join("fs25_foo.zip"), b"PK theirs").unwrap();
-
-    let rep = flatten(&conn, &Layout::default_for(&base));
-
-    assert_eq!(rep.changed, 0, "{:?}", rep.errors);
-    assert_eq!(rep.errors.len(), 2, "{:?}", rep.errors);
-    assert!(rep.errors[0].contains(KEPT_UNPROVEN), "{:?}", rep.errors);
-    assert_eq!(
-        rep.errors[1],
-        format!("{UNRECOGNIZED} fs25_foo.zip. Nothing was deleted.")
-    );
-    assert!(flat.is_file() && cat.join("fs25_foo.zip").is_file());
-    drop(conn);
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// What counts as inside a mod's archive entry: the entry itself; a folder mod's files below it;
-/// nothing below a zip mod's entry; never a name that only starts the same. Another spelling
-/// counts only when it's the same entry on disk: not when nothing proves it (no such file), and
-/// not for a hardlink under another name.
+/// nothing below a zip mod's entry; never a name that only starts the same, or another spelling.
 #[test]
 fn in_archive_entry_matches_the_entry_and_a_folder_mods_files() {
     let a = Path::new("archive");
@@ -966,19 +971,25 @@ fn in_archive_entry_matches_the_entry_and_a_folder_mods_files() {
     ));
     let other_case = a.join("vehicles").join("fs25_foo.zip");
     assert!(!in_archive_entry(&other_case, &zip, false));
+}
 
-    // On disk: another casing is the entry exactly where the filesystem folds case.
-    let base = temp_dir_for("in_archive_entry_disk");
+/// An entry's spelling on disk: itself when listed; where the filesystem finds it under another
+/// spelling, the listed name (and never a hardlink under another name); `None` when it isn't
+/// there or isn't under the archive.
+#[test]
+fn spelled_on_disk_finds_the_listed_name_of_the_same_entry() {
+    let base = temp_dir_for("spelled_on_disk");
     let cat = base.join("Vehicles");
     std::fs::create_dir_all(&cat).unwrap();
-    let zip = cat.join("FS25_Foo.zip");
+    let zip = cat.join("fs25_foo.zip");
     std::fs::write(&zip, b"PK").unwrap();
-    let folds = folds_case(&cat);
-    let other_case = base.join("vehicles").join("fs25_foo.zip");
-    assert_eq!(in_archive_entry(&other_case, &zip, false), folds);
-    let twin = cat.join("Copy.zip");
-    std::fs::hard_link(&zip, &twin).unwrap();
-    assert!(!in_archive_entry(&twin, &zip, false));
+    std::fs::hard_link(&zip, cat.join("Copy.zip")).unwrap();
+    assert_eq!(spelled_on_disk(&base, &zip), Some(zip.clone()));
+    let asked = base.join("VEHICLES").join("FS25_Foo.zip");
+    let expect = folds_case(&cat).then(|| zip.clone());
+    assert_eq!(spelled_on_disk(&base, &asked), expect);
+    assert_eq!(spelled_on_disk(&base, &cat.join("FS25_Bar.zip")), None);
+    assert_eq!(spelled_on_disk(&cat, &base.join("x.zip")), None);
     let _ = std::fs::remove_dir_all(&base);
 }
 

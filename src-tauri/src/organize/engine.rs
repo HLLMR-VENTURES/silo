@@ -409,6 +409,19 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
     // archived files being unrecognized (#410).
     match cleanup_empty_archive(&layout.archive, true) {
         Ok(leftover) => {
+            // Each entry as spelled on disk, so a leftover listed under the folder's real
+            // spelling matches it (looked up only when something was left).
+            let reported: Vec<(PathBuf, bool)> = if leftover.is_empty() {
+                Vec::new()
+            } else {
+                reported
+                    .into_iter()
+                    .map(|(entry, is_dir)| {
+                        let spelled = spelled_on_disk(&layout.archive, &entry);
+                        (spelled.unwrap_or(entry), is_dir)
+                    })
+                    .collect()
+            };
             for p in leftover.into_iter().filter(|p| {
                 !reported
                     .iter()
@@ -427,35 +440,41 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
 }
 
 /// Whether `path` is the archive entry `entry`, or a file inside it when it's a folder mod's
-/// (`is_dir`; a zip mod's entry owns nothing below it). The part of `path` at `entry`'s depth
-/// must be spelled the same, or be the same entry on disk (`scratch::entry_number`, never
-/// following a link) under a name that differs only as a case-insensitive filesystem allows
-/// (case, how an accent is encoded). So a renamed casing matches where the filesystem finds the
-/// entry under it (NTFS, APFS), and a second file that differs only in case, in a case-sensitive
-/// folder, doesn't.
+/// (`is_dir`; a zip mod's entry owns nothing below it). Compared as spelled: pass the entry as
+/// [`spelled_on_disk`] finds it.
 pub(crate) fn in_archive_entry(path: &Path, entry: &Path, is_dir: bool) -> bool {
-    let depth = entry.components().count();
-    let mut rest = path.components();
-    let head: PathBuf = rest.by_ref().take(depth).collect();
-    if head.components().count() != depth || (!is_dir && rest.next().is_some()) {
-        return false;
+    path == entry || (is_dir && path.starts_with(entry))
+}
+
+/// `entry` (a path under `archive`) spelled as its folders list it. A name listed exactly is
+/// itself, even beside one that differs only in case (a case-sensitive folder: two entries). A
+/// name not listed but found anyway (NTFS and APFS ignore case and, on APFS, how an accent is
+/// encoded) is the listed name that differs only that way and is the same entry on disk
+/// (`scratch::entry_number`, never following a link). `None` when a part can't be listed or
+/// found.
+pub(crate) fn spelled_on_disk(archive: &Path, entry: &Path) -> Option<PathBuf> {
+    let mut cur = archive.to_path_buf();
+    for part in entry.strip_prefix(archive).ok()?.components() {
+        let name = part.as_os_str();
+        let listed: Vec<std::ffi::OsString> = std::fs::read_dir(&cur)
+            .ok()?
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect();
+        if listed.iter().any(|n| n == name) {
+            cur.push(name);
+            continue;
+        }
+        let found = crate::scratch::entry_number(&cur.join(name))?;
+        let wanted = name.to_string_lossy();
+        let spelled = listed.into_iter().find(|n| {
+            let n_str = n.to_string_lossy();
+            (crate::fold_file_name(&n_str) == crate::fold_file_name(&wanted)
+                || n_str.to_uppercase() == wanted.to_uppercase())
+                && crate::scratch::entry_number(&cur.join(n)) == Some(found)
+        })?;
+        cur.push(spelled);
     }
-    if head == entry {
-        return true;
-    }
-    let same_names = head.components().zip(entry.components()).all(|(a, b)| {
-        let (a, b) = (
-            a.as_os_str().to_string_lossy(),
-            b.as_os_str().to_string_lossy(),
-        );
-        crate::fold_file_name(&a) == crate::fold_file_name(&b)
-            || a.to_uppercase() == b.to_uppercase()
-    });
-    same_names
-        && matches!(
-            (crate::scratch::entry_number(&head), crate::scratch::entry_number(entry)),
-            (Some(x), Some(y)) if x == y
-        )
+    Some(cur)
 }
 
 /// Remove each category folder Silo filed into under `archive`, but only if it is empty.
