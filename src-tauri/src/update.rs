@@ -235,7 +235,7 @@ fn swap_with(
         out.relinked = Some(flat);
     }
     // e. Keep the previous version in backups.
-    match keep_backup(&old, mods_root, &name) {
+    match keep_backup(&old, mods_root, &name, policy) {
         Ok(b) => out.backup = Some(b),
         Err(e) => out.problems.push(format!(
             "{name} was updated, but {}",
@@ -279,9 +279,15 @@ fn undo_swap(dest: &Path, part: &Path, old: &Path, name: &str, e: &std::io::Erro
 }
 
 /// Move the set-aside `old` into `<mods_root>/backups/` and prune that mod's older backups.
-fn keep_backup(old: &Path, mods_root: &Path, name: &str) -> std::io::Result<PathBuf> {
+fn keep_backup(
+    old: &Path,
+    mods_root: &Path,
+    name: &str,
+    policy: &LinkPolicy,
+) -> std::io::Result<PathBuf> {
     let bak = organize::update_backup_path(mods_root, name)?;
-    organize::move_path_as(old, &bak, "backup")?;
+    // A cross-drive move is a full copy: asked for room first, like every copy a move makes.
+    organize::move_path_checked(old, &bak, "backup", policy.room_check())?;
     prune_backups(&mods_root.join("backups"), name, KEEP_BACKUPS);
     Ok(bak)
 }
@@ -418,7 +424,7 @@ fn finish_or_roll_back(
             if !take_turn(old, attempt) {
                 return;
             }
-            match keep_backup(old, mods_root, name) {
+            match keep_backup(old, mods_root, name, policy) {
                 Ok(b) => {
                     turn_done(old);
                     out.notices.push(format!(
@@ -465,7 +471,7 @@ fn finish_or_roll_back(
             return;
         }
     }
-    match keep_backup(old, mods_root, name) {
+    match keep_backup(old, mods_root, name, policy) {
         Ok(b) => {
             turn_done(old);
             out.notices.push(format!(
@@ -546,9 +552,10 @@ pub(crate) fn layout_dirs(layout: &organize::Layout) -> Vec<PathBuf> {
 }
 
 /// Keep the `keep` newest update backups of `file_name` in `backups` (named
-/// `<file_name>.<unix_secs>[-n].update.bak`); remove older ones, and the half-copied
-/// `.<file_name>.….update.bak.silo-tmp` a stopped cross-drive move leaves. Never touches anything
-/// else there, including the `.bak` files adopt/restore keep.
+/// `<file_name>.<unix_secs>[-n].update.bak`); remove older ones. A half-copied
+/// `.<file_name>.….silo-tmp` a stopped cross-drive move left is logged and left in place: Silo
+/// can't prove from its name alone that it made it (#394). Never touches anything else there,
+/// including the `.bak` files adopt/restore keep.
 pub fn prune_backups(backups: &Path, file_name: &str, keep: usize) {
     let Ok(entries) = std::fs::read_dir(backups) else {
         return;
@@ -566,8 +573,11 @@ pub fn prune_backups(backups: &Path, file_name: &str, keep: usize) {
             .strip_prefix(&tmp_prefix)
             .and_then(|s| s.strip_suffix(&tmp_suffix))
         {
-            if backup_order(stamp).is_some() && std::fs::remove_file(e.path()).is_ok() {
-                crate::fslog::changed("prune", &e.path());
+            if backup_order(stamp).is_some() {
+                log::warn!(
+                    "left {} in place: it looks like an older version's half-copied backup",
+                    e.path().display()
+                );
             }
             continue;
         }
@@ -1156,7 +1166,7 @@ mod tests {
         }
         // Same second as t=5: the `-2` one is newer still.
         std::fs::write(backups.join("FS25_A.zip.5-2.update.bak"), b"x").unwrap();
-        // A half-copied backup from a stopped cross-drive move: removed.
+        // An older version's half-copied backup (a fixed name): left in place (#394).
         std::fs::write(backups.join(".FS25_A.zip.6.update.bak.silo-tmp"), b"half").unwrap();
         // Not update backups of this mod: never touched.
         std::fs::write(backups.join("FS25_A.zip.1.bak"), b"user's own").unwrap();
@@ -1172,6 +1182,7 @@ mod tests {
         assert_eq!(
             left,
             vec![
+                ".FS25_A.zip.6.update.bak.silo-tmp",
                 ".FS25_B.zip.1.update.bak.silo-tmp",
                 "FS25_A.zip.1.bak",
                 "FS25_A.zip.4.update.bak",

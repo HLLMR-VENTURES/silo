@@ -131,7 +131,6 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
         let link = root.join(&row.file_name);
         let src = archive_path(&layout.archive, &row.category, &row.file_name);
         let want = active.contains(&row.tech_name);
-        sweep_copy_temp(&link);
         // A link into a folder that's gone (a re-pointed archive's old drive) would otherwise
         // count as "already linked" and the mod could never be activated or parked again.
         let stale = match remove_dangling_link(&link) {

@@ -41,13 +41,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Switching mods folders now clears messages about the folder you left. (#396)
-- Moving your library archive, and re-linking mods in your mods folder, no longer delete Silo's
-  temporary files just by their name. Each temporary file now has a name of its own, Silo notes
-  it before making it, and it only removes the ones it noted, once it has checked that they
-  aren't the only copy of a mod. If Silo stopped partway through deleting a mod's old copy and
-  the new copy was then lost, resuming the move now puts the old copy back instead of deleting
-  it. Temporary files left by older versions of Silo are left where they are and noted in the
-  log. (#394)
+- Moving your library archive, organizing, re-linking mods in your mods folder and mod
+  updates no longer delete Silo's temporary files just by their name. Each temporary file now
+  has a name of its own, and Silo only removes one once it has checked that it isn't the only
+  copy of anything. If Silo stopped partway through deleting a mod's old copy and the new copy
+  was then lost, resuming the move now puts the old copy back instead of deleting it. Before a
+  move deletes a mod's old copy, it now compares every byte of the new copy and makes sure the
+  new copy is saved to disk. Temporary files left by older versions of Silo are left where they
+  are and noted in the log. (#394)
 - When a move re-points a folder mod's link in your mods folder, the new link is made first and
   then swapped in, so the mod is never without a link on macOS and Linux. On Windows the old link
   still goes first; if Silo stops in between, resuming the move makes the link again. (#394)

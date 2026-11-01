@@ -187,7 +187,7 @@ fn relink_over(
             Ok(())
         }
         Err(e) => {
-            discard_relink_tmp(journal, &tmp);
+            discard_relink_tmp(journal, &tmp, src, "zip");
             Err(e)
         }
     }
@@ -229,22 +229,23 @@ fn settle_relink_tmp(journal: Option<&dyn crate::scratch::Journal>, tmp: &Path) 
     }
 }
 
-/// Remove a temp Silo just made (a link, or a copy of the archived mod), then drop its record.
-/// One that can't be removed stays recorded for a later sweep.
-fn discard_relink_tmp(journal: Option<&dyn crate::scratch::Journal>, tmp: &Path) {
-    let removed = match tmp.symlink_metadata() {
-        Ok(m) if m.file_type().is_symlink() => {
-            std::fs::remove_file(tmp).or_else(|_| std::fs::remove_dir(tmp))
-        }
-        // A folder is only ever Silo's marked copy here; `remove_link` checks it's untouched.
-        Ok(m) if m.is_dir() => remove_link(tmp),
-        Ok(_) => std::fs::remove_file(tmp),
-        Err(_) => Ok(()),
+/// Remove a temp Silo just made (a link to `from`, or a copy of it), with the same proof a
+/// sweep needs (`scratch::discard`): a link holds no data; a copy goes only while `from` still
+/// holds every byte of it. Anything else is kept, and stays recorded for a later sweep.
+fn discard_relink_tmp(
+    journal: Option<&dyn crate::scratch::Journal>,
+    tmp: &Path,
+    from: &Path,
+    kind: &str,
+) {
+    let e = crate::scratch::Entry {
+        path: tmp.to_path_buf(),
+        role: crate::scratch::Role::RelinkTmp,
+        from: from.to_path_buf(),
+        to: tmp.to_path_buf(),
+        kind: kind.to_string(),
     };
-    if let Err(e) = removed {
-        log::warn!("couldn't remove {}: {e}", tmp.display());
-    }
-    settle_relink_tmp(journal, tmp);
+    crate::scratch::discard(journal, &e);
 }
 
 /// Atomically swap a zip's mods-folder entry `link` for a new link to `dst` (hardlink →
@@ -266,14 +267,14 @@ pub(crate) fn replace_zip_link(
     // A new entry that reaches no file (the copy went while it was linked) never replaces the
     // working one.
     if !std::fs::metadata(&tmp).is_ok_and(|m| m.is_file()) {
-        discard_relink_tmp(journal, &tmp);
+        discard_relink_tmp(journal, &tmp, dst, "zip");
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "the new copy of the mod isn't there",
         ));
     }
     if let Err(e) = std::fs::rename(&tmp, link) {
-        discard_relink_tmp(journal, &tmp);
+        discard_relink_tmp(journal, &tmp, dst, "zip");
         return Err(e);
     }
     settle_relink_tmp(journal, &tmp);
@@ -304,7 +305,7 @@ pub(crate) fn replace_dir_link(
         return Err(e);
     }
     if !std::fs::metadata(&tmp).is_ok_and(|m| m.is_dir()) {
-        discard_relink_tmp(journal, &tmp);
+        discard_relink_tmp(journal, &tmp, dst, "dir");
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "the new copy of the mod isn't there",
@@ -332,7 +333,7 @@ pub(crate) fn replace_dir_link(
         Ok(())
     });
     if let Err(e) = unlinked {
-        discard_relink_tmp(journal, &tmp);
+        discard_relink_tmp(journal, &tmp, dst, "dir");
         return Err(e);
     }
     match crate::paths::rename_no_replace(&tmp, link) {
@@ -342,7 +343,7 @@ pub(crate) fn replace_dir_link(
             Ok(())
         }
         Err(e) => {
-            discard_relink_tmp(journal, &tmp);
+            discard_relink_tmp(journal, &tmp, dst, "dir");
             if old.exists() {
                 let _ = make_link(old, link, "dir", policy);
             }
@@ -419,11 +420,11 @@ pub(super) fn replace_zip_link_if_linkable_with(
         }
     }
     if !reaches_a_file(&tmp) {
-        discard_relink_tmp(journal, &tmp);
+        discard_relink_tmp(journal, &tmp, dst, "zip");
         return Err(gone());
     }
     if let Err(e) = std::fs::rename(&tmp, link) {
-        discard_relink_tmp(journal, &tmp);
+        discard_relink_tmp(journal, &tmp, dst, "zip");
         return Err(e);
     }
     settle_relink_tmp(journal, &tmp);

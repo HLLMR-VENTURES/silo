@@ -53,7 +53,7 @@ pub(crate) fn make_link(
 /// [`NoRoom`]).
 pub(crate) type RoomCheck<'a> = &'a dyn Fn(&Path, &Path) -> std::io::Result<()>;
 
-fn check_room(room: Option<RoomCheck>, src: &Path, entry: &Path) -> std::io::Result<()> {
+pub(super) fn check_room(room: Option<RoomCheck>, src: &Path, entry: &Path) -> std::io::Result<()> {
     room.map_or(Ok(()), |r| r(src, entry))
 }
 
@@ -116,6 +116,11 @@ impl<'a> LinkPolicy<'a> {
     pub(crate) fn with_room_check(mut self, room: RoomCheck<'a>) -> Self {
         self.room = Some(room);
         self
+    }
+
+    /// What to ask before a full copy, if anything (`with_room_check`).
+    pub(crate) fn room_check(&self) -> Option<RoomCheck<'a>> {
+        self.room
     }
 
     /// The journal relink temps are recorded in, if any.

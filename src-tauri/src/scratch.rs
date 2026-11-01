@@ -277,6 +277,54 @@ fn covered_by(part: &Path, whole: &Path, cover: Cover, skip: Option<&str>) -> bo
     distinct(part, whole) && walk(part, part, whole, cover, skip)
 }
 
+/// `copy` holds nothing that isn't also in `of`: a file whose every byte is at the same offset
+/// in `of` (a copy that stopped part-way is a prefix), or a folder whose every file is (Silo's
+/// marker in a marked copy aside). What a failed copy's temp must be before it's removed.
+pub(crate) fn redundant_copy(copy: &Path, of: &Path) -> bool {
+    match copy.symlink_metadata() {
+        Ok(m) if m.file_type().is_symlink() => false,
+        Ok(m) if m.is_dir() => {
+            real_copy(of, "dir")
+                && covered_by(copy, of, Cover::Prefix, Some(crate::organize::SILO_MARKER))
+        }
+        Ok(_) => real_copy(of, "zip") && prefix_of(copy, of),
+        Err(_) => false,
+    }
+}
+
+/// Every byte of `part` is in `whole`: the same bytes for a file, and for a folder every file
+/// at the same place with the same bytes. What an original must be before it's deleted.
+pub(crate) fn held_by(part: &Path, whole: &Path) -> bool {
+    match part.symlink_metadata() {
+        Ok(m) if m.file_type().is_symlink() => false,
+        Ok(m) if m.is_dir() => {
+            real_copy(whole, "dir") && covered_by(part, whole, Cover::Exact, None)
+        }
+        Ok(_) => real_copy(whole, "zip") && same_bytes(part, whole),
+        Err(_) => false,
+    }
+}
+
+/// Clean up a scratch entry right after the operation that made it failed: the same proof as
+/// [`sweep_where`], so it's removed only when redundant; otherwise it's kept (and stays
+/// recorded in `journal`, when there is one, for a later sweep).
+pub(crate) fn discard(journal: Option<&dyn Journal>, e: &Entry) -> Swept {
+    let s = sweep_one(e);
+    if let Some(j) = journal {
+        if s != Swept::Kept {
+            j.forget(&e.path);
+        }
+    }
+    if s == Swept::Kept {
+        log::warn!(
+            "kept {}: Silo couldn't prove it's safe to remove (from {})",
+            e.path.display(),
+            e.from.display()
+        );
+    }
+    s
+}
+
 /// [`sweep_where`] over every entry.
 #[cfg(test)]
 pub(crate) fn sweep(journal: &dyn Journal) -> Vec<(Entry, Swept)> {
@@ -837,6 +885,30 @@ pub(crate) mod tests {
             same_bytes(&f, &h),
             "a second name of the same file is a distinct name"
         );
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    /// A copy that failed is cleaned up with the same proof as a sweep: one whose original
+    /// changed while it was copied is kept (it may be all that's left of what was there).
+    #[test]
+    fn a_failed_copy_is_removed_only_while_its_original_holds_it() {
+        let b = base("discard");
+        let src = b.join("FS25_A.zip");
+        std::fs::write(&src, b"PK version B").unwrap();
+        let tmp = unique_beside(&b.join("new.zip"), MOVE_TMP);
+        std::fs::write(&tmp, b"PK version A").unwrap();
+        let e = entry(&tmp, Role::MoveTmp, &src, &b.join("new.zip"), "zip");
+        let j = MemJournal::default();
+        j.record(&e).unwrap();
+        assert_eq!(discard(Some(&j), &e), Swept::Kept);
+        assert!(tmp.exists() && j.entries().len() == 1);
+        std::fs::write(&src, b"PK version A, whole").unwrap();
+        assert_eq!(discard(Some(&j), &e), Swept::Removed);
+        assert!(!tmp.exists() && j.entries().is_empty());
+        // `held_by` (an original before it's deleted) wants every byte, not a prefix.
+        let part = b.join("part.zip");
+        std::fs::write(&part, b"PK version A").unwrap();
+        assert!(redundant_copy(&part, &src) && !held_by(&part, &src));
         let _ = std::fs::remove_dir_all(&b);
     }
 }

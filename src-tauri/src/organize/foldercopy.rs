@@ -55,17 +55,19 @@ pub(super) fn listing_of(dir: &Path) -> std::io::Result<Vec<ListedFile>> {
 /// Copy a directory as a projection and drop the ownership marker, so a later flatten /
 /// deactivate can prove Silo created it (a copied dir has no link identity to compare). The
 /// marker lists the copy's own files as written, so later edits can be detected. The copy is
-/// built and flushed under a Silo temp sibling (`.{name}.silo-tmp`), marker included, and only
-/// then renamed to `dst`: a copy that stops part-way never leaves a partial mod under its real
-/// name, and a failed copy removes its temp. Never merges into an existing `dst`.
+/// built and flushed under a new Silo temp sibling (`.{name}.<token>.silo-tmp`), marker included,
+/// and only then renamed to `dst`: a copy that stops part-way never leaves a partial mod under
+/// its real name, and a failed copy removes its temp once it's proven redundant
+/// (`discard_copy`). Never merges into an existing `dst`.
 pub(crate) fn copy_dir_projection(src: &Path, dst: &Path) -> std::io::Result<()> {
     if dst.symlink_metadata().is_ok() {
         return Err(std::io::ErrorKind::AlreadyExists.into());
     }
     let tmp = tmp_sibling(dst);
-    remove_path(&tmp)?; // a stale temp from a copy that was cut off
+    // Made exclusively: a temp name that's somehow taken is left alone.
+    std::fs::create_dir(&tmp)?;
     if let Err(e) = build_dir_copy(src, &tmp).and_then(|()| place_new(&tmp, dst)) {
-        let _ = remove_path(&tmp);
+        discard_copy(&tmp, src);
         return Err(e);
     }
     crate::fslog::moved("copy", src, dst);

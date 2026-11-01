@@ -222,7 +222,7 @@ fn link_inside(p: &Path) -> String {
     )
 }
 
-/// Copy a file in chunks, giving up (and deleting the partial) when `abort()` turns true. The
+/// Copy a file in chunks, giving up (the caller removes the partial) when `abort()` turns true. The
 /// copy keeps the original's modified time, so a moved mod keeps its date (and the scan cache,
 /// keyed by path+mtime+size, isn't fooled into thinking it changed).
 fn copy_file_abortable(src: &Path, dst: &Path, abort: &dyn Fn() -> bool) -> Result<(), StepErr> {
@@ -233,8 +233,7 @@ fn copy_file_abortable(src: &Path, dst: &Path, abort: &dyn Fn() -> bool) -> Resu
     let mut buf = vec![0u8; 1 << 20];
     loop {
         if abort() {
-            drop(w);
-            let _ = std::fs::remove_file(dst);
+            // The partial copy is the caller's to clean up, once it's proven redundant.
             return Err(StepErr::Interrupted);
         }
         let n = r.read(&mut buf).map_err(io)?;
@@ -414,7 +413,18 @@ fn copy_verify_place(
     }
     let res = copy_to_temp_and_place(src, &tmp, dst, kind, abort);
     if res.is_err() {
-        let _ = remove_any(&tmp);
+        // Removed only while the original still holds every byte of it (the original could
+        // have changed mid-copy); otherwise kept and recorded for a later sweep.
+        scratch::discard(
+            Some(&journal),
+            &scratch::Entry {
+                path: tmp.clone(),
+                role: scratch::Role::MoveTmp,
+                from: src.to_path_buf(),
+                to: dst.to_path_buf(),
+                kind: kind.to_string(),
+            },
+        );
     }
     // Placed (renamed, or hardlinked and dropped) or removed: the record goes. A temp still
     // there stays recorded for `scratch::sweep_where`.
@@ -500,8 +510,9 @@ fn delete_source(
     Ok(())
 }
 
-/// Flush a placed copy and every folder entry its placement made (inside a folder mod, and up to
-/// the archive `root`) to disk.
+/// Flush a placed copy and every folder entry its placement made to disk: inside a folder mod,
+/// up to the archive `root`, and every folder above it (the move may have created the archive
+/// folder itself, and folders above it).
 fn make_durable(p: &Path, root: &Path) -> std::io::Result<()> {
     fn subdirs(dir: &Path) -> std::io::Result<()> {
         for e in std::fs::read_dir(dir)? {
@@ -516,7 +527,11 @@ fn make_durable(p: &Path, root: &Path) -> std::io::Result<()> {
     if p.symlink_metadata()?.is_dir() {
         subdirs(p)?;
     }
-    organize::sync_placement(p, Some(root))
+    organize::sync_placement(p, Some(root))?;
+    for dir in root.ancestors().skip(1) {
+        organize::sync_dir(dir)?;
+    }
+    Ok(())
 }
 
 /// Keep an active mod's mods-folder entry valid as its archived copy moves from `src` to `dst`:
