@@ -2172,4 +2172,25 @@ mod tests {
         assert!(served < MAX_REDIRECTS, "served {served}");
         assert!(took < Duration::from_millis(1500), "took {took:?}");
     }
+
+    #[test]
+    fn a_slow_first_check_does_not_use_up_the_fetch_cap() {
+        // The cap counts from the first request: a check slower than the whole cap, then a
+        // prompt answer, is a success (a deadline set before the check would already be spent).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve(listener, vec![answer("200 OK", "", "ok")]);
+        let cap = Some(Duration::from_millis(300));
+        let g = GuardedAgent {
+            agent: build_agent(Duration::from_millis(500), Duration::from_millis(500), cap),
+            overall: cap,
+        };
+        let slow_check = |u: &Url| {
+            std::thread::sleep(Duration::from_millis(500));
+            allow_loopback(u)
+        };
+        let resp = get_guarded(&g, &format!("http://{addr}/a.zip"), &slow_check, None).unwrap();
+        assert_eq!(resp.into_string().unwrap(), "ok");
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
 }
