@@ -3020,7 +3020,11 @@ fn try_move_lock() -> Result<MoveLock, String> {
             // running to receive) only once the lock is ours, and only then announce the move —
             // a cancel that sees the flag from here on is sent to this move and kept.
             relocate::requests().store(0, std::sync::atomic::Ordering::SeqCst);
-            MOVE_HOLDS_LOCK.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Not while Play is starting the game (#415); then announced, under the launch gate.
+            if let Err(e) = admit_move() {
+                drop(g);
+                return Err(e);
+            }
             Ok(MoveLock { _guard: g })
         }
         None if move_in_progress() => Err(MOVE_LOCK_HELD.into()),
@@ -5747,38 +5751,118 @@ fn unreachable_in(
     Ok(relocate::unreachable_mods(mods, &rows))
 }
 
-/// How long after Silo asks FS25 to start an archive move still won't start or resume, unless
-/// the game has shown up (and so is checked directly) by then (#415). The game takes a few
-/// seconds to appear, longer through Steam.
+/// How long after Silo started FS25 an archive move still won't start or resume, unless the
+/// game has shown up (and so is checked directly) by then (#415). The game takes a few seconds
+/// to appear, longer through Steam.
 const LAUNCH_GRACE_MS: u64 = 30_000;
 
-/// When Silo last asked FS25 to start, as ms since `launch_clock()` plus one (0: not pending).
-/// SeqCst with `MOVE_HOLDS_LOCK`: Play marks this before it checks for a move, and a move
-/// raises that flag before it checks for the game, so of a Play and a Resume at once at least
-/// one sees the other and refuses.
-static LAUNCH_PENDING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Who may go between a launch and an archive move (#415): one short-lived lock arbitrates a
+/// Play starting and a move being admitted, so they never overlap.
+/// - A Play is admitted (`begin_launch`) only while no move is (`move_in_progress`, read under
+///   this lock); it stays in flight, with no deadline, through its checks and the start itself.
+/// - A move is admitted (`admit_move`, which raises `MOVE_HOLDS_LOCK` under this lock) only
+///   with no Play in flight and none started in the last `LAUNCH_GRACE_MS`.
+/// - Only a start that went out (`end_launch(true)`) sets that deadline; a refused Play leaves
+///   an earlier start's deadline as it was.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct LaunchGate {
+    /// Plays admitted and not yet finished.
+    in_flight: u32,
+    /// When the last start went out (`launch_clock` ms), until the game shows up or the grace
+    /// passes.
+    started: Option<u64>,
+}
+
+impl LaunchGate {
+    /// Admit a Play unless a move is admitted (`moving`). Pure.
+    fn begin_launch(&mut self, moving: bool) -> bool {
+        if moving {
+            return false;
+        }
+        self.in_flight += 1;
+        true
+    }
+
+    /// A Play admitted by `begin_launch` is done; `started`: the game start went out at `now`.
+    fn end_launch(&mut self, started: bool, now: u64) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        if started {
+            self.started = Some(now);
+        }
+    }
+
+    /// A launch is starting or was started moments ago (`LAUNCH_GRACE_MS`).
+    fn launching(&self, now: u64) -> bool {
+        self.in_flight > 0
+            || self
+                .started
+                .is_some_and(|t| now.saturating_sub(t) < LAUNCH_GRACE_MS)
+    }
+}
+
+static LAUNCH_GATE: std::sync::Mutex<LaunchGate> = std::sync::Mutex::new(LaunchGate {
+    in_flight: 0,
+    started: None,
+});
+
+fn launch_gate() -> std::sync::MutexGuard<'static, LaunchGate> {
+    LAUNCH_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 fn launch_clock() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     let start = *START.get_or_init(std::time::Instant::now);
-    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX - 1)
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Pure: a launch marked at `marked` (`LAUNCH_PENDING`'s value) is still pending at `now`.
-fn launch_pending_at(marked: u64, now: u64) -> bool {
-    marked != 0 && now.saturating_sub(marked - 1) < LAUNCH_GRACE_MS
+/// Refused move admission while a launch is starting (`LaunchGate::launching`).
+const LAUNCH_STARTING: &str = "Close Farming Simulator 25 first. Silo won't move mods while \
+     the game is starting or using them. If it didn't start, try again in half a minute.";
+
+/// Admit an archive move (#415): raise `MOVE_HOLDS_LOCK` under the launch gate, unless a Play
+/// is in flight or just started the game. The caller holds the library write lock.
+fn admit_move() -> Result<(), String> {
+    let gate = launch_gate();
+    if gate.launching(launch_clock()) {
+        return Err(LAUNCH_STARTING.into());
+    }
+    MOVE_HOLDS_LOCK.store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+/// A Play admitted through the launch gate; `started` records that the start went out. Dropped
+/// without it (a refusal, an error, a panic), the Play is simply done.
+struct LaunchTicket {
+    started: bool,
+}
+
+impl LaunchTicket {
+    /// Admit a Play, or refuse it (`MOVE_RUNNING`) while a move is admitted.
+    fn take() -> Result<LaunchTicket, error::AppError> {
+        if launch_gate().begin_launch(move_in_progress()) {
+            return Ok(LaunchTicket { started: false });
+        }
+        Err(move_play_gate(true, Ok(Vec::new()), true).expect_err("refused while a move is"))
+    }
+}
+
+impl Drop for LaunchTicket {
+    fn drop(&mut self) {
+        launch_gate().end_launch(self.started, launch_clock());
+    }
 }
 
 /// What an archive move takes for "the game is running" (`RunCtx::game_running`): FS25 is, or
-/// Silo asked it to start moments ago and it hasn't shown up yet (`LAUNCH_GRACE_MS`). Once seen
-/// running, the launch is no longer pending: from then on the game is checked directly.
+/// Silo started it moments ago and it hasn't shown up yet (`LaunchGate::launching`). Once seen
+/// running, the start's deadline goes: from then on the game is checked directly.
 fn game_running_for_move() -> bool {
-    use std::sync::atomic::Ordering::SeqCst;
     if gamelaunch::fs25_running() {
-        LAUNCH_PENDING.store(0, SeqCst);
+        launch_gate().started = None;
         return true;
     }
-    launch_pending_at(LAUNCH_PENDING.load(SeqCst), launch_clock())
+    launch_gate().launching(launch_clock())
 }
 
 /// Start FS25. `check_profile`: refuse unless the FS25 profile that would start is
@@ -5811,19 +5895,11 @@ async fn launch_game(
         if !modsroot::resolved() {
             return Err(STILL_LOADING.into());
         }
-        // A running move refuses at once, unmarked: the mark would pause it (`game_running_for_move`).
-        move_play_gate(move_in_progress(), Ok(Vec::new()), true)?;
-        // Then marked before looking again (see `LAUNCH_PENDING`): a Resume or Cancel from here on
-        // refuses as if the game ran, and one that got in first is seen. Unmarked if refused.
-        use std::sync::atomic::Ordering::SeqCst;
-        LAUNCH_PENDING.store(launch_clock() + 1, SeqCst);
-        let refused = |e: error::AppError| {
-            LAUNCH_PENDING.store(0, SeqCst);
-            e
-        };
-        // A move first (no need to look at the mods then), then what a paused one left.
-        let moving = move_in_progress();
-        let unreachable = if moving || play_anyway.unwrap_or(false) {
+        // Admitted through the launch gate (refused while a move is admitted); from here until
+        // it's done, and for a while after a start, no move is admitted (`LaunchGate`).
+        let mut ticket = LaunchTicket::take()?;
+        // No move can be admitted now; what a paused one left.
+        let unreachable = if play_anyway.unwrap_or(false) {
             Ok(Vec::new())
         } else {
             paused_move_unreachable(&db)
@@ -5837,17 +5913,19 @@ async fn launch_game(
                 );
             }
         }
-        move_play_gate(moving, unreachable, play_anyway.unwrap_or(false)).map_err(refused)?;
+        move_play_gate(false, unreachable, play_anyway.unwrap_or(false))?;
         let game_profile = gameprofile::active();
         if check_profile.unwrap_or(false)
             && launch_profile_mismatch(game_profile.as_deref(), expected_profile.as_deref())
         {
-            return Err(refused(PROFILE_CHANGED.into()));
+            return Err(PROFILE_CHANGED.into());
         }
         if play_anyway.unwrap_or(false) {
             log::warn!("play: Play anyway, past the paused archive move's link check");
         }
-        gamelaunch::launch(game_profile.as_deref()).map_err(|e| refused(error::AppError::from(e)))
+        gamelaunch::launch(game_profile.as_deref()).map_err(error::AppError::from)?;
+        ticket.started = true;
+        Ok(())
     })
     .await
     .map_err(|e| error::AppError::from(e.to_string()))?
@@ -10956,16 +11034,34 @@ mod tests {
         assert_eq!(reads(None, None, None), None);
     }
 
-    /// A launch Silo just asked for counts as the game running for a move, for a while.
+    /// The launch gate (#415): a Play and a move never overlap, whatever the order.
     #[test]
-    fn a_move_waits_for_a_launch_that_hasnt_shown_up_yet() {
-        let grace = super::LAUNCH_GRACE_MS;
-        assert!(!super::launch_pending_at(0, 5));
-        assert!(super::launch_pending_at(1, 0));
-        assert!(super::launch_pending_at(101, 100 + grace - 1));
-        assert!(!super::launch_pending_at(101, 100 + grace));
-        // A clock read before the mark (another thread) is still pending, never an underflow.
-        assert!(super::launch_pending_at(101, 50));
+    fn a_play_and_an_archive_move_are_never_admitted_together() {
+        use super::{LaunchGate, LAUNCH_GRACE_MS as G};
+        let mut g = LaunchGate::default();
+        assert!(!g.launching(0));
+        // A move admitted first: Play is refused and publishes nothing a move could see.
+        assert!(!g.begin_launch(true));
+        assert_eq!(g, LaunchGate::default());
+        // Play in flight: no move, however long its checks take (no deadline yet).
+        assert!(g.begin_launch(false));
+        assert!(g.launching(10 * G));
+        // Refused (nothing started): moves are admitted again at once.
+        g.end_launch(false, 10 * G);
+        assert!(!g.launching(10 * G));
+        // Started: no move for the grace from the start, not from when Play was pressed.
+        assert!(g.begin_launch(false));
+        g.end_launch(true, 100);
+        assert!(g.launching(100 + G - 1));
+        assert!(!g.launching(100 + G));
+        // Play again moments later, refused (the game is still starting): the first start's
+        // deadline stands.
+        assert!(g.begin_launch(false));
+        g.end_launch(false, 200);
+        assert!(g.launching(100 + G - 1), "{g:?}");
+        assert!(!g.launching(100 + G));
+        // A clock read from another thread a moment before the start never underflows.
+        assert!(g.launching(50));
     }
 
     #[test]
