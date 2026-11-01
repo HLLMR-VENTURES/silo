@@ -1070,14 +1070,15 @@ pub fn record_catalog_alias(conn: &Connection, row: &CatalogAliasRow) -> Result<
 }
 
 /// Every catalog alias recorded for a zip named `tech_name` (one per build installed), newest
-/// first. Empty when there are none or the table can't be read.
-pub fn catalog_aliases(conn: &Connection, tech_name: &str) -> Vec<CatalogAliasRow> {
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT tech_name, archive_sha256, size, catalog_id, catalog_tech_name, download_url
-         FROM catalog_alias WHERE tech_name = ?1 ORDER BY created_at DESC",
-    ) else {
-        return Vec::new();
-    };
+/// first. An error when the table or a row can't be read: a link that can't be checked must
+/// not read as no link.
+pub fn catalog_aliases(conn: &Connection, tech_name: &str) -> Result<Vec<CatalogAliasRow>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT tech_name, archive_sha256, size, catalog_id, catalog_tech_name, download_url
+             FROM catalog_alias WHERE tech_name = ?1 ORDER BY created_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
     let rows = stmt.query_map([tech_name], |r| {
         Ok(CatalogAliasRow {
             tech_name: r.get(0)?,
@@ -1088,7 +1089,8 @@ pub fn catalog_aliases(conn: &Connection, tech_name: &str) -> Vec<CatalogAliasRo
             download_url: r.get(5)?,
         })
     });
-    rows.map(|r| r.flatten().collect()).unwrap_or_default()
+    rows.and_then(|r| r.collect::<rusqlite::Result<Vec<_>>>())
+        .map_err(|e| e.to_string())
 }
 
 /// Remove the catalog alias for this zip name and hash, if there is one.
@@ -1948,7 +1950,9 @@ mod tests {
         let conn = open(&path).unwrap();
         assert_eq!(schema_version(&conn).unwrap(), 4);
         assert_eq!(load_sources(&conn).len(), 1, "the library is kept");
-        assert!(catalog_aliases(&conn, "FS25_FieldToDoList").is_empty());
+        assert!(catalog_aliases(&conn, "FS25_FieldToDoList")
+            .unwrap()
+            .is_empty());
 
         let row = CatalogAliasRow {
             tech_name: "FS25_FieldToDoList".into(),
@@ -1967,14 +1971,16 @@ mod tests {
             ..row.clone()
         };
         record_catalog_alias(&conn, &other).unwrap();
-        let rows = catalog_aliases(&conn, "FS25_FieldToDoList");
+        let rows = catalog_aliases(&conn, "FS25_FieldToDoList").unwrap();
         assert_eq!(rows.len(), 2);
         let first = rows.iter().find(|r| r.archive_sha256 == "abcd").unwrap();
         assert_eq!(first.catalog_id, "cat-todo", "the hash is kept lowercase");
         assert_eq!(first.catalog_tech_name.as_deref(), Some("FS25_ToDo"));
         assert_eq!(first.size, 10);
         assert!(first.download_url.is_some());
-        assert!(catalog_aliases(&conn, "FS25_fieldtodolist").is_empty());
+        assert!(catalog_aliases(&conn, "FS25_fieldtodolist")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

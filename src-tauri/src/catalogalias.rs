@@ -4,14 +4,16 @@
 //! without `.zip`. A few catalog entries ship a file named otherwise (`FS25_ToDo` downloads as
 //! `FS25_FieldToDoList.zip`). Silo never renames a mod zip (multiplayer needs the exact bytes and
 //! the game names the mod after the file), so when Browse installs one of these it records which
-//! entry the file came from: the file's name, its whole-file SHA-256, and the entry's id. Every
-//! catalog join of a library zip (the drawer's catalog facts, update checks, Verify integrity,
-//! sharing a mod set) asks here first.
+//! entry the file came from: the file's name, its whole-file SHA-256, and the entry's id. The
+//! library's own catalog joins (the drawer's catalog facts, update checks, Verify integrity, and
+//! sharing a mod set) ask here first. Importing a shared set still goes by techName alone.
 //!
-//! The link belongs to the bytes Silo installed: it is used only when the file hashes to what was
-//! recorded. A different build under the same name (an update from elsewhere, a file swapped in
-//! by hand) has another hash and isn't linked. The recorded size only spares hashing a file that
-//! can't match.
+//! The link belongs to the bytes Silo installed under that name: it is used only when the file
+//! has its recorded name and hashes to what was recorded. A different build under the same name
+//! (an update from elsewhere, a file swapped in by hand) has another hash and isn't linked, and a
+//! renamed file isn't either. The recorded size only spares hashing a file that can't match.
+//! When the record or the file can't be read, callers get an error, never "no link": falling
+//! back to the entry with the file's name could be another mod's.
 
 use crate::db::{self, CatalogAliasRow};
 use rusqlite::Connection;
@@ -58,22 +60,56 @@ pub fn needs_alias(filename: &str, catalog_tech_name: Option<&str>) -> bool {
     catalog_tech_name.map(str::trim) != Some(stem.as_str())
 }
 
+/// How to put the record for one name and hash back as it was before `record` or `forget`
+/// changed it, when the file it was for then isn't placed after all.
+#[derive(Debug)]
+pub struct Undo {
+    tech_name: String,
+    sha256: String,
+    before: Option<CatalogAliasRow>,
+}
+
+impl Undo {
+    /// Put the record back as it was.
+    pub fn apply(self, conn: &Connection) -> Result<(), String> {
+        match &self.before {
+            Some(row) => db::record_catalog_alias(conn, row),
+            None => db::forget_catalog_alias(conn, &self.tech_name, &self.sha256),
+        }
+    }
+}
+
+/// The record for this name and hash now, to undo a change to it.
+fn undo_for(conn: &Connection, tech_name: &str, sha256: &str) -> Result<Undo, String> {
+    let before = db::catalog_aliases(conn, tech_name)?
+        .into_iter()
+        .find(|r| r.archive_sha256 == sha256);
+    Ok(Undo {
+        tech_name: tech_name.to_string(),
+        sha256: sha256.to_string(),
+        before,
+    })
+}
+
 /// Record that the zip named `tech_name` (`.zip` added) whose bytes are `size` long and hash
 /// to `sha256` came from the catalog entry `link`, replacing the record for the same name and
-/// bytes. Called before the file is placed, so a placed file always has its record. The record
-/// is for those bytes under that name wherever they are (another mods folder too).
+/// bytes. Called before the file is placed, so a placed file always has its record; the
+/// returned `Undo` restores the previous record if the file then isn't placed. The record is
+/// for those bytes under that name wherever they are (another mods folder too).
 pub fn record(
     conn: &Connection,
     tech_name: &str,
     sha256: &str,
     size: u64,
     link: &Link,
-) -> Result<(), String> {
+) -> Result<Undo, String> {
+    let sha256 = sha256.to_ascii_lowercase();
+    let undo = undo_for(conn, tech_name, &sha256)?;
     db::record_catalog_alias(
         conn,
         &CatalogAliasRow {
             tech_name: tech_name.to_string(),
-            archive_sha256: sha256.to_ascii_lowercase(),
+            archive_sha256: sha256,
             size: size as i64,
             catalog_id: link.catalog_id.clone(),
             catalog_tech_name: link
@@ -84,13 +120,20 @@ pub fn record(
                 .map(str::to_string),
             download_url: link.download_url.clone(),
         },
-    )
+    )?;
+    Ok(undo)
 }
 
 /// The catalog entry Silo installed the zip at `path` from, when the library knows it as
 /// `tech_name` (the file's own name must be that) and the file hashes to what Silo recorded.
-/// A file with no record for its name, or whose size matches none, is never hashed.
-pub fn link_for_file(conn: &Connection, tech_name: &str, path: &Path) -> Option<Link> {
+/// `Ok(None)` when there's no record for its name, no file there, or its size or hash matches
+/// none; a file with no record of its size is never hashed. An error when the record or the
+/// file can't be read.
+pub fn link_for_file(
+    conn: &Connection,
+    tech_name: &str,
+    path: &Path,
+) -> Result<Option<Link>, String> {
     link_for_file_with(conn, tech_name, path, crate::provenance::sha256_file)
 }
 
@@ -100,20 +143,29 @@ fn link_for_file_with(
     tech_name: &str,
     path: &Path,
     hash: impl Fn(&Path) -> Result<String, String>,
-) -> Option<Link> {
+) -> Result<Option<Link>, String> {
     if zip_tech_name(path).as_deref() != Some(tech_name) {
-        return None;
+        return Ok(None);
     }
-    let rows = db::catalog_aliases(conn, tech_name);
-    let meta = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    let rows = db::catalog_aliases(conn, tech_name)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let meta = match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => m,
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Silo couldn't read {}: {e}", path.display())),
+    };
     let size = meta.len() as i64;
     if !rows.iter().any(|r| r.size == size) {
-        return None;
+        return Ok(None);
     }
-    let sha = hash(path).ok()?.to_ascii_lowercase();
-    rows.iter()
+    let sha = hash(path)?.to_ascii_lowercase();
+    Ok(rows
+        .iter()
         .find(|r| r.size == size && r.archive_sha256 == sha)
-        .map(Link::from)
+        .map(Link::from))
 }
 
 /// The catalog entry Silo installed a zip from, given the file's path and its whole-file
@@ -123,26 +175,30 @@ pub fn link_for_hash(
     tech_name: &str,
     path: &Path,
     sha256: &str,
-) -> Option<Link> {
+) -> Result<Option<Link>, String> {
     if zip_tech_name(path).as_deref() != Some(tech_name) {
-        return None;
+        return Ok(None);
     }
     let sha = sha256.to_ascii_lowercase();
-    db::catalog_aliases(conn, tech_name)
+    Ok(db::catalog_aliases(conn, tech_name)?
         .iter()
         .find(|r| r.archive_sha256 == sha)
-        .map(Link::from)
+        .map(Link::from))
 }
 
 /// Whether any alias is recorded for a zip named `tech_name`.
-pub fn has_any(conn: &Connection, tech_name: &str) -> bool {
-    !db::catalog_aliases(conn, tech_name).is_empty()
+pub fn has_any(conn: &Connection, tech_name: &str) -> Result<bool, String> {
+    Ok(!db::catalog_aliases(conn, tech_name)?.is_empty())
 }
 
-/// Drop the alias of the zip named `tech_name` with these bytes: Silo installed those bytes
-/// from an entry whose techName is that name, so they need none.
-pub fn forget(conn: &Connection, tech_name: &str, sha256: &str) -> Result<(), String> {
-    db::forget_catalog_alias(conn, tech_name, &sha256.to_ascii_lowercase())
+/// Drop the alias of the zip named `tech_name` with these bytes: Silo is installing those bytes
+/// from an entry whose techName is that name, so they need none. The returned `Undo` puts it
+/// back if the file then isn't placed.
+pub fn forget(conn: &Connection, tech_name: &str, sha256: &str) -> Result<Undo, String> {
+    let sha256 = sha256.to_ascii_lowercase();
+    let undo = undo_for(conn, tech_name, &sha256)?;
+    db::forget_catalog_alias(conn, tech_name, &sha256)?;
+    Ok(undo)
 }
 
 /// The GitHub repository (`owner/repo`, lowercased) and file name of a release-asset address:
@@ -177,6 +233,19 @@ pub fn another_release_of(link: &Link, asset_url: &str) -> bool {
         release_asset(asset_url),
     ) {
         (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Whether the download at `url` is a file named exactly as `dest` (its last path segment,
+/// without query or fragment).
+pub fn url_names_file(url: &str, dest: &Path) -> bool {
+    let Ok(u) = url::Url::parse(url) else {
+        return false;
+    };
+    let last = u.path_segments().and_then(|mut s| s.next_back());
+    match (last, dest.file_name().and_then(|n| n.to_str())) {
+        (Some(a), Some(b)) => !a.is_empty() && a == b,
         _ => false,
     }
 }
@@ -267,12 +336,14 @@ mod tests {
         let dir = temp_dir("keeps");
         let conn = conn_in(&dir);
         let file = installed(&conn, &dir, "FS25_FieldToDoList", b"build one");
-        let link = link_for_file(&conn, "FS25_FieldToDoList", &file).unwrap();
+        let link = link_for_file(&conn, "FS25_FieldToDoList", &file)
+            .unwrap()
+            .unwrap();
         assert_eq!(link, todo());
         // Copied elsewhere (a new modified time): the same bytes, still linked.
         set_mtime(&file, std::time::SystemTime::UNIX_EPOCH);
         assert_eq!(
-            link_for_file(&conn, "FS25_FieldToDoList", &file),
+            link_for_file(&conn, "FS25_FieldToDoList", &file).unwrap(),
             Some(todo())
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -287,9 +358,12 @@ mod tests {
         // Same length and, put back by hand, the same modified time: only the hash differs.
         std::fs::write(&file, b"build two").unwrap();
         set_mtime(&file, when);
-        assert_eq!(link_for_file(&conn, "FS25_FieldToDoList", &file), None);
         assert_eq!(
-            link_for_hash(&conn, "FS25_FieldToDoList", &file, &sha(b"build two")),
+            link_for_file(&conn, "FS25_FieldToDoList", &file).unwrap(),
+            None
+        );
+        assert_eq!(
+            link_for_hash(&conn, "FS25_FieldToDoList", &file, &sha(b"build two")).unwrap(),
             None
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -307,14 +381,17 @@ mod tests {
             crate::provenance::sha256_file(p)
         };
         assert_eq!(
-            link_for_file_with(&conn, "FS25_FieldToDoList", &file, count),
+            link_for_file_with(&conn, "FS25_FieldToDoList", &file, count).unwrap(),
             None
         );
         assert_eq!(hashed.get(), 0);
         // A mod without an alias is never hashed either.
         let plain = dir.join("FS25_Plain.zip");
         std::fs::write(&plain, b"x").unwrap();
-        assert_eq!(link_for_file_with(&conn, "FS25_Plain", &plain, count), None);
+        assert_eq!(
+            link_for_file_with(&conn, "FS25_Plain", &plain, count).unwrap(),
+            None
+        );
         assert_eq!(hashed.get(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -325,12 +402,12 @@ mod tests {
         let conn = conn_in(&dir);
         let file = installed(&conn, &dir, "FS25_FieldToDoList", b"build one");
         // Another mod's name, or the same bytes under another file name.
-        assert_eq!(link_for_file(&conn, "FS25_Other", &file), None);
+        assert_eq!(link_for_file(&conn, "FS25_Other", &file).unwrap(), None);
         let copy = dir.join("FS25_Copy.zip");
         std::fs::copy(&file, &copy).unwrap();
-        assert_eq!(link_for_file(&conn, "FS25_Copy", &copy), None);
+        assert_eq!(link_for_file(&conn, "FS25_Copy", &copy).unwrap(), None);
         assert_eq!(
-            link_for_hash(&conn, "FS25_Copy", &copy, &sha(b"build one")),
+            link_for_hash(&conn, "FS25_Copy", &copy, &sha(b"build one")).unwrap(),
             None
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -349,12 +426,21 @@ mod tests {
         let b = two.join("FS25_FieldToDoList.zip");
         std::fs::write(&b, b"build two").unwrap();
         set_mtime(&b, std::fs::metadata(&a).unwrap().modified().unwrap());
-        assert!(link_for_file(&conn, "FS25_FieldToDoList", &a).is_some());
-        assert_eq!(link_for_file(&conn, "FS25_FieldToDoList", &b), None);
+        assert!(link_for_file(&conn, "FS25_FieldToDoList", &a)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            link_for_file(&conn, "FS25_FieldToDoList", &b).unwrap(),
+            None
+        );
         // Installed there too: each build keeps its own record.
         let b = installed(&conn, &two, "FS25_FieldToDoList", b"build two!");
-        assert!(link_for_file(&conn, "FS25_FieldToDoList", &a).is_some());
-        assert!(link_for_file(&conn, "FS25_FieldToDoList", &b).is_some());
+        assert!(link_for_file(&conn, "FS25_FieldToDoList", &a)
+            .unwrap()
+            .is_some());
+        assert!(link_for_file(&conn, "FS25_FieldToDoList", &b)
+            .unwrap()
+            .is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -398,6 +484,79 @@ mod tests {
     }
 
     #[test]
+    fn an_install_that_isnt_placed_puts_the_record_back() {
+        let dir = temp_dir("undo");
+        let conn = conn_in(&dir);
+        let file = installed(&conn, &dir, "FS25_FieldToDoList", b"build one");
+        // The same bytes from another entry, then not placed: the first entry's link is back.
+        let other = Link {
+            catalog_id: "cat-other".into(),
+            ..todo()
+        };
+        let undo = record(&conn, "FS25_FieldToDoList", &sha(b"build one"), 9, &other).unwrap();
+        let now = link_for_file(&conn, "FS25_FieldToDoList", &file)
+            .unwrap()
+            .unwrap();
+        assert_eq!(now.catalog_id, "cat-other");
+        undo.apply(&conn).unwrap();
+        assert_eq!(
+            link_for_file(&conn, "FS25_FieldToDoList", &file).unwrap(),
+            Some(todo())
+        );
+        // Forgotten, then not placed: back as well.
+        let undo = forget(&conn, "FS25_FieldToDoList", &sha(b"build one")).unwrap();
+        assert_eq!(
+            link_for_file(&conn, "FS25_FieldToDoList", &file).unwrap(),
+            None
+        );
+        undo.apply(&conn).unwrap();
+        assert_eq!(
+            link_for_file(&conn, "FS25_FieldToDoList", &file).unwrap(),
+            Some(todo())
+        );
+        // A new record with nothing before it is removed again.
+        let undo = record(&conn, "FS25_New", &sha(b"n"), 1, &todo()).unwrap();
+        assert!(has_any(&conn, "FS25_New").unwrap());
+        undo.apply(&conn).unwrap();
+        assert!(!has_any(&conn, "FS25_New").unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_that_cant_be_hashed_is_an_error_not_no_link() {
+        let dir = temp_dir("unreadable");
+        let conn = conn_in(&dir);
+        let file = installed(&conn, &dir, "FS25_FieldToDoList", b"build one");
+        let locked = |_: &Path| -> Result<String, String> { Err("in use".into()) };
+        assert!(link_for_file_with(&conn, "FS25_FieldToDoList", &file, locked).is_err());
+        // Gone is not an error: there's simply no file to link.
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(
+            link_for_file(&conn, "FS25_FieldToDoList", &file).unwrap(),
+            None
+        );
+        // An unreadable record is an error too.
+        conn.execute_batch("DROP TABLE catalog_alias").unwrap();
+        assert!(link_for_file(&conn, "FS25_FieldToDoList", &file).is_err());
+        assert!(link_for_hash(&conn, "FS25_FieldToDoList", &file, "ab").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_download_names_the_file_only_by_its_exact_name() {
+        let dest = Path::new("mods/FS25_FieldToDoList.zip");
+        assert!(url_names_file(TODO_URL, dest));
+        assert!(url_names_file(&format!("{TODO_URL}?raw=1#x"), dest));
+        let renamed = "https://github.com/k/r/releases/download/v2/FS25_FieldToDoList2.zip";
+        assert!(!url_names_file(renamed, dest));
+        assert!(!url_names_file(
+            "https://github.com/k/r/releases/download/v2/fs25_fieldtodolist.zip",
+            dest
+        ));
+        assert!(!url_names_file("not a url", dest));
+    }
+
+    #[test]
     fn forgetting_an_alias_drops_only_those_bytes() {
         let dir = temp_dir("forget");
         let conn = conn_in(&dir);
@@ -408,10 +567,15 @@ mod tests {
         let a = installed(&conn, &one, "FS25_FieldToDoList", b"build one");
         let b = installed(&conn, &two, "FS25_FieldToDoList", b"build two!");
         forget(&conn, "FS25_FieldToDoList", &sha(b"build one")).unwrap();
-        assert_eq!(link_for_file(&conn, "FS25_FieldToDoList", &a), None);
-        assert!(link_for_file(&conn, "FS25_FieldToDoList", &b).is_some());
-        assert!(has_any(&conn, "FS25_FieldToDoList"));
-        assert!(!has_any(&conn, "FS25_Plain"));
+        assert_eq!(
+            link_for_file(&conn, "FS25_FieldToDoList", &a).unwrap(),
+            None
+        );
+        assert!(link_for_file(&conn, "FS25_FieldToDoList", &b)
+            .unwrap()
+            .is_some());
+        assert!(has_any(&conn, "FS25_FieldToDoList").unwrap());
+        assert!(!has_any(&conn, "FS25_Plain").unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
