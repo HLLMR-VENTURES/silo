@@ -841,7 +841,6 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
-    let mut policy = LinkPolicy::new(layout);
     let mut categories: HashSet<String> = HashSet::new();
     for row in db::load_organized(conn, &key) {
         categories.insert(row.category.clone());
@@ -886,14 +885,6 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             }
             if let Err(e) = restored {
                 rep.errors.push(format!("{}: restore: {e}", row.tech_name));
-                // The projection was removed to free the slot: put it back, so the mod stays
-                // active as it was (an edited copy kept in backups is the user's to restore).
-                let relinked = occupied
-                    && kept.is_none()
-                    && make_link(&src, &link, &row.kind, &mut policy).is_ok();
-                if relinked && row.kind == "zip" {
-                    note_zip_projection(conn, &key, &row.file_name, &link);
-                }
                 continue;
             }
         } else if link.exists() {
@@ -2562,42 +2553,6 @@ mod tests {
         assert_eq!(kept.len(), 1);
         assert!(e.contains(&kept[0].display().to_string()), "{e}");
         assert_eq!(std::fs::read(&kept[0]).unwrap(), b"user's build");
-        drop(conn);
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn a_failed_flatten_restore_puts_the_projection_back() {
-        // Active, projected as a copy (a hardlink would share the archived file's lock).
-        let base = swap_fixture(
-            "flatten_rollback",
-            b"PK archived",
-            Some(b"PK archived"),
-            true,
-        );
-        let conn = db::open(&base.join("silo.db")).unwrap();
-        let layout = Layout::default_for(&base);
-        let key = crate::modsroot::canonical_key(&base);
-        let archived = base.join(ARCHIVE).join("Vehicles").join("FS25_Foo.zip");
-        let flat = base.join("FS25_Foo.zip");
-
-        let Some(held) = unmovable(&archived) else {
-            return;
-        };
-        let rep = flatten(&conn, &layout);
-        drop(held);
-        assert!(
-            rep.errors.iter().any(|e| e.contains("restore:")),
-            "{:?}",
-            rep.errors
-        );
-        assert_eq!(
-            std::fs::read(&flat).unwrap(),
-            b"PK archived",
-            "still active"
-        );
-        assert!(archived.exists(), "the archived copy stays");
-        assert_eq!(db::load_organized(&conn, &key).len(), 1, "still managed");
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
     }
