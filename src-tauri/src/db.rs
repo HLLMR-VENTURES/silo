@@ -1091,6 +1091,20 @@ pub fn catalog_aliases(conn: &Connection, tech_name: &str) -> Vec<CatalogAliasRo
     rows.map(|r| r.flatten().collect()).unwrap_or_default()
 }
 
+/// Remove the catalog alias for this zip name and hash, if there is one.
+pub fn forget_catalog_alias(
+    conn: &Connection,
+    tech_name: &str,
+    archive_sha256: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM catalog_alias WHERE tech_name = ?1 AND archive_sha256 = ?2",
+        rusqlite::params![tech_name, archive_sha256],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Replace all tags for a mod.
 pub fn set_tags(conn: &mut Connection, tech_name: &str, tags: &[String]) -> Result<(), String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;

@@ -955,13 +955,7 @@ async fn download_update(
         let mut link_problem = None;
         let carry = match old_link {
             Some(link) => match carried_link(&app, link, &asset_url) {
-                Some(link) => {
-                    let sha = provenance::sha256_file(part.path())?;
-                    let size = std::fs::metadata(part.path())
-                        .map_err(|e| e.to_string())?
-                        .len();
-                    Some((link, sha, size))
-                }
+                Some(link) => Some(alias_record(link, part.path())?),
                 None => {
                     link_problem = Some(LINK_NOT_KEPT.to_string());
                     None
@@ -988,6 +982,25 @@ async fn download_update(
             return Err(update::leftover_message(&settled, &[old]));
         }
         github::verify_update_identity(part.path(), &dest)?;
+        // Recovery may have put a linked file back at `dest`. No network under the lock: only
+        // the same-release rule can keep that link.
+        let carry = match (carry, &link_problem) {
+            (None, None) => match recovered_link(&db, &dest) {
+                Some(link) if catalogalias::another_release_of(&link, &asset_url) => {
+                    let link = catalogalias::Link {
+                        download_url: Some(asset_url.clone()),
+                        ..link
+                    };
+                    Some(alias_record(link, part.path())?)
+                }
+                Some(_) => {
+                    link_problem = Some(LINK_NOT_KEPT.to_string());
+                    None
+                }
+                None => None,
+            },
+            (carry, _) => carry,
+        };
         if let Some((link, sha, size)) = &carry {
             remember_catalog_alias(&db, &dest, sha, *size, link)?;
         }
@@ -1017,14 +1030,30 @@ async fn download_update(
     .map_err(error::AppError::from)
 }
 
+/// The alias to record for the downloaded file `part` linked by `link`: its hash and size.
+fn alias_record(
+    link: catalogalias::Link,
+    part: &std::path::Path,
+) -> Result<(catalogalias::Link, String, u64), String> {
+    let sha = provenance::sha256_file(part)?;
+    let size = std::fs::metadata(part).map_err(|e| e.to_string())?.len();
+    Ok((link, sha, size))
+}
+
+/// The catalog link of the file at `dest` now, when it has one (#386).
+fn recovered_link(db: &std::path::Path, dest: &std::path::Path) -> Option<catalogalias::Link> {
+    let tech_name = catalogalias::zip_tech_name(dest)?;
+    catalogalias::link_for_file(&db::open(db).ok()?, &tech_name, dest)
+}
+
 /// What an update says when the file it replaced was linked to its catalog entry (#386) and
 /// the new one can't be shown to come from that entry.
 const LINK_NOT_KEPT: &str = "Silo couldn't confirm this update came from the mod's catalog \
      entry, so it may show as not in Silo's catalog. Installing it from Browse links it again.";
 
 /// The link for the file an update from `asset_url` writes over a file linked by `link`: kept
-/// when the update is a release asset of the same GitHub repository the linked file came from,
-/// or a download the catalog entry lists right now. None when neither holds, or when the
+/// when the update is a release asset with the same file name from the same GitHub repository
+/// the linked file came from, or a download the catalog entry lists right now. None when neither holds, or when the
 /// catalog can't be asked for the second.
 fn carried_link(
     app: &tauri::AppHandle,
@@ -1035,7 +1064,7 @@ fn carried_link(
         download_url: Some(asset_url.to_string()),
         ..link
     };
-    if catalogalias::same_release_repo(&link, asset_url) {
+    if catalogalias::another_release_of(&link, asset_url) {
         return Some(with_url(link));
     }
     let base = siloapi_base(app).ok()?;
@@ -1448,9 +1477,17 @@ async fn install_remote_mod(
                 );
             },
         )?;
-        // The alias holds the bytes' hash and size, taken before the lock. A download the
-        // catalog has a hash for was already checked against it.
-        let alias = if alias {
+        // What this install records about the file's catalog entry (#386), worked out before the
+        // lock: an alias for a differently named file, or, for a file named after its entry,
+        // dropping an alias an earlier install left for the same name and bytes.
+        let db = db_path(&app)?;
+        let stem = catalogalias::zip_tech_name(&dest);
+        let stale = match stem.as_deref() {
+            Some(t) if !alias => catalogalias::has_any(&db::open(&db)?, t),
+            _ => false,
+        };
+        let note = if alias || stale {
+            // A download the catalog has a hash for was already checked against it.
             let sha = match &resolved.expected_sha256 {
                 Some(h) => h.clone(),
                 None => provenance::sha256_file(part.path())?,
@@ -1463,16 +1500,18 @@ async fn install_remote_mod(
                 catalog_tech_name: resolved.tech_name.clone(),
                 download_url: Some(resolved.url.clone()),
             };
-            Some((link, sha, size))
+            Some((alias.then_some(link), sha, size))
         } else {
             None
         };
         // A finished download waits out a busy spell instead of being thrown away.
         let _write = library_write_within(PLACE_WAIT)?;
         install_recheck(&root, &dest)?;
-        // Recorded before the file is placed, so a placed file always has its link.
-        if let Some((link, sha, size)) = &alias {
-            remember_catalog_alias(&db_path(&app)?, &dest, sha, *size, link)?;
+        // Noted before the file is placed, so a placed file never has a missing or stale link.
+        match &note {
+            Some((Some(link), sha, size)) => remember_catalog_alias(&db, &dest, sha, *size, link)?,
+            Some((None, sha, _)) => forget_catalog_alias(&db, stem.as_deref(), sha)?,
+            None => {}
         }
         place_part(part.path(), &dest)?;
         Ok(resolved.filename)
@@ -1520,6 +1559,21 @@ fn remember_catalog_alias(
              Try again. ({e})"
         )),
     }
+}
+
+/// Drop the alias for the zip `tech_name` with whole-file SHA-256 `sha` (#386): the file is
+/// being installed from an entry with its own name. A failure stops the install.
+fn forget_catalog_alias(
+    db: &std::path::Path,
+    tech_name: Option<&str>,
+    sha: &str,
+) -> Result<(), String> {
+    let Some(tech_name) = tech_name else {
+        return Ok(());
+    };
+    catalogalias::forget(&db::open(db)?, tech_name, sha).map_err(|e| {
+        format!("Silo couldn't update which catalog entry {tech_name} came from, so it didn't add it. Try again. ({e})")
+    })
 }
 
 /// The database, for reading catalog aliases (#386). None, logged, when it can't be opened:
@@ -1787,7 +1841,7 @@ async fn catalog_check_updates(
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<CatalogUpdate>, String> {
         let base = siloapi_base(&app)?;
         // A zip Silo installed from a catalog entry under another name is looked up as that
-        // entry (#386); the file is only hashed when it has an alias and changed since.
+        // entry (#386); a file is hashed only when an alias of its size is recorded for its name.
         let conn = alias_db(&app);
         let asked: Vec<(String, Option<catalogalias::Link>)> = mods
             .iter()
@@ -1832,16 +1886,15 @@ fn resolve_catalog(
     mods: &[(String, Option<catalogalias::Link>)],
 ) -> Result<Vec<Option<siloapi::LookupResult>>, String> {
     let results = siloapi::lookup(base, &catalog_lookup_names(mods))?;
-    Ok(mods
-        .iter()
+    mods.iter()
         .map(
             |(tech_name, link)| match (catalog_hit(tech_name, link.as_ref(), &results), link) {
-                (Some(r), _) => Some(r.clone()),
+                (Some(r), _) => Ok(Some(r.clone())),
                 (None, Some(link)) => linked_entry(base, link),
-                (None, None) => None,
+                (None, None) => Ok(None),
             },
         )
-        .collect())
+        .collect()
 }
 
 /// The techNames to look up: a linked mod's catalog techName, every other mod's own.
@@ -1869,19 +1922,27 @@ fn catalog_hit<'a>(
     }
 }
 
-/// A linked entry the lookup by techName didn't return, fetched by its id. None, logged, when
-/// it can't be fetched.
-fn linked_entry(base: &str, link: &catalogalias::Link) -> Option<siloapi::LookupResult> {
+/// A linked entry the lookup by techName didn't return, fetched by its id. None when the
+/// catalog no longer has it; any other failure is an error, so a check that couldn't ask about
+/// the mod never reads as a check that found nothing.
+fn linked_entry(
+    base: &str,
+    link: &catalogalias::Link,
+) -> Result<Option<siloapi::LookupResult>, String> {
     match siloapi::detail(base, &link.catalog_id) {
-        Ok(d) => Some(lookup_from_detail(d)),
-        Err(e) => {
-            log::warn!(
-                "[catalog] couldn't fetch catalog entry {}: {e}",
-                link.catalog_id
-            );
-            None
+        Ok(d) => Ok(Some(lookup_from_detail(d))),
+        Err(e) if catalog_not_found(&e) => {
+            log::info!("[catalog] catalog entry {} is gone", link.catalog_id);
+            Ok(None)
         }
+        Err(e) => Err(e),
     }
+}
+
+/// Whether a catalog request's error is the catalog answering 404 (`siloapi::not_answering`
+/// words every error status as "... (error <code>) ...").
+fn catalog_not_found(e: &str) -> bool {
+    e.contains("(error 404)")
 }
 
 /// A full catalog record in the shape the lookup returns: its best direct download is its
@@ -4795,11 +4856,12 @@ fn build_collection_entries(
 
     // The curator's own build hash — the trust anchor. Best-effort per mod; a failure is
     // reported through `unpinned`, not dropped silently.
-    let manifests: Vec<Option<provenance::LocalManifest>> = zips
+    // (archive SHA-256, manifest hash) per zip: only the two hashes are kept, not the entries.
+    let manifests: Vec<Option<(String, String)>> = zips
         .iter()
         .map(
             |m| match provenance::manifest_from_zip(std::path::Path::new(&m.path)) {
-                Ok(lm) => Some(lm),
+                Ok(lm) => Some((lm.archive_sha256, lm.manifest_hash)),
                 Err(e) => {
                     log::warn!("collection: couldn't fingerprint {}: {e}", m.tech_name);
                     None
@@ -4812,9 +4874,9 @@ fn build_collection_entries(
         .iter()
         .zip(&manifests)
         .map(|(m, lm)| {
-            let link = conn.zip(lm.as_ref()).and_then(|(c, lm)| {
+            let link = conn.zip(lm.as_ref()).and_then(|(c, (sha, _))| {
                 let file = std::path::Path::new(&m.path);
-                catalogalias::link_for_hash(c, &m.tech_name, file, &lm.archive_sha256)
+                catalogalias::link_for_hash(c, &m.tech_name, file, sha)
             });
             (m.tech_name.clone(), link)
         })
@@ -4824,18 +4886,21 @@ fn build_collection_entries(
     let mut entries: Vec<collection::CollectionMod> = zips
         .iter()
         .zip(manifests)
-        .zip(&hits)
-        .map(|((m, lm), hit)| {
-            let manifest_hash = lm.map(|lm| lm.manifest_hash);
+        .zip(hits.iter().zip(&asked))
+        .map(|((m, lm), (hit, (_, link)))| {
+            let manifest_hash = lm.map(|(_, h)| h);
             let hit = hit.as_ref();
             let dl = hit.and_then(|r| r.download.as_ref());
+            // An importer finds mods by techName and installs only a file named after the mod,
+            // so a file linked by an alias can't be installed from the set directly.
+            let direct = dl.is_some() && link.is_none();
             collection::CollectionMod {
                 tech_name: m.tech_name.clone(),
                 version: m.version.clone(),
                 source: dl.map(|d| d.source.clone()),
                 source_url: None,
                 manifest_hash,
-                installable: hit.map(|_| dl.is_some()),
+                installable: hit.map(|_| direct),
                 catalog_id: hit.map(|r| r.id.clone()),
             }
         })
@@ -8561,6 +8626,19 @@ mod tests {
         // one (`resolve_catalog` then fetches the linked entry by its id).
         let results = vec![lookup_row(Some("FS25_FieldToDoList"), "someone-else")];
         assert!(super::catalog_hit("FS25_FieldToDoList", Some(&link), &results).is_none());
+    }
+
+    #[test]
+    fn only_a_404_counts_as_a_linked_entry_gone() {
+        assert!(super::catalog_not_found(
+            "Silo's catalog isn't answering right now (error 404). Try again in a few minutes."
+        ));
+        assert!(!super::catalog_not_found(
+            "Silo's catalog isn't answering right now (error 500). Try again in a few minutes."
+        ));
+        assert!(!super::catalog_not_found(
+            "Silo can't reach its catalog right now: timed out"
+        ));
     }
 
     #[test]

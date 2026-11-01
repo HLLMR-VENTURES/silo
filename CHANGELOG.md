@@ -48,8 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Its drawer shows the catalog's details, update checks find newer versions, and **Verify
   integrity** compares it with the published build, instead of saying it isn't in Silo's
   catalog. Silo remembers the exact file it installed, still never renames it, and drops the
-  link if a different build replaces that file. Updating the mod in Silo from the same catalog
-  entry keeps the link. (#386)
+  link if a different build replaces that file. Updating the mod in Silo with a newer release
+  of the same file keeps the link; when Silo can't confirm that, the update says so. (#386)
 - An unpacked (folder) mod you edit in place now shows its new title, version, dependencies and
   map flag after the next scan, and its new icon. Before, Silo kept showing what it read the
   first time until you cleared the scan cache. (#353)

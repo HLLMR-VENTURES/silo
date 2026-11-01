@@ -59,8 +59,9 @@ pub fn needs_alias(filename: &str, catalog_tech_name: Option<&str>) -> bool {
 }
 
 /// Record that the zip named `tech_name` (`.zip` added) whose bytes are `size` long and hash
-/// to `sha256` came from the catalog entry `link`. Called before the file is placed, so a
-/// placed file always has its record; a record whose file never arrives matches nothing else.
+/// to `sha256` came from the catalog entry `link`, replacing the record for the same name and
+/// bytes. Called before the file is placed, so a placed file always has its record. The record
+/// is for those bytes under that name wherever they are (another mods folder too).
 pub fn record(
     conn: &Connection,
     tech_name: &str,
@@ -133,9 +134,20 @@ pub fn link_for_hash(
         .map(Link::from)
 }
 
-/// The GitHub repository (`owner/repo`, lowercased) a release-asset address belongs to:
-/// `https://github.com/<owner>/<repo>/releases/download/...`. None for anything else.
-pub fn release_repo(url: &str) -> Option<String> {
+/// Whether any alias is recorded for a zip named `tech_name`.
+pub fn has_any(conn: &Connection, tech_name: &str) -> bool {
+    !db::catalog_aliases(conn, tech_name).is_empty()
+}
+
+/// Drop the alias of the zip named `tech_name` with these bytes: Silo installed those bytes
+/// from an entry whose techName is that name, so they need none.
+pub fn forget(conn: &Connection, tech_name: &str, sha256: &str) -> Result<(), String> {
+    db::forget_catalog_alias(conn, tech_name, &sha256.to_ascii_lowercase())
+}
+
+/// The GitHub repository (`owner/repo`, lowercased) and file name of a release-asset address:
+/// `https://github.com/<owner>/<repo>/releases/download/<tag>/<file>`. None for anything else.
+pub fn release_asset(url: &str) -> Option<(String, String)> {
     let u = url::Url::parse(url).ok()?;
     let host = u.host_str()?.to_ascii_lowercase();
     if u.scheme() != "https" || (host != "github.com" && host != "www.github.com") {
@@ -143,21 +155,26 @@ pub fn release_repo(url: &str) -> Option<String> {
     }
     let segs: Vec<&str> = u.path_segments()?.collect();
     match segs.as_slice() {
-        [owner, repo, "releases", "download", tag, file, ..]
+        [owner, repo, "releases", "download", tag, file]
             if !owner.is_empty() && !repo.is_empty() && !tag.is_empty() && !file.is_empty() =>
         {
-            Some(format!("{owner}/{repo}").to_ascii_lowercase())
+            Some((
+                format!("{owner}/{repo}").to_ascii_lowercase(),
+                file.to_string(),
+            ))
         }
         _ => None,
     }
 }
 
 /// Whether an update downloaded from `asset_url` is another release of the build `link` was
-/// installed from: a release asset of the same GitHub repository.
-pub fn same_release_repo(link: &Link, asset_url: &str) -> bool {
+/// installed from: a release asset of the same GitHub repository with the same file name. A
+/// repository can publish several mods, so the repository alone isn't enough; FS25 knows a
+/// mod by its file name.
+pub fn another_release_of(link: &Link, asset_url: &str) -> bool {
     match (
-        link.download_url.as_deref().and_then(release_repo),
-        release_repo(asset_url),
+        link.download_url.as_deref().and_then(release_asset),
+        release_asset(asset_url),
     ) {
         (Some(a), Some(b)) => a == b,
         _ => false,
@@ -342,34 +359,59 @@ mod tests {
     }
 
     #[test]
-    fn an_update_from_the_same_release_repo_is_the_same_entry() {
+    fn an_update_is_the_same_entry_only_as_the_same_file_from_the_same_repo() {
         assert_eq!(
-            release_repo(TODO_URL).as_deref(),
-            Some("knoellix/fs25_todo")
+            release_asset(TODO_URL),
+            Some((
+                "knoellix/fs25_todo".to_string(),
+                "FS25_FieldToDoList.zip".to_string()
+            ))
         );
         let later =
             "https://github.com/Knoellix/FS25_ToDo/releases/download/v0.2/FS25_FieldToDoList.zip";
-        assert!(same_release_repo(&todo(), later));
+        assert!(another_release_of(&todo(), later));
+        // Another mod published from the same repository is not this entry's release.
+        let sibling =
+            "https://github.com/knoellix/FS25_ToDo/releases/download/v0.2/FS25_OtherMod.zip";
+        assert!(!another_release_of(&todo(), sibling));
         let fork =
             "https://github.com/someone/FS25_ToDo/releases/download/v0.2/FS25_FieldToDoList.zip";
-        assert!(!same_release_repo(&todo(), fork));
+        assert!(!another_release_of(&todo(), fork));
         // Not a release asset, or not GitHub, or no address recorded: never the same.
         assert_eq!(
-            release_repo("https://github.com/knoellix/FS25_ToDo/archive/main.zip"),
+            release_asset("https://github.com/knoellix/FS25_ToDo/archive/main.zip"),
             None
         );
         assert_eq!(
-            release_repo("http://github.com/k/r/releases/download/v1/x.zip"),
+            release_asset("http://github.com/k/r/releases/download/v1/x.zip"),
             None
         );
         assert_eq!(
-            release_repo("https://github.com.evil.example/k/r/releases/download/v1/x.zip"),
+            release_asset("https://github.com.evil.example/k/r/releases/download/v1/x.zip"),
             None
         );
         let no_url = Link {
             download_url: None,
             ..todo()
         };
-        assert!(!same_release_repo(&no_url, later));
+        assert!(!another_release_of(&no_url, later));
+    }
+
+    #[test]
+    fn forgetting_an_alias_drops_only_those_bytes() {
+        let dir = temp_dir("forget");
+        let conn = conn_in(&dir);
+        let one = dir.join("one");
+        let two = dir.join("two");
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        let a = installed(&conn, &one, "FS25_FieldToDoList", b"build one");
+        let b = installed(&conn, &two, "FS25_FieldToDoList", b"build two!");
+        forget(&conn, "FS25_FieldToDoList", &sha(b"build one")).unwrap();
+        assert_eq!(link_for_file(&conn, "FS25_FieldToDoList", &a), None);
+        assert!(link_for_file(&conn, "FS25_FieldToDoList", &b).is_some());
+        assert!(has_any(&conn, "FS25_FieldToDoList"));
+        assert!(!has_any(&conn, "FS25_Plain"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
