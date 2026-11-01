@@ -36,6 +36,9 @@ export interface ArchiveMoveDeps {
   runScan: () => Promise<void>;
   /** A move ended cleanly: offer to file in loose mods found in the archive folder. */
   offerAdopt: () => Promise<void>;
+  /** Hold crash-log looks from before a move's backend call until its result is adopted (the
+   *  move can republish another FS25 profile, #387). Returns the release. */
+  holdCrashLooks?: () => () => void;
 }
 
 const isStillLoading = (e: unknown) => errorCode(e) === "STILL_LOADING";
@@ -110,9 +113,15 @@ export class ArchiveMove {
       const st = await archiveStatus();
       if (seq !== this.#seq) return false;
       this.archive = st;
+      this.#follow(st);
       this.loadFailed = false;
       if (st.moving?.direction === "back") this.#sawTurnAround = true;
       if (st.moving && !st.running) this.pauseRequested = false;
+      // A followed move that stopped: the poll's timer stops with the move, so whichever read
+      // sees it first settles it (which also ends the follow hold).
+      if (!st.running && this.#followRelease && !this.#settling && this.#inFlight === 0) {
+        void this.#settle(null);
+      }
       return true;
     } catch (e) {
       if (!isStillLoading(e)) console.warn("[Silo] archive_status:", e);
@@ -126,7 +135,10 @@ export class ArchiveMove {
       const seq = ++this.#seq;
       try {
         const st = await archiveStatus();
-        if (seq === this.#seq) this.archive = st;
+        if (seq === this.#seq) {
+          this.archive = st;
+          this.#follow(st); // startup recovery: a move still running from before
+        }
         this.loadFailed = false;
         return;
       } catch (e) {
@@ -147,7 +159,14 @@ export class ArchiveMove {
     const wasRunning = !!this.archive?.running;
     if (!(await this.refresh())) return;
     // A move this window isn't waiting on (e.g. after a webview reload) stopped: settle it here.
-    if (pollShouldSettle(wasRunning, this.archive, this.#inFlight)) await this.#settle(null);
+    if (pollShouldSettle(wasRunning, this.archive, this.#inFlight) && !this.#settling) {
+      const release = this.#deps.holdCrashLooks?.();
+      try {
+        await this.#settle(null);
+      } finally {
+        release?.();
+      }
+    }
   }
 
   /** After a move stops (finished, paused, or back home): refresh everything that depends on
@@ -172,7 +191,28 @@ export class ArchiveMove {
       }
     } finally {
       this.#settling = false;
+      this.#endFollow();
     }
+  }
+
+  /** Releases the crash-look hold taken while following a move this window didn't start. */
+  #followRelease: (() => void) | null = null;
+
+  /** A move is running that this window isn't driving (after a webview reload, or found at
+   *  startup): hold crash-log looks from now until it has settled and its result is adopted,
+   *  since it may republish another FS25 profile when it ends (#387). */
+  #follow(st: ArchiveStatus): void {
+    if (st.running && this.#inFlight === 0 && !this.#followRelease) {
+      this.#followRelease = this.#deps.holdCrashLooks?.() ?? null;
+    }
+  }
+
+  /** The followed move has settled (and isn't running again): let crash-log looks run. */
+  #endFollow(): void {
+    if (this.archive?.running || !this.#followRelease) return;
+    const release = this.#followRelease;
+    this.#followRelease = null;
+    release();
   }
 
   /** One settle pass. Returns the messages it showed, for the next pass to carry. */
@@ -221,8 +261,18 @@ export class ArchiveMove {
     return this.lastLostCancel;
   }
 
-  /** Run a move-ish invoke (pending until the move finishes or pauses), then settle. */
+  /** Run a move-ish invoke (pending until the move finishes or pauses), then settle. Crash-log
+   *  looks are held from before the call until the settle adopted the result (#387). */
   async drive(call: () => Promise<unknown>, isCancel = false): Promise<void> {
+    const release = this.#deps.holdCrashLooks?.();
+    try {
+      await this.#driveNow(call, isCancel);
+    } finally {
+      release?.();
+    }
+  }
+
+  async #driveNow(call: () => Promise<unknown>, isCancel: boolean): Promise<void> {
     this.#inFlight++;
     let problem: string | null = null;
     try {

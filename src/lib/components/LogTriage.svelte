@@ -55,6 +55,8 @@
     refreshKey?: number;
     /** Why library writes are off right now (Park is off with this reason), or "". */
     lockReason?: string;
+    /** The FS25 profile the app shows, passed to guided bisection's launches (#387). */
+    gameProfile?: string | null;
   }
   let {
     activeMods,
@@ -73,6 +75,7 @@
     onBisectRequestTaken,
     refreshKey = 0,
     lockReason = "",
+    gameProfile,
   }: Props = $props();
 
   let mode = $state<"report" | "bisect">("report");
@@ -186,6 +189,7 @@
       {alwaysOn}
       onPrepare={onBisectPrepare}
       stayOn={activeFixed.filter((m) => activeMods.includes(m) && !activeMaps.includes(m)).length}
+      {gameProfile}
       {onApply}
       {onBisecting}
       {recoveryPending}

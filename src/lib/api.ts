@@ -126,6 +126,23 @@ export interface ModsRootStatus {
   layoutProblemCause: "overlap" | "gameSetting" | "readError" | null;
   /** The folder it runs into, when known. */
   layoutConflict: string | null;
+  /** The folder's FS25 profile (#387), when the folder is `<profile>/mods`; null otherwise.
+   *  While it's on, `gameReads` and `mismatch` describe that profile. */
+  gameProfile: GameProfileStatus | null;
+}
+
+/** "Launch FS25 with this folder's profile" (#387) for the current mods folder. */
+export interface GameProfileStatus {
+  /** The profile folder (the mods folder's parent). */
+  dir: string;
+  /** Play starts FS25 on this profile, and Silo reads its files. */
+  enabled: boolean;
+  /** The folder looks like a profile (it has game.xml or gameSettings.xml). */
+  detected: boolean;
+  /** The user turned it on or off; otherwise it follows `detected`. */
+  chosen: boolean;
+  /** Launching on a profile works on this platform (Windows only for now). */
+  supported: boolean;
 }
 
 export function modsRootStatus(): Promise<ModsRootStatus> {
@@ -139,6 +156,9 @@ export function clearModsRoot(): Promise<ModsRootStatus> {
 }
 export function pointGameAtModsRoot(): Promise<ModsRootStatus> {
   return invoke<ModsRootStatus>("point_game_at_mods_root");
+}
+export function setGameProfile(enabled: boolean): Promise<ModsRootStatus> {
+  return invoke<ModsRootStatus>("set_game_profile", { enabled });
 }
 export function createModsFolder(): Promise<ModsRootStatus> {
   return invoke<ModsRootStatus>("create_mods_folder");
@@ -470,8 +490,21 @@ export function getSavegames(): Promise<Savegame[]> {
   return invoke<Savegame[]>("get_savegames");
 }
 
-export function backupSavegame(folder: string): Promise<string> {
-  return invoke<string>("backup_savegame", { folder });
+/** Savegames, the user folder and the mods with settings, read from one FS25 profile (#387). */
+export interface GameFiles {
+  userDir: string | null;
+  savegames: Savegame[];
+  modsWithSettings: string[];
+  /** The FS25 profile they were read from; null for the main user folder. */
+  profile: string | null;
+}
+export function gameFiles(): Promise<GameFiles> {
+  return invoke<GameFiles>("game_files");
+}
+
+/** `userDir`: the user folder the save was listed from (refused if the FS25 profile changed). */
+export function backupSavegame(folder: string, userDir?: string | null): Promise<string> {
+  return invoke<string>("backup_savegame", { folder, userDir: userDir ?? null });
 }
 
 export function detectConflicts(mods: ConflictInput[]): Promise<Conflict[]> {
@@ -689,8 +722,9 @@ export function catalogCheckUpdates(
 }
 
 /** Parse FS25's log.txt: did the last run crash, and which mods are at fault. */
-export function scanLog(): Promise<LogReport> {
-  return invoke<LogReport>("scan_log");
+export function scanLog(path?: string | null): Promise<LogReport> {
+  // `path`: a `logStatus().path` to read that very log (the current one when left out).
+  return invoke<LogReport>("scan_log", { path: path ?? null });
 }
 
 /** A cheap look at log.txt for crash detection (a stat, no read) and whether the game runs. */
@@ -699,8 +733,9 @@ export function logStatus(): Promise<LogStatus> {
 }
 
 /** Remember the log change time Silo has looked at, so one crash is announced once. */
-export function markLogSeen(modifiedMs: number): Promise<void> {
-  return invoke<void>("mark_log_seen", { modifiedMs });
+export function markLogSeen(modifiedMs: number, path?: string | null): Promise<void> {
+  // `path`: the `logStatus().path` this time belongs to (each FS25 profile has its own log).
+  return invoke<void>("mark_log_seen", { modifiedMs, path: path ?? null });
 }
 
 /** Parse inputBinding.xml into a per-device binding map. */
@@ -884,8 +919,11 @@ export function detectGame(): Promise<GameInfo | null> {
   return invoke<GameInfo | null>("detect_game");
 }
 
-export function launchGame(): Promise<void> {
-  return invoke("launch_game");
+/** Start FS25. `expectedProfile`: the FS25 profile the app shows (null = the main one); the
+ *  launch is refused if Silo would start another (#387). Left out: no such check. */
+export function launchGame(expectedProfile?: string | null): Promise<void> {
+  if (expectedProfile === undefined) return invoke("launch_game");
+  return invoke("launch_game", { expectedProfile, checkProfile: true });
 }
 
 /** Prompt for a path and save text (used by the diagnostics report). */

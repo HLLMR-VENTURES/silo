@@ -47,6 +47,9 @@
     onPrepare?: () => Promise<boolean>;
     /** Active mods Silo can't park (unzipped folder mods), kept on every round. */
     stayOn?: number;
+    /** The FS25 profile the app shows (null: the main one): a test round starts only that one
+     *  (#387). Left out: not checked. */
+    gameProfile?: string | null;
   }
   let {
     pool,
@@ -60,6 +63,7 @@
     titleOf = (t: string) => t,
     onPrepare,
     stayOn = 0,
+    gameProfile,
   }: Props = $props();
 
   type Phase =
@@ -199,7 +203,7 @@
     working = "Launching Farming Simulator 25…";
     error = null;
     try {
-      await launchGame();
+      await launchGame(gameProfile);
     } catch (e) {
       // The round is still set up: the user can launch from Steam, or try again.
       error = inlineError(e, "Launching the game");

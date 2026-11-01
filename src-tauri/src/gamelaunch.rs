@@ -342,13 +342,229 @@ fn pick_mac_install(steam_dirs: &[PathBuf], bundles: &[PathBuf]) -> Option<(Path
 /// Launch FS25: through Steam (`steam://rungameid/<appid>`), or — for a macOS App Store /
 /// GIANTS-direct install — by opening the detected `.app` bundle. Guided bisection uses
 /// this same entry point.
-pub fn launch() -> Result<(), String> {
+///
+/// With `profile` (an FS25 profile folder, #387, Windows only: see `gameprofile::SUPPORTED`)
+/// the game executable is started directly with `-profile "<dir>"`, so FS25 uses that folder's
+/// mods, settings, savegames and log. A hands-on test (2026-11-01) confirmed this loads the
+/// profile with Steam running. If the executable can't be found or started, the Steam URL with
+/// the same arguments is the fallback (`steam://run/<id>//<args>/`, Valve's documented form;
+/// Steam asks the user to confirm launch arguments). Never the plain `rungameid` URL: that
+/// would start the main profile, with the wrong mods.
+pub fn launch(profile: Option<&Path>) -> Result<(), String> {
+    if let Some(dir) = profile {
+        return launch_profile(dir);
+    }
     #[cfg(target_os = "macos")]
     if let Some(info) = detect().filter(|i| i.store == Store::Standalone) {
         return open_mac_app(&info.exe);
     }
     let url = format!("steam://rungameid/{APP_ID}");
     open_url(&url)
+}
+
+/// How a profile launch starts the game.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchPlan {
+    /// Start `program` with `args`, in `cwd` (the install folder).
+    Exe {
+        program: PathBuf,
+        args: Vec<String>,
+        cwd: PathBuf,
+    },
+    /// Open this Steam URL (the fallback).
+    SteamUrl(String),
+}
+
+/// The arguments that start FS25 on the profile folder `dir`. One argument per item: the
+/// folder is a single argument however many spaces it has (see [`windows_quote`]).
+pub fn profile_args(dir: &Path) -> Vec<String> {
+    vec!["-profile".to_string(), dir.to_string_lossy().into_owned()]
+}
+
+/// Pure: the plan for starting FS25 on profile `dir`, given the detected install. A Steam
+/// install with a game executable: run it directly. Otherwise the Steam URL fallback.
+pub fn profile_launch_plan(info: Option<&GameInfo>, dir: &Path) -> LaunchPlan {
+    match info {
+        Some(i) if i.store == Store::Steam && !i.exe.is_empty() => LaunchPlan::Exe {
+            program: PathBuf::from(&i.exe),
+            args: profile_args(dir),
+            cwd: PathBuf::from(&i.install_dir),
+        },
+        _ => LaunchPlan::SteamUrl(steam_profile_url(dir)),
+    }
+}
+
+/// `steam://run/<appid>//-profile "<dir>"/`, percent-encoded. Valve documents
+/// `steam://run/<id>//<args>/` with "args are passed to the application as launch parameters".
+/// The arguments are first quoted the way a Windows command line quotes them (as typed into
+/// Steam's launch options), then every character but letters, digits, `-._~`, `\` and `:` is
+/// percent-encoded, the way a browser hands such a link to Steam. So the URL has no space or
+/// quote that could split it where Windows puts it on Steam's command line (`"%1"`), and nothing
+/// a shell would read. It is opened by the system URL handler, never through a shell (see
+/// `open_url_safely`).
+pub fn steam_profile_url(dir: &Path) -> String {
+    format!(
+        "steam://run/{APP_ID}//{}/",
+        percent_encode_arg(&windows_command_line(&profile_args(dir)))
+    )
+}
+
+/// Percent-encode `s` (UTF-8) except unreserved characters and the `\` / `:` of a Windows path.
+fn percent_encode_arg(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'\\' | b':') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// One argument quoted the way Windows programs split their command line (the Microsoft C
+/// runtime rules that `CommandLineToArgvW` follows): left alone when it isn't empty and has no
+/// space, tab, newline or quote; otherwise wrapped in quotes, each quote escaped as `\"`, and
+/// the backslashes right before a quote (or before the closing quote) doubled. A folder path
+/// therefore arrives as exactly one argument, and nothing in it can start another one.
+pub fn windows_quote(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '\x0b', '"']) {
+        return arg.to_string();
+    }
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.push_str(&"\\".repeat(backslashes));
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    out.push_str(&"\\".repeat(backslashes * 2));
+    out.push('"');
+    out
+}
+
+/// The arguments joined into a Windows command line tail, each quoted by [`windows_quote`].
+pub fn windows_command_line(args: &[String]) -> String {
+    args.iter()
+        .map(|a| windows_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// How long after a profile launch another one is refused: the new process can take a moment to
+/// show up in the process list, and Steam no longer stands between two clicks on Play.
+pub const PROFILE_LAUNCH_HOLD: std::time::Duration = std::time::Duration::from_secs(10);
+
+pub const ALREADY_RUNNING: &str = "Farming Simulator 25 is already running.";
+pub const JUST_STARTED: &str = "Farming Simulator 25 is starting. Give it a moment.";
+
+/// When the last profile launch was started (one at a time: the lock is held through the spawn).
+static LAST_PROFILE_LAUNCH: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// True for [`PROFILE_LAUNCH_HOLD`] after a profile launch: the game may be starting without
+/// showing in the process list yet, so writes to its files wait as they do while it runs.
+pub fn profile_launch_pending() -> bool {
+    LAST_PROFILE_LAUNCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some_and(|t| t.elapsed() < PROFILE_LAUNCH_HOLD)
+}
+
+/// Pure: why a profile launch must not start now. The game started directly (not through Steam)
+/// could otherwise run twice: when it's already running, or when it was started `since` ago,
+/// within [`PROFILE_LAUNCH_HOLD`], and may not be in the process list yet.
+pub fn profile_launch_refusal(
+    running: bool,
+    since: Option<std::time::Duration>,
+) -> Option<&'static str> {
+    if running {
+        return Some(ALREADY_RUNNING);
+    }
+    since
+        .filter(|d| *d < PROFILE_LAUNCH_HOLD)
+        .map(|_| JUST_STARTED)
+}
+
+/// Start FS25 on profile `dir`. Refuses a folder that isn't there (an unplugged drive): FS25
+/// would start a new, empty profile there instead of the user's setup. One launch at a time,
+/// checked against the process list right before the spawn ([`profile_launch_refusal`]).
+fn launch_profile(dir: &Path) -> Result<(), String> {
+    if !crate::gameprofile::SUPPORTED {
+        return Err(
+            "Launching Farming Simulator 25 with a separate profile works on Windows only for now."
+                .into(),
+        );
+    }
+    if !dir.is_dir() {
+        return Err(format!(
+            "This mods folder's Farming Simulator 25 profile isn't available: {}",
+            dir.display()
+        ));
+    }
+    let mut last = LAST_PROFILE_LAUNCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(why) = profile_launch_refusal(fs25_running(), last.map(|t| t.elapsed())) {
+        return Err(why.into());
+    }
+    let started = launch_profile_now(dir);
+    if started.is_ok() {
+        *last = Some(std::time::Instant::now());
+    }
+    started
+}
+
+fn launch_profile_now(dir: &Path) -> Result<(), String> {
+    match profile_launch_plan(detect().as_ref(), dir) {
+        LaunchPlan::Exe { program, args, cwd } => match spawn_exe(&program, &args, &cwd) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                log::warn!(
+                    "couldn't start {} directly ({e}); asking Steam instead",
+                    program.display()
+                );
+                open_url_safely(&steam_profile_url(dir))
+            }
+        },
+        LaunchPlan::SteamUrl(url) => open_url_safely(&url),
+    }
+}
+
+/// Start the game executable with `args`, not through a shell. On Windows each argument goes on
+/// the command line exactly as [`windows_quote`] writes it (`raw_arg`), so what runs is what the
+/// unit tests check.
+fn spawn_exe(program: &Path, args: &[String], cwd: &Path) -> Result<(), String> {
+    let mut cmd = std::process::Command::new(program);
+    cmd.current_dir(cwd);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        for a in args {
+            cmd.raw_arg(windows_quote(a));
+        }
+    }
+    #[cfg(not(windows))]
+    cmd.args(args);
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Open a URL that carries a folder path with the system URL handler, without a shell:
+/// `cmd /C start` would read `&`, `|`, `^` or `%` in a folder name as shell syntax.
+/// (`tauri-plugin-opener` hands the URL to `Start-Process` in an environment variable.)
+fn open_url_safely(url: &str) -> Result<(), String> {
+    tauri_plugin_opener::open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
 /// `open -a <bundle>`: LaunchServices starts the app; we don't wait for it to exit.
@@ -397,6 +613,175 @@ mod tests {
 
     fn in_steam(name: &str) -> PathBuf {
         Path::new(STEAM).join(name)
+    }
+
+    /// Splits a Windows command line tail the way the Microsoft C runtime does
+    /// (`CommandLineToArgvW` rules for arguments after the program name): the reference the
+    /// quoting is checked against.
+    fn split_windows_args(line: &str) -> Vec<String> {
+        let mut args = Vec::new();
+        let mut cur = String::new();
+        let mut in_arg = false;
+        let mut quoted = false;
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if c == '\\' {
+                let start = i;
+                while i < chars.len() && chars[i] == '\\' {
+                    i += 1;
+                }
+                let n = i - start;
+                if i < chars.len() && chars[i] == '"' {
+                    cur.push_str(&"\\".repeat(n / 2));
+                    if n % 2 == 1 {
+                        cur.push('"');
+                        i += 1;
+                    }
+                } else {
+                    cur.push_str(&"\\".repeat(n));
+                }
+                in_arg = true;
+                continue;
+            }
+            if c == '"' {
+                if quoted && chars.get(i + 1) == Some(&'"') {
+                    cur.push('"');
+                    i += 2;
+                    continue;
+                }
+                quoted = !quoted;
+                in_arg = true;
+            } else if (c == ' ' || c == '\t') && !quoted {
+                if in_arg {
+                    args.push(std::mem::take(&mut cur));
+                    in_arg = false;
+                }
+            } else {
+                cur.push(c);
+                in_arg = true;
+            }
+            i += 1;
+        }
+        if in_arg {
+            args.push(cur);
+        }
+        args
+    }
+
+    #[test]
+    fn windows_quote_leaves_plain_args_and_quotes_spaces() {
+        assert_eq!(windows_quote("-profile"), "-profile");
+        assert_eq!(windows_quote(r"F:\fs25-silo-smoke"), r"F:\fs25-silo-smoke");
+        assert_eq!(
+            windows_quote(r"F:\FS25 Profiles\Seasons run"),
+            r#""F:\FS25 Profiles\Seasons run""#
+        );
+        assert_eq!(windows_quote(""), r#""""#);
+        // A trailing backslash would escape the closing quote: it's doubled.
+        assert_eq!(windows_quote(r"C:\My Games\"), r#""C:\My Games\\""#);
+        // A quote can't be in a Windows path, but if one came it stays inside the argument.
+        assert_eq!(windows_quote(r#"a "b"#), r#""a \"b""#);
+        assert_eq!(windows_quote(r#"a\"b"#), r#""a\\\"b""#);
+    }
+
+    #[test]
+    fn profile_args_split_back_to_exactly_two_arguments() {
+        for dir in [
+            r"F:\fs25-silo-smoke",
+            r"F:\FS25 Profiles\Seasons run",
+            r"C:\Users\Jo Doe\Documents\FS25 & Maps (test)\prof",
+            r"D:\x\  two  spaces\",
+            r#"D:\odd" -profile "C:\other"#,
+            r"\\nas\share\FS 25\prof",
+            "D:\\tab\there",
+        ] {
+            let args = profile_args(Path::new(dir));
+            let line = windows_command_line(&args);
+            assert_eq!(
+                split_windows_args(&line),
+                vec!["-profile".to_string(), dir.to_string()],
+                "{line}"
+            );
+        }
+    }
+
+    fn steam_game(exe: &str, install: &str) -> GameInfo {
+        GameInfo {
+            app_id: APP_ID.into(),
+            exe: exe.into(),
+            install_dir: install.into(),
+            store: Store::Steam,
+        }
+    }
+
+    #[test]
+    fn profile_launch_runs_the_exe_with_the_profile() {
+        let install = r"E:\SteamLibrary\steamapps\common\Farming Simulator 25";
+        let exe = format!(r"{install}\FarmingSimulator2025.exe");
+        let dir = Path::new(r"F:\FS25 Profiles\smoke");
+        assert_eq!(
+            profile_launch_plan(Some(&steam_game(&exe, install)), dir),
+            LaunchPlan::Exe {
+                program: PathBuf::from(&exe),
+                args: vec!["-profile".into(), r"F:\FS25 Profiles\smoke".into()],
+                cwd: PathBuf::from(install),
+            }
+        );
+    }
+
+    #[test]
+    fn a_profile_launch_never_starts_the_game_twice() {
+        use std::time::Duration;
+        assert_eq!(profile_launch_refusal(false, None), None);
+        assert_eq!(profile_launch_refusal(true, None), Some(ALREADY_RUNNING));
+        // Just started, maybe not in the process list yet: held.
+        assert_eq!(
+            profile_launch_refusal(false, Some(Duration::from_secs(1))),
+            Some(JUST_STARTED)
+        );
+        assert_eq!(
+            profile_launch_refusal(false, Some(PROFILE_LAUNCH_HOLD)),
+            None
+        );
+        assert_eq!(
+            profile_launch_refusal(true, Some(PROFILE_LAUNCH_HOLD * 3)),
+            Some(ALREADY_RUNNING)
+        );
+    }
+
+    #[test]
+    fn profile_launch_falls_back_to_the_steam_url_with_arguments() {
+        let dir = Path::new(r"F:\FS25 Profiles\smoke");
+        // `-profile "F:\FS25 Profiles\smoke"`, encoded: no space or quote left in the URL.
+        let url = r"steam://run/2300320//-profile%20%22F:\FS25%20Profiles\smoke%22/";
+        assert_eq!(steam_profile_url(dir), url);
+        assert_eq!(
+            profile_launch_plan(None, dir),
+            LaunchPlan::SteamUrl(url.into())
+        );
+        // A standalone (macOS) install isn't started this way.
+        let mut mac = steam_game("/Applications/FS25.app", "/Applications/FS25.app");
+        mac.store = Store::Standalone;
+        assert_eq!(
+            profile_launch_plan(Some(&mac), dir),
+            LaunchPlan::SteamUrl(url.into())
+        );
+        // A folder without spaces needs no quotes.
+        assert_eq!(
+            steam_profile_url(Path::new(r"F:\fs25-silo-smoke")),
+            r"steam://run/2300320//-profile%20F:\fs25-silo-smoke/"
+        );
+        // Shell and URL syntax in a folder name is encoded, never left as is.
+        let odd = steam_profile_url(Path::new(r"F:\A&B %PATH% ^|<>/#?\é"));
+        assert!(
+            !odd["steam://run/2300320//".len()..odd.len() - 1]
+                .contains([' ', '"', '&', '|', '^', '<', '>', '/', '#', '?', 'é']),
+            "{odd}"
+        );
+        assert!(odd.contains("%25PATH%25"), "{odd}");
+        assert!(odd.contains("%C3%A9"), "{odd}");
     }
 
     #[test]

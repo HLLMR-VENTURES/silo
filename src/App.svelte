@@ -16,6 +16,7 @@
     setModsRoot,
     clearModsRoot,
     pointGameAtModsRoot,
+    setGameProfile,
     createModsFolder,
     folderLooksEmpty,
     pickFolderFor,
@@ -32,6 +33,7 @@
     flatten,
     clearScanCache,
     getSavegames,
+    gameFiles,
     backupSavegame,
     detectConflicts,
     detectGame,
@@ -781,7 +783,8 @@
     )
       return;
     try {
-      await launchGame();
+      // The profile shown is the one started, or none is (#387).
+      await launchGame(profileInUse(modsStatus));
       crashWatch.afterLaunch(); // look at the log when the game exits
     } catch (e) {
       reportError(e, "Launching the game");
@@ -935,7 +938,7 @@
     const op = beginWrite(`Backing up ${s.name}`, false, { duringMove: true });
     if (!op) return;
     try {
-      await backupSavegame(s.folder);
+      await backupSavegame(s.folder, userDir);
       success(`Backed up ${s.name}.`);
     } catch (e) {
       reportError(e, `Backing up ${s.name}`);
@@ -1677,14 +1680,18 @@
         };
       const op = beginWrite("Switching to the new library archive");
       if (!op) return { problem: blocked("library-write").reason || "Silo is busy. Try again in a moment." };
-      try {
-        await archiveRepoint(path);
-      } finally {
-        op.end();
-      }
-      await archiveMove.refresh();
-      modsStatus = await modsRootStatus().catch(() => modsStatus);
-      await runScan(false);
+      // A re-point republishes the folder (maybe another FS25 profile, #387): crash looks wait
+      // from before it until its status is adopted.
+      await withCrashLooksHeld(async () => {
+        try {
+          await archiveRepoint(path);
+        } finally {
+          op.end();
+        }
+        await archiveMove.refresh();
+        await adoptArchiveStatus(await modsRootStatus().catch(() => modsStatus));
+        await runScan(false); // still held: the scan reads the folder just adopted
+      });
       return { path };
     } catch (e) {
       return { problem: inlineError(e, "Switching to the new library archive") };
@@ -1695,16 +1702,20 @@
   async function useDefaultArchiveFirstRun(): Promise<string | null> {
     const op = beginWrite("Switching to the new library archive");
     if (!op) return blocked("library-write").reason || "Silo is busy. Try again in a moment.";
-    try {
-      await archiveRepoint(null);
-    } catch (e) {
-      return inlineError(e, "Switching to the new library archive");
-    } finally {
-      op.end();
-    }
-    await archiveMove.refresh();
-    await runScan(false);
-    return null;
+    const problem = await withCrashLooksHeld(async () => {
+      try {
+        await archiveRepoint(null);
+      } catch (e) {
+        return inlineError(e, "Switching to the new library archive");
+      } finally {
+        op.end();
+      }
+      await archiveMove.refresh();
+      await adoptArchiveStatus(await modsRootStatus().catch(() => modsStatus));
+      await runScan(false); // still held: the scan reads the folder just adopted
+      return null;
+    });
+    return problem;
   }
 
   /** The setup flow's dry run, kept for filing (so failures can name their files). */
@@ -2806,13 +2817,29 @@
     );
   }
 
-  /** Adopt a new status; if the live folder changed, reload everything folder-specific. */
-  async function applyModsStatus(st: ModsRootStatus) {
+  let statusGen = 0;
+  /** Adopt a new status; if the live folder changed, reload everything folder-specific.
+   *  `refreshArchive: false` when an archive operation calls (it has just read the archive
+   *  status itself, and may be the archive move that refresh would ask about). */
+  async function applyModsStatus(st: ModsRootStatus, { refreshArchive = true } = {}) {
+    // A newer status adopted while this one waits for the archive takes over: this one doesn't
+    // put its folder back. Once its folder is set, it finishes the reload (a newer status for
+    // the same folder leaves that to it).
+    const gen = ++statusGen;
     const prev = roots[0] ?? null;
     modsStatus = st;
-    await archiveMove.refresh(); // the archive belongs to the mods folder
+    // Against the profile whose files are shown, not the last status: a status that was
+    // overtaken mid-switch still leaves the newest one to load the new profile's files.
+    const profileChanged = profileInUse(st) !== shownProfile;
+    // Before any await: nothing from the other profile's folder stays up meanwhile (#387).
+    if (profileChanged) forgetGameFiles();
+    if (refreshArchive) await archiveMove.refresh(); // the archive belongs to the mods folder
+    if (gen !== statusGen) return;
     roots = rootsFor(st);
-    if ((roots[0] ?? null) === prev) return;
+    if ((roots[0] ?? null) === prev) {
+      if (profileChanged) await loadGameFiles(true);
+      return;
+    }
     // A scan already running reads the old folder: let it land, then start over on the new one
     // (runScan skips while one runs, which would leave the old folder's mods up).
     await waitWhile(() => scanning);
@@ -2841,7 +2868,96 @@
         .then((ok) => (cloudSynced = !ok))
         .catch(() => {});
     }
-    await loadSavegames();
+    await loadGameFiles(profileChanged);
+  }
+
+  /** The FS25 profile folder the status uses (#387), or null for the main user folder. */
+  function profileInUse(st: ModsRootStatus | null): string | null {
+    return st?.gameProfile?.enabled ? st.gameProfile.dir : null;
+  }
+
+  /** Reload what Silo reads from the game's user folder: savegames, the folder the config
+   *  editors open, mods with settings. When the FS25 profile changed (#387) the log is another
+   *  one too: the old crash notice belonged to the other profile, so look again. */
+  let gameFilesGen = 0;
+  /** The FS25 profile whose game files are shown (null: the main user folder); undefined while
+   *  none are (dropped, and not read again yet). */
+  let shownProfile: string | null | undefined = null;
+
+  /** The FS25 profile changed: drop everything read from the other profile's folder, and any
+   *  load or crash look of it still running, until `loadGameFiles` reads the new one. */
+  function forgetGameFiles() {
+    gameFilesGen++;
+    shownProfile = undefined;
+    savegames = [];
+    userDir = null;
+    settingsModsSet = new Set();
+    configEditor = null;
+    settingsMod = null;
+    lastCrash = null;
+    crashWatch.logChanged();
+  }
+
+  async function loadGameFiles(profileChanged: boolean) {
+    // Only the newest load lands: an older one may describe the other profile's folder.
+    const gen = ++gameFilesGen;
+    try {
+      // One backend read: the saves and the folder their paths are built from never come from
+      // two different FS25 profiles.
+      const files = await gameFiles();
+      if (gen !== gameFilesGen) return;
+      savegames = files.savegames;
+      userDir = files.userDir;
+      settingsModsSet = new Set(files.modsWithSettings);
+      // Where these came from, as the backend read them (not the status this app holds).
+      shownProfile = files.profile;
+    } catch (e) {
+      if (gen === gameFilesGen) reportError(e, "Reading the game's files", { background: true });
+    }
+    if (profileChanged && gen === gameFilesGen) {
+      logReadKey++;
+      void crashWatch.check();
+    }
+  }
+
+  /** Run `fn` with crash-log looks held (they may resume nested): for an operation that can
+   *  publish another FS25 profile before its result is adopted (#387). Looks again after. */
+  async function withCrashLooksHeld<T>(fn: () => Promise<T>): Promise<T> {
+    crashWatch.pause();
+    try {
+      return await fn();
+    } finally {
+      crashWatch.resume();
+      void crashWatch.check();
+    }
+  }
+
+  /** Adopt a status read after an archive move, re-point or recovery the same way as a folder
+   *  switch: FS25's own setting may have moved Silo to another folder or FS25 profile meanwhile
+   *  (#387), so roots, the library (reset and rescan), game files and the crash notice all
+   *  follow, as `applyModsStatus` does. Run as a switch (`whileSwitchingFolder`), without its
+   *  archive refresh (the caller just read it). */
+  async function adoptArchiveStatus(st: ModsRootStatus | null) {
+    if (!st) return; // nothing read yet, and the refresh failed: keep what is shown
+    await whileSwitchingFolder(() => applyModsStatus(st, { refreshArchive: false }));
+  }
+
+  let profileToggling = false;
+  async function setGameProfileOn(on: boolean) {
+    if (profileToggling) return;
+    const why = await switchBlockReason();
+    if (why) {
+      refuse(why);
+      return;
+    }
+    profileToggling = true;
+    try {
+      await whileSwitchingFolder(async () => applyModsStatus(await setGameProfile(on)));
+    } catch (e) {
+      reportError(e, "Changing how Play starts the game");
+    } finally {
+      profileToggling = false;
+    }
   }
 
   /** Mods-folder switches under way (the picker, its dialogs, the rescan): no focus rescan, and
@@ -2849,11 +2965,16 @@
   let folderSwitches = 0;
   const FOLDER_SWITCH_WAIT = "Wait for the mods folder switch to finish.";
   async function whileSwitchingFolder<T>(fn: () => Promise<T>): Promise<T> {
-    folderSwitches++;
+    // No crash look while the backend may already read the new folder's FS25 profile and the
+    // app still shows the old one: the run would be announced in the wrong place (#387).
+    if (folderSwitches++ === 0) crashWatch.pause();
     try {
       return await fn();
     } finally {
-      folderSwitches--;
+      if (--folderSwitches === 0) {
+        crashWatch.resume();
+        void crashWatch.check();
+      }
     }
   }
 
@@ -2882,9 +3003,13 @@
       // Switch first: if updating FS25's setting then fails, Silo is still on the chosen folder
       // and the mismatch banner explains (the error shows too).
       await applyModsStatus(st);
+      // Never for a folder that belongs to its own FS25 profile (#387), launch on or off: that
+      // profile has its own settings, and the main profile's must not be touched
+      // (canWriteGameSetting is false too).
       if (
         st.mismatch &&
         st.canWriteGameSetting &&
+        !(st.gameProfile && (st.gameProfile.enabled || st.gameProfile.detected)) &&
         (await ask({
           title: "Point Farming Simulator 25 at this folder too?",
           body:
@@ -2946,20 +3071,27 @@
     }
   }
 
+  // Both may publish another folder (and its FS25 profile, #387): no crash look in between,
+  // like a switch.
   async function retryModsFolder() {
     try {
-      await applyModsStatus(await modsRootStatus());
+      await whileSwitchingFolder(async () => applyModsStatus(await modsRootStatus()));
     } catch (e) {
       reportError(e, "Checking the mods folder", { retry: retryModsFolder });
     }
   }
 
   async function makeModsFolder() {
-    try {
-      await applyModsStatus(await createModsFolder());
-    } catch (e) {
-      reportError(e, "Creating the mods folder");
-    }
+    await whileSwitchingFolder(async () => {
+      try {
+        await applyModsStatus(await createModsFolder());
+      } catch (e) {
+        reportError(e, "Creating the mods folder");
+        // A refusal may come after the backend republished the folder in use (another one, or
+        // its FS25 profile, #387): adopt that before crash looks resume and Play is pressed.
+        await applyModsStatus(await modsRootStatus()).catch(() => {});
+      }
+    });
   }
 
   // ── Library archive location (#166) ──────────────────────────────────────────
@@ -2971,8 +3103,17 @@
       isOnlyLostCancel(msg, archiveMove.lastLostCancel)
         ? info(msg, { duration: 12_000 })
         : reportError(msg, "Moving your library"),
-    refreshModsStatus: async () => {
-      modsStatus = await modsRootStatus().catch(() => modsStatus);
+    refreshModsStatus: () =>
+      withCrashLooksHeld(async () =>
+        adoptArchiveStatus(await modsRootStatus().catch(() => modsStatus)),
+      ),
+    // The whole move, from before its backend call until its result is adopted (#387).
+    holdCrashLooks: () => {
+      crashWatch.pause();
+      return () => {
+        crashWatch.resume();
+        void crashWatch.check();
+      };
     },
     runScan: () => runScan(),
     // One adopt offer at a time (a second settle pass mustn't replace an open preview).
@@ -3083,14 +3224,18 @@
     try {
       const op = beginWrite("Switching to the new library archive");
       if (!op) return;
-      try {
-        await archiveRepoint(path);
-      } finally {
-        op.end();
-      }
-      await archiveMove.refresh();
-      modsStatus = await modsRootStatus().catch(() => modsStatus);
-      await runScan();
+      // A re-point republishes the folder (maybe another FS25 profile, #387): crash looks wait
+      // from before it until its status is adopted, as for a move.
+      await withCrashLooksHeld(async () => {
+        try {
+          await archiveRepoint(path);
+        } finally {
+          op.end();
+        }
+        await archiveMove.refresh();
+        await adoptArchiveStatus(await modsRootStatus().catch(() => modsStatus));
+        await runScan(); // still held: the scan reads the folder just adopted
+      });
     } catch (e) {
       reportError(e, "Switching to the new library archive");
     }
@@ -3408,6 +3553,9 @@
       try {
         modsStatus = await modsRootStatus();
         roots = rootsFor(modsStatus);
+        // The folder's FS25 profile is known now (#387): read the game's files from it. The crash
+        // check below reads its log.
+        if (profileInUse(modsStatus)) await loadGameFiles(false);
         if (
           showOverrideNotice(modsStatus, localStorage.getItem("silo.overrideNoticeShown") === "1")
         ) {
@@ -3891,7 +4039,8 @@
             label={testRound ? "Launch test round" : "Play"}
             menuItems={playMenuItems}
             onmenuselect={playMenuSelect}
-            activeSetLine={activeSetLine(setState)}
+            activeSetLine={activeSetLine(setState) +
+              (profileInUse(modsStatus) ? `. Starts with the FS25 profile in ${profileInUse(modsStatus)}` : "")}
           />
         {/if}
       {/snippet}
@@ -4314,6 +4463,7 @@
             onChangeModsFolder={changeModsFolder}
             onUseGameFolder={useGameFolder}
             onSwitchModsFolder={switchModsFolder}
+            onSetGameProfile={setGameProfileOn}
           />
         {/snippet}
         {#snippet libraryTab()}
@@ -4382,6 +4532,7 @@
     >
       <div class="page-card">
         <LogTriage
+          gameProfile={profileInUse(modsStatus)}
           activeMods={[...activeSet]}
           activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
           activeFixed={mods.filter((m) => activeSet.has(m.techName) && !m.organized && m.kind !== "zip").map((m) => m.techName)}

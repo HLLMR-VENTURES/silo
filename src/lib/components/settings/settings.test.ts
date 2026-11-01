@@ -132,6 +132,7 @@ describe("ModsFolderSettings", () => {
         layoutProblem: null,
         layoutProblemCause: null,
         layoutConflict: null,
+        gameProfile: null,
       },
       gameInfo: null,
       lockReason: "",
@@ -146,6 +147,67 @@ describe("ModsFolderSettings", () => {
     expect(screen.getByText(/install not found/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Change…" }));
     expect(onChangeModsFolder).toHaveBeenCalledOnce();
+    // The main folder's mods: no FS25 profile setting.
+    expect(screen.queryByRole("switch", { name: /this folder's profile/ })).toBeNull();
+  });
+
+  const profileStatus = (gameProfile: import("../../api").GameProfileStatus) => ({
+    path: "F:/FS25 Profile/mods",
+    source: "user" as const,
+    gameReads: "F:/FS25 Profile/mods",
+    mismatch: false,
+    available: true,
+    modsFolderMissing: false,
+    known: [],
+    canWriteGameSetting: false,
+    gameSettingProblem: null,
+    unresolvedOverride: null,
+    layoutProblem: null,
+    layoutProblemCause: null,
+    layoutConflict: null,
+    gameProfile,
+  });
+  const base = {
+    roots: ["F:/FS25 Profile/mods"],
+    gameInfo: null,
+    lockReason: "",
+    scanning: false,
+    moveUnfinished: false,
+    onChangeModsFolder: vi.fn(),
+    onUseGameFolder: vi.fn(),
+    onSwitchModsFolder: vi.fn(),
+  };
+
+  it("offers to launch FS25 with the folder's profile and says what it changes (#387)", async () => {
+    const user = userEvent.setup();
+    const onSetGameProfile = vi.fn();
+    render(ModsFolderSettings, {
+      ...base,
+      modsStatus: profileStatus({
+        dir: "F:/FS25 Profile",
+        enabled: true,
+        detected: true,
+        chosen: false,
+        supported: true,
+      }),
+      onSetGameProfile,
+    });
+    const sw = screen.getByRole("switch", { name: "Launch FS25 with this folder's profile" });
+    expect(sw).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByText(/Play starts Farming Simulator 25 with the profile in/)).toBeInTheDocument();
+    await user.click(sw);
+    expect(onSetGameProfile).toHaveBeenCalledWith(false);
+  });
+
+  it("says a detected profile is off, and hides the switch where it isn't supported (#387)", () => {
+    const p = { dir: "F:/FS25 Profile", enabled: false, detected: true, chosen: true, supported: true };
+    const { unmount } = render(ModsFolderSettings, { ...base, modsStatus: profileStatus(p) });
+    expect(screen.getByRole("switch", { name: /this folder's profile/ })).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByText(/Otherwise the game loads your main profile's mods/)).toBeInTheDocument();
+    unmount();
+    render(ModsFolderSettings, { ...base, modsStatus: profileStatus({ ...p, supported: false }) });
+    expect(screen.queryByRole("switch", { name: /this folder's profile/ })).toBeNull();
+    expect(screen.getByText(/works on Windows only for now/)).toBeInTheDocument();
   });
 });
 

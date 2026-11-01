@@ -132,6 +132,17 @@ export function modsFolderNotices(
       ],
       dismissible: false,
     };
+  } else if (st?.mismatch && st.gameProfile?.enabled) {
+    // The folder's own FS25 profile (#387) points the game at another mods folder. "Use the
+    // game's folder" would leave the profile for the main one, so it isn't offered.
+    out.override = {
+      key: OVERRIDE_KEY,
+      level: "warning",
+      title: `This folder's FS25 profile loads mods from a different folder${st.gameReads ? ` (${st.gameReads})` : ""}.`,
+      body: "Its own game settings point there, so mods you turn on here won't load in-game. Change that setting in the game, or choose another folder.",
+      actions: [{ label: "Choose another", run: a.chooseAnother }],
+      dismissible: false,
+    };
   } else if (st?.mismatch) {
     out.override = {
       key: OVERRIDE_KEY,

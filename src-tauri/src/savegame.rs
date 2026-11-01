@@ -237,8 +237,10 @@ pub fn list_savegames(user_dir: &Path) -> Vec<Savegame> {
     out
 }
 
+/// Copy `src` into `dst`, a folder this backup has just created (`backup_destination`).
+/// Every folder and file below it is created new (`create_dir`, `create_new`): nothing already
+/// there, a link included, is ever written through.
 fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
     for e in std::fs::read_dir(src)? {
         let e = e?;
         let to = dst.join(e.file_name());
@@ -249,12 +251,57 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
             continue;
         }
         if kind.is_dir() {
+            std::fs::create_dir(&to)?;
             copy_dir(&e.path(), &to)?;
         } else {
-            std::fs::copy(e.path(), &to)?;
+            let mut out = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&to)?;
+            std::io::copy(&mut std::fs::File::open(e.path())?, &mut out)?;
         }
     }
     Ok(())
+}
+
+/// Where a backup of `folder` goes: a new folder in `<user_dir>/SiloBackups`, created here.
+/// Confined to the user folder in use (the FS25 profile's or the main one, #387): `SiloBackups`
+/// must be a real folder (not a symlink or junction) whose real location is directly inside
+/// `user_dir`'s, and the backup folder is created new, never one already there. So a link can't
+/// carry a profile's backup into the main user folder, or anywhere else.
+fn backup_destination(user_dir: &Path, folder: &str, secs: u64) -> Result<PathBuf, String> {
+    let outside = || {
+        "Silo keeps savegame backups in a SiloBackups folder inside your Farming Simulator 25 user folder, and that one points somewhere else. Remove or rename it, then try again.".to_string()
+    };
+    let backups = user_dir.join("SiloBackups");
+    match std::fs::symlink_metadata(&backups) {
+        Ok(m) if m.file_type().is_dir() && !m.file_type().is_symlink() => {}
+        Ok(_) => return Err(outside()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&backups).map_err(|e| e.to_string())?;
+        }
+        Err(e) => return Err(e.to_string()),
+    }
+    let real_user = std::fs::canonicalize(user_dir).map_err(|e| e.to_string())?;
+    let real_backups = std::fs::canonicalize(&backups).map_err(|e| e.to_string())?;
+    if real_backups.parent() != Some(real_user.as_path()) {
+        return Err(outside());
+    }
+    // A new folder: a second backup in the same second gets its own.
+    for n in 0..100u32 {
+        let name = if n == 0 {
+            format!("{folder}_{secs}")
+        } else {
+            format!("{folder}_{secs}_{n}")
+        };
+        let dst = backups.join(name);
+        match std::fs::create_dir(&dst) {
+            Ok(()) => return Ok(dst),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err("Silo couldn't find a free name for the backup. Try again in a moment.".into())
 }
 
 /// The folder of savegame `folder`, if it's a plain name that `list_savegames` reports and a
@@ -283,9 +330,7 @@ pub fn backup(user_dir: &Path, folder: &str) -> Result<String, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let dst = user_dir
-        .join("SiloBackups")
-        .join(format!("{folder}_{secs}"));
+    let dst = backup_destination(user_dir, folder, secs)?;
     copy_dir(&src, &dst).map_err(|e| e.to_string())?;
     crate::fslog::moved("backup-save", &src, &dst);
     Ok(dst.to_string_lossy().into_owned())
@@ -480,6 +525,39 @@ mod tests {
         std::os::unix::fs::symlink(target, link).unwrap();
         #[cfg(windows)]
         junction::create(target, link).unwrap();
+    }
+
+    /// #387: a `SiloBackups` that is a link (a symlink on Linux/macOS, a junction on Windows)
+    /// into another user folder, e.g. the main one while a profile is in use, is refused: the
+    /// backup never lands there.
+    #[test]
+    fn a_backup_never_goes_through_a_linked_backups_folder() {
+        let base = std::env::temp_dir().join(format!("silo_sg_dest_link_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let profile = base.join("profile");
+        let main_backups = base.join("main").join("SiloBackups");
+        std::fs::create_dir_all(profile.join("savegame1")).unwrap();
+        std::fs::write(profile.join("savegame1/careerSavegame.xml"), SAMPLE).unwrap();
+        std::fs::create_dir_all(&main_backups).unwrap();
+        link_dir(&main_backups, &profile.join("SiloBackups"));
+
+        let err = backup(&profile, "savegame1").unwrap_err();
+        assert!(err.contains("points somewhere else"), "{err}");
+        assert_eq!(std::fs::read_dir(&main_backups).unwrap().count(), 0);
+
+        // Once it's a real folder again, the backup goes in it, each in a new folder.
+        // The link itself goes (a symlink is a file on Linux/macOS, a junction a folder here).
+        #[cfg(unix)]
+        std::fs::remove_file(profile.join("SiloBackups")).unwrap();
+        #[cfg(windows)]
+        std::fs::remove_dir(profile.join("SiloBackups")).unwrap();
+        let a = PathBuf::from(backup(&profile, "savegame1").unwrap());
+        let b = PathBuf::from(backup(&profile, "savegame1").unwrap());
+        assert_ne!(a, b);
+        assert!(a.starts_with(profile.join("SiloBackups")));
+        assert!(b.join("careerSavegame.xml").is_file());
+        assert_eq!(std::fs::read_dir(&main_backups).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
