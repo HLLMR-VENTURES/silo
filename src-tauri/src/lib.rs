@@ -1779,16 +1779,19 @@ struct InFlight {
 /// A download's claim on its part file (#400): a name of its own beside the mod
 /// (`<file>.<token><suffix>`, `scratch::unique_beside`), recorded in the scratch journal
 /// (`scratch::Role::Part`) before it's made, and made only by [`PartClaim::create`], which never
-/// opens anything already there. Dropping the claim removes the part it made (a failed or
-/// abandoned download) while that is still a file, frees the name, and drops the record once
-/// nothing is there. A part a crash leaves stays recorded, for `scratch::sweep_where`.
+/// opens anything already there and then records which file it made (`scratch::Made`).
+/// Dropping the claim removes the part it made (a failed or abandoned download) while that
+/// very file is still there, frees the name, and drops the record unless that file is still
+/// there. A part a crash leaves stays recorded, for `scratch::sweep_where`.
 pub struct PartClaim {
     path: PathBuf,
+    /// The mod file it downloads.
+    dest: PathBuf,
     key: FileKey,
     /// The database whose journal recorded the part (none in tests that don't need one).
     db: Option<PathBuf>,
-    /// [`PartClaim::create`] made the file.
-    made: std::sync::atomic::AtomicBool,
+    /// The file [`PartClaim::create`] made.
+    made: std::sync::OnceLock<scratch::Made>,
 }
 
 impl PartClaim {
@@ -1797,35 +1800,94 @@ impl PartClaim {
     }
 
     /// Make the part file: a new file at the claim's own name, never one already there (a
-    /// clash fails; nothing is removed or written into).
+    /// clash fails; nothing is removed or written into). Then note which file it is, in the
+    /// claim and in the journal, so only that file is ever removed.
     pub fn create(&self) -> std::io::Result<std::fs::File> {
+        if self.made.get().is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "the part was already made",
+            ));
+        }
         let f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&self.path)?;
-        self.made.store(true, std::sync::atomic::Ordering::SeqCst);
+        let Some(made) = scratch::Made::of_file(&f) else {
+            // Nothing proves which file this is: it's never removed (logged when left).
+            log::warn!("couldn't read which file {} is", self.path.display());
+            return Ok(f);
+        };
+        let _ = self.made.set(made);
+        if let Some(db) = &self.db {
+            let noted = db::open(db).and_then(|conn| {
+                scratch::Journal::record(
+                    &scratch::DbJournal(&conn),
+                    &part_entry(&self.path, &self.dest, Some(made)),
+                )
+            });
+            if let Err(e) = noted {
+                // A part a crash then leaves is never removed (it proves nothing).
+                log::warn!(
+                    "couldn't note {} in the scratch journal: {e}",
+                    self.path.display()
+                );
+            }
+        }
         Ok(f)
+    }
+
+    /// The very file this claim made is still at its name.
+    fn holds_its_part(&self) -> bool {
+        self.made
+            .get()
+            .is_some_and(|m| scratch::Made::of(&self.path).is_some_and(|now| m.same_file(&now)))
+    }
+}
+
+/// The journal entry for a download's part at `path`, of the mod file `dest`.
+fn part_entry(
+    path: &std::path::Path,
+    dest: &std::path::Path,
+    made: Option<scratch::Made>,
+) -> scratch::Entry {
+    scratch::Entry {
+        path: path.to_path_buf(),
+        role: scratch::Role::Part,
+        from: dest.to_path_buf(),
+        to: dest.to_path_buf(),
+        kind: "zip".into(),
+        made,
     }
 }
 
 impl Drop for PartClaim {
     fn drop(&mut self) {
-        // Only the file this claim made, and only while it is one (never through a link).
-        let made = self.made.load(std::sync::atomic::Ordering::SeqCst);
-        if made && self.path.symlink_metadata().is_ok_and(|m| m.is_file()) {
+        // Only the very file this claim made (never through a link, never another file put
+        // at its name since).
+        if self.holds_its_part() {
             if let Err(e) = std::fs::remove_file(&self.path) {
                 log::warn!("couldn't remove {}: {e}", self.path.display());
             }
+        } else if self.path.symlink_metadata().is_ok() {
+            log::warn!(
+                "left {} in place: it isn't the file Silo's download made",
+                self.path.display()
+            );
         }
         {
             let mut held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
             held.retain(|c| c.key != self.key);
         }
         if let Some(db) = &self.db {
-            match db::open(db) {
-                // Placed, removed or never made: the record goes. Still there: kept recorded.
-                Ok(conn) => scratch::settle(&scratch::DbJournal(&conn), &self.path),
-                Err(e) => log::warn!("couldn't update the scratch journal: {e}"),
+            // Kept recorded only while its own file is still there (its removal failed), for a
+            // later sweep. Placed, removed, never made, or another file there: the record goes,
+            // so it never stands for anything else.
+            if !self.holds_its_part() {
+                match db::open(db) {
+                    Ok(conn) => scratch::Journal::forget(&scratch::DbJournal(&conn), &self.path),
+                    Err(e) => log::warn!("couldn't update the scratch journal: {e}"),
+                }
             }
         }
     }
@@ -1942,9 +2004,10 @@ pub(crate) fn claim_part_at(
     }
     let claim = PartClaim {
         path,
+        dest: dest.to_path_buf(),
         key,
         db: db.map(std::path::Path::to_path_buf),
-        made: std::sync::atomic::AtomicBool::new(false),
+        made: std::sync::OnceLock::new(),
     };
     if let Some(db) = db {
         let journal_err = |e: String| {
@@ -1956,14 +2019,7 @@ pub(crate) fn claim_part_at(
         let conn = db::open(db).map_err(journal_err)?;
         scratch::Journal::record(
             &scratch::DbJournal(&conn),
-            &scratch::Entry {
-                path: claim.path.clone(),
-                role: scratch::Role::Part,
-                from: dest.to_path_buf(),
-                to: dest.to_path_buf(),
-                kind: "zip".into(),
-                size: None,
-            },
+            &part_entry(&claim.path, dest, None),
         )
         .map_err(journal_err)?;
     }
@@ -1980,22 +2036,32 @@ pub(crate) fn part_in_flight(path: &std::path::Path) -> bool {
         .any(|c| c.path.overlaps(&key))
 }
 
+/// What [`remove_unclaimed_part`] did.
+pub(crate) enum PartSweep {
+    /// It was the part Silo made and nothing claims it: removed (or the removal's error).
+    Removed(std::io::Result<()>),
+    /// A download running now claims it: left alone.
+    Claimed,
+    /// Not the file Silo made there (another file, a link, a folder, or unreadable): left.
+    NotIt,
+}
+
 /// Remove a recorded part file (`scratch::Role::Part`) no download running now claims, while it
-/// is a file (never a link or a folder). The claim list stays locked across the check and the
-/// removal, so a download can't claim it in between. `None` when it's claimed or not a file.
-pub(crate) fn remove_unclaimed_part(path: &std::path::Path) -> Option<std::io::Result<()>> {
+/// is the very file Silo made there (`made`, read without following a link). The claim list
+/// stays locked across the check and the removal, so a download can't claim it in between.
+pub(crate) fn remove_unclaimed_part(path: &std::path::Path, made: &scratch::Made) -> PartSweep {
     let held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
     let key = same_file_key(path);
     if held
         .iter()
         .any(|c| c.path.overlaps(&key) || c.key.overlaps(&key))
     {
-        return None;
+        return PartSweep::Claimed;
     }
-    if !path.symlink_metadata().is_ok_and(|m| m.is_file()) {
-        return None;
+    if !scratch::Made::of(path).is_some_and(|now| made.same_file(&now)) {
+        return PartSweep::NotIt;
     }
-    Some(std::fs::remove_file(path))
+    PartSweep::Removed(std::fs::remove_file(path))
 }
 
 /// Anything at `p`, including a broken link (which `Path::exists` would call absent).
@@ -9850,9 +9916,10 @@ mod tests {
         // partial download) is never replaced, written into or removed by a new download.
         let base = temp_base("claim_not_made");
         let dest = base.join("mods").join("FS25_Keep.zip");
+        let db = base.join("silo.db");
         let legacy = dest.with_extension("zip.part");
         std::fs::write(&legacy, b"the user's partial download").unwrap();
-        let claim = super::claim_part(&dest, None).unwrap();
+        let claim = super::claim_part(&dest, Some(&db)).unwrap();
         // Something appears at the claim's own name before the download makes it.
         std::fs::write(claim.path(), b"not Silo's").unwrap();
         assert!(claim.create().is_err(), "never opens what's already there");
@@ -9863,6 +9930,38 @@ mod tests {
             std::fs::read(&legacy).unwrap(),
             b"the user's partial download"
         );
+        // The failed create leaves no record that a later sweep could act on.
+        let conn = super::db::open(&db).unwrap();
+        let journal = super::scratch::DbJournal(&conn);
+        assert!(super::scratch::Journal::entries(&journal).is_empty());
+        super::scratch::sweep_where(&journal, &|_| true);
+        assert_eq!(std::fs::read(&at).unwrap(), b"not Silo's");
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_claim_never_removes_a_file_put_at_its_name_after_it_made_its_part() {
+        // #400: dropping a claim removes only the very file it made.
+        let base = temp_base("claim_replaced");
+        let dest = base.join("mods").join("FS25_Swap.zip");
+        let db = base.join("silo.db");
+        let claim = super::claim_part(&dest, Some(&db)).unwrap();
+        std::io::Write::write_all(&mut claim.create().unwrap(), b"silo's part").unwrap();
+        let at = claim.path().to_path_buf();
+        let moved = base.join("moved.zip");
+        std::fs::rename(&at, &moved).unwrap();
+        std::fs::write(&at, b"user's file").unwrap(); // not even a different size
+        drop(claim);
+        assert_eq!(std::fs::read(&at).unwrap(), b"user's file");
+        assert_eq!(std::fs::read(&moved).unwrap(), b"silo's part");
+        let conn = super::db::open(&db).unwrap();
+        let journal = super::scratch::DbJournal(&conn);
+        assert!(
+            super::scratch::Journal::entries(&journal).is_empty(),
+            "no record stands for the user's file"
+        );
+        drop(conn);
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -423,7 +423,7 @@ fn copy_verify_place(
                 from: src.to_path_buf(),
                 to: dst.to_path_buf(),
                 kind: kind.to_string(),
-                size: None,
+                made: None,
             },
         );
     }

@@ -59,9 +59,116 @@ pub(crate) struct Entry {
     pub to: PathBuf,
     /// `zip` or `dir`.
     pub kind: String,
-    /// `UpdateBak`: its size when Silo made it.
+    /// `Part`, `UpdateBak`: the file Silo made there, read right after it made it. Without it
+    /// nothing proves the file at `path` is still that one, so it's never removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size: Option<u64>,
+    pub made: Option<Made>,
+}
+
+/// Which file is at a path, and how it was, read right after Silo made it (#400): what proves a
+/// later file there is still Silo's own. The file's number on its volume (Windows: volume serial
+/// and file index; Unix: device and inode) and its birth time where the system keeps one: a file
+/// made, moved or copied there later is another file. Size and last change tell whether it was
+/// changed since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Made {
+    pub volume: u64,
+    pub index: u64,
+    /// Birth time, ns since 1970.
+    #[serde(default)]
+    pub created: Option<u64>,
+    pub size: u64,
+    /// Last change, ns since 1970.
+    #[serde(default)]
+    pub modified: Option<u64>,
+}
+
+fn nanos(t: std::io::Result<std::time::SystemTime>) -> Option<u64> {
+    let d = t.ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    u64::try_from(d.as_nanos()).ok()
+}
+
+impl Made {
+    /// The open file `f` (just made).
+    pub(crate) fn of_file(f: &std::fs::File) -> Option<Made> {
+        let m = f.metadata().ok()?;
+        if !m.is_file() {
+            return None;
+        }
+        let (volume, index) = file_number(f, &m)?;
+        Some(Made {
+            volume,
+            index,
+            created: nanos(m.created()),
+            size: m.len(),
+            modified: nanos(m.modified()),
+        })
+    }
+
+    /// The file at `p` itself: `None` for a link, a folder, or anything that can't be read.
+    pub(crate) fn of(p: &Path) -> Option<Made> {
+        if !p.symlink_metadata().is_ok_and(|m| m.is_file()) {
+            return None;
+        }
+        Made::of_file(&open_no_follow(p).ok()?)
+    }
+
+    /// The same file: same number on the same volume, born at the same time.
+    pub(crate) fn same_file(&self, other: &Made) -> bool {
+        self.volume == other.volume && self.index == other.index && self.created == other.created
+    }
+
+    /// The same file, unchanged since (same size, same last change).
+    pub(crate) fn unchanged(&self, other: &Made) -> bool {
+        self.same_file(other) && self.size == other.size && self.modified == other.modified
+    }
+}
+
+/// Open `p` for its attributes only, never following a link at it (a link opens as itself).
+#[cfg(windows)]
+fn open_no_follow(p: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    };
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(p)
+}
+
+#[cfg(unix)]
+fn open_no_follow(p: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    // O_NOFOLLOW: a link at `p` fails to open. Non-blocking, so a FIFO put there can't hang.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(p)
+}
+
+#[cfg(windows)]
+fn file_number(f: &std::fs::File, _: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    // SAFETY: a zeroed plain-data struct, filled by the call; the handle is open for the call.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) };
+    (ok != 0).then(|| {
+        (
+            u64::from(info.dwVolumeSerialNumber),
+            (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn file_number(_: &std::fs::File, m: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((m.dev(), m.ino()))
 }
 
 /// Where scratch entries are recorded. Recording comes first: an entry that couldn't be
@@ -199,7 +306,7 @@ pub(crate) fn begin(
         from: from.to_path_buf(),
         to: to.to_path_buf(),
         kind: kind.to_string(),
-        size: None,
+        made: None,
     })?;
     Ok(path)
 }
@@ -440,6 +547,10 @@ pub(crate) enum Swept {
     Removed,
     /// An old copy whose replacement didn't verify, put back under the mod's name.
     PutBack,
+    /// No longer the file Silo recorded making (another file is there, or Silo never read
+    /// which file it made): left in place, logged, and the record dropped, since it proves
+    /// nothing any more.
+    Disowned,
     /// Kept: Silo couldn't prove it's safe to remove (logged).
     Kept,
 }
@@ -460,10 +571,11 @@ pub(crate) enum Swept {
 ///   file still left). With no replacement at all it may be the only copy left: a zip is put
 ///   back under its name (`from`) when that's free; a folder (perhaps half-deleted) is kept.
 ///
-/// - `Part`: a file (not a link, not a folder) that no download running now claims
-///   (`crate::remove_unclaimed_part`, which holds the claims across the check and the removal).
-///   A claim records its part before making it exclusively, so a recorded part nothing claims
-///   is a download that stopped (a crash, or a removal that failed).
+/// - `Part`: the very file the claim made (`made`: the same file number and birth time, read
+///   without following a link), that no download running now claims
+///   (`crate::remove_unclaimed_part` holds the claims across the check and the removal). A
+///   recorded part nothing claims is a download that stopped (a crash, or a removal that
+///   failed). Any other file there is left in place and the record dropped (`Disowned`).
 ///
 /// Only the entries `which` picks are looked at (a relink pass sweeps relink temps; a move
 /// sweeps those and its own folders' move scratch, never an older move's). Update backups
@@ -477,14 +589,23 @@ pub(crate) fn sweep_where(
         .entries()
         .into_iter()
         .filter(|e| e.role != Role::UpdateBak && which(e))
+        // A running download's part: not looked at (not even whether it's there yet, so its
+        // record is never dropped before the download makes it).
+        .filter(|e| e.role != Role::Part || !crate::part_in_flight(&e.path))
     {
         let s = sweep_one(&e);
         match s {
-            Swept::Gone | Swept::Removed | Swept::PutBack => journal.forget(&e.path),
+            Swept::Gone | Swept::Removed | Swept::PutBack | Swept::Disowned => {
+                journal.forget(&e.path)
+            }
             Swept::Kept => {}
         }
         match s {
             Swept::Gone => {}
+            Swept::Disowned => log::warn!(
+                "left {} in place: it's no longer the file Silo made there",
+                e.path.display()
+            ),
             Swept::Removed => crate::fslog::changed("remove-scratch", &e.path),
             Swept::PutBack => crate::fslog::moved("restore", &e.path, &e.from),
             Swept::Kept => log::warn!(
@@ -527,8 +648,15 @@ fn sweep_one(e: &Entry) -> Swept {
             .then(|| crate::organize::remove_link(&e.path)),
         // Silo never makes a link as move scratch or a part: a link here isn't its own.
         Role::MoveTmp | Role::MoveOld | Role::Part if link => None,
-        // A download that stopped: a file no download running now claims.
-        Role::Part => crate::remove_unclaimed_part(&e.path),
+        // A download that stopped: the file it made, which no download running now claims.
+        Role::Part => match &e.made {
+            Some(made) => match crate::remove_unclaimed_part(&e.path, made) {
+                crate::PartSweep::Removed(r) => Some(r),
+                crate::PartSweep::Claimed => None,
+                crate::PartSweep::NotIt => return Swept::Disowned,
+            },
+            None => return Swept::Disowned,
+        },
         // Never swept (`sweep_where` skips them); kept if one ever gets here.
         Role::UpdateBak => None,
         // A copy that may have stopped part-way: every byte it holds is still in the original
@@ -681,7 +809,7 @@ pub(crate) mod tests {
             from: from.into(),
             to: to.into(),
             kind: kind.into(),
-            size: None,
+            made: None,
         }
     }
 

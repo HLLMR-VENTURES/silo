@@ -290,8 +290,9 @@ fn undo_swap(dest: &Path, part: &Path, old: &Path, name: &str, e: &std::io::Erro
 }
 
 /// Move the set-aside `old` (a previous version of `dest`) into `<mods_root>/backups/`, record
-/// it in the policy's journal ([`Role::UpdateBak`], with its size), and prune that mod's older
-/// recorded backups. A backup that couldn't be recorded is kept for good (never pruned).
+/// it in the policy's journal ([`Role::UpdateBak`], with which file it is and how it was:
+/// `scratch::Made`), and prune that mod's older recorded backups. A backup that couldn't be
+/// recorded is kept for good (never pruned).
 fn keep_backup(
     old: &Path,
     dest: &Path,
@@ -310,7 +311,7 @@ fn keep_backup(
             from: old.to_path_buf(),
             to: dest.to_path_buf(),
             kind: "zip".into(),
-            size: bak.symlink_metadata().ok().map(|m| m.len()),
+            made: scratch::Made::of(&bak),
         };
         if let Err(e) = j.record(&e) {
             log::warn!(
@@ -536,14 +537,10 @@ pub(crate) fn settle(
     };
     let mut out = Recovery::default();
     let journal: &dyn Journal = policy.journal().unwrap_or(&scratch::NoJournal);
-    scratch::sweep_where(journal, &|e| {
-        e.role == Role::Part && !crate::part_in_flight(&e.path)
-    });
+    scratch::sweep_where(journal, &|e| e.role == Role::Part);
     for dir in dirs {
         out.unrecorded
-            .extend(scratch::log_unrecorded(journal, dir, &|n: &str| {
-                n.to_lowercase().ends_with(PART_SUFFIX)
-            }));
+            .extend(scratch::log_unrecorded(journal, dir, &is_part_name));
     }
     for dir in dirs {
         recover_in(dir, mods_root, &others_of(dir), policy, attempt, &mut out);
@@ -566,6 +563,22 @@ pub(crate) fn settle(
         }
     }
     out
+}
+
+/// A download's part-file name: an update's (`….silo-update.part`, either style), or an
+/// install's (`<file>.zip.part` from an older version, `<file>.zip.<16 hex>.part` now).
+fn is_part_name(n: &str) -> bool {
+    let l = n.to_lowercase();
+    if l.ends_with(PART_SUFFIX) || l.ends_with(".zip.part") {
+        return true;
+    }
+    l.strip_suffix(".part")
+        .and_then(|s| s.rsplit_once('.'))
+        .is_some_and(|(stem, token)| {
+            stem.ends_with(".zip")
+                && token.len() == 16
+                && token.chars().all(|c| c.is_ascii_hexdigit())
+        })
 }
 
 /// Why something must wait for `paths` (set-aside old versions): the recorded problems when
@@ -599,9 +612,9 @@ pub(crate) fn layout_dirs(layout: &organize::Layout) -> Vec<PathBuf> {
 
 /// Keep the `keep` newest update backups of `file_name` in `backups` that Silo recorded making
 /// ([`Role::UpdateBak`] in `journal`, in the order it made them); remove older ones (#400).
-/// One is removed only while it's still what Silo recorded: a file (never a link), the size it
-/// had. One that isn't any more is logged and left, and its record dropped (it no longer
-/// counts). A backup-like name nothing records (`<file_name>.<secs>[-n].update.bak` from an
+/// One is removed only while it's still what Silo recorded: the same file (number and birth
+/// time, read without following a link), unchanged since (same size and last change). One that
+/// isn't any more is logged and left, and its record dropped (it no longer counts). A backup-like name nothing records (`<file_name>.<secs>[-n].update.bak` from an
 /// earlier version, or the user's own file) is logged and left in place, as is a half-copied
 /// `.<file_name>.….silo-tmp` a stopped cross-drive move left (#394). Never touches anything
 /// else there, including the `.bak` files adopt/restore keep. Returns the unrecorded
@@ -645,8 +658,9 @@ pub(crate) fn prune_backups(
         if !mine {
             continue;
         }
+        let now = scratch::Made::of(&e.path);
         match e.path.symlink_metadata() {
-            Ok(m) if !m.file_type().is_symlink() && m.is_file() && Some(m.len()) == e.size => {
+            Ok(_) if now.is_some_and(|now| e.made.is_some_and(|m| m.unchanged(&now))) => {
                 proven.push(e.path)
             }
             Ok(_) => {
@@ -1087,15 +1101,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&mods);
     }
 
-    /// A recorded part entry at `path` for `dest`, as a claim records it.
-    fn part_entry(path: &Path, dest: &Path) -> scratch::Entry {
+    /// A recorded part entry at `path` for `dest`, as a claim records it (`made` once it made
+    /// the file).
+    fn part_entry(path: &Path, dest: &Path, made: Option<scratch::Made>) -> scratch::Entry {
         scratch::Entry {
             path: path.to_path_buf(),
             role: Role::Part,
             from: dest.to_path_buf(),
             to: dest.to_path_buf(),
             kind: "zip".into(),
-            size: None,
+            made,
         }
     }
 
@@ -1120,20 +1135,26 @@ mod tests {
         std::fs::write(&legacy, b"half a download from an older Silo").unwrap();
         let lookalike = scratch::unique_beside(&dest, PART_SUFFIX);
         std::fs::write(&lookalike, b"not recorded").unwrap();
+        // An install's part, in the old and the new style.
+        let install_legacy = dest.with_extension("zip.part");
+        std::fs::write(&install_legacy, b"an older install's part").unwrap();
+        let install_new = scratch::unique_beside(&dest, ".part");
+        std::fs::write(&install_new, b"not recorded either").unwrap();
+        let all = [&legacy, &lookalike, &install_legacy, &install_new];
         let journal = scratch::tests::MemJournal::default();
 
         let r = settle_with(&mods, &layout, &journal);
 
-        assert!(legacy.exists() && lookalike.exists());
+        assert!(all.iter().all(|p| p.exists()));
         let mut logged = r.unrecorded.clone();
         logged.sort();
-        let mut want = vec![legacy.clone(), lookalike.clone()];
+        let mut want: Vec<PathBuf> = all.iter().map(|p| p.to_path_buf()).collect();
         want.sort();
-        assert_eq!(logged, want, "both are logged");
+        assert_eq!(logged, want, "all are logged");
         // Without a journal at all, the same: logged, left.
         let r = recover_and_list(&mods, &layout);
-        assert!(legacy.exists() && lookalike.exists());
-        assert_eq!(r.unrecorded.len(), 2, "{r:?}");
+        assert!(all.iter().all(|p| p.exists()));
+        assert_eq!(r.unrecorded.len(), 4, "{r:?}");
         assert_eq!(version_of(&dest).as_deref(), Some("1.0.0.0"));
         let _ = std::fs::remove_dir_all(&mods);
     }
@@ -1155,8 +1176,11 @@ mod tests {
         make_mod_zip(&dest, "A", "1.0.0.0");
         let part = scratch::unique_beside(&dest, PART_SUFFIX);
         let journal = scratch::tests::MemJournal::default();
-        journal.record(&part_entry(&part, &dest)).unwrap();
+        journal.record(&part_entry(&part, &dest, None)).unwrap();
         std::fs::write(&part, b"half a download").unwrap();
+        let made = scratch::Made::of(&part);
+        assert!(made.is_some());
+        journal.record(&part_entry(&part, &dest, made)).unwrap();
 
         let r = settle_with(&mods, &layout, &journal);
 
@@ -1173,8 +1197,12 @@ mod tests {
         let layout = Layout::default_for(&mods);
         let dest = mods.join("FS25_A.zip");
         let part = scratch::unique_beside(&dest, PART_SUFFIX);
+        // Silo made a file there once; now a folder is there.
+        std::fs::write(&part, b"x").unwrap();
+        let made = scratch::Made::of(&part);
+        std::fs::remove_file(&part).unwrap();
         let journal = scratch::tests::MemJournal::default();
-        journal.record(&part_entry(&part, &dest)).unwrap();
+        journal.record(&part_entry(&part, &dest, made)).unwrap();
         std::fs::create_dir_all(part.join("inside")).unwrap();
         std::fs::write(part.join("inside").join("f"), b"x").unwrap();
 
@@ -1184,7 +1212,54 @@ mod tests {
             part.join("inside").join("f").exists(),
             "a folder is never a part"
         );
-        assert_eq!(journal.entries().len(), 1, "kept recorded");
+        assert!(
+            journal.entries().is_empty(),
+            "the record proves nothing now"
+        );
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn another_file_at_a_recorded_part_is_left_in_place() {
+        // #400: the record names the file Silo made. A file put at that name since (here the
+        // same size, even) is someone else's.
+        let mods = fresh("recover_part_replaced");
+        let layout = Layout::default_for(&mods);
+        let dest = mods.join("FS25_A.zip");
+        let part = scratch::unique_beside(&dest, PART_SUFFIX);
+        std::fs::write(&part, b"silo's").unwrap();
+        let made = scratch::Made::of(&part);
+        let journal = scratch::tests::MemJournal::default();
+        journal.record(&part_entry(&part, &dest, made)).unwrap();
+        std::fs::rename(&part, mods.join("moved away")).unwrap();
+        std::fs::write(&part, b"user's").unwrap();
+
+        settle_with(&mods, &layout, &journal);
+
+        assert_eq!(std::fs::read(&part).unwrap(), b"user's");
+        assert!(
+            journal.entries().is_empty(),
+            "the record proves nothing now"
+        );
+        let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_recorded_part_silo_never_read_is_left_in_place() {
+        // A claim records its part before making it. A file there without the record of which
+        // file Silo made (a failed or crashed create) is never removed.
+        let mods = fresh("recover_part_unread");
+        let layout = Layout::default_for(&mods);
+        let dest = mods.join("FS25_A.zip");
+        let part = scratch::unique_beside(&dest, PART_SUFFIX);
+        let journal = scratch::tests::MemJournal::default();
+        journal.record(&part_entry(&part, &dest, None)).unwrap();
+        std::fs::write(&part, b"whose?").unwrap();
+
+        settle_with(&mods, &layout, &journal);
+
+        assert_eq!(std::fs::read(&part).unwrap(), b"whose?");
+        assert!(journal.entries().is_empty(), "the record proves nothing");
         let _ = std::fs::remove_dir_all(&mods);
     }
 
@@ -1196,8 +1271,11 @@ mod tests {
         let victim = mods.join("elsewhere.zip");
         std::fs::write(&victim, b"someone else's file").unwrap();
         let part = scratch::unique_beside(&dest, PART_SUFFIX);
+        // The record names the victim's own file: still a link at the part's name is no part.
         let journal = scratch::tests::MemJournal::default();
-        journal.record(&part_entry(&part, &dest)).unwrap();
+        journal
+            .record(&part_entry(&part, &dest, scratch::Made::of(&victim)))
+            .unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&victim, &part).unwrap();
         #[cfg(windows)]
@@ -1209,7 +1287,10 @@ mod tests {
 
         assert!(part.symlink_metadata().is_ok(), "the link is kept");
         assert_eq!(std::fs::read(&victim).unwrap(), b"someone else's file");
-        assert_eq!(journal.entries().len(), 1, "kept recorded");
+        assert!(
+            scratch::Made::of(&part).is_none(),
+            "a link is never read as a file"
+        );
         let _ = std::fs::remove_dir_all(&mods);
     }
 
@@ -1220,14 +1301,20 @@ mod tests {
         let dest = mods.join("FS25_A.zip");
         let db = mods.join("silo.db");
         let claim = crate::claim_part_at(&dest, &part_path(&dest), PART_SUFFIX, Some(&db)).unwrap();
-        std::io::Write::write_all(&mut claim.create().unwrap(), b"downloading").unwrap();
         let conn = crate::db::open(&db).unwrap();
         let journal = scratch::DbJournal(&conn);
         assert_eq!(
             journal.entries(),
-            vec![part_entry(claim.path(), &dest)],
+            vec![part_entry(claim.path(), &dest, None)],
             "recorded before it was made"
         );
+        // A sweep before the download made it (an archive move's) never drops its record.
+        scratch::sweep_where(&journal, &|_| true);
+        assert_eq!(journal.entries().len(), 1);
+        std::io::Write::write_all(&mut claim.create().unwrap(), b"downloading").unwrap();
+        let made = journal.entries()[0].made;
+        assert!(made.is_some(), "which file it made is recorded");
+        scratch::sweep_where(&journal, &|_| true);
 
         let r = settle_with(&mods, &layout, &journal);
 
@@ -1457,6 +1544,46 @@ mod tests {
             "its record goes"
         );
         let _ = std::fs::remove_dir_all(&mods);
+    }
+
+    #[test]
+    fn a_same_size_file_at_a_recorded_backup_is_left() {
+        // #400: size alone proves nothing. Another file of the same length put at the oldest
+        // backup's name, or that backup rewritten in place at the same length, is kept.
+        for in_place in [false, true] {
+            let mods = fresh(if in_place {
+                "prune_rewritten"
+            } else {
+                "prune_same_size"
+            });
+            let journal = scratch::tests::MemJournal::default();
+            let dest = mods.join("FS25_A.zip");
+            make_mod_zip(&dest, "A", "1.0.0.0");
+            let first = update_to(&dest, &mods, "2.0.0.0", &journal);
+            let len = std::fs::metadata(&first).unwrap().len() as usize;
+            let other = vec![b'u'; len];
+            if in_place {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&first)
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, &other))
+                    .unwrap();
+            } else {
+                std::fs::remove_file(&first).unwrap();
+                std::fs::write(&first, &other).unwrap();
+            }
+            for v in 3..=5 {
+                update_to(&dest, &mods, &format!("{v}.0.0.0"), &journal);
+            }
+
+            assert_eq!(
+                std::fs::read(&first).unwrap(),
+                other,
+                "in place: {in_place}"
+            );
+            assert!(!journal.entries().iter().any(|e| e.path == first));
+            let _ = std::fs::remove_dir_all(&mods);
+        }
     }
 
     #[test]

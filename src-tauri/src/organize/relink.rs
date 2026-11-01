@@ -250,7 +250,7 @@ fn discard_relink_tmp(
         from: from.to_path_buf(),
         to: tmp.to_path_buf(),
         kind: kind.to_string(),
-        size: None,
+        made: None,
     };
     crate::scratch::discard(journal, &e);
 }
