@@ -656,7 +656,8 @@ pub(crate) fn note_zip_projection(conn: &Connection, key: &str, file_name: &str,
 /// Adopt the file the user swapped into the mods folder as the new canonical version: back
 /// up the old archived copy, promote the flat file into the archive, and (if the mod is
 /// active) re-project it so it's Silo-managed again. Reversible — the old copy is kept under
-/// `backups/`.
+/// `backups/`. If the promote fails (a file in use, say), the old copy is moved back into the
+/// archive, so the failure changes nothing.
 pub fn adopt_foreign(conn: &Connection, layout: &Layout, file_name: &str) -> Result<(), String> {
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
@@ -679,14 +680,22 @@ pub fn adopt_foreign(conn: &Connection, layout: &Layout, file_name: &str) -> Res
     }
     let archive = archive_path(&layout.archive, &row.category, file_name);
     // Back up the old archived copy before replacing it.
+    let mut backup = None;
     if archive.exists() {
         let bak = backup_path(root, file_name)?;
         move_path_as(&archive, &bak, "backup").map_err(|e| format!("backup: {e}"))?;
+        backup = Some(bak);
     } else if let Some(parent) = archive.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     // Promote the swapped-in file into the archive, then re-project it back into the root.
-    move_path(&flat, &archive).map_err(|e| format!("promote: {e}"))?;
+    if let Err(e) = move_path(&flat, &archive) {
+        let failed = format!("promote: {e}");
+        return Err(match backup {
+            Some(bak) => put_backup_back(&bak, &archive, failed),
+            None => failed,
+        });
+    }
     if row.active {
         make_link(&archive, &flat, &row.kind, &mut LinkPolicy::new(layout))
             .map_err(|e| format!("re-project: {e}"))?;
@@ -696,11 +705,26 @@ pub fn adopt_foreign(conn: &Connection, layout: &Layout, file_name: &str) -> Res
 
 /// Restore Silo's managed copy over a file the user swapped in: back up their file, then
 /// re-project the archived original (if the mod is active). Reversible — their file is kept
-/// under `backups/`.
+/// under `backups/`. If the re-project fails, their file is moved back into the mods folder,
+/// so the failure changes nothing.
 pub fn restore_projection(
     conn: &Connection,
     layout: &Layout,
     file_name: &str,
+) -> Result<(), String> {
+    let mut policy = LinkPolicy::new(layout);
+    restore_projection_with(conn, layout, file_name, |src, link, kind| {
+        make_link(src, link, kind, &mut policy)
+    })
+}
+
+/// [`restore_projection`] with the re-project (`make_link`) injected, so its rollback is
+/// testable.
+fn restore_projection_with(
+    conn: &Connection,
+    layout: &Layout,
+    file_name: &str,
+    relink: impl FnOnce(&Path, &Path, &str) -> std::io::Result<()>,
 ) -> Result<(), String> {
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
@@ -715,15 +739,41 @@ pub fn restore_projection(
     }
     let flat = root.join(file_name);
     // Back up the user's file, then free the slot.
+    let mut backup = None;
     if flat.symlink_metadata().is_ok() {
         let bak = backup_path(root, file_name)?;
         move_path_as(&flat, &bak, "backup").map_err(|e| format!("backup: {e}"))?;
+        backup = Some(bak);
     }
     if row.active {
-        make_link(&archive, &flat, &row.kind, &mut LinkPolicy::new(layout))
-            .map_err(|e| format!("re-project: {e}"))?;
+        if let Err(e) = relink(&archive, &flat, &row.kind) {
+            let failed = format!("re-project: {e}");
+            return Err(match backup {
+                Some(bak) => put_backup_back(&bak, &flat, failed),
+                None => failed,
+            });
+        }
     }
     Ok(())
+}
+
+/// Undo a backup move after the step that followed it failed with `failed`: move `bak` back to
+/// `to`, its old place, so the failure changes nothing. Only into a free `to` (never over what
+/// the failed step may have left there). Returns the error to report: `failed`, plus where the
+/// backup is if it couldn't be moved back.
+fn put_backup_back(bak: &Path, to: &Path, failed: String) -> String {
+    let undone = if to.symlink_metadata().is_ok() {
+        Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+    } else {
+        move_path_as(bak, to, "restore")
+    };
+    match undone {
+        Ok(()) => failed,
+        Err(e) => format!(
+            "{failed}. Silo couldn't move the backup back ({e}); it's kept at {}.",
+            bak.display()
+        ),
+    }
 }
 
 /// A free `<root>/backups/<file_name>.<unix_secs>.bak` for a file we're about to replace.
@@ -791,6 +841,7 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
     let root = &layout.mods;
     let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
+    let mut policy = LinkPolicy::new(layout);
     let mut categories: HashSet<String> = HashSet::new();
     for row in db::load_organized(conn, &key) {
         categories.insert(row.category.clone());
@@ -835,6 +886,14 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             }
             if let Err(e) = restored {
                 rep.errors.push(format!("{}: restore: {e}", row.tech_name));
+                // The projection was removed to free the slot: put it back, so the mod stays
+                // active as it was (an edited copy kept in backups is the user's to restore).
+                let relinked = occupied
+                    && kept.is_none()
+                    && make_link(&src, &link, &row.kind, &mut policy).is_ok();
+                if relinked && row.kind == "zip" {
+                    note_zip_projection(conn, &key, &row.file_name, &link);
+                }
                 continue;
             }
         } else if link.exists() {
@@ -2371,6 +2430,175 @@ mod tests {
             b"the user's swapped-in build"
         );
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A mods folder at a fresh temp `base` with one managed zip, `FS25_Foo.zip` (Vehicles),
+    /// archived as `archived`, and `flat` swapped into the mods folder at its name (if any).
+    /// `backups/` exists already.
+    fn swap_fixture(tag: &str, archived: &[u8], flat: Option<&[u8]>, active: bool) -> PathBuf {
+        let base = temp_dir_for(tag);
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let cat = base.join(ARCHIVE).join("Vehicles");
+        std::fs::create_dir_all(&cat).unwrap();
+        std::fs::create_dir_all(base.join("backups")).unwrap();
+        std::fs::write(cat.join("FS25_Foo.zip"), archived).unwrap();
+        let row = OrganizedRow {
+            tech_name: "FS25_Foo".into(),
+            file_name: "FS25_Foo.zip".into(),
+            kind: "zip".into(),
+            category: "Vehicles".into(),
+            subcategory: None,
+            active,
+        };
+        db::upsert_organized(&conn, &crate::modsroot::canonical_key(&base), &row).unwrap();
+        if let Some(flat) = flat {
+            std::fs::write(base.join("FS25_Foo.zip"), flat).unwrap();
+        }
+        base
+    }
+
+    fn backups_in(base: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(base.join("backups"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect()
+    }
+
+    /// Keep `file` from being moved for as long as the guard lives, the way a running FS25 holds
+    /// a mod it loaded: on Windows a handle that doesn't share delete; on Unix its folder made
+    /// read-only. `None` where that can't hold (Unix as root).
+    fn unmovable(file: &Path) -> Option<impl Drop> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            struct Held(#[allow(dead_code)] std::fs::File);
+            impl Drop for Held {
+                fn drop(&mut self) {}
+            }
+            let held = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1) // FILE_SHARE_READ: readable, not movable
+                .open(file)
+                .unwrap();
+            Some(Held(held))
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            struct ReadOnly(PathBuf);
+            impl Drop for ReadOnly {
+                fn drop(&mut self) {
+                    let _ =
+                        std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+                }
+            }
+            let dir = file.parent().unwrap().to_path_buf();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let guard = ReadOnly(dir.clone());
+            if std::fs::write(dir.join(".probe"), b"").is_ok() {
+                let _ = std::fs::remove_file(dir.join(".probe"));
+                return None; // root ignores folder permissions
+            }
+            Some(guard)
+        }
+    }
+
+    #[test]
+    fn a_failed_adopt_puts_the_archived_copy_back() {
+        let base = swap_fixture(
+            "adopt_rollback",
+            b"OLD archived",
+            Some(b"NEWER flat"),
+            false,
+        );
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let layout = Layout::default_for(&base);
+        let archived = base.join(ARCHIVE).join("Vehicles").join("FS25_Foo.zip");
+        let flat = base.join("FS25_Foo.zip");
+
+        let Some(held) = unmovable(&flat) else {
+            return;
+        };
+        let e = adopt_foreign(&conn, &layout, "FS25_Foo.zip").unwrap_err();
+        drop(held);
+        assert!(e.starts_with("promote:"), "{e}");
+        assert!(!e.contains("kept at"), "rolled back: {e}");
+        assert_eq!(std::fs::read(&archived).unwrap(), b"OLD archived");
+        assert_eq!(std::fs::read(&flat).unwrap(), b"NEWER flat");
+        assert!(backups_in(&base).is_empty(), "no backup left behind");
+
+        // Nothing holds it any more: the adopt goes through.
+        adopt_foreign(&conn, &layout, "FS25_Foo.zip").unwrap();
+        assert_eq!(std::fs::read(&archived).unwrap(), b"NEWER flat");
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_failed_restore_puts_the_users_file_back() {
+        let base = swap_fixture("restore_rollback", b"MANAGED", Some(b"user's build"), true);
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let layout = Layout::default_for(&base);
+        let flat = base.join("FS25_Foo.zip");
+
+        let refuse = |_: &Path, _: &Path, _: &str| -> std::io::Result<()> {
+            Err(std::io::Error::other("disk full"))
+        };
+        let e = restore_projection_with(&conn, &layout, "FS25_Foo.zip", refuse).unwrap_err();
+        assert_eq!(e, "re-project: disk full");
+        assert_eq!(std::fs::read(&flat).unwrap(), b"user's build");
+        assert!(backups_in(&base).is_empty(), "no backup left behind");
+
+        // A failed re-project that left something at the name: the user's file is never moved
+        // over it, and the error says where it's kept.
+        let partial = |_: &Path, link: &Path, _: &str| -> std::io::Result<()> {
+            std::fs::write(link, b"PK half")?;
+            Err(std::io::Error::other("cut off"))
+        };
+        let e = restore_projection_with(&conn, &layout, "FS25_Foo.zip", partial).unwrap_err();
+        let kept = backups_in(&base);
+        assert_eq!(kept.len(), 1);
+        assert!(e.contains(&kept[0].display().to_string()), "{e}");
+        assert_eq!(std::fs::read(&kept[0]).unwrap(), b"user's build");
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_failed_flatten_restore_puts_the_projection_back() {
+        // Active, projected as a copy (a hardlink would share the archived file's lock).
+        let base = swap_fixture(
+            "flatten_rollback",
+            b"PK archived",
+            Some(b"PK archived"),
+            true,
+        );
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let layout = Layout::default_for(&base);
+        let key = crate::modsroot::canonical_key(&base);
+        let archived = base.join(ARCHIVE).join("Vehicles").join("FS25_Foo.zip");
+        let flat = base.join("FS25_Foo.zip");
+
+        let Some(held) = unmovable(&archived) else {
+            return;
+        };
+        let rep = flatten(&conn, &layout);
+        drop(held);
+        assert!(
+            rep.errors.iter().any(|e| e.contains("restore:")),
+            "{:?}",
+            rep.errors
+        );
+        assert_eq!(
+            std::fs::read(&flat).unwrap(),
+            b"PK archived",
+            "still active"
+        );
+        assert!(archived.exists(), "the archived copy stays");
+        assert_eq!(db::load_organized(&conn, &key).len(), 1, "still managed");
+        drop(conn);
         let _ = std::fs::remove_dir_all(&base);
     }
 
