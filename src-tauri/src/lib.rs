@@ -3319,6 +3319,7 @@ fn target_problems(
 }
 
 /// The free-space facts a move depends on (see `move_problems`).
+#[derive(Clone, Copy)]
 struct Space {
     /// The old and new archive share a drive.
     archive_same_drive: bool,
@@ -3339,8 +3340,14 @@ struct Space {
     /// only a copy is possible, folders where a folder link may not work). From
     /// `relocate::relink_cost`.
     relink_copied: u64,
+    /// The largest single mod in `relink_copied`.
+    relink_largest_copied: u64,
     /// The mods folder is on the new archive's drive (known mounts only).
     mods_same_drive: bool,
+    /// The old archive is on the mods folder's drive (known mounts only): each copy made in the
+    /// mods folder is followed by deleting that mod's old copy there, so only one at a time
+    /// needs room.
+    old_on_mods_drive: bool,
     /// Free on the mods folder's drive (unknown never blocks).
     mods_free: Option<u64>,
 }
@@ -3398,6 +3405,8 @@ fn move_problems(f: MoveFacts) -> Vec<String> {
     let mods_needed = if s.mods_same_drive {
         needed += s.relink_copied;
         0
+    } else if s.old_on_mods_drive {
+        s.relink_largest_copied
     } else {
         s.relink_copied
     };
@@ -3441,15 +3450,15 @@ fn check_move(
     let new_mount = organize::mount_of(new);
     let free = new_mount.as_ref().map(|(_, f)| *f);
     // For space, an unknown mount is another drive: the whole archive must fit.
-    let archive_same_drive =
-        organize::known_same_mount(&organize::mount_of(&layout.archive), &new_mount);
+    let old_mount = organize::mount_of(&layout.archive);
+    let archive_same_drive = organize::known_same_mount(&old_mount, &new_mount);
     let mods_mount = organize::mount_of(&layout.mods);
     // Re-links only cost space where a new link might be a copy. Asking runs the link probes
     // in the new folder, so only once it is cleared (`target` empty) and only when an active
     // mod would be re-linked at all.
     let cost = relocate::relink_cost(&layout.mods, &layout.archive, &rows);
-    let (mut relink_kept, mut relink_copied) = (0, 0);
-    if target.is_empty() && cost != relocate::RelinkCost::default() {
+    let (mut relink_kept, mut relink_copied, mut relink_largest_copied) = (0, 0, 0);
+    if target.is_empty() && cost.kept + cost.copied_zips + cost.copied_dirs > 0 {
         let to = organize::Layout {
             mods: layout.mods.clone(),
             archive: new.to_path_buf(),
@@ -3457,9 +3466,11 @@ fn check_move(
         if cost.kept + cost.copied_zips > 0 && organize::LinkPolicy::new(&to).can_only_copy() {
             relink_kept = cost.kept;
             relink_copied = cost.copied_zips;
+            relink_largest_copied = cost.largest_copied_zip;
         }
         if cost.copied_dirs > 0 && organize::dir_link_may_copy(&to) {
             relink_copied += cost.copied_dirs;
+            relink_largest_copied = relink_largest_copied.max(cost.largest_copied_dir);
         }
     }
     // An archive folder Silo can't list may hold unrecorded mods the move would leave behind.
@@ -3489,7 +3500,9 @@ fn check_move(
             },
             relink_kept,
             relink_copied,
+            relink_largest_copied,
             mods_same_drive: organize::known_same_mount(&mods_mount, &new_mount),
+            old_on_mods_drive: organize::known_same_mount(&old_mount, &mods_mount),
             mods_free: mods_mount.as_ref().map(|(_, f)| *f),
         },
     });
@@ -7519,7 +7532,9 @@ mod tests {
             largest_unkept: 2 << 30,
             relink_kept: 0,
             relink_copied: 0,
+            relink_largest_copied: 0,
             mods_same_drive: true,
+            old_on_mods_drive: false,
             mods_free: free,
         }
     }
@@ -7626,6 +7641,24 @@ mod tests {
             "{p:?}"
         );
         assert!(move_problems(facts(with(0, gb(3), false, Some(gb(4)), Some(gb(5))))).is_empty());
+        // The old archive shares the mods folder's drive: each mod's old copy there is deleted
+        // right after its copy is made in the mods folder, so 100 such 1 GB mods need room for
+        // one, not all 100.
+        let shared_old = Space {
+            relink_largest_copied: gb(1),
+            old_on_mods_drive: true,
+            archive_same_drive: false,
+            ..with(0, gb(100), false, Some(gb(200)), Some(gb(3)))
+        };
+        assert!(move_problems(facts(shared_old)).is_empty());
+        let p = move_problems(facts(Space {
+            mods_free: Some(gb(1)),
+            ..shared_old
+        }));
+        assert!(
+            p[0].starts_with("Not enough free space on your mods folder's drive"),
+            "{p:?}"
+        );
         // Unknown free space on the mods folder's drive never blocks.
         assert!(move_problems(facts(with(0, gb(3), false, Some(gb(4)), None))).is_empty());
     }

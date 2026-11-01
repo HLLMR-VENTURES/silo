@@ -534,6 +534,9 @@ pub struct RelinkCost {
     pub copied_dirs: u64,
     /// The largest mod in `rows` (active or not) that isn't counted in `kept`.
     pub largest_unkept: u64,
+    /// The largest single entry in `copied_zips` / `copied_dirs`.
+    pub largest_copied_zip: u64,
+    pub largest_copied_dir: u64,
 }
 
 /// `RelinkCost` of the active mods in `rows`, with their mods-folder entries in `mods` and
@@ -562,8 +565,14 @@ pub fn relink_cost(mods: &Path, archive: &Path, rows: &[OrganizedRow]) -> Relink
         };
         cost.largest_unkept = cost.largest_unkept.max(size);
         match (made_again, dir) {
-            (true, true) => cost.copied_dirs += size,
-            (true, false) => cost.copied_zips += size,
+            (true, true) => {
+                cost.copied_dirs += size;
+                cost.largest_copied_dir = cost.largest_copied_dir.max(size);
+            }
+            (true, false) => {
+                cost.copied_zips += size;
+                cost.largest_copied_zip = cost.largest_copied_zip.max(size);
+            }
             _ => {}
         }
     }
@@ -2675,6 +2684,8 @@ mod tests {
             kept: size("FS25_Linked"),
             copied_zips: size("FS25_Missing"),
             copied_dirs: size_of(&f.old.join("Tools/FS25_Dir")),
+            largest_copied_zip: 0,
+            largest_copied_dir: 0,
             largest_unkept: ["FS25_Missing", "FS25_Copied", "FS25_Parked"]
                 .iter()
                 .map(|t| size(t))
@@ -2682,6 +2693,8 @@ mod tests {
                 .max()
                 .unwrap(),
         };
+        want.largest_copied_zip = size("FS25_Missing");
+        want.largest_copied_dir = want.copied_dirs;
         assert!(want.copied_dirs > 0);
         assert_eq!(relink_cost(&f.mods, &f.old, &rows), want);
         // A symlink to the archived copy is made again too; one pointing anywhere else —
@@ -2690,10 +2703,12 @@ mod tests {
         std::fs::remove_file(&sym).unwrap();
         if organize::symlink_file(&zip_at(&f.old, "FS25_Copied"), &sym).is_ok() {
             want.copied_zips += size("FS25_Copied");
+            want.largest_copied_zip = want.largest_copied_zip.max(size("FS25_Copied"));
             assert_eq!(relink_cost(&f.mods, &f.old, &rows), want);
             std::fs::remove_file(&sym).unwrap();
             organize::symlink_file(&f.base.join("gone.zip"), &sym).unwrap();
             want.copied_zips -= size("FS25_Copied");
+            want.largest_copied_zip = size("FS25_Missing");
             assert_eq!(relink_cost(&f.mods, &f.old, &rows), want);
         }
         let _ = std::fs::remove_dir_all(&f.base);
