@@ -173,11 +173,20 @@ impl Entry {
     }
 }
 
+/// The whole listing of the entries Silo can download from directly.
+#[derive(Debug, Clone)]
+pub struct Listing {
+    pub entries: Vec<Entry>,
+    /// When it was read whole (unix milliseconds). Answers the catalog gave about a file's bytes
+    /// while another listing was current aren't reused (the catalog may have hashed more since).
+    pub read_ms: i64,
+}
+
 /// What the backfill asks the catalog.
 pub trait Catalog {
     /// Every entry Silo can download from directly; an error once `out_of_time` says so before
     /// a request.
-    fn entries(&self, out_of_time: &dyn Fn() -> bool) -> Result<Vec<Entry>, String>;
+    fn entries(&self, out_of_time: &dyn Fn() -> bool) -> Result<Listing, String>;
     /// Which of `names` are an entry's techName, exactly.
     fn known_tech_names(&self, names: &[String]) -> Result<HashSet<String>, String>;
     /// The whole-zip SHA-256 the catalog has for entry `id`'s build of `version`; None when it
@@ -190,16 +199,23 @@ pub struct SiloApi {
     pub base: String,
 }
 
-/// How long a whole listing read from the catalog is reused, so a run that spent its time on
-/// the listing leaves the next run its time for the files.
+/// How long a whole listing read from the catalog is reused, and a listing read part of the way
+/// is gone on with, so a run that spent its time on the listing leaves the next its time.
 const LISTING_FRESH: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
-/// The last whole listing read this session, by catalog address.
+/// The listing read this session, by catalog address.
 static LISTING: ListingCache = ListingCache::new();
 
-/// One whole catalog listing, kept for a while (only ever a complete one).
+/// One catalog listing: the last one read whole, kept for a while, and one read part of the way.
+/// Only a whole one is ever handed out.
 pub struct ListingCache {
-    kept: std::sync::Mutex<Option<(String, std::time::Instant, Vec<Entry>)>>,
+    kept: std::sync::Mutex<Option<Kept>>,
+}
+
+struct Kept {
+    key: String,
+    whole: Option<(std::time::Instant, Listing)>,
+    partial: Option<(std::time::Instant, siloapi::PartialListing)>,
 }
 
 impl ListingCache {
@@ -209,22 +225,54 @@ impl ListingCache {
         }
     }
 
-    /// The listing for `key` read within `fresh`, or `read`'s answer (kept when it's one).
+    /// The listing for `key` read whole within `fresh`; otherwise `read` goes on with the one read
+    /// part of the way within `fresh` (or starts one), and a whole answer is kept.
     pub fn get(
         &self,
         key: &str,
         fresh: std::time::Duration,
-        read: impl FnOnce() -> Result<Vec<Entry>, String>,
-    ) -> Result<Vec<Entry>, String> {
+        read: impl FnOnce(&mut siloapi::PartialListing) -> Result<Vec<Entry>, String>,
+    ) -> Result<Listing, String> {
         let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((k, at, entries)) = kept.as_ref() {
-            if k == key && at.elapsed() < fresh {
-                return Ok(entries.clone());
+        let k = match kept.as_mut() {
+            Some(k) if k.key == key => k,
+            _ => kept.insert(Kept {
+                key: key.to_string(),
+                whole: None,
+                partial: None,
+            }),
+        };
+        if let Some((at, listing)) = &k.whole {
+            if at.elapsed() < fresh {
+                return Ok(listing.clone());
             }
         }
-        let entries = read()?;
-        *kept = Some((key.to_string(), std::time::Instant::now(), entries.clone()));
-        Ok(entries)
+        let (started, mut partial) = k
+            .partial
+            .take()
+            .filter(|(at, _)| at.elapsed() < fresh)
+            .unwrap_or_else(|| {
+                (
+                    std::time::Instant::now(),
+                    siloapi::PartialListing::default(),
+                )
+            });
+        match read(&mut partial) {
+            Ok(entries) => {
+                let listing = Listing {
+                    entries,
+                    read_ms: now_ms(),
+                };
+                k.whole = Some((std::time::Instant::now(), listing.clone()));
+                Ok(listing)
+            }
+            Err(e) => {
+                if !partial.is_empty() {
+                    k.partial = Some((started, partial));
+                }
+                Err(e)
+            }
+        }
     }
 }
 
@@ -235,9 +283,10 @@ impl Default for ListingCache {
 }
 
 impl Catalog for SiloApi {
-    fn entries(&self, out_of_time: &dyn Fn() -> bool) -> Result<Vec<Entry>, String> {
-        LISTING.get(&self.base, LISTING_FRESH, || {
-            let mods = siloapi::list_source(&self.base, "github", MAX_LIST_PAGES, out_of_time)?;
+    fn entries(&self, out_of_time: &dyn Fn() -> bool) -> Result<Listing, String> {
+        LISTING.get(&self.base, LISTING_FRESH, |partial| {
+            let mods =
+                siloapi::list_source(&self.base, "github", MAX_LIST_PAGES, out_of_time, partial)?;
             Ok(mods.iter().map(Entry::from).collect())
         })
     }
@@ -347,8 +396,8 @@ pub fn run_with<G>(
     // Files never tried first, then the ones that have waited longest, so a file that keeps
     // failing never holds up the rest.
     pending.sort_by_key(|p| p.noted.as_ref().map(|n| n.attempted_ms));
-    let entries = match catalog.entries(&|| budget.out_of_time()) {
-        Ok(e) => e,
+    let listing = match catalog.entries(&|| budget.out_of_time()) {
+        Ok(l) => l,
         Err(e) => {
             log::info!("[catalog] link backfill skipped, trying after the next scan: {e}");
             retry_all(pending.iter().map(|p| p.zip), &e, &mut out);
@@ -356,6 +405,7 @@ pub fn run_with<G>(
         }
     };
 
+    let entries = &listing.entries;
     // Which zips some entry downloads under their name; the rest are settled without hashing.
     let mut named: Vec<(Pending, Vec<&Entry>)> = Vec::new();
     for p in pending {
@@ -407,7 +457,7 @@ pub fn run_with<G>(
         } else if !budget.has_room() {
             (Outcome::Retry(BUDGET_USED.to_string()), None)
         } else {
-            check_bytes(conn, &p, &by_name, &entries, catalog, &hash, &lock, &budget)
+            check_bytes(conn, &p, &by_name, &listing, catalog, &hash, &lock, &budget)
         };
         settle(conn, p.zip, outcome, sha.as_deref(), &mut out);
     }
@@ -422,7 +472,7 @@ fn check_bytes<G>(
     conn: &Connection,
     p: &Pending,
     by_name: &[&Entry],
-    entries: &[Entry],
+    listing: &Listing,
     catalog: &impl Catalog,
     hash: &impl Fn(&Path) -> Result<String, String>,
     lock: &impl Fn() -> Result<G, String>,
@@ -430,14 +480,16 @@ fn check_bytes<G>(
 ) -> (Outcome, Option<String>) {
     let z = p.zip;
     let noted_sha = p.noted.as_ref().and_then(|n| n.sha256.clone());
-    // The catalog's answers about the noted hash so far, from a search cut short.
+    // The catalog's answers about the noted hash so far, from a search cut short while this
+    // listing was current; answers from before it are asked again.
     let mut asked: Asked = p
         .noted
         .as_ref()
         .filter(|_| noted_sha.is_some())
         .and_then(|n| n.asked.as_deref())
-        .and_then(|a| serde_json::from_str(a).ok())
-        .unwrap_or_default();
+        .and_then(|a| serde_json::from_str::<Asked>(a).ok())
+        .filter(|a| a.listing == listing.read_ms)
+        .unwrap_or_else(|| Asked::new(listing.read_ms));
     // A file that can't be read, or isn't what the scan saw, waits behind the rest next time
     // (what was noted for this version is kept).
     let not_now = |why: String, asked: &Asked| {
@@ -471,7 +523,15 @@ fn check_bytes<G>(
         }
     };
     let outcome = match_bytes(
-        conn, z, &sha, by_name, entries, catalog, lock, budget, &mut asked,
+        conn,
+        z,
+        &sha,
+        by_name,
+        &listing.entries,
+        catalog,
+        lock,
+        budget,
+        &mut asked,
     );
     if !outcome.decided() {
         // A retry keeps the hash and the answers so far, and waits behind the rest next time.
@@ -480,9 +540,23 @@ fn check_bytes<G>(
     (outcome, Some(sha))
 }
 
-/// The catalog's answers about one file's bytes: entry id to whether its build of the file's
-/// version is those bytes.
-type Asked = std::collections::BTreeMap<String, bool>;
+/// The catalog's answers about one file's bytes while one listing was current: entry id to
+/// whether its build of the file's version is those bytes.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct Asked {
+    /// The listing's `read_ms`.
+    listing: i64,
+    answers: std::collections::BTreeMap<String, bool>,
+}
+
+impl Asked {
+    fn new(listing: i64) -> Self {
+        Asked {
+            listing,
+            answers: Default::default(),
+        }
+    }
+}
 
 /// What the catalog says about the bytes `sha` of the zip `z`.
 #[allow(clippy::too_many_arguments)]
@@ -518,7 +592,7 @@ fn match_bytes<G>(
             if entry.lists_latest(sha) {
                 continue;
             }
-            let lists = match asked.get(&entry.id) {
+            let lists = match asked.answers.get(&entry.id) {
                 Some(&lists) => lists,
                 None => {
                     if !budget.take_manifest() {
@@ -527,7 +601,7 @@ fn match_bytes<G>(
                     match catalog.archive_sha256(&entry.id, version) {
                         Ok(h) => {
                             let lists = h.is_some_and(|h| h.eq_ignore_ascii_case(sha));
-                            asked.insert(entry.id.clone(), lists);
+                            asked.answers.insert(entry.id.clone(), lists);
                             lists
                         }
                         Err(e) => return Outcome::Retry(e),
@@ -609,7 +683,7 @@ fn settle(
         other => log::debug!("[catalog] {label}: not linked ({other:?})"),
     }
     if outcome.decided() {
-        note(conn, z, sha, &Asked::new(), true);
+        note(conn, z, sha, &Asked::default(), true);
     }
     out.push((z.path.clone(), outcome));
 }
@@ -620,7 +694,7 @@ fn note(conn: &Connection, z: &LibraryZip, sha: Option<&str>, asked: &Asked, dec
         size: z.size,
         mtime_ms: z.mtime_ms,
         sha256: sha.map(str::to_string),
-        asked: (!asked.is_empty())
+        asked: (!asked.answers.is_empty())
             .then(|| serde_json::to_string(asked).ok())
             .flatten(),
         decided,
@@ -727,6 +801,8 @@ mod tests {
         asked_entries: Cell<usize>,
         asked_known: Cell<usize>,
         asked_builds: RefCell<Vec<(String, String)>>,
+        /// The listing's `read_ms`.
+        generation: i64,
     }
 
     impl Fake {
@@ -747,12 +823,15 @@ mod tests {
     }
 
     impl Catalog for Fake {
-        fn entries(&self, _out_of_time: &dyn Fn() -> bool) -> Result<Vec<Entry>, String> {
+        fn entries(&self, _out_of_time: &dyn Fn() -> bool) -> Result<Listing, String> {
             self.asked_entries.set(self.asked_entries.get() + 1);
             if self.fail_entries {
                 return Err("Silo can't reach its catalog right now".into());
             }
-            Ok(self.entries.clone())
+            Ok(Listing {
+                entries: self.entries.clone(),
+                read_ms: self.generation,
+            })
         }
         fn known_tech_names(&self, names: &[String]) -> Result<HashSet<String>, String> {
             self.asked_known.set(self.asked_known.get() + 1);
@@ -1455,6 +1534,135 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn answers_from_before_a_newer_listing_are_asked_again() {
+        let (dir, conn) = setup("stale_answers");
+        let file = write_zip(&dir, "FS25_FieldToDoList.zip", b"build one");
+        let mut fake = Fake::default();
+        for i in 0..3 {
+            fake.entries.push(Entry {
+                id: format!("cat-{i}"),
+                tech_name: Some(format!("FS25_ToDo{i}")),
+                archive_sha256: Some(sha(b"newer")),
+                download_urls: vec![TODO_URL.into()],
+            });
+        }
+        let mut fake = fake.build("cat-2", "1.0", b"build one");
+        fake.generation = 1;
+        let one = Limits {
+            max_manifests: 1,
+            ..Limits::default()
+        };
+        let hash = crate::provenance::sha256_file;
+        let zips = [scanned(&file, Some("1.0"))];
+        // cat-0 has no hashed build of 1.0 yet.
+        let out = run_with(&conn, &zips, &fake, hash, || Ok(()), one);
+        assert!(matches!(out[0].1, Outcome::Retry(_)), "{out:?}");
+        // The catalog hashes cat-0's 1.0 meanwhile: the same bytes. A newer listing is read.
+        fake = fake.build("cat-0", "1.0", b"build one");
+        fake.generation = 2;
+        let mut last = Outcome::Retry(String::new());
+        for _ in 0..4 {
+            let out = run_with(&conn, &zips, &fake, hash, || Ok(()), one);
+            if let Some((_, o)) = out.into_iter().next() {
+                last = o;
+            }
+        }
+        // cat-0 was asked again, so both entries are seen: no link.
+        assert_eq!(last, Outcome::Several(2));
+        assert!(!catalogalias::has_any(&conn, "FS25_FieldToDoList").unwrap());
+        let cat0 = fake
+            .asked_builds
+            .borrow()
+            .iter()
+            .filter(|(id, _)| id == "cat-0")
+            .count();
+        assert_eq!(cat0, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A catalog whose listing is paged, each page taking `page_time`, read through a
+    /// `ListingCache` and the real paging, the way `SiloApi` is.
+    struct Paged<'a> {
+        fake: &'a Fake,
+        cache: &'a ListingCache,
+        page_time: std::time::Duration,
+        pages_read: RefCell<Vec<u32>>,
+    }
+
+    impl Catalog for Paged<'_> {
+        fn entries(&self, out_of_time: &dyn Fn() -> bool) -> Result<Listing, String> {
+            self.cache.get("base", LISTING_FRESH, |partial| {
+                // 250 rows: the fake's entries first, then filler.
+                let rows: Vec<siloapi::BrowseMod> = (0..250)
+                    .map(|i| {
+                        let e = self.fake.entries.get(i);
+                        serde_json::from_value(serde_json::json!({
+                            "id": e.map_or(format!("filler-{i}"), |e| e.id.clone()),
+                            "techName": e.and_then(|e| e.tech_name.clone()),
+                            "title": "x",
+                            "archiveSha256": e.and_then(|e| e.archive_sha256.clone()),
+                            "sources": e.map_or(vec![], |e| e.download_urls.iter().map(|u| {
+                                serde_json::json!({"source": "github", "sourceUrl": "https://github.com/o/r",
+                                    "installable": true, "downloadUrl": u})
+                            }).collect()),
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+                let fetch = |offset: u32| {
+                    std::thread::sleep(self.page_time);
+                    self.pages_read.borrow_mut().push(offset);
+                    let from = offset as usize;
+                    Ok(siloapi::BrowsePage {
+                        mods: rows[from..(from + 100).min(250)].to_vec(),
+                        total: 250,
+                    })
+                };
+                let mods = siloapi::all_pages(fetch, 10, out_of_time, partial)?;
+                Ok(mods.iter().map(Entry::from).collect())
+            })
+        }
+        fn known_tech_names(&self, names: &[String]) -> Result<HashSet<String>, String> {
+            self.fake.known_tech_names(names)
+        }
+        fn archive_sha256(&self, id: &str, version: &str) -> Result<Option<String>, String> {
+            self.fake.archive_sha256(id, version)
+        }
+    }
+
+    #[test]
+    fn a_listing_cut_short_by_the_time_limit_is_gone_on_with_by_the_next_run() {
+        let (dir, conn) = setup("paged");
+        let file = write_zip(&dir, "FS25_FieldToDoList.zip", b"build one");
+        let zips = [scanned(&file, None)];
+        let fake = Fake::with(vec![todo(Some(b"build one"))]);
+        let cache = ListingCache::new();
+        let paged = Paged {
+            fake: &fake,
+            cache: &cache,
+            page_time: std::time::Duration::from_millis(300),
+            pages_read: RefCell::new(Vec::new()),
+        };
+        // Time for two pages of three in a run.
+        let short = Limits {
+            time: std::time::Duration::from_millis(500),
+            ..Limits::default()
+        };
+        let hash = crate::provenance::sha256_file;
+        let out = run_with(&conn, &zips, &paged, hash, || Ok(()), short);
+        assert!(matches!(out[0].1, Outcome::Retry(_)), "{out:?}");
+        assert_eq!(*paged.pages_read.borrow(), [0, 100]);
+        let out = run_with(&conn, &zips, &paged, hash, || Ok(()), short);
+        assert_eq!(out[0].1, Outcome::Linked("cat-todo".into()));
+        assert_eq!(
+            *paged.pages_read.borrow(),
+            [0, 100, 200],
+            "no page read twice"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `Fake` behind a listing cache, the way the real catalog is.
     struct Cached<'a> {
         fake: &'a Fake,
@@ -1463,10 +1671,10 @@ mod tests {
     }
 
     impl Catalog for Cached<'_> {
-        fn entries(&self, out_of_time: &dyn Fn() -> bool) -> Result<Vec<Entry>, String> {
-            self.cache.get("base", LISTING_FRESH, || {
+        fn entries(&self, out_of_time: &dyn Fn() -> bool) -> Result<Listing, String> {
+            self.cache.get("base", LISTING_FRESH, |_| {
                 std::thread::sleep(self.slow);
-                self.fake.entries(out_of_time)
+                Ok(self.fake.entries(out_of_time)?.entries)
             })
         }
         fn known_tech_names(&self, names: &[String]) -> Result<HashSet<String>, String> {
@@ -1507,13 +1715,13 @@ mod tests {
     fn a_kept_listing_is_reused_while_fresh_and_only_when_whole() {
         let cache = ListingCache::new();
         let reads = Cell::new(0);
-        let read = || {
+        let read = |_: &mut siloapi::PartialListing| {
             reads.set(reads.get() + 1);
             Ok(vec![todo(None)])
         };
         let fresh = std::time::Duration::from_secs(60);
-        assert_eq!(cache.get("a", fresh, read).unwrap().len(), 1);
-        assert_eq!(cache.get("a", fresh, read).unwrap().len(), 1);
+        assert_eq!(cache.get("a", fresh, read).unwrap().entries.len(), 1);
+        assert_eq!(cache.get("a", fresh, read).unwrap().entries.len(), 1);
         assert_eq!(reads.get(), 1);
         // Another catalog address, or a stale one, is read again.
         cache.get("b", fresh, read).unwrap();
@@ -1523,7 +1731,7 @@ mod tests {
         // A failed read keeps nothing, and the next is read afresh.
         let cache = ListingCache::new();
         assert!(cache
-            .get("a", fresh, || Err("offline".to_string()))
+            .get("a", fresh, |_| Err("offline".to_string()))
             .is_err());
         cache.get("a", fresh, read).unwrap();
         assert_eq!(reads.get(), 4);

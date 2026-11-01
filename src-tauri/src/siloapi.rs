@@ -315,16 +315,38 @@ pub fn browse(
 /// The most rows `GET /mods` returns per page.
 const LIST_PAGE: u32 = 100;
 
+/// A listing read part of the way: the rows so far and the total its first page reported. Kept
+/// by a caller between tries, so a listing cut short goes on where it stopped.
+#[derive(Debug, Clone, Default)]
+pub struct PartialListing {
+    total: Option<u64>,
+    mods: Vec<BrowseMod>,
+    seen: std::collections::HashSet<String>,
+}
+
+impl PartialListing {
+    /// How many rows it has so far.
+    pub fn len(&self) -> usize {
+        self.mods.len()
+    }
+
+    /// Whether it has no rows yet.
+    pub fn is_empty(&self) -> bool {
+        self.mods.is_empty()
+    }
+}
+
 /// Every catalog entry with a source of kind `source` (`github`, say), read page by page from
-/// `GET /mods?source=<source>&sort=name` (name order, tie-broken by id on the server). Anything
-/// short of the whole listing is an error, never a partial list: a caller counting the entries
-/// that list some bytes must see them all (see `all_pages`). `out_of_time` is asked before each
-/// page; once it says so, no further request starts and the listing is an error.
+/// `GET /mods?source=<source>&sort=name` (name order, tie-broken by id on the server), going on
+/// from `partial`. Anything short of the whole listing is an error, never a partial list: a
+/// caller counting the entries that list some bytes must see them all (see `all_pages`).
+/// `out_of_time` is asked before each page; once it says so, no further request starts.
 pub fn list_source(
     base: &str,
     source: &str,
     max_pages: u32,
     out_of_time: &dyn Fn() -> bool,
+    partial: &mut PartialListing,
 ) -> Result<Vec<BrowseMod>, String> {
     let fetch = |offset: u32| -> Result<BrowsePage, String> {
         let url = format!(
@@ -338,44 +360,49 @@ pub fn list_source(
             total: parsed.total,
         })
     };
-    all_pages(fetch, max_pages, out_of_time)
+    all_pages(fetch, max_pages, out_of_time, partial)
 }
 
-/// Read pages of `LIST_PAGE` rows from `fetch(offset)` until the total the first page reported.
-/// An error when a page fails, when the listing changes while it's read (another total, a page
-/// shorter or longer than the rest of the total, an entry seen twice), when it runs past
-/// `max_pages` pages, or when `out_of_time` says so before a page.
-fn all_pages(
+/// Read pages of `LIST_PAGE` rows from `fetch(offset)`, going on from `partial`, until the total
+/// the first page reported; the whole listing then, with `partial` emptied. An error when a page
+/// fails or `out_of_time` says so before a page (`partial` keeps the pages read, for the next
+/// try); when the listing changed while it was read (another total, a page shorter or longer
+/// than the rest of the total, an entry seen twice: `partial` starts over); or when it runs past
+/// `max_pages` pages.
+pub(crate) fn all_pages(
     fetch: impl Fn(u32) -> Result<BrowsePage, String>,
     max_pages: u32,
     out_of_time: &dyn Fn() -> bool,
+    partial: &mut PartialListing,
 ) -> Result<Vec<BrowseMod>, String> {
-    let changed = || "Silo's catalog changed while Silo was reading it.".to_string();
-    let mut out: Vec<BrowseMod> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut total = None;
-    for page in 0..max_pages {
+    let changed = |partial: &mut PartialListing| {
+        *partial = PartialListing::default();
+        "Silo's catalog changed while Silo was reading it.".to_string()
+    };
+    let first = (partial.mods.len() / LIST_PAGE as usize) as u32;
+    for page in first..max_pages {
         if out_of_time() {
             return Err("Silo stopped reading its catalog: it took too long.".to_string());
         }
         let got = fetch(page * LIST_PAGE)?;
-        let want = *total.get_or_insert(got.total);
+        let want = *partial.total.get_or_insert(got.total);
         let left = want
-            .saturating_sub(out.len() as u64)
+            .saturating_sub(partial.mods.len() as u64)
             .min(u64::from(LIST_PAGE));
         if got.total != want || got.mods.len() as u64 != left {
-            return Err(changed());
+            return Err(changed(partial));
         }
         for m in got.mods {
-            if !seen.insert(m.id.clone()) {
-                return Err(changed());
+            if !partial.seen.insert(m.id.clone()) {
+                return Err(changed(partial));
             }
-            out.push(m);
+            partial.mods.push(m);
         }
-        if out.len() as u64 == want {
-            return Ok(out);
+        if partial.mods.len() as u64 == want {
+            return Ok(std::mem::take(partial).mods);
         }
     }
+    *partial = PartialListing::default();
     Err(format!(
         "Silo's catalog listed more than {} mods; Silo stopped reading it.",
         max_pages * LIST_PAGE
@@ -982,6 +1009,20 @@ mod tests {
         }
     }
 
+    /// `all_pages` from the start.
+    fn whole(
+        fetch: impl Fn(u32) -> Result<BrowsePage, String>,
+        max_pages: u32,
+        out_of_time: &dyn Fn() -> bool,
+    ) -> Result<Vec<BrowseMod>, String> {
+        all_pages(
+            fetch,
+            max_pages,
+            out_of_time,
+            &mut PartialListing::default(),
+        )
+    }
+
     /// A list page of `n` bare rows numbered from `from`, of `total` overall.
     fn list_page(from: u32, n: u32, total: u64) -> BrowsePage {
         BrowsePage {
@@ -1003,18 +1044,18 @@ mod tests {
             let n = 250u32.saturating_sub(offset).min(LIST_PAGE);
             Ok(list_page(offset, n, 250))
         };
-        let all = all_pages(fetch, 10, &|| false).unwrap();
+        let all = whole(fetch, 10, &|| false).unwrap();
         assert_eq!(all.len(), 250);
         assert_eq!(all[249].id, "m249");
         assert_eq!(*asked.borrow(), [0, 100, 200]);
         // Exactly a page, and nothing at all.
         assert_eq!(
-            all_pages(|o| Ok(list_page(o, 100, 100)), 10, &|| false)
+            whole(|o| Ok(list_page(o, 100, 100)), 10, &|| false)
                 .unwrap()
                 .len(),
             100
         );
-        assert!(all_pages(|o| Ok(list_page(o, 0, 0)), 10, &|| false)
+        assert!(whole(|o| Ok(list_page(o, 0, 0)), 10, &|| false)
             .unwrap()
             .is_empty());
     }
@@ -1028,21 +1069,49 @@ mod tests {
                 Err("offline".to_string())
             }
         };
-        assert_eq!(all_pages(failing, 10, &|| false).unwrap_err(), "offline");
+        assert_eq!(whole(failing, 10, &|| false).unwrap_err(), "offline");
         // A page that comes back empty or short before the total is reached.
         let empty = |o: u32| Ok(list_page(o, if o == 0 { 100 } else { 0 }, 900));
-        assert!(all_pages(empty, 10, &|| false).is_err());
+        assert!(whole(empty, 10, &|| false).is_err());
         let short = |o: u32| Ok(list_page(o, if o == 0 { 100 } else { 50 }, 300));
-        assert!(all_pages(short, 10, &|| false).is_err());
+        assert!(whole(short, 10, &|| false).is_err());
         // More rows than the total said, or the total moves between pages.
-        assert!(all_pages(|o| Ok(list_page(o, 100, 50)), 10, &|| false).is_err());
+        assert!(whole(|o| Ok(list_page(o, 100, 50)), 10, &|| false).is_err());
         let moving = |o: u32| Ok(list_page(o, 100, if o == 0 { 300 } else { 301 }));
-        assert!(all_pages(moving, 10, &|| false).is_err());
+        assert!(whole(moving, 10, &|| false).is_err());
         // An entry seen on two pages (the order shifted while paging).
         let overlap = |o: u32| Ok(list_page(o.saturating_sub(1), 100, 200));
-        assert!(all_pages(overlap, 10, &|| false).is_err());
+        assert!(whole(overlap, 10, &|| false).is_err());
         let endless = |o: u32| Ok(list_page(o, 100, 1_000_000));
-        assert!(all_pages(endless, 3, &|| false).is_err());
+        assert!(whole(endless, 3, &|| false).is_err());
+    }
+
+    #[test]
+    fn a_source_listing_cut_short_goes_on_where_it_stopped() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let fetch = |o: u32| {
+            asked.borrow_mut().push(o);
+            Ok(list_page(o, 250u32.saturating_sub(o).min(LIST_PAGE), 250))
+        };
+        let mut partial = PartialListing::default();
+        // Out of time after two pages: an error, with those pages kept.
+        let late = || asked.borrow().len() >= 2;
+        assert!(all_pages(fetch, 10, &late, &mut partial).is_err());
+        assert_eq!(partial.len(), 200);
+        let all = all_pages(fetch, 10, &|| false, &mut partial).unwrap();
+        assert_eq!(all.len(), 250);
+        assert_eq!(*asked.borrow(), [0, 100, 200], "no page read twice");
+        assert!(partial.is_empty());
+        // A listing that changed meanwhile starts over.
+        let first = |o: u32| Ok(list_page(o, 100, 300));
+        let mut partial = PartialListing::default();
+        let once = std::cell::Cell::new(false);
+        let cut = || once.replace(true);
+        assert!(all_pages(first, 10, &cut, &mut partial).is_err());
+        assert_eq!(partial.len(), 100);
+        let moved = |o: u32| Ok(list_page(o, 100, 301));
+        assert!(all_pages(moved, 10, &|| false, &mut partial).is_err());
+        assert!(partial.is_empty(), "a changed listing isn't continued");
     }
 
     #[test]
@@ -1054,9 +1123,9 @@ mod tests {
         };
         // Time runs out after the first page.
         let late = || asked.get() >= 1;
-        assert!(all_pages(fetch, 10, &late).is_err());
+        assert!(whole(fetch, 10, &late).is_err());
         assert_eq!(asked.get(), 1);
-        assert!(all_pages(fetch, 10, &|| true).is_err());
+        assert!(whole(fetch, 10, &|| true).is_err());
         assert_eq!(asked.get(), 1, "none started once out of time");
     }
 
