@@ -856,6 +856,30 @@ fn occupied(at: &Path) -> StepErr {
     ))
 }
 
+/// A step stops while the scratch journal still holds an old copy of this mod (either of its
+/// two places) that the sweep kept: renamed aside, its replacement then failed to verify
+/// against it (changed or damaged while Silo was stopped). That old copy may be the only intact
+/// one, so the move can't count the mod as moved, or copy the other one back over it, until
+/// the user has looked at both.
+fn unresolved_old(env: &Env, a: &Path, b: &Path) -> Result<(), StepErr> {
+    let kept: Vec<PathBuf> = env
+        .journal()
+        .entries()
+        .into_iter()
+        .filter(|e| e.role == scratch::Role::MoveOld && (e.from == a || e.from == b))
+        .map(|e| e.path)
+        .filter(|p| p.symlink_metadata().is_ok())
+        .collect();
+    match kept.first() {
+        None => Ok(()),
+        Some(k) => Err(StepErr::Failed(format!(
+            "move: Silo kept an earlier copy of this mod at {} because the copy at {} no longer              matches it. Check both, keep the right one under the mod's name, then resume.",
+            k.display(),
+            if exists(b) { b } else { a }.display()
+        ))),
+    }
+}
+
 /// One mod, `from` → `to`. Idempotent. The mod is recorded in `moved` before its copy starts
 /// (and un-recorded if the copy isn't placed), so a destination counts as Silo's only when it is
 /// recorded — and even then it must verify against the original. Anything else at the
@@ -871,6 +895,7 @@ fn forward_one(
     let dst = organize::archive_path(&marker.to, &row.category, &row.file_name);
     let tech = row.tech_name.as_str();
     let ours = marker.moved.iter().any(|t| t == tech);
+    unresolved_old(env, &src, &dst)?;
     let has_src = exists(&src);
     if has_src {
         refuse_link(&src)?;
@@ -937,6 +962,7 @@ fn back_one(
 ) -> Result<Step, StepErr> {
     let src = organize::archive_path(&marker.to, &row.category, &row.file_name);
     let home = organize::archive_path(&marker.from, &row.category, &row.file_name);
+    unresolved_old(env, &src, &home)?;
     let has_src = exists(&src);
     if has_src {
         refuse_link(&src)?;
@@ -2986,6 +3012,47 @@ mod tests {
             );
         }
         assert!(load_marker(&f.conn, &f.key).is_some());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// A crash after the old copy was renamed aside, then the new copy was damaged while Silo
+    /// was stopped: the old copy is kept (it doesn't verify against the new one), and neither
+    /// Resume nor Cancel can finish around it.
+    #[test]
+    fn a_kept_old_copy_stops_resume_and_cancel() {
+        let f = fx("keptold");
+        let a = add_zip(&f, "FS25_A", false);
+        let mut m = marker(&f);
+        let (src, dst) = (zip_at(&f.old, "FS25_A"), zip_at(&f.new, "FS25_A"));
+        copy_verify_place(&env(&f), &src, &dst, "zip", &|| false).unwrap();
+        env(&f).record(&mut m, &a.tech_name).unwrap();
+        let old_name = recorded_old(&f, &src, &dst, "zip");
+        std::fs::rename(&src, &old_name).unwrap();
+        std::fs::remove_file(&dst).unwrap();
+        std::fs::write(&dst, b"PK truncated").unwrap(); // damaged while Silo was stopped
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        for op in [Op::Resume, Op::Cancel, Op::Resume] {
+            let out = run_with(&f, op, &|| false).unwrap().unwrap();
+            assert!(
+                out.errors
+                    .iter()
+                    .any(|e| e.contains(&old_name.display().to_string())),
+                "{:?}",
+                out.errors
+            );
+            assert!(setting(&f).is_none(), "never finished");
+        }
+        assert_eq!(std::fs::read(&old_name).unwrap(), b"PK FS25_A");
+        assert!(
+            !src.exists(),
+            "the damaged copy wasn't moved back over the name"
+        );
+        // The user keeps the right one under the mod's name: the cancel then finishes.
+        std::fs::rename(&old_name, &src).unwrap();
+        std::fs::remove_file(&dst).unwrap();
+        assert!(run_with(&f, Op::Resume, &|| false).unwrap().is_none());
+        assert_eq!(std::fs::read(&src).unwrap(), b"PK FS25_A");
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
