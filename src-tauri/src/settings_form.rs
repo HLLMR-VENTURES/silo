@@ -194,17 +194,28 @@ pub fn apply_edits(xml: &str, edits: &[Edit]) -> Result<String, String> {
     let mut buf = Vec::new();
     let mut id = 0usize;
     let mut applied: Vec<usize> = Vec::new();
+    let mut depth = 0usize;
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(e.to_string()),
+            Ok(Event::Eof) if depth == 0 => break,
+            Ok(Event::Eof) => {
+                return Err(crate::xmltext::damaged(
+                    "it ends before every tag is closed",
+                ))
+            }
+            Err(e) => return Err(crate::xmltext::damaged(e)),
             Ok(Event::Start(e)) => {
+                depth += 1;
                 let n = element_slots(&e).len();
                 let out = element_out(e, id, n, edits, &mut applied)?;
                 id += n;
                 writer
                     .write_event(Event::Start(out))
                     .map_err(|e| e.to_string())?;
+            }
+            Ok(ev @ Event::End(_)) => {
+                depth = depth.saturating_sub(1);
+                writer.write_event(ev).map_err(|e| e.to_string())?;
             }
             Ok(Event::Empty(e)) => {
                 let n = element_slots(&e).len();
@@ -407,6 +418,31 @@ mod tests {
         let f = parse(&out);
         let text = f.iter().find(|f| f.label == "PAGER_TEXT").unwrap();
         assert_eq!(text.value, "A & B\n\tC");
+    }
+
+    /// #354: a cut-off file isn't rewritten (and reported saved); nor is a value XML can't
+    /// hold.
+    #[test]
+    fn a_cut_off_file_or_an_impossible_value_is_refused() {
+        let cut = "<settings>\n    <setting name=\"MAX\" integer=\"1\"/>\n";
+        let err = apply_edits(
+            cut,
+            &[Edit {
+                id: 0,
+                value: "2".into(),
+            }],
+        )
+        .unwrap_err();
+        assert!(err.contains("cut off or damaged"), "{err}");
+        let err = apply_edits(
+            SAMPLE,
+            &[Edit {
+                id: 0,
+                value: "1\u{1}".into(),
+            }],
+        )
+        .unwrap_err();
+        assert!(err.contains("can't be saved"), "{err}");
     }
 
     /// An edit for a field that isn't in the file is an error, not a silent "saved".

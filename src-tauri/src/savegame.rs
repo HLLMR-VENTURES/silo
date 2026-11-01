@@ -3,7 +3,7 @@
 //! on; `required="true"` mods are ones the save genuinely needs. Silo uses this to
 //! build a loadout from a save and to verify a save's mods are present.
 
-use quick_xml::events::Event;
+use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -48,8 +48,9 @@ fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
 }
 
 /// Parse a `careerSavegame.xml` into name/map/mod-list. Fails, with a short reason, on any
-/// XML error or when the `<careerSavegame>` root is missing or never closed: the `<mod>`
-/// entries come last, so a cut-off file would otherwise yield a partial mod list.
+/// XML error, a damaged `<mod>` entry, anything but one `<careerSavegame>` root, or a root
+/// that never closes: the `<mod>` entries come last, so a cut-off file would otherwise
+/// yield a partial mod list.
 fn parse(xml: &str, index: u32, folder: &str) -> Result<Savegame, String> {
     let mut name = String::new();
     let mut map_title = None;
@@ -59,26 +60,41 @@ fn parse(xml: &str, index: u32, folder: &str) -> Result<Savegame, String> {
     let mut reader = Reader::from_str(xml);
     let mut buf = Vec::new();
     let mut stack: Vec<String> = Vec::new();
-    // Whether the root element has opened, and whether it was `<careerSavegame>`.
-    let mut root: Option<bool> = None;
+    let mut root_seen = false;
     let cut_off = || "careerSavegame.xml is cut off or damaged".to_string();
 
-    let handle_open = |e: &quick_xml::events::BytesStart, mods: &mut Vec<SaveMod>| {
+    // A tag's local name, once it's known to stand where it may: the one root element is
+    // `<careerSavegame>`, and nothing comes after it.
+    let open = |e: &BytesStart, stack: &[String], root_seen: &mut bool| {
         let local = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
-        if local == "mod" {
-            if let Some(mod_name) = attr(e, b"modName") {
-                let is_dlc = mod_name.starts_with("pdlc_");
-                mods.push(SaveMod {
-                    is_dlc,
-                    title: attr(e, b"title"),
-                    version: attr(e, b"version"),
-                    required: attr(e, b"required").as_deref() == Some("true"),
-                    file_hash: attr(e, b"fileHash"),
-                    mod_name,
-                });
+        if stack.is_empty() {
+            if *root_seen {
+                return Err(cut_off());
             }
+            if local != "careerSavegame" {
+                return Err("careerSavegame.xml isn't a savegame file".to_string());
+            }
+            *root_seen = true;
         }
-        local
+        Ok(local)
+    };
+
+    // A `<mod>` entry. One whose attributes are damaged fails the parse rather than being
+    // skipped, which would leave a partial list.
+    let read_mod = |e: &BytesStart, mods: &mut Vec<SaveMod>| {
+        crate::xmltext::check_attributes(e).map_err(|_| cut_off())?;
+        if let Some(mod_name) = attr(e, b"modName") {
+            let is_dlc = mod_name.starts_with("pdlc_");
+            mods.push(SaveMod {
+                is_dlc,
+                title: attr(e, b"title"),
+                version: attr(e, b"version"),
+                required: attr(e, b"required").as_deref() == Some("true"),
+                file_hash: attr(e, b"fileHash"),
+                mod_name,
+            });
+        }
+        Ok::<(), String>(())
     };
 
     // Element text arrives split at every `&amp;` (#266): gather it, then read it when
@@ -107,24 +123,30 @@ fn parse(xml: &str, index: u32, folder: &str) -> Result<Savegame, String> {
             Err(_) => return Err(cut_off()),
             Ok(Event::Start(e)) => {
                 take_text(&stack, &mut run);
-                let local = handle_open(&e, &mut mods);
-                if stack.is_empty() {
-                    root.get_or_insert(local == "careerSavegame");
+                let local = open(&e, &stack, &mut root_seen)?;
+                if local == "mod" {
+                    read_mod(&e, &mut mods)?;
                 }
                 stack.push(local); // real elements have a matching End
             }
             Ok(Event::Empty(e)) => {
                 // Self-closing (e.g. <mod .../>): handle attrs, don't push.
                 take_text(&stack, &mut run);
-                let local = handle_open(&e, &mut mods);
-                if stack.is_empty() {
-                    root.get_or_insert(local == "careerSavegame");
+                if open(&e, &stack, &mut root_seen)? == "mod" {
+                    read_mod(&e, &mut mods)?;
                 }
             }
             Ok(Event::End(_)) => {
                 take_text(&stack, &mut run);
                 stack.pop();
             }
+            // Outside the root, only whitespace may stand.
+            Ok(Event::Text(t)) if stack.is_empty() => {
+                if !t.iter().all(u8::is_ascii_whitespace) {
+                    return Err(cut_off());
+                }
+            }
+            Ok(Event::GeneralRef(_) | Event::CData(_)) if stack.is_empty() => return Err(cut_off()),
             Ok(Event::Text(t)) => run.push_text(&t),
             Ok(Event::GeneralRef(r)) => run.push_ref(&r),
             Ok(Event::CData(c)) => run.push_str(&String::from_utf8_lossy(&c)),
@@ -132,11 +154,11 @@ fn parse(xml: &str, index: u32, folder: &str) -> Result<Savegame, String> {
         }
         buf.clear();
     }
-    match root {
-        None => return Err("careerSavegame.xml is empty or has no savegame in it".into()),
-        Some(false) => return Err("careerSavegame.xml isn't a savegame file".into()),
-        Some(true) if !stack.is_empty() => return Err(cut_off()),
-        Some(true) => {}
+    if !root_seen {
+        return Err("careerSavegame.xml is empty or has no savegame in it".into());
+    }
+    if !stack.is_empty() {
+        return Err(cut_off());
     }
 
     if name.is_empty() {
@@ -363,10 +385,41 @@ mod tests {
             ("\u{feff}<?xml version=\"1.0\"?>\n", "empty"),
             ("<x/>", "isn't a savegame"),
             ("<game><mod modName=\"FS25_a\"/></game>", "isn't a savegame"),
+            ("<mod modName=\"FS25_a\"/>", "isn't a savegame"),
         ] {
             let err = parse(xml, 1, "savegame1").unwrap_err();
             assert!(err.contains(why), "{xml:?}: {err}");
         }
+    }
+
+    /// #354: a damaged `<mod>` entry, or anything after the root closes, fails the parse
+    /// rather than leaving out the entries it can't read.
+    #[test]
+    fn a_damaged_mod_entry_or_content_after_the_root_fails_to_parse() {
+        let full = career(2);
+        let end = full.rfind("</careerSavegame>").unwrap();
+        for extra in [
+            "<mod modName=\"FS25_&missing;\"/>",
+            "<mod modName=FS25_x/>",
+            "<mod modName=\"FS25_x\" modName=\"FS25_y\"/>",
+            "<mod modName=\"a & b\"/>",
+        ] {
+            let xml = format!("{}    {extra}\n{}", &full[..end], &full[end..]);
+            let err = parse(&xml, 1, "savegame1").unwrap_err();
+            assert!(err.contains("cut off or damaged"), "{extra}: {err}");
+        }
+        for after in [
+            "<mod modName=\"FS25_b\"/>",
+            "<careerSavegame/>",
+            "trailing",
+            "&amp;",
+        ] {
+            let xml = format!("{full}{after}");
+            let err = parse(&xml, 1, "savegame1").unwrap_err();
+            assert!(err.contains("cut off or damaged"), "{after}: {err}");
+        }
+        // Whitespace and comments after the root are fine.
+        assert!(parse(&format!("{full}\n<!-- c -->\n"), 1, "savegame1").is_ok());
     }
 
     /// #354: a name written as CDATA is read.

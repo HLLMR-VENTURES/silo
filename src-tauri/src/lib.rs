@@ -4962,6 +4962,9 @@ fn ensure_well_formed(xml: &str) -> Result<(), String> {
             "That isn't valid XML, so Silo didn't save it ({why}). Fix it and save again."
         ))
     };
+    if let Err(why) = xmltext::check_chars(xml) {
+        return refuse(why);
+    }
     let mut reader = quick_xml::Reader::from_str(xml);
     let mut depth = 0usize;
     let mut roots = 0usize;
@@ -5487,6 +5490,9 @@ mod tests {
             r#"<settings><a v="<"/></settings>"#,
             "<settings>&#1;</settings>",
             r#"<settings><a v="&#0;"/></settings>"#,
+            "<settings value=\"\u{1}\"/>",
+            "<settings>a\u{1}b</settings>",
+            "<settings><![CDATA[\u{FFFF}]]></settings>",
         ] {
             let e = super::ensure_well_formed(bad).unwrap_err();
             assert!(e.contains("didn't save it"), "{bad}: {e}");

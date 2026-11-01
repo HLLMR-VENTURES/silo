@@ -63,6 +63,24 @@ pub fn attr_value(a: &Attribute) -> Option<String> {
         .map(Cow::into_owned)
 }
 
+/// XML 1.0's `Char` production: tab, LF, CR, and everything from U+0020 up, except
+/// surrogates (which a Rust `char` can't hold anyway) and U+FFFE/U+FFFF.
+fn is_xml_char(c: u32) -> bool {
+    matches!(c, 0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
+}
+
+/// Refuse text holding a character XML can't contain at all, not even as a reference (the
+/// C0 controls other than tab/LF/CR, U+FFFE, U+FFFF).
+pub fn check_chars(s: &str) -> Result<(), String> {
+    match s.chars().find(|&c| !is_xml_char(c as u32)) {
+        Some(c) => Err(format!(
+            "it contains the character U+{:04X}, which XML can't hold",
+            c as u32
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Check one reference's name (what sits between `&` and `;`): it must be one of the five
 /// predefined entities or a character reference to a character XML allows. Settings files
 /// have no DTD, so any other entity is undeclared and the game's parser rejects the file.
@@ -81,10 +99,8 @@ pub fn check_reference(name: &str) -> Result<(), String> {
         None if !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()) => num.parse().ok(),
         None => None,
     };
-    // XML 1.0's Char production: tab, LF, CR, and everything else above the C0 controls
-    // except surrogates and U+FFFE/U+FFFF.
     match code {
-        Some(0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF) => Ok(()),
+        Some(c) if is_xml_char(c) => Ok(()),
         _ => Err(format!("&{name}; isn't a valid character reference")),
     }
 }
@@ -115,11 +131,22 @@ pub fn check_attributes(e: &BytesStart) -> Result<(), String> {
     Ok(())
 }
 
+/// The error for a settings file that can't be rewritten safely (cut off, or not XML).
+pub fn damaged(detail: impl std::fmt::Display) -> String {
+    format!("This file is cut off or damaged ({detail}), so Silo didn't change it.")
+}
+
+/// Refuse a value typed into a settings form that XML can't hold.
+pub fn check_value(v: &str) -> Result<(), String> {
+    check_chars(v).map_err(|why| format!("That value can't be saved: {why}. Nothing was saved."))
+}
+
 /// Rebuild `e` with some attribute values replaced. `replacement` is asked once per
 /// attribute, in order, and returns the new value for an attribute being edited. Every
 /// other attribute keeps its raw bytes, so its character references (`&#10;`) and entities
 /// survive; so does an edited one whose new value is what a reader already sees. A
-/// malformed or duplicated attribute is an error: never dropped, never written back empty.
+/// malformed or duplicated attribute, or a new value XML can't hold, is an error: never
+/// dropped, never written back empty.
 pub fn rebuild_attributes(
     e: &BytesStart,
     mut replacement: impl FnMut(&Attribute) -> Option<String>,
@@ -130,7 +157,10 @@ pub fn rebuild_attributes(
         let a = a.map_err(|err| format!("an attribute of <{name}> is malformed ({err})"))?;
         let edited = replacement(&a).filter(|v| attr_value(&a).as_ref() != Some(v));
         let value = match &edited {
-            Some(v) => Cow::Owned(escape_attr(v).into_bytes()),
+            Some(v) => {
+                check_value(v)?;
+                Cow::Owned(escape_attr(v).into_bytes())
+            }
             None => raw_for_double_quotes(&a.value),
         };
         out.push_attribute(Attribute::from((a.key.as_ref(), value.as_ref())));
@@ -253,6 +283,14 @@ mod tests {
             "#x110000",
         ] {
             assert!(super::check_reference(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn characters_xml_cannot_hold_are_refused() {
+        assert!(super::check_chars("tab\tnewline\n\r é 😀").is_ok());
+        for bad in ["a\u{1}b", "\u{0}", "\u{1F}", "\u{FFFE}", "\u{FFFF}"] {
+            assert!(super::check_chars(bad).is_err(), "{bad:?}");
         }
     }
 

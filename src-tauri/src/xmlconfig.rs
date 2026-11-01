@@ -143,6 +143,9 @@ fn write(writer: &mut Writer<Cursor<Vec<u8>>>, ev: Event) -> Result<(), String> 
 /// isn't in the file is an error naming it, so a save never reports success for a value
 /// it didn't write.
 pub fn set_values(xml: &str, edits: &[Edit]) -> Result<String, String> {
+    for ed in edits {
+        crate::xmltext::check_value(&ed.value)?;
+    }
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     let mut buf = Vec::new();
@@ -157,8 +160,13 @@ pub fn set_values(xml: &str, edits: &[Edit]) -> Result<String, String> {
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(e.to_string()),
+            Ok(Event::Eof) if stack.is_empty() => break,
+            Ok(Event::Eof) => {
+                return Err(crate::xmltext::damaged(
+                    "it ends before every tag is closed",
+                ))
+            }
+            Err(e) => return Err(crate::xmltext::damaged(e)),
             Ok(Event::Start(e)) => {
                 stack.push(local(e.name().as_ref()));
                 let path = stack.join(".");
@@ -440,6 +448,24 @@ mod tests {
             assert!(err.contains("nothing was saved"), "{err}");
             assert!(err.contains(missing), "{err}");
             assert!(!err.contains("game.language"), "{err}");
+        }
+    }
+
+    /// #354: a cut-off file isn't rewritten (and reported saved) even when the edit lands
+    /// before the cut; nor is a value XML can't hold.
+    #[test]
+    fn a_cut_off_file_or_an_impossible_value_is_refused() {
+        let err = set_values("<game><a>1</a>", &[edit("game.a", "2")]).unwrap_err();
+        assert!(err.contains("cut off or damaged"), "{err}");
+        let cut = &GAME[..GAME.find("<performanceClass/>").unwrap()];
+        let err = set_values(cut, &[edit("game.language", "0")]).unwrap_err();
+        assert!(err.contains("cut off or damaged"), "{err}");
+        for bad in [
+            edit("game.language", "a\u{1}b"),
+            edit("game.graphic.scalability.fsr@quality", "\u{FFFF}"),
+        ] {
+            let err = set_values(GAME, &[bad]).unwrap_err();
+            assert!(err.contains("can't be saved"), "{err}");
         }
     }
 
