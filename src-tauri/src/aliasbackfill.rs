@@ -3,32 +3,37 @@
 //! Since #388 a Browse install records which catalog entry a zip came from when the file isn't
 //! named after the entry's techName (`catalogalias`). A zip installed that way earlier has no
 //! record, so its drawer said "Not in Silo's catalog", update checks skipped it and Verify
-//! integrity said Unverified. After a library scan, this looks such zips up and records the same
-//! link an install would have.
+//! integrity said Unverified. This looks such zips up and records the same link an install would
+//! have.
 //!
 //! SiloAPI has no "which entry lists these bytes" query, so the candidates come from what the
-//! catalog already publishes: every entry with a GitHub source (`GET /mods?source=github`), the
-//! only source Silo installs from directly and the one SiloAPI hashes. A zip is hashed only when
-//! all of these hold:
+//! catalog already publishes: every entry with a GitHub source (`GET /mods?source=github`, read
+//! whole or not at all), the only source Silo installs from directly and the one SiloAPI hashes.
+//! A zip is hashed only when all of these hold:
+//! - its file name is its techName (as the joins require);
 //! - one of those entries downloads a file with the zip's name (any case), and none of them is
-//!   named after the zip (a file named after its entry is joined by techName and needs no link);
-//! - the catalog has no entry with the zip's techName (`POST /mods/lookup`);
-//! - its file name is its techName (as the joins require).
+//!   named after the zip (a file named after its entry is joined by techName and needs no link).
+//!   A Browse install saves the file under its download's name, so this is where it came from;
+//! - the catalog has no entry with the zip's techName (`POST /mods/lookup`).
 //!
-//! It is then linked when exactly one catalog entry lists its bytes: as the entry's latest build
-//! (`archiveSha256` in the listing), or, for an entry that downloads a file with the zip's name,
-//! as the build of the zip's own version (`GET /mods/:id/manifest?version=`, the comparison
-//! Verify integrity makes). When no entry or several do, nothing is recorded. A zip whose bytes
-//! already have a link is left alone. The record is an install's (`catalogalias::record`), made
-//! under the library lock.
+//! The entries listing its bytes are those whose latest build they are (`archiveSha256` in the
+//! listing), and those downloading a file with the zip's name whose build of the zip's own
+//! version they are (`GET /mods/:id/manifest?version=`, the comparison Verify integrity makes).
+//! The zip is linked when that is exactly one entry and it downloads a file with the zip's name.
+//! Otherwise nothing is recorded. A zip whose bytes already have a link is left alone. The record
+//! is an install's (`catalogalias::record`), made under the library lock.
 //!
-//! When it runs: after every library scan, off the UI thread, one run at a time (a scan during a
-//! run leaves its new files to the next one). Each version of a file (its path, size and modified
-//! time, as the scan cache keys it) is looked at once: once decided, it isn't hashed or looked up
+//! When it runs: it sends some mod names (and, for those, their versions) to the catalog, so only
+//! with the user's leave to check for updates: after a library scan when the startup update
+//! check is on, and at the start of an update check of the library (so that check already finds
+//! the links). Off the UI thread, one run at a time (a scan during a run leaves its files to that
+//! run or a later one; an update check waits for it). Each version of a file (its path, size and
+//! modified time, as the scan cache keys it) is decided once: then it isn't hashed or looked up
 //! again until the file changes. A failed or offline lookup, a busy library, or a file that can't
-//! be read or changes meanwhile decides nothing, so that file is tried again after the next scan.
-//! A run hashes and looks up at most `MAX_HASHED` files; the rest wait for the next scan. Nothing
-//! here is shown to the user; it's only logged.
+//! be read or changes meanwhile decides nothing, so that file is tried again next time, behind
+//! files not tried yet; a hash already taken is kept for it. A run hashes and looks up at most
+//! `MAX_HASHED` files; the rest wait for the next run. Nothing here is shown to the user as an
+//! error; it's only logged.
 
 use crate::catalogalias::{self, Link};
 use crate::db;
@@ -168,6 +173,12 @@ impl Outcome {
     }
 }
 
+/// A zip to look at, with what was noted about this version of it on an earlier try.
+struct Pending<'a> {
+    zip: &'a LibraryZip,
+    noted: Option<db::AliasCheck>,
+}
+
 /// Look up the zips in `zips` that need it (see the module notes) and record the links found.
 /// `hash` gives a file's whole-file SHA-256; `lock` takes the library lock for a record. Never
 /// fails: what couldn't be done is logged and tried again after the next scan. Returns what it
@@ -185,108 +196,142 @@ pub fn run<G>(
         if catalogalias::zip_tech_name(&z.path).as_deref() != Some(z.tech_name.as_str()) {
             continue;
         }
-        match db::alias_checked(conn, &path_key(z), z.size, z.mtime_ms) {
-            Ok(true) => {}
-            Ok(false) => pending.push(z),
+        let noted = match db::alias_check(conn, &path_key(z)) {
+            Ok(n) => n.filter(|n| n.size == z.size && n.mtime_ms == z.mtime_ms),
             Err(e) => {
                 log::warn!("[catalog] link backfill skipped: couldn't read what it checked: {e}");
                 return out;
             }
+        };
+        if !noted.as_ref().is_some_and(|n| n.decided) {
+            pending.push(Pending { zip: z, noted });
         }
     }
     if pending.is_empty() {
         return out;
     }
+    // Files never tried first, then the ones that have waited longest, so a file that keeps
+    // failing never holds up the rest.
+    pending.sort_by_key(|p| p.noted.as_ref().map(|n| n.attempted_ms));
     let entries = match catalog.entries() {
         Ok(e) => e,
         Err(e) => {
             log::info!("[catalog] link backfill skipped, trying after the next scan: {e}");
-            retry_all(&pending, &e, &mut out);
+            retry_all(pending.iter().map(|p| p.zip), &e, &mut out);
             return out;
         }
     };
 
     // Which zips some entry downloads under their name; the rest are settled without hashing.
-    let mut named: Vec<(&LibraryZip, Vec<&Entry>)> = Vec::new();
-    for z in pending {
-        let file = file_name(z);
+    let mut named: Vec<(Pending, Vec<&Entry>)> = Vec::new();
+    for p in pending {
+        let file = file_name(p.zip);
         let by_name: Vec<&Entry> = entries
             .iter()
             .filter(|e| e.download_named(file).is_some())
             .collect();
         if by_name.is_empty() {
-            settle(conn, z, Outcome::NoCandidate, &mut out);
+            settle(conn, p.zip, Outcome::NoCandidate, None, &mut out);
         } else if by_name
             .iter()
             .any(|e| !catalogalias::needs_alias(file, e.tech_name.as_deref()))
         {
-            settle(conn, z, Outcome::NamedAfterEntry, &mut out);
+            settle(conn, p.zip, Outcome::NamedAfterEntry, None, &mut out);
         } else {
-            named.push((z, by_name));
+            named.push((p, by_name));
         }
     }
     if named.is_empty() {
         return out;
     }
     if named.len() > MAX_HASHED {
-        let later: Vec<&LibraryZip> = named
-            .split_off(MAX_HASHED)
-            .into_iter()
-            .map(|(z, _)| z)
-            .collect();
-        retry_all(&later, "left for the next scan", &mut out);
+        let later = named.split_off(MAX_HASHED);
+        retry_all(
+            later.iter().map(|(p, _)| p.zip),
+            "left for the next scan",
+            &mut out,
+        );
     }
 
-    let names: Vec<String> = named.iter().map(|(z, _)| z.tech_name.clone()).collect();
+    let names: Vec<String> = named.iter().map(|(p, _)| p.zip.tech_name.clone()).collect();
     let known = match catalog.known_tech_names(&names) {
         Ok(k) => k,
         Err(e) => {
             log::info!("[catalog] link backfill skipped, trying after the next scan: {e}");
-            let zs: Vec<&LibraryZip> = named.iter().map(|(z, _)| *z).collect();
-            retry_all(&zs, &e, &mut out);
+            retry_all(named.iter().map(|(p, _)| p.zip), &e, &mut out);
             return out;
         }
     };
-    for (z, by_name) in named {
-        let outcome = if known.contains(&z.tech_name) {
-            Outcome::InCatalog
+    for (p, by_name) in named {
+        let (outcome, sha) = if known.contains(&p.zip.tech_name) {
+            (Outcome::InCatalog, None)
         } else {
-            check_bytes(conn, z, &by_name, &entries, catalog, &hash, &lock)
+            check_bytes(conn, &p, &by_name, &entries, catalog, &hash, &lock)
         };
-        settle(conn, z, outcome, &mut out);
+        settle(conn, p.zip, outcome, sha.as_deref(), &mut out);
     }
     out
 }
 
-/// Hash the zip and link it when exactly one entry lists its bytes.
+/// Hash the zip (or take the hash noted on an earlier try) and link it when exactly one entry
+/// lists its bytes and that entry downloads a file with its name. Returns the outcome and the
+/// hash, when it was taken.
 fn check_bytes<G>(
     conn: &Connection,
-    z: &LibraryZip,
+    p: &Pending,
     by_name: &[&Entry],
     entries: &[Entry],
     catalog: &impl Catalog,
     hash: &impl Fn(&Path) -> Result<String, String>,
     lock: &impl Fn() -> Result<G, String>,
-) -> Outcome {
+) -> (Outcome, Option<String>) {
+    let z = p.zip;
     if let Err(why) = unchanged(z) {
-        return Outcome::Retry(why);
+        return (Outcome::Retry(why), None);
     }
-    let sha = match hash(&z.path) {
-        Ok(h) => h.to_ascii_lowercase(),
-        Err(e) => return Outcome::Retry(format!("couldn't read it: {e}")),
+    let sha = match p.noted.as_ref().and_then(|n| n.sha256.clone()) {
+        Some(h) => h,
+        None => {
+            let taken = hash(&z.path).map(|h| h.to_ascii_lowercase());
+            // Hashed as the scan saw it, not mid-change.
+            if let Err(why) = unchanged(z) {
+                return (Outcome::Retry(why), None);
+            }
+            // Noted now, so a try that fails from here on doesn't hash the file again, and the
+            // file waits behind the rest next time.
+            note(conn, z, taken.as_ref().ok().map(String::as_str), false);
+            match taken {
+                Ok(h) => h,
+                Err(e) => return (Outcome::Retry(format!("couldn't read it: {e}")), None),
+            }
+        }
     };
-    // Hashed as the scan saw it, not mid-change.
-    if let Err(why) = unchanged(z) {
-        return Outcome::Retry(why);
+    let outcome = match_bytes(conn, z, &sha, by_name, entries, catalog, lock);
+    if !outcome.decided() && p.noted.is_some() {
+        // A retry with a hash noted earlier: it waits behind the rest next time too.
+        note(conn, z, Some(&sha), false);
     }
-    match catalogalias::recorded_entry(conn, &z.tech_name, &sha) {
+    (outcome, Some(sha))
+}
+
+/// What the catalog says about the bytes `sha` of the zip `z`.
+fn match_bytes<G>(
+    conn: &Connection,
+    z: &LibraryZip,
+    sha: &str,
+    by_name: &[&Entry],
+    entries: &[Entry],
+    catalog: &impl Catalog,
+    lock: &impl Fn() -> Result<G, String>,
+) -> Outcome {
+    match catalogalias::recorded_entry(conn, &z.tech_name, sha) {
         Ok(Some(_)) => return Outcome::AlreadyLinked,
         Ok(None) => {}
         Err(e) => return Outcome::Retry(e),
     }
     let mut matched: Vec<&Entry> = Vec::new();
     // Everything the listing has on it already: entries whose latest build is these bytes.
-    for entry in entries.iter().filter(|e| e.lists_latest(&sha)) {
+    for entry in entries.iter().filter(|e| e.lists_latest(sha)) {
         add_once(&mut matched, entry);
     }
     // An entry that downloads the file may list them as an older build: the zip's own version.
@@ -297,11 +342,11 @@ fn check_bytes<G>(
         .filter(|v| !v.is_empty())
     {
         for &entry in by_name {
-            if entry.lists_latest(&sha) {
+            if entry.lists_latest(sha) {
                 continue;
             }
             match catalog.archive_sha256(&entry.id, version) {
-                Ok(Some(h)) if h.eq_ignore_ascii_case(&sha) => add_once(&mut matched, entry),
+                Ok(Some(h)) if h.eq_ignore_ascii_case(sha) => add_once(&mut matched, entry),
                 Ok(_) => {}
                 Err(e) => return Outcome::Retry(e),
             }
@@ -309,10 +354,10 @@ fn check_bytes<G>(
     }
     match matched.as_slice() {
         [] => Outcome::NoMatch,
-        [one] if !catalogalias::needs_alias(file_name(z), one.tech_name.as_deref()) => {
-            Outcome::NamedAfterEntry
-        }
-        [one] => link(conn, z, &sha, one, lock),
+        // The one entry with these bytes doesn't download a file of this name, so a Browse
+        // install didn't get it from there.
+        [one] if !by_name.iter().any(|e| e.id == one.id) => Outcome::NoMatch,
+        [one] => link(conn, z, sha, one, lock),
         several => Outcome::Several(several.len()),
     }
 }
@@ -356,8 +401,15 @@ fn link<G>(
     }
 }
 
-/// Note what was made of `z` (a decided outcome is kept for this version of the file) and log it.
-fn settle(conn: &Connection, z: &LibraryZip, outcome: Outcome, out: &mut Vec<(PathBuf, Outcome)>) {
+/// Log what was made of `z`, and keep a decided outcome (with the hash, when taken) for this
+/// version of the file.
+fn settle(
+    conn: &Connection,
+    z: &LibraryZip,
+    outcome: Outcome,
+    sha: Option<&str>,
+    out: &mut Vec<(PathBuf, Outcome)>,
+) {
     let label = file_name(z);
     match &outcome {
         Outcome::Linked(id) => log::info!("[catalog] {label} linked to catalog entry {id}"),
@@ -370,18 +422,41 @@ fn settle(conn: &Connection, z: &LibraryZip, outcome: Outcome, out: &mut Vec<(Pa
         other => log::debug!("[catalog] {label}: not linked ({other:?})"),
     }
     if outcome.decided() {
-        if let Err(e) = db::mark_alias_checked(conn, &path_key(z), z.size, z.mtime_ms) {
-            log::warn!("[catalog] {label}: couldn't note it was checked, so it will be again: {e}");
-        }
+        note(conn, z, sha, true);
     }
     out.push((z.path.clone(), outcome));
 }
 
-fn retry_all(zips: &[&LibraryZip], why: &str, out: &mut Vec<(PathBuf, Outcome)>) {
-    out.extend(
-        zips.iter()
-            .map(|z| (z.path.clone(), Outcome::Retry(why.to_string()))),
-    );
+/// Save what was noted about this version of `z`, now. A failure only means it's looked at again.
+fn note(conn: &Connection, z: &LibraryZip, sha: Option<&str>, decided: bool) {
+    let check = db::AliasCheck {
+        size: z.size,
+        mtime_ms: z.mtime_ms,
+        sha256: sha.map(str::to_string),
+        decided,
+        attempted_ms: now_ms(),
+    };
+    if let Err(e) = db::note_alias_check(conn, &path_key(z), &check) {
+        log::warn!(
+            "[catalog] {}: couldn't note it was checked, so it will be again: {e}",
+            file_name(z)
+        );
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn retry_all<'a>(
+    zips: impl Iterator<Item = &'a LibraryZip>,
+    why: &str,
+    out: &mut Vec<(PathBuf, Outcome)>,
+) {
+    out.extend(zips.map(|z| (z.path.clone(), Outcome::Retry(why.to_string()))));
 }
 
 /// The file still has the size and modified time the scan saw.
@@ -753,7 +828,8 @@ mod tests {
             assert!(matches!(out[0].1, Outcome::Retry(_)), "{out:?}");
             assert!(!catalogalias::has_any(&conn, "FS25_FieldToDoList").unwrap());
             let z = &zips[0];
-            assert!(!db::alias_checked(&conn, &path_key(z), z.size, z.mtime_ms).unwrap());
+            let noted = db::alias_check(&conn, &path_key(z)).unwrap();
+            assert!(!noted.is_some_and(|n| n.decided), "not settled");
         }
         // Back online: the same file version is looked at and linked.
         let fake = Fake::with(vec![todo(Some(b"build one"))]);
@@ -846,13 +922,21 @@ mod tests {
         };
         let out = run(&conn, &[stale], &fake, hash, || Ok(()));
         assert!(matches!(out[0].1, Outcome::Retry(_)), "{out:?}");
+        assert!(!catalogalias::has_any(&conn, "FS25_FieldToDoList").unwrap());
+        // Looked at again, and linked once nothing is in the way.
+        let out = run(&conn, std::slice::from_ref(&zip), &fake, hash, || Ok(()));
+        assert_eq!(out[0].1, Outcome::Linked("cat-todo".into()));
+        // A file that can't be read (the game has it open, say) waits too.
+        let other = dir.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let file = write_zip(&other, "FS25_FieldToDoList.zip", b"build one!");
+        let fake = Fake::with(vec![todo(Some(b"build one!"))]);
+        let zip = scanned(&file, None);
         let unreadable = |_: &Path| -> Result<String, String> { Err("in use".into()) };
         let out = run(&conn, std::slice::from_ref(&zip), &fake, unreadable, || {
             Ok(())
         });
         assert!(matches!(out[0].1, Outcome::Retry(_)), "{out:?}");
-        assert!(!catalogalias::has_any(&conn, "FS25_FieldToDoList").unwrap());
-        // Each is looked at again, and linked once nothing is in the way.
         let out = run(&conn, &[zip], &fake, hash, || Ok(()));
         assert_eq!(out[0].1, Outcome::Linked("cat-todo".into()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -890,6 +974,111 @@ mod tests {
         let out = backfill(&conn, &zips, &fake, &hashed);
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|(_, o)| matches!(o, Outcome::Linked(_))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_lookup_is_retried_without_hashing_the_file_again() {
+        let (dir, conn) = setup("rehash");
+        let file = write_zip(&dir, "FS25_FieldToDoList.zip", b"build one");
+        let zips = [scanned(&file, Some("0.1.0.16"))];
+        let offline = Fake {
+            fail_builds: true,
+            ..Fake::with(vec![todo(Some(b"build two"))])
+        };
+        let hashed = Cell::new(0);
+        for _ in 0..3 {
+            let out = backfill(&conn, &zips, &offline, &hashed);
+            assert!(matches!(out[0].1, Outcome::Retry(_)), "{out:?}");
+        }
+        assert_eq!(hashed.get(), 1, "hashed once, then the noted hash is used");
+        assert_eq!(
+            offline.asked_builds.borrow().len(),
+            3,
+            "the lookup is what's retried"
+        );
+        let online =
+            Fake::with(vec![todo(Some(b"build two"))]).build("cat-todo", "0.1.0.16", b"build one");
+        let out = backfill(&conn, &zips, &online, &hashed);
+        assert_eq!(out[0].1, Outcome::Linked("cat-todo".into()));
+        assert_eq!(hashed.get(), 1);
+        assert!(
+            catalogalias::link_for_file(&conn, "FS25_FieldToDoList", &file)
+                .unwrap()
+                .is_some()
+        );
+        // A new build of the file is hashed afresh, never judged by the old hash.
+        std::fs::write(&file, b"build three!").unwrap();
+        let out = backfill(
+            &conn,
+            &[scanned(&file, Some("0.1.0.16"))],
+            &offline,
+            &hashed,
+        );
+        assert!(matches!(out[0].1, Outcome::Retry(_)), "{out:?}");
+        assert_eq!(hashed.get(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn files_that_keep_failing_dont_hold_up_the_rest() {
+        let (dir, conn) = setup("starve");
+        let mut entries = Vec::new();
+        let mut zips = Vec::new();
+        // MAX_HASHED files that can never be read, then one that can be linked; scans list
+        // them in this order every time.
+        for i in 0..=MAX_HASHED {
+            let name = format!("FS25_File{i:02}.zip");
+            let file = write_zip(&dir, &name, format!("bytes {i}").as_bytes());
+            zips.push(scanned(&file, None));
+            entries.push(Entry {
+                id: format!("cat-{i}"),
+                tech_name: Some(format!("FS25_Entry{i}")),
+                archive_sha256: Some(sha(format!("bytes {i}").as_bytes())),
+                download_urls: vec![format!(
+                    "https://github.com/o/r/releases/download/v1/{name}"
+                )],
+            });
+        }
+        let last = zips[MAX_HASHED].path.clone();
+        let fake = Fake::with(entries);
+        let locked = |p: &Path| -> Result<String, String> {
+            if p == last.as_path() {
+                crate::provenance::sha256_file(p)
+            } else {
+                Err("in use".into())
+            }
+        };
+        let out = run(&conn, &zips, &fake, locked, || Ok(()));
+        assert!(
+            out.iter().all(|(_, o)| matches!(o, Outcome::Retry(_))),
+            "{out:?}"
+        );
+        // The next scan tries the file it didn't get to first.
+        let out = run(&conn, &zips, &fake, locked, || Ok(()));
+        let got = out.iter().find(|(p, _)| *p == last).map(|(_, o)| o.clone());
+        assert_eq!(got, Some(Outcome::Linked(format!("cat-{MAX_HASHED}"))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_one_entry_with_the_bytes_must_download_a_file_of_that_name() {
+        let (dir, conn) = setup("elsewhere");
+        let file = write_zip(&dir, "FS25_FieldToDoList.zip", b"build one");
+        // The entry shipping this file name doesn't list the bytes; a mirror under another file
+        // name does, as its latest build. That isn't where a Browse install of this file came from.
+        let mirror = Entry {
+            id: "cat-mirror".into(),
+            tech_name: Some("FS25_ToDoMirror".into()),
+            archive_sha256: Some(sha(b"build one")),
+            download_urls: vec![
+                "https://github.com/m/r/releases/download/v1/FS25_Mirror.zip".into(),
+            ],
+        };
+        let fake = Fake::with(vec![todo(Some(b"build two")), mirror]);
+        let out = backfill(&conn, &[scanned(&file, Some("1.0"))], &fake, &Cell::new(0));
+        assert_eq!(out[0].1, Outcome::NoMatch);
+        assert!(!catalogalias::has_any(&conn, "FS25_FieldToDoList").unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

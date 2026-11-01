@@ -316,9 +316,9 @@ pub fn browse(
 const LIST_PAGE: u32 = 100;
 
 /// Every catalog entry with a source of kind `source` (`github`, say), read page by page from
-/// `GET /mods?source=<source>&sort=name` (name order, tie-broken by id on the server, so pages
-/// don't overlap or skip). More than `max_pages` pages is an error rather than a partial list,
-/// as is any page that fails: a caller counting the entries that list some bytes must see them all.
+/// `GET /mods?source=<source>&sort=name` (name order, tie-broken by id on the server). Anything
+/// short of the whole listing is an error, never a partial list: a caller counting the entries
+/// that list some bytes must see them all (see `all_pages`).
 pub fn list_source(base: &str, source: &str, max_pages: u32) -> Result<Vec<BrowseMod>, String> {
     let fetch = |offset: u32| -> Result<BrowsePage, String> {
         let url = format!(
@@ -335,18 +335,34 @@ pub fn list_source(base: &str, source: &str, max_pages: u32) -> Result<Vec<Brows
     all_pages(fetch, max_pages)
 }
 
-/// Read pages of `LIST_PAGE` rows from `fetch(offset)` until the reported total is reached or a
-/// page comes back empty; more than `max_pages` pages is an error.
+/// Read pages of `LIST_PAGE` rows from `fetch(offset)` until the total the first page reported.
+/// An error when a page fails, when the listing changes while it's read (another total, a page
+/// shorter or longer than the rest of the total, an entry seen twice), or when it runs past
+/// `max_pages` pages.
 fn all_pages(
     fetch: impl Fn(u32) -> Result<BrowsePage, String>,
     max_pages: u32,
 ) -> Result<Vec<BrowseMod>, String> {
+    let changed = || "Silo's catalog changed while Silo was reading it.".to_string();
     let mut out: Vec<BrowseMod> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut total = None;
     for page in 0..max_pages {
         let got = fetch(page * LIST_PAGE)?;
-        let done = got.mods.is_empty() || out.len() as u64 + got.mods.len() as u64 >= got.total;
-        out.extend(got.mods);
-        if done {
+        let want = *total.get_or_insert(got.total);
+        let left = want
+            .saturating_sub(out.len() as u64)
+            .min(u64::from(LIST_PAGE));
+        if got.total != want || got.mods.len() as u64 != left {
+            return Err(changed());
+        }
+        for m in got.mods {
+            if !seen.insert(m.id.clone()) {
+                return Err(changed());
+            }
+            out.push(m);
+        }
+        if out.len() as u64 == want {
             return Ok(out);
         }
     }
@@ -981,17 +997,18 @@ mod tests {
         assert_eq!(all.len(), 250);
         assert_eq!(all[249].id, "m249");
         assert_eq!(*asked.borrow(), [0, 100, 200]);
-        // A page that comes back empty ends it (the total moved under us).
-        let short = all_pages(|o| Ok(list_page(o, if o == 0 { 100 } else { 0 }, 900)), 10);
-        assert_eq!(short.unwrap().len(), 100);
-        // Nothing at all.
+        // Exactly a page, and nothing at all.
+        assert_eq!(
+            all_pages(|o| Ok(list_page(o, 100, 100)), 10).unwrap().len(),
+            100
+        );
         assert!(all_pages(|o| Ok(list_page(o, 0, 0)), 10)
             .unwrap()
             .is_empty());
     }
 
     #[test]
-    fn a_source_listing_that_fails_or_runs_long_is_an_error_not_a_partial_list() {
+    fn a_source_listing_that_fails_or_changes_or_runs_long_is_an_error_not_a_partial_list() {
         let failing = |o: u32| {
             if o == 0 {
                 Ok(list_page(0, 100, 300))
@@ -1000,6 +1017,18 @@ mod tests {
             }
         };
         assert_eq!(all_pages(failing, 10).unwrap_err(), "offline");
+        // A page that comes back empty or short before the total is reached.
+        let empty = |o: u32| Ok(list_page(o, if o == 0 { 100 } else { 0 }, 900));
+        assert!(all_pages(empty, 10).is_err());
+        let short = |o: u32| Ok(list_page(o, if o == 0 { 100 } else { 50 }, 300));
+        assert!(all_pages(short, 10).is_err());
+        // More rows than the total said, or the total moves between pages.
+        assert!(all_pages(|o| Ok(list_page(o, 100, 50)), 10).is_err());
+        let moving = |o: u32| Ok(list_page(o, 100, if o == 0 { 300 } else { 301 }));
+        assert!(all_pages(moving, 10).is_err());
+        // An entry seen on two pages (the order shifted while paging).
+        let overlap = |o: u32| Ok(list_page(o.saturating_sub(1), 100, 200));
+        assert!(all_pages(overlap, 10).is_err());
         let endless = |o: u32| Ok(list_page(o, 100, 1_000_000));
         assert!(all_pages(endless, 3).is_err());
     }

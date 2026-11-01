@@ -2118,7 +2118,8 @@
   }
 
   const updateCheckDeps = {
-    catalog: catalogCheckUpdates,
+    // This check links older installs under another name to their entry first (#402).
+    catalog: (mods: Parameters<typeof catalogCheckUpdates>[0]) => catalogCheckUpdates(mods, true),
     checkRepo: checkModUpdate,
     explain: explainUpdateError,
   };
@@ -3447,7 +3448,9 @@
     progress = { done: 0, total: 0 };
     let scanned = false;
     try {
-      const r = await scanMods(roots.length ? roots : undefined);
+      // Linking older installs to the catalog (#402) asks it about mod names: only when the
+      // user lets Silo check for updates at startup.
+      const r = await scanMods(roots.length ? roots : undefined, autoCheckEnabled());
       result = r;
       mods = r.mods;
       libraryScanned = true;

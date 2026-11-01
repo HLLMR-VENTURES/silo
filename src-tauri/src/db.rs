@@ -294,18 +294,22 @@ fn migrate_3_to_4(tx: &Connection) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// Version 5 = `alias_check` (#402): the library zips the catalog-link backfill has already
-/// looked at, keyed by path with the size and modified time it saw (as the scan cache is), so an
-/// unchanged file is never hashed or looked up again. A changed file has another size or time and
-/// is looked at once more. Rows for files the scan no longer has are dropped with
-/// `prune_alias_checks`. Additive.
+/// Version 5 = `alias_check` (#402): what the catalog-link backfill noted about each library zip,
+/// keyed by path with the size and modified time it saw (as the scan cache is). `decided` = that
+/// version of the file is settled and isn't hashed or looked up again; a changed file has another
+/// size or time and is looked at once more. `sha256` keeps the hash once taken, so a lookup that
+/// failed is retried without hashing the file again. `attempted_ms` orders retries behind files
+/// never looked at. Rows for files the scan no longer has are dropped with `prune_alias_checks`.
+/// Additive.
 fn migrate_4_to_5(tx: &Connection) -> Result<(), String> {
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS alias_check (
-             path       TEXT PRIMARY KEY,
-             size       INTEGER NOT NULL,
-             mtime_ms   INTEGER NOT NULL,
-             checked_at INTEGER NOT NULL
+             path         TEXT PRIMARY KEY,
+             size         INTEGER NOT NULL,
+             mtime_ms     INTEGER NOT NULL,
+             sha256       TEXT,
+             decided      INTEGER NOT NULL DEFAULT 0,
+             attempted_ms INTEGER NOT NULL
          );",
     )
     .map_err(|e| e.to_string())
@@ -1125,39 +1129,55 @@ pub fn forget_catalog_alias(
     Ok(())
 }
 
-/// Whether the catalog-link backfill (#402) already looked at the file at `path` when it had
-/// this size and modified time.
-pub fn alias_checked(
-    conn: &Connection,
-    path: &str,
-    size: u64,
-    mtime_ms: u64,
-) -> Result<bool, String> {
+/// What the catalog-link backfill (#402) noted about one version of a library file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AliasCheck {
+    pub size: u64,
+    pub mtime_ms: u64,
+    /// The file's whole-file SHA-256 at that size and time, once taken (lowercase hex).
+    pub sha256: Option<String>,
+    /// Settled: not looked at again until the file changes.
+    pub decided: bool,
+    /// When it was last looked at (unix milliseconds).
+    pub attempted_ms: i64,
+}
+
+/// What the catalog-link backfill noted about the file at `path`, for whatever version of it it
+/// last saw.
+pub fn alias_check(conn: &Connection, path: &str) -> Result<Option<AliasCheck>, String> {
     conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM alias_check WHERE path = ?1 AND size = ?2 AND mtime_ms = ?3)",
-        rusqlite::params![path, size as i64, mtime_ms as i64],
-        |r| r.get(0),
+        "SELECT size, mtime_ms, sha256, decided, attempted_ms FROM alias_check WHERE path = ?1",
+        [path],
+        |r| {
+            Ok(AliasCheck {
+                size: r.get::<_, i64>(0)? as u64,
+                mtime_ms: r.get::<_, i64>(1)? as u64,
+                sha256: r.get(2)?,
+                decided: r.get(3)?,
+                attempted_ms: r.get(4)?,
+            })
+        },
     )
+    .optional()
     .map_err(|e| e.to_string())
 }
 
-/// Note that the catalog-link backfill (#402) looked at the file at `path` with this size and
-/// modified time, replacing what it noted for an earlier version of the file.
-pub fn mark_alias_checked(
-    conn: &Connection,
-    path: &str,
-    size: u64,
-    mtime_ms: u64,
-) -> Result<(), String> {
+/// Save what the catalog-link backfill noted about the file at `path`, replacing what it noted
+/// for an earlier version of the file.
+pub fn note_alias_check(conn: &Connection, path: &str, check: &AliasCheck) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO alias_check(path, size, mtime_ms, checked_at) VALUES(?1, ?2, ?3, ?4)
+        "INSERT INTO alias_check(path, size, mtime_ms, sha256, decided, attempted_ms)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(path) DO UPDATE SET
-             size = excluded.size, mtime_ms = excluded.mtime_ms, checked_at = excluded.checked_at",
+             size = excluded.size, mtime_ms = excluded.mtime_ms, sha256 = excluded.sha256,
+             decided = excluded.decided, attempted_ms = excluded.attempted_ms",
         rusqlite::params![
             path,
-            size as i64,
-            mtime_ms as i64,
-            unix_now().as_secs() as i64
+            check.size as i64,
+            check.mtime_ms as i64,
+            check.sha256.as_deref().map(str::to_ascii_lowercase),
+            check.decided,
+            check.attempted_ms
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -2083,29 +2103,51 @@ mod tests {
             1,
             "the links are kept"
         );
-        assert!(!alias_checked(&conn, "m/FS25_X.zip", 10, 5).unwrap());
+        assert_eq!(alias_check(&conn, "m/FS25_X.zip").unwrap(), None);
     }
 
     #[test]
-    fn an_alias_check_holds_for_one_version_of_one_file() {
+    fn an_alias_check_round_trips_and_is_pruned_with_the_scan_cache() {
         let path = temp_db("alias_check");
         let mut conn = open(&path).unwrap();
-        mark_alias_checked(&conn, "m/FS25_X.zip", 10, 5).unwrap();
-        assert!(alias_checked(&conn, "m/FS25_X.zip", 10, 5).unwrap());
-        // Another size, another time, or another file: not looked at yet.
-        assert!(!alias_checked(&conn, "m/FS25_X.zip", 11, 5).unwrap());
-        assert!(!alias_checked(&conn, "m/FS25_X.zip", 10, 6).unwrap());
-        assert!(!alias_checked(&conn, "m/FS25_Y.zip", 10, 5).unwrap());
-        // The newer version replaces the note for the older one.
-        mark_alias_checked(&conn, "m/FS25_X.zip", 11, 6).unwrap();
-        assert!(alias_checked(&conn, "m/FS25_X.zip", 11, 6).unwrap());
-        assert!(!alias_checked(&conn, "m/FS25_X.zip", 10, 5).unwrap());
+        let first = AliasCheck {
+            size: 10,
+            mtime_ms: 5,
+            sha256: Some("ABCD".into()),
+            decided: false,
+            attempted_ms: 100,
+        };
+        note_alias_check(&conn, "m/FS25_X.zip", &first).unwrap();
+        let got = alias_check(&conn, "m/FS25_X.zip").unwrap().unwrap();
+        assert_eq!(
+            got.sha256.as_deref(),
+            Some("abcd"),
+            "the hash is kept lowercase"
+        );
+        assert_eq!(
+            (got.size, got.mtime_ms, got.decided, got.attempted_ms),
+            (10, 5, false, 100)
+        );
+        assert_eq!(alias_check(&conn, "m/FS25_Y.zip").unwrap(), None);
+        // A newer version of the file replaces the note for the older one.
+        let next = AliasCheck {
+            size: 11,
+            mtime_ms: 6,
+            sha256: None,
+            decided: true,
+            attempted_ms: 200,
+        };
+        note_alias_check(&conn, "m/FS25_X.zip", &next).unwrap();
+        assert_eq!(
+            alias_check(&conn, "m/FS25_X.zip").unwrap(),
+            Some(next.clone())
+        );
         // Notes for files the scan cache no longer has are dropped; the rest stay.
-        mark_alias_checked(&conn, "m/FS25_Gone.zip", 1, 1).unwrap();
+        note_alias_check(&conn, "m/FS25_Gone.zip", &first).unwrap();
         upsert_many(&mut conn, &[("m/FS25_X.zip".into(), 6, 11, "{}".into())]).unwrap();
         assert_eq!(prune_alias_checks(&conn).unwrap(), 1);
-        assert!(alias_checked(&conn, "m/FS25_X.zip", 11, 6).unwrap());
-        assert!(!alias_checked(&conn, "m/FS25_Gone.zip", 1, 1).unwrap());
+        assert_eq!(alias_check(&conn, "m/FS25_X.zip").unwrap(), Some(next));
+        assert_eq!(alias_check(&conn, "m/FS25_Gone.zip").unwrap(), None);
     }
 
     #[test]

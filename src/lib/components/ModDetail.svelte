@@ -8,7 +8,14 @@
   import { tick, untrack } from "svelte";
   import type { ModEntry, CurationRow, Conflict, CatalogModDetail, CatalogUpdate, LogReport, SourceRow } from "../types";
   import type { ForeignFile } from "../api";
-  import { revealInFolder, catalogDetailByTech, catalogCheckUpdates, scanLog, setCuration } from "../api";
+  import {
+    revealInFolder,
+    catalogDetailByTech,
+    catalogCheckUpdates,
+    onCatalogLinked,
+    scanLog,
+    setCuration,
+  } from "../api";
   import { reportError } from "../state/notify.svelte";
   import Switch from "../ui/Switch.svelte";
   import { resizable } from "../resize";
@@ -129,8 +136,24 @@
   let catalogFailed = $state(false);
   /** The last game log's triage; null until read (or when there's no log). */
   let report = $state<LogReport | null>(null);
+  /** Bumped when Silo links this file to its catalog entry while the drawer shows it (#402). */
+  let linked = $state(0);
+  $effect(() => {
+    let stop: (() => void) | null = null;
+    let gone = false;
+    void onCatalogLinked((paths) => {
+      if (paths.includes(untrack(() => mod.path))) linked++;
+    })
+      .then((un) => (gone ? un() : (stop = un)))
+      .catch(() => {});
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
   $effect(() => {
     const id = fileId;
+    const gen = linked;
     untrack(() => {
       const m = mod;
       icon = cachedModIcon(m);
@@ -139,7 +162,7 @@
       catalogChecked = false;
       catalogFailed = false;
       report = null;
-      const still = () => provKey(mod) === id;
+      const still = () => provKey(mod) === id && linked === gen;
       if (!icon) void loadModIcon(m).then((u) => {
         if (still()) icon = u;
       });
