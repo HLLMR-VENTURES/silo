@@ -10,8 +10,10 @@
 // result) that comes back for an older generation is dropped, so nothing re-arms after a cancel.
 // The backend keeps its own order (newest sign-in wins), and a cancel tells it which flow ended.
 // Account changes reach it in the order the user asked: a sign-in first registers an attempt
-// (quick, no network), and those registrations and Disconnects are sent one at a time, so a
-// Disconnect can't overtake a token save clicked before it, nor wait for its network check.
+// (quick, no network), and those registrations, cancels and Disconnects are sent one at a time.
+// A sign-in's own command (the device start, the token save) goes out in its registration's
+// turn, but nothing waits for its answer, so a Disconnect can't overtake a token save clicked
+// before it, nor wait for its network check.
 // When the flow finishes while no GitHubAuth view is mounted, a toast says how it went.
 
 import {
@@ -61,13 +63,15 @@ let generation = 0;
 let views = 0;
 /** The device code of the flow on screen, so a cancel can name it to the backend. */
 let activeCode: string | null = null;
-/** The account change (an attempt registration or a Disconnect) still on its way, if any. */
+/** The account change (a registration, a cancel or a Disconnect) still on its way, if any. */
 let accountTail: Promise<void> | null = null;
 
 /**
  * Send an account change after the one before it has answered, so the backend sees them in the
  * order the user asked (it can't tell that order itself). Runs at once when nothing is pending.
- * Only quick steps go through here: registering a sign-in attempt, and Disconnect.
+ * Only quick steps are waited for: registering a sign-in attempt, cancelling a flow, and
+ * Disconnect. A sign-in's own command is sent inside its registration's turn and handed back
+ * unanswered (wrapped, so the turn doesn't wait for it); the next change goes out right after.
  */
 function inOrder<T>(op: () => Promise<T>): Promise<T> {
   const run = accountTail
@@ -137,8 +141,7 @@ function stopTimer(): void {
  * status so the screen shows what's really connected.
  */
 function cancelOnBackend(code: string, refreshIfOver: boolean): void {
-  Promise.resolve()
-    .then(() => ghDeviceCancel(code))
+  inOrder(() => ghDeviceCancel(code))
     .then((cancelled) => {
       if (!cancelled && refreshIfOver) return refreshGithub();
     })
@@ -230,10 +233,16 @@ export async function startDeviceFlow(write = false, gist = false): Promise<void
   githubAuth.flow = null;
   githubAuth.message = null;
   try {
-    // Waiting behind another account change and cancelled meanwhile: don't start at all.
-    const attempt = await inOrder(() => (gen === generation ? ghSignInBegin() : Promise.resolve(null)));
-    if (attempt === null || gen !== generation) return;
-    const dc = await ghDeviceStart(write, gist, attempt);
+    // Waiting behind another account change and cancelled meanwhile: don't start at all. The
+    // start goes out in this sign-in's turn; GitHub's answer is awaited outside it.
+    const sent = await inOrder(async () => {
+      if (gen !== generation) return null;
+      const attempt = await ghSignInBegin();
+      if (gen !== generation) return null;
+      return { start: ghDeviceStart(write, gist, attempt) };
+    });
+    if (sent === null) return;
+    const dc = await sent.start;
     if (gen !== generation) {
       // Cancelled or restarted meanwhile: make sure the backend forgets this flow too.
       cancelOnBackend(dc.deviceCode, false);
@@ -284,8 +293,11 @@ export async function disconnectGithub(): Promise<void> {
  * @return the GitHub login it belongs to
  */
 export async function saveGithubPat(pat: string): Promise<string> {
-  const attempt = await inOrder(() => ghSignInBegin());
-  return ghSetPat(pat, attempt);
+  // The save goes out in this sign-in's turn; GitHub's check of the token is awaited outside it.
+  const sent = await inOrder(async () => ({
+    save: ghSetPat(pat, await ghSignInBegin()),
+  }));
+  return sent.save;
 }
 
 /** Test helper: back to the initial state with no timer and no views. */

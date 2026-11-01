@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Clicking **Connect**, **Cancel** or **Disconnect** for GitHub in quick succession now always
+  reaches Silo in the order you clicked. Before, cancelling a sign-in and connecting or
+  disconnecting right after could arrive the other way round. (#403)
 - Switching mods folders now clears messages about the folder you left. (#396)
 - Moving your library archive, organizing, re-linking mods in your mods folder and mod
   updates no longer delete Silo's temporary files just by their name. Each temporary file now
