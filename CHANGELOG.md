@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Silo now finds the game, and shows the **Play** button, when the Steam client is installed on
   a drive other than C: (Windows), and when FS25 runs through Proton, including Flatpak Steam
   (Linux). (#346)
+- Folder mods can no longer make Silo read files outside the mod's own folder.
 
 ### Security
 
