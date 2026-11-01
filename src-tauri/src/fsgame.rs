@@ -52,6 +52,18 @@ fn mac_candidates(home: &Path) -> Vec<PathBuf> {
     ]
 }
 
+/// Linux Steam client roots under `home`: the native install (both of its usual paths) and
+/// the Flatpak one. Shared with `gamelaunch`, which looks for the game install under the same
+/// roots. Existence is not checked here.
+#[allow(dead_code)] // used on Linux and in tests
+pub fn linux_steam_roots(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".steam/steam"),
+        home.join(".local/share/Steam"),
+        home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+    ]
+}
+
 /// Linux (Proton) candidates as `(user_dir, prefix)` pairs: every Steam library under the
 /// native and Flatpak Steam roots, each with FS25's compatdata prefix. `read` loads a file's
 /// text (injected for tests).
@@ -60,11 +72,7 @@ fn linux_candidates(
     home: &Path,
     read: impl Fn(&Path) -> Option<String>,
 ) -> Vec<(PathBuf, PathBuf)> {
-    let roots = [
-        home.join(".steam/steam"),
-        home.join(".local/share/Steam"),
-        home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
-    ];
+    let roots = linux_steam_roots(home);
     let mut libs: Vec<PathBuf> = Vec::new();
     for root in &roots {
         let mut found = vec![root.clone()];
@@ -245,5 +253,18 @@ mod tests {
         // No duplicates (the native root appears both as a root and in its own VDF).
         let unique: HashSet<_> = c.iter().collect();
         assert_eq!(unique.len(), c.len());
+    }
+
+    #[test]
+    fn linux_steam_roots_include_native_and_flatpak() {
+        let home = Path::new("/home/u");
+        assert_eq!(
+            linux_steam_roots(home),
+            vec![
+                home.join(".steam/steam"),
+                home.join(".local/share/Steam"),
+                home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+            ]
+        );
     }
 }

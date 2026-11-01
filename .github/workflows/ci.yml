@@ -59,12 +59,14 @@ jobs:
       - name: Format check
         working-directory: src-tauri
         run: cargo fmt --all --check
+      # `--locked` on every cargo build here: build from the committed Cargo.lock, the one
+      # `cargo audit` checks, so a Cargo.toml change without its refreshed lock fails CI (#359).
       - name: Clippy (deny warnings)
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         working-directory: src-tauri
-        run: cargo test
+        run: cargo test --locked
 
   rust-macos:
     name: Rust (macOS clippy + test)
@@ -83,10 +85,10 @@ jobs:
           workspaces: src-tauri
       - name: Clippy (deny warnings)
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         working-directory: src-tauri
-        run: cargo test
+        run: cargo test --locked
 
   rust-windows:
     name: Rust (Windows clippy + test)
@@ -103,10 +105,10 @@ jobs:
           workspaces: src-tauri
       - name: Clippy (deny warnings)
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         working-directory: src-tauri
-        run: cargo test
+        run: cargo test --locked
 
   audit:
     name: Security audit (cargo-audit)

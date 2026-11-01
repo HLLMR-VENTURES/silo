@@ -50,10 +50,15 @@ fn with_suffix(p: &Path, suffix: &str) -> PathBuf {
 pub fn fetch(url: &str, dest: &Path) -> Result<crate::PartClaim, String> {
     crate::github::check_update_url(url)?;
     let claim = crate::claim_part_at(dest, part_path(dest))?;
-    let resp = crate::net::download()
-        .get(url)
-        .call()
-        .map_err(|e| e.to_string())?;
+    // Release assets redirect (github.com → release-assets.githubusercontent.com); every hop
+    // must pass the same check as the first URL.
+    let resp = crate::net::get_guarded(
+        crate::net::download(),
+        url,
+        &|u| crate::github::check_update_url(u.as_str()),
+        None,
+    )
+    .map_err(|e| e.to_string())?;
     write_part(resp.into_reader(), claim.path(), dest)?;
     Ok(claim)
 }
