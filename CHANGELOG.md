@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Silo now finds the game, and shows the **Play** button, when the Steam client is installed on
   a drive other than C: (Windows), and when FS25 runs through Proton, including Flatpak Steam
   (Linux). (#346)
+- **Use this version** no longer leaves a mod's archive slot empty when it can't move the file
+  in from your mods folder (for example while the game has it open). Silo puts the archived copy
+  back and tells you why. **Keep Silo's copy** does the same with your file if it can't put
+  Silo's copy in place. Both buttons now wait for Farming Simulator 25 to close. (#344)
 - When Silo has to copy a mod into your mods folder (a cloud-synced Documents folder, or a
   library on another drive), it now builds the copy under a hidden temporary name and only puts
   it in place once it's complete. Before, a copy that stopped part-way (a full disk, a file that
