@@ -168,7 +168,12 @@ pub fn get(conn: &Connection, key: &str) -> Option<String> {
 
 fn get_with(conn: &Connection, key: &str, keychain: Option<&keyring::Entry>) -> Option<String> {
     let _held = store_lock();
-    if let Some(row) = db::get_app_setting(conn, key) {
+    // Strict: a row Silo can't read may be the newest token (a fallback sign-in), so it's never
+    // taken as "no row", which would return an older keychain copy instead.
+    let Ok(row) = setting(conn, key) else {
+        return None;
+    };
+    if let Some(row) = row {
         match row_revoked(conn, key, &row) {
             // Can't tell whether this row is the current token or a revoked one: use nothing,
             // delete nothing, and don't fall back to an older keychain copy either.
@@ -438,16 +443,20 @@ fn clear_with(
     keychain: Option<&keyring::Entry>,
     missing: impl Fn() -> bool,
 ) -> Result<Removal, String> {
-    // A row Silo can't read can be neither revoked nor counted as gone: nothing is touched,
-    // and the caller keeps the account signed out.
-    let row = setting(conn, key)?;
+    // A row Silo can't read can be neither revoked nor counted as gone, so then the result is
+    // an error (the caller keeps the account signed out and retries). The keychain copy is
+    // still deleted first: a database problem mustn't keep a healthy keychain's token.
+    let row = setting(conn, key);
     let Some(e) = keychain else {
+        let row = row?;
         return Ok(Removal {
             keychain_kept: false,
             row_kept: drop_row(conn, key, row.as_deref())?,
         });
     };
-    let removed = match clear_keychain(e) {
+    let cleared = clear_keychain(e);
+    let row = row?;
+    let removed = match cleared {
         Cleared::Gone => {
             set_distrust(conn, key, false)?;
             true
@@ -1319,6 +1328,36 @@ mod tests {
         set_with(&conn, KEY, Some("row"), None, NO_KEYCHAIN).unwrap();
         sweep_with(&conn, KEY, None);
         assert_eq!(row(&conn).as_deref(), Some("row"));
+    }
+
+    /// Put a value in the test key's row that can't be read as text, as a read error would.
+    fn unreadable_row(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO app_setting(key, value) VALUES (?1, x'00ff') \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [KEY],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_row_never_lets_an_older_keychain_token_through() {
+        // B signed in through the fallback (its row can't be read just now); the keychain
+        // still holds A, with no distrust marker.
+        let conn = mem_db();
+        unreadable_row(&conn);
+        let k = FakeKeychain::with(|s| s.stored = Some("account-a".into()));
+        assert_eq!(get_with(&conn, KEY, Some(&k.entry())), None, "never A");
+        assert_eq!(k.stored().as_deref(), Some("account-a"), "nothing deleted");
+    }
+
+    #[test]
+    fn a_disconnect_deletes_the_keychain_copy_even_when_the_row_cant_be_read() {
+        let conn = mem_db();
+        unreadable_row(&conn);
+        let k = FakeKeychain::with(|s| s.stored = Some("tok".into()));
+        assert!(clear_with(&conn, KEY, Some(&k.entry()), KEYCHAIN_WORKS).is_err());
+        assert_eq!(k.stored(), None, "the healthy keychain's copy is gone");
     }
 
     #[test]

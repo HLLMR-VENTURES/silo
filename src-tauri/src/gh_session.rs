@@ -483,7 +483,10 @@ impl Session {
                     Ok(v)
                 }
                 Err(e) => {
+                    // The marker is still there, so the next run stays signed out too, and a
+                    // status read retries the cleanup.
                     g.signed_out = true;
+                    g.cleanup_pending = true;
                     Err(format!("{UNMARK_FAILED} ({e})."))
                 }
             },
@@ -536,11 +539,19 @@ fn write_durably(p: &Path) -> std::io::Result<()> {
     sync_folder(p)
 }
 
-/// Remove the marker so that survives a power loss too (on Unix, the folder entry is flushed).
-/// A marker that isn't there is fine.
+/// Remove the marker, and try to make that survive a power loss too (on Unix, the folder entry
+/// is flushed). A marker that isn't there is fine. Err only when the file is still there: once
+/// it's unlinked, a failed flush can at worst bring it back after a power loss, which keeps the
+/// account signed out (the safe side), so it's logged and counted as removed. Reporting it as a
+/// failure would leave the account "signed out" in this run with no marker for the next one.
 fn remove_durably(p: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(p) {
-        Ok(()) => sync_folder(p),
+        Ok(()) => {
+            if let Err(e) = sync_folder(p) {
+                log::warn!("GitHub: removed the signed-out marker but couldn't flush it: {e}");
+            }
+            Ok(())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
