@@ -549,6 +549,10 @@ fn rename_or_copy(
 /// (its link). Folders further up as for a copy (`make_durable`). Nothing inside the mod
 /// changed, so no file is flushed.
 fn flush_rename(placed: &Path, left: &Path, mods: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if tests::FLUSH_FAULT.with(|f| f.get()) {
+        return Err(std::io::Error::other("injected flush failure"));
+    }
     let mut above = placed.ancestors().skip(1);
     for dir in above.by_ref().take(2) {
         organize::sync_dir_checked(dir)?;
@@ -691,7 +695,9 @@ fn mend_renamed_links(env: &Env, marker: &mut MoveMarker) -> Vec<String> {
     // note goes. One that can't be re-pointed yet is kept.
     let notes = std::mem::take(&mut marker.relinking);
     let noted = notes.len();
-    let mut relinked = Vec::new();
+    // Notes with nothing left to vouch for: they go only once the state they leave behind is on
+    // disk (`settle_note`, after the generic pass below), whoever made it.
+    let mut retiring = Vec::new();
     for note in notes {
         let Some(row) = rows.iter().find(|r| r.tech_name == note.tech_name) else {
             continue;
@@ -699,9 +705,12 @@ fn mend_renamed_links(env: &Env, marker: &mut MoveMarker) -> Vec<String> {
         let link = env.mods.join(&row.file_name);
         match inspect_entry(&link) {
             Ok(Entry::Link(t)) if t == note.target => {}
-            // Gone (the generic pass below makes it again), or not the link Silo noted: the
-            // note has nothing left to vouch for.
-            Ok(_) => continue,
+            // Gone (the generic pass below makes it again), or not the link Silo noted (perhaps
+            // re-pointed by an earlier attempt): the note has nothing left to vouch for.
+            Ok(_) => {
+                retiring.push(note);
+                continue;
+            }
             Err(e) => {
                 errors.push(format!("{}: relink: {e}", row.tech_name));
                 marker.relinking.push(note);
@@ -709,6 +718,7 @@ fn mend_renamed_links(env: &Env, marker: &mut MoveMarker) -> Vec<String> {
             }
         }
         if reaches_the_copy(&link, &row.kind).is_ok() {
+            retiring.push(note);
             continue;
         }
         let a = organize::archive_path(&marker.from, &row.category, &row.file_name);
@@ -745,25 +755,11 @@ fn mend_renamed_links(env: &Env, marker: &mut MoveMarker) -> Vec<String> {
             .with_journal(&journal)
             .with_room_check(&room);
         match relink_entry(env, row, &link, &here, &gone, &mut policy) {
-            Ok(()) => relinked.push(note),
+            Ok(()) => retiring.push(note),
             Err(e) => {
                 errors.push(format!("{}: {}", row.tech_name, failed(e)));
                 marker.relinking.push(note);
             }
-        }
-    }
-    // A note goes only once its new link is on disk.
-    if !relinked.is_empty() {
-        if let Err(e) = organize::sync_dir_checked(env.mods) {
-            errors.push(format!(
-                "relink: Silo couldn't write the mods folder's links to disk: {e}. Check that drive, then resume."
-            ));
-            marker.relinking.extend(relinked);
-        }
-    }
-    if marker.relinking.len() != noted {
-        if let Err(e) = env.save(marker) {
-            errors.push(failed(e));
         }
     }
     for row in rows
@@ -842,7 +838,42 @@ fn mend_renamed_links(env: &Env, marker: &mut MoveMarker) -> Vec<String> {
             errors.push(format!("{}: {}", row.tech_name, failed(e)));
         }
     }
+    for note in retiring {
+        let Some(row) = rows.iter().find(|r| r.tech_name == note.tech_name) else {
+            continue;
+        };
+        if let Err(e) = settle_note(env, row, marker) {
+            errors.push(format!("{}: {}", row.tech_name, failed(e)));
+            marker.relinking.push(note);
+        }
+    }
+    if marker.relinking.len() != noted {
+        if let Err(e) = env.save(marker) {
+            errors.push(failed(e));
+        }
+    }
     errors
+}
+
+/// Before a link note goes: the mod's link and its archived copy, as they are now, are on disk
+/// (`Env::flush` for whichever of its two places holds it, with the mods folder), so a power
+/// cut can't bring back the state the note was kept for without the note.
+fn settle_note(env: &Env, row: &OrganizedRow, marker: &MoveMarker) -> Result<(), StepErr> {
+    let a = organize::archive_path(&marker.from, &row.category, &row.file_name);
+    let b = organize::archive_path(&marker.to, &row.category, &row.file_name);
+    let (placed, left) = if !exists(&a) && exists(&b) {
+        (b, a)
+    } else {
+        (a, b)
+    };
+    if exists(&placed) {
+        return flushed(env, &placed, &left);
+    }
+    organize::sync_dir_checked(env.mods).map_err(|e| {
+        StepErr::Failed(format!(
+            "relink: Silo couldn't write your mods folder's links to disk: {e}. Check that drive, then resume."
+        ))
+    })
 }
 
 /// Delete a moved mod's old copy `src`, now that `replacement` holds it: rename it aside to a
@@ -2485,6 +2516,8 @@ mod tests {
         pub(super) static REPOINT_FAULT: Cell<Option<fn(&Path)>> = const { Cell::new(None) };
         /// The next `inspect_entry` on this thread fails (taken once).
         pub(super) static INSPECT_FAULT: Cell<bool> = const { Cell::new(false) };
+        /// Every `flush_rename` on this thread fails while set.
+        pub(super) static FLUSH_FAULT: Cell<bool> = const { Cell::new(false) };
     }
 
     struct Fx {
@@ -5912,6 +5945,57 @@ mod tests {
                 None => assert!(same_file(&flat, &dst), "{tag}: moved, and linked"),
             }
             assert!(!old_name.exists(), "{tag}");
+            let _ = std::fs::remove_dir_all(&f.base);
+        }
+    }
+
+    /// A note goes only once what it leaves behind is on disk. The link is repaired but the
+    /// flush fails: the note stays, the failure is listed. Resumed (paused at once) with the
+    /// flush still failing, the repaired link no longer matches the note, yet the note still
+    /// waits for the flush, which is retried and listed again. Once the flush works it goes.
+    /// The same for a note whose link went missing (the generic pass makes it again).
+    #[test]
+    fn a_note_goes_only_after_a_flush_of_what_it_leaves() {
+        for (tag, lose_link) in [("notedurable1", false), ("notedurable2", true)] {
+            let f = fx(tag);
+            let Some((_, dst, link)) = crashed_with_unrecognizable_link(&f) else {
+                let _ = std::fs::remove_dir_all(&f.base);
+                return;
+            };
+            if lose_link {
+                std::fs::remove_file(&link)
+                    .or_else(|_| std::fs::remove_dir(&link))
+                    .unwrap();
+            }
+            FLUSH_FAULT.with(|c| c.set(true));
+            for attempt in 0..2 {
+                let paused = resume_paused_at_once(&f);
+                assert_eq!(
+                    paused.errors.len(),
+                    1,
+                    "{tag} {attempt}: {:?}",
+                    paused.errors
+                );
+                assert!(
+                    paused.errors[0].contains("injected flush failure"),
+                    "{tag} {attempt}: {:?}",
+                    paused.errors
+                );
+                assert_eq!(
+                    load_marker(&f.conn, &f.key).unwrap().relinking.len(),
+                    1,
+                    "{tag} {attempt}: the note is kept"
+                );
+                assert_eq!(
+                    std::fs::canonicalize(&link).unwrap(),
+                    std::fs::canonicalize(&dst).unwrap(),
+                    "{tag} {attempt}: the link itself is mended"
+                );
+            }
+            FLUSH_FAULT.with(|c| c.set(false));
+            let paused = resume_paused_at_once(&f);
+            assert!(paused.errors.is_empty(), "{tag}: {:?}", paused.errors);
+            assert!(load_marker(&f.conn, &f.key).unwrap().relinking.is_empty());
             let _ = std::fs::remove_dir_all(&f.base);
         }
     }
