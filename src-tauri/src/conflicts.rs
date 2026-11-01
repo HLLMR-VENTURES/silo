@@ -171,7 +171,7 @@ fn read_member(path: &str, kind: &str, member: &str) -> Option<Vec<u8>> {
         // Cap the read — a compared member could be a zip-bombed script.
         crate::scan::read_capped(e, 32 * 1024 * 1024, &member).ok()
     } else {
-        let f = std::fs::File::open(Path::new(path).join(&member)).ok()?;
+        let f = crate::paths::open_inside(Path::new(path), &member)?;
         crate::scan::read_capped(f, 32 * 1024 * 1024, &member).ok()
     }
 }

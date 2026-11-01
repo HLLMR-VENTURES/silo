@@ -4116,6 +4116,7 @@ dependencies = [
  "ureq",
  "url",
  "walkdir",
+ "windows-registry",
  "zip 9.1.0",
 ]
 

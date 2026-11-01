@@ -100,6 +100,10 @@ fn icon_candidates(name: &str) -> Vec<String> {
     v
 }
 
+/// Largest icon file read. Real ones are a few MB; the cap keeps a huge "icon" from being read
+/// whole into memory.
+const ICON_LIMIT: u64 = 64 * 1024 * 1024;
+
 fn read_icon_bytes(mod_path: &Path, kind: &str, icon_filename: &str) -> Result<Vec<u8>, String> {
     match kind {
         "zip" => {
@@ -108,16 +112,16 @@ fn read_icon_bytes(mod_path: &Path, kind: &str, icon_filename: &str) -> Result<V
             for cand in icon_candidates(icon_filename) {
                 if let Ok(entry) = ar.by_name(&cand) {
                     // Cap the read so a zip-bombed "icon" can't exhaust memory.
-                    return crate::scan::read_capped(entry, 64 * 1024 * 1024, &cand);
+                    return crate::scan::read_capped(entry, ICON_LIMIT, &cand);
                 }
             }
             Err(format!("icon '{icon_filename}' not found in archive"))
         }
         _ => {
             for cand in icon_candidates(icon_filename) {
-                let p = mod_path.join(&cand);
-                if p.is_file() {
-                    return std::fs::read(&p).map_err(|e| e.to_string());
+                // Only a file inside the mod's own folder, capped like the zip branch.
+                if let Some(f) = crate::paths::open_inside(mod_path, &cand) {
+                    return crate::scan::read_capped(f, ICON_LIMIT, &cand);
                 }
             }
             Err(format!("icon '{icon_filename}' not found"))
@@ -150,5 +154,31 @@ mod tests {
             k,
             cache_key(std::path::Path::new("/mods/FS25_A.zip"), 1235, "icon.dds")
         );
+    }
+
+    /// An unpacked mod's icon is read only from inside its own folder, and capped like a zip's.
+    #[test]
+    fn a_folder_mod_reads_its_icon_only_inside_its_folder() {
+        let base = std::env::temp_dir().join(format!("silo_icon_inside_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("FS25_A");
+        std::fs::create_dir_all(dir.join("icons")).unwrap();
+        std::fs::write(dir.join("icons").join("icon.png"), b"png").unwrap();
+        std::fs::write(base.join("outside.png"), b"png").unwrap();
+
+        // The listed `.dds` falls back to the shipped `.png`, as before.
+        assert_eq!(
+            read_icon_bytes(&dir, "dir", r"icons\icon.dds").unwrap(),
+            b"png"
+        );
+        assert!(read_icon_bytes(&dir, "dir", "../outside.png").is_err());
+        let absolute = base.join("outside.png");
+        assert!(read_icon_bytes(&dir, "dir", absolute.to_str().unwrap()).is_err());
+
+        let big = std::fs::File::create(dir.join("big.png")).unwrap();
+        big.set_len(ICON_LIMIT + 1).unwrap();
+        drop(big);
+        assert!(read_icon_bytes(&dir, "dir", "big.png").is_err());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

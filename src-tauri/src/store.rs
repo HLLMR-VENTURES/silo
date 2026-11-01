@@ -40,7 +40,7 @@ fn read_member(mod_path: &Path, kind: &str, member: &str) -> Option<String> {
             crate::scan::read_capped(entry, MEMBER_LIMIT, &member).ok()?
         }
         _ => {
-            let f = std::fs::File::open(mod_path.join(&member)).ok()?;
+            let f = crate::paths::open_inside(mod_path, &member)?;
             crate::scan::read_capped(f, MEMBER_LIMIT, &member).ok()?
         }
     };
@@ -112,6 +112,30 @@ mod tests {
         assert_eq!(read_member(&dir, "dir", "ok.xml").as_deref(), Some(ok));
         assert_eq!(read_member(&dir, "dir", "big.xml"), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unpacked mod's store item is read only from inside its own folder.
+    #[test]
+    fn a_folder_mod_reads_store_items_only_inside_its_folder() {
+        let base = std::env::temp_dir().join(format!("silo_store_inside_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("FS25_A");
+        std::fs::create_dir_all(dir.join("xml")).unwrap();
+        let ok = "<vehicle><storeData><category>tractorsM</category></storeData></vehicle>";
+        std::fs::write(dir.join("xml").join("tractor.xml"), ok).unwrap();
+        std::fs::write(base.join("outside.xml"), ok).unwrap();
+        assert_eq!(
+            read_member(&dir, "dir", r"xml\tractor.xml").as_deref(),
+            Some(ok)
+        );
+        assert_eq!(read_member(&dir, "dir", "../outside.xml"), None);
+        let absolute = base.join("outside.xml");
+        assert_eq!(read_member(&dir, "dir", absolute.to_str().unwrap()), None);
+        assert_eq!(
+            first_store_category(&dir, "dir", &["../outside.xml".to_string()]),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// #266: a category with an entity reference isn't cut at the `&`.

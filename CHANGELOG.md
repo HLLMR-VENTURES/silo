@@ -25,10 +25,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A mod set switch that fails (an unplugged library drive, say) no longer leaves the Library,
+  **Play** and the multiplayer share list showing the new set while the game loads the old one.
+  Silo reads your mods folder again before it lets go, and when nothing changed it doesn't save a
+  "Before …" snapshot, mark the set as the one you're on, or offer Undo. Turning one mod on or
+  off that finishes with problems reads the folder again too. (#347)
+- Switching mod sets, its Undo and **Use this save's mods** now wait for a library scan that's
+  already running, as turning single mods on or off does. Before, a scan that finished just after
+  the switch could put the old set back on screen, and the next change re-applied it. (#347)
+- On Linux, Silo didn't notice Farming Simulator 25 running under Proton, so it let you move
+  your mods archive or change game and mod settings while the game was open. It now waits for
+  the game to close, as it does on Windows and macOS. (#345)
+- Silo now finds the game, and shows the **Play** button, when the Steam client is installed on
+  a drive other than C: (Windows), and when FS25 runs through Proton, including Flatpak Steam
+  (Linux). (#346)
+- Folder mods can no longer make Silo read files outside the mod's own folder.
 - Mod downloads, updates and catalog images now check every redirect, not just the first
   address: Silo won't follow one to plain `http` or to an address on your own network, and it
   refuses a web address whose name points at your own network. GitHub downloads work as
   before. (#348)
+
+### Security
+
+- Release builds now use exactly the dependency versions in the committed lockfile, the ones the
+  security audit and the software bill of materials check. A release is refused unless its tag
+  matches the app version, and pre-release tags can no longer become a stable release. Each
+  installer is attested by the build job that made it, and the release fails if any download
+  differs from what was built. (#359)
 
 ## [1.0.3] - 2026-10-29
 
