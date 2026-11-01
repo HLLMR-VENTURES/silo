@@ -370,6 +370,14 @@ fn a_copy_whose_marker_was_deleted_is_left_alone() {
 
     let rep = flatten(&conn, &layout);
     assert_eq!(rep.changed, 0);
+    // The archived copy it left alone is that mod's, not unrecognized (#410).
+    assert_eq!(rep.errors.len(), 1, "{:?}", rep.errors);
+    assert!(
+        rep.errors[0]
+            .starts_with("FS25_Dir: the file in your mods folder isn't the one Silo linked"),
+        "{:?}",
+        rep.errors
+    );
     assert_eq!(std::fs::read(flat.join("a.lua")).unwrap(), b"print('mine')");
     assert!(src.join("a.lua").is_file(), "the archived copy stays put");
     assert_eq!(db::load_organized(&conn, &key).len(), 1, "still organized");
@@ -401,6 +409,7 @@ fn a_junction_to_a_folder_outside_the_archive_is_never_removed() {
 
     let rep = flatten(&conn, &layout);
     assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+    assert_eq!(rep.errors.len(), 1, "{:?}", rep.errors);
     assert!(junction::exists(&flat).unwrap(), "the junction stays");
     assert_eq!(
         std::fs::read(theirs.join("modDesc.xml")).unwrap(),
@@ -459,8 +468,8 @@ fn assert_kept_on(base: &Path, conn: &Connection, src: &Path, flat: &Path, flatt
         set_active(conn, &layout, &HashSet::new())
     };
     assert_eq!(rep.changed, 0, "{:?}", rep.errors);
-    // Flatten also lists what it left in the archive.
-    assert!(flattening || rep.errors.len() == 1, "{:?}", rep.errors);
+    // Flatten doesn't call the kept mod's archived files unrecognized (#410).
+    assert_eq!(rep.errors.len(), 1, "{:?}", rep.errors);
     assert!(
         rep.errors[0].starts_with(&format!("FS25_Dir: FS25_Dir {KEPT_UNPROVEN}")),
         "{:?}",
@@ -509,6 +518,65 @@ fn a_folder_copy_is_kept_when_the_archived_copy_doesnt_hold_its_files() {
             let _ = std::fs::remove_dir_all(&base);
         }
     }
+}
+
+/// Flatten keeps a folder copy its archived copy doesn't hold (#399). The kept mod's archived
+/// files aren't listed as unrecognized, but a file beside its folder whose name only starts the
+/// same (a zip of it) still is (#410).
+#[test]
+fn flatten_doesnt_list_a_kept_folder_mods_archived_files() {
+    let base = temp_dir_for("flatten_kept_folder_mix");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = folder_copy_fixture(&base, &conn);
+    std::fs::write(src.join("a.lua"), b"pri").unwrap(); // cut short: the copy is kept
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    std::fs::write(src.join("sub").join("extra.dds"), b"dds").unwrap();
+    let beside = src.with_file_name("FS25_Dir.zip");
+    std::fs::write(&beside, b"PK").unwrap();
+
+    let rep = flatten(&conn, &Layout::default_for(&base));
+
+    assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+    assert_eq!(rep.errors.len(), 2, "{:?}", rep.errors);
+    assert!(
+        rep.errors[0].starts_with(&format!("FS25_Dir: FS25_Dir {KEPT_UNPROVEN}")),
+        "{:?}",
+        rep.errors
+    );
+    assert_eq!(
+        rep.errors[1],
+        "Silo kept an unrecognized file in your library archive: FS25_Dir.zip. Nothing was deleted."
+    );
+    assert!(flat.join(SILO_MARKER).is_file());
+    assert!(src.join("sub").join("extra.dds").is_file() && beside.is_file());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A dead junction at a folder mod's archive path leaves no archived copy, so flatten keeps the
+/// mods-folder folder and says so; the junction is that mod's, not unrecognized (#410).
+#[cfg(windows)]
+#[test]
+fn flatten_doesnt_list_a_dead_junction_at_a_kept_mods_archive_path() {
+    let base = temp_dir_for("flatten_kept_dead_junction");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = folder_copy_fixture(&base, &conn);
+    let gone = base.join("gone");
+    std::fs::rename(&src, &gone).unwrap();
+    junction_to(&gone, &src).unwrap();
+    std::fs::remove_dir_all(&gone).unwrap();
+    assert!(!src.exists() && src.symlink_metadata().is_ok());
+
+    let rep = flatten(&conn, &Layout::default_for(&base));
+
+    assert_eq!(
+        rep.errors,
+        ["FS25_Dir: there's no copy in your library archive, so Silo kept the file in your mods folder."]
+    );
+    assert!(flat.join("a.lua").is_file());
+    drop(conn);
+    let _ = std::fs::remove_dir(&src);
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// No archived copy at all, or a file where the archived folder should be (the wrong kind):
@@ -633,7 +701,7 @@ fn a_legacy_copy_that_doesnt_match_the_archive_stays_put() {
             set_active(&conn, &layout, &HashSet::new())
         };
         assert_eq!(rep.changed, 0, "{:?}", rep.errors);
-        assert!(flattening || rep.errors.len() == 1, "{:?}", rep.errors);
+        assert_eq!(rep.errors.len(), 1, "{:?}", rep.errors);
         assert!(
             rep.errors[0].starts_with(
                 "FS25_Dir: FS25_Dir stays in your mods folder: it doesn't match the copy in your library archive"
@@ -684,6 +752,7 @@ fn a_copy_that_cant_be_listed_stays_put() {
         };
         unlock();
         assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+        assert_eq!(rep.errors.len(), 1, "{:?}", rep.errors);
         assert!(
             rep.errors[0].starts_with(
                 "FS25_Dir: Silo couldn't check whether FS25_Dir changed since it was copied"

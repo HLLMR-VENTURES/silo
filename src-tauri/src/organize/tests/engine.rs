@@ -700,6 +700,9 @@ fn adopting_files_loose_archive_mods_into_categories() {
 const KEPT_UNPROVEN: &str =
     "stays in your mods folder: Silo couldn't confirm the copy in your library archive matches it";
 
+/// What flatten says about a file in Silo's own archive that no mod it tracks owns.
+const UNRECOGNIZED: &str = "Silo kept an unrecognized file in your library archive:";
+
 /// An active zip `FS25_Foo` archived in `Vehicles` whose mods-folder entry is a byte copy with
 /// its provenance recorded, as activation leaves it where hardlinks fail. Returns (src, flat).
 fn zip_copy_fixture(base: &Path, conn: &Connection) -> (PathBuf, PathBuf) {
@@ -739,12 +742,8 @@ fn a_zip_copy_is_kept_when_the_archived_copy_doesnt_match() {
                 set_active(&conn, &layout, &HashSet::new())
             };
             assert_eq!(rep.changed, 0, "{tag}: {:?}", rep.errors);
-            // Flatten also lists what it left in the archive.
-            assert!(
-                flattening || rep.errors.len() == 1,
-                "{tag}: {:?}",
-                rep.errors
-            );
+            // Flatten doesn't call the kept mod's archived zip unrecognized (#410).
+            assert_eq!(rep.errors.len(), 1, "{tag}: {:?}", rep.errors);
             assert!(
                 rep.errors[0].starts_with(&format!("FS25_Foo: FS25_Foo.zip {KEPT_UNPROVEN}")),
                 "{tag}: {:?}",
@@ -763,6 +762,326 @@ fn a_zip_copy_is_kept_when_the_archived_copy_doesnt_match() {
             let _ = std::fs::remove_dir_all(&base);
         }
     }
+}
+
+/// Flatten keeps a zip copy its archived copy doesn't match (#399). Files in the archive no mod
+/// Silo tracks owns are still listed as unrecognized, next to it in the same folder too, but the
+/// kept mod's own archived zip isn't (#410).
+#[test]
+fn flatten_lists_only_archive_files_no_kept_mod_owns() {
+    let base = temp_dir_for("flatten_kept_mix");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = zip_copy_fixture(&base, &conn);
+    std::fs::write(&src, b"PK\x03\x04 the arch").unwrap(); // cut short: the copy is kept
+    let cat = src.parent().unwrap();
+    std::fs::write(cat.join("FS25_Foo.zip.bak"), b"mine").unwrap();
+    std::fs::create_dir_all(base.join(ARCHIVE).join("Tools")).unwrap();
+    std::fs::write(base.join(ARCHIVE).join("Tools").join("orphan.zip"), b"PK").unwrap();
+
+    let rep = flatten(&conn, &Layout::default_for(&base));
+
+    assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+    let (kept, unknown): (Vec<_>, Vec<_>) =
+        rep.errors.iter().partition(|e| e.starts_with("FS25_Foo: "));
+    assert_eq!(kept.len(), 1, "{:?}", rep.errors);
+    assert!(kept[0].contains(KEPT_UNPROVEN), "{:?}", rep.errors);
+    let mut unknown: Vec<&str> = unknown.iter().map(|e| e.as_str()).collect();
+    unknown.sort_unstable();
+    assert_eq!(
+        unknown,
+        [
+            format!("{UNRECOGNIZED} FS25_Foo.zip.bak. Nothing was deleted."),
+            format!("{UNRECOGNIZED} orphan.zip. Nothing was deleted."),
+        ],
+        "{:?}",
+        rep.errors
+    );
+    assert!(flat.is_file() && src.is_file());
+    assert!(cat.join("FS25_Foo.zip.bak").is_file());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A zip mod's archive entry is the zip alone: when a folder took its place (the wrong kind, so
+/// the copy is kept), files inside that folder are still listed as unrecognized (#410).
+#[test]
+fn flatten_lists_files_in_a_folder_where_a_kept_zip_should_be() {
+    let base = temp_dir_for("flatten_kept_zip_dir");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = zip_copy_fixture(&base, &conn);
+    std::fs::remove_file(&src).unwrap();
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("unrelated.txt"), b"mine").unwrap();
+
+    let rep = flatten(&conn, &Layout::default_for(&base));
+
+    assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+    assert_eq!(rep.errors.len(), 2, "{:?}", rep.errors);
+    assert!(rep.errors[0].contains(KEPT_UNPROVEN), "{:?}", rep.errors);
+    assert_eq!(
+        rep.errors[1],
+        format!("{UNRECOGNIZED} unrelated.txt. Nothing was deleted.")
+    );
+    assert!(flat.is_file() && src.join("unrelated.txt").is_file());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A dead link at a mod's archive path leaves no archived copy, so flatten keeps the mods-folder
+/// zip and says so; the dead link is that mod's, not unrecognized, while an orphan beside it
+/// still is (#410).
+#[test]
+fn flatten_doesnt_list_a_dead_link_at_a_kept_mods_archive_path() {
+    let base = temp_dir_for("flatten_kept_dead_link");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = zip_copy_fixture(&base, &conn);
+    std::fs::remove_file(&src).unwrap();
+    if symlink_file(&base.join("gone.zip"), &src).is_err() {
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+        return; // no file symlinks here (Windows without Developer Mode)
+    }
+    let orphan = src.with_file_name("orphan.zip");
+    std::fs::write(&orphan, b"PK").unwrap();
+
+    let rep = flatten(&conn, &Layout::default_for(&base));
+
+    assert_eq!(
+        rep.errors,
+        [
+            "FS25_Foo: there's no copy in your library archive, so Silo kept the file in your mods folder.".to_string(),
+            format!("{UNRECOGNIZED} orphan.zip. Nothing was deleted."),
+        ]
+    );
+    assert!(flat.is_file() && orphan.is_file());
+    drop(conn);
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Whether names in `dir` ignore case (NTFS, APFS by default), probed with a file of its own.
+fn folds_case(dir: &Path) -> bool {
+    let probe = dir.join("CaseProbe.tmp");
+    std::fs::write(&probe, b"").unwrap();
+    let folds = dir.join("caseprobe.tmp").exists();
+    std::fs::remove_file(&probe).unwrap();
+    folds
+}
+
+/// A kept mod's zip whose folder and name were renamed to other casing: where the filesystem
+/// still finds it under the recorded name (NTFS, APFS), it's that mod's and isn't unrecognized
+/// (#410). Where it doesn't (case-sensitive), there is no archived copy and the renamed file is
+/// listed as unrecognized.
+#[test]
+fn flatten_matches_a_kept_mods_zip_under_other_casing_as_the_filesystem_does() {
+    let base = temp_dir_for("flatten_kept_casing");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = zip_copy_fixture(&base, &conn);
+    let cat = src.parent().unwrap();
+    let lower_cat = cat.with_file_name("vehicles");
+    std::fs::rename(&src, cat.join("fs25_foo.zip")).unwrap();
+    std::fs::rename(cat, &lower_cat).unwrap();
+    std::fs::write(lower_cat.join("fs25_foo.zip"), b"PK\x03\x04 the arch").unwrap();
+    let folds = folds_case(&lower_cat);
+
+    let rep = flatten(&conn, &Layout::default_for(&base));
+
+    assert_eq!(rep.changed, usize::from(!folds), "{:?}", rep.errors);
+    if folds {
+        assert_eq!(rep.errors.len(), 1, "{:?}", rep.errors);
+        assert!(rep.errors[0].contains(KEPT_UNPROVEN), "{:?}", rep.errors);
+    } else {
+        assert_eq!(
+            rep.errors,
+            [
+                "FS25_Foo: there's no copy in your library archive, so Silo kept the file in your mods folder.".to_string(),
+                format!("{UNRECOGNIZED} fs25_foo.zip. Nothing was deleted."),
+            ]
+        );
+    }
+    assert!(flat.is_file() && lower_cat.join("fs25_foo.zip").is_file());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// In a case-sensitive folder, a second entry whose name differs from a kept mod's zip only in
+/// case is a different entry, even as a hardlink to the same file: it's still listed as
+/// unrecognized (#410). (Skipped where names ignore case: the two can't both exist.)
+#[test]
+fn flatten_lists_an_entry_differing_from_a_kept_mods_zip_only_in_case() {
+    for hardlink in [false, true] {
+        let base = temp_dir_for(&format!("flatten_kept_case_twin_{hardlink}"));
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let (src, flat) = zip_copy_fixture(&base, &conn);
+        let cat = src.parent().unwrap();
+        if folds_case(cat) {
+            drop(conn);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        std::fs::write(&src, b"PK\x03\x04 the arch").unwrap(); // cut short: the copy is kept
+        let twin = cat.join("fs25_foo.zip");
+        if hardlink {
+            std::fs::hard_link(&src, &twin).unwrap();
+        } else {
+            std::fs::write(&twin, b"PK theirs").unwrap();
+        }
+
+        let rep = flatten(&conn, &Layout::default_for(&base));
+
+        assert_eq!(rep.changed, 0, "{hardlink}: {:?}", rep.errors);
+        assert_eq!(rep.errors.len(), 2, "{hardlink}: {:?}", rep.errors);
+        assert!(rep.errors[0].contains(KEPT_UNPROVEN), "{:?}", rep.errors);
+        assert_eq!(
+            rep.errors[1],
+            format!("{UNRECOGNIZED} fs25_foo.zip. Nothing was deleted.")
+        );
+        assert!(flat.is_file() && twin.is_file());
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+/// A kept mod's zip renamed to other casing, beside a hardlink of it whose name differs only in
+/// how its accent is encoded: both names could be the entry, so Silo can't tell which and lists
+/// both, never hiding the other one (#410). (Skipped where the twin can't be made: APFS treats
+/// the two names as one.)
+#[test]
+fn flatten_hides_neither_name_when_two_could_be_a_kept_mods_zip() {
+    for twin_first in [false, true] {
+        let base = temp_dir_for(&format!("flatten_kept_accent_twin_{twin_first}"));
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
+        let cat = base.join(ARCHIVE).join("Vehicles");
+        std::fs::create_dir_all(&cat).unwrap();
+        let tech = "FS25_Caf\u{e9}";
+        let file = format!("{tech}.zip");
+        db::upsert_organized(
+            &conn,
+            &key,
+            &OrganizedRow {
+                tech_name: tech.into(),
+                file_name: file.clone(),
+                kind: "zip".into(),
+                category: "Vehicles".into(),
+                subcategory: None,
+                active: true,
+            },
+        )
+        .unwrap();
+        let flat = base.join(&file);
+        std::fs::write(&flat, b"PK\x03\x04 the archived build").unwrap();
+        let (size, mtime) = file_stats(&flat).unwrap();
+        db::record_projection(&conn, &key, &file, size, mtime);
+        // The archived zip, cut short, under other casing; and its hardlink, the accent decomposed.
+        let (renamed, twin) = ("fs25_caf\u{e9}.zip", "fs25_cafe\u{301}.zip");
+        let (first, second) = if twin_first {
+            (twin, renamed)
+        } else {
+            (renamed, twin)
+        };
+        std::fs::write(cat.join(first), b"PK\x03\x04 the arch").unwrap();
+        if std::fs::hard_link(cat.join(first), cat.join(second)).is_err()
+            || std::fs::read_dir(&cat).unwrap().count() != 2
+        {
+            drop(conn);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+
+        let rep = flatten(&conn, &Layout::default_for(&base));
+
+        for name in [renamed, twin] {
+            assert!(
+                rep.errors
+                    .contains(&format!("{UNRECOGNIZED} {name}. Nothing was deleted.")),
+                "{twin_first} {name:?}: {:?}",
+                rep.errors
+            );
+        }
+        assert!(flat.is_file());
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+/// What counts as inside a mod's archive entry: the entry itself; a folder mod's files below it;
+/// nothing below a zip mod's entry; never a name that only starts the same, or another spelling.
+#[test]
+fn in_archive_entry_matches_the_entry_and_a_folder_mods_files() {
+    let a = Path::new("archive");
+    let zip = a.join("Vehicles").join("FS25_Foo.zip");
+    let dir = a.join("Misc").join("FS25_Dir");
+    assert!(in_archive_entry(&zip, &zip, false));
+    assert!(!in_archive_entry(&zip.join("x.txt"), &zip, false));
+    assert!(in_archive_entry(&dir, &dir, true));
+    assert!(in_archive_entry(&dir.join("sub").join("a.dds"), &dir, true));
+    assert!(!in_archive_entry(
+        &a.join("Vehicles").join("FS25_Foo.zip.bak"),
+        &zip,
+        false
+    ));
+    assert!(!in_archive_entry(
+        &a.join("Misc").join("FS25_Dir.zip"),
+        &dir,
+        true
+    ));
+    assert!(!in_archive_entry(&a.join("Misc"), &dir, true));
+    assert!(!in_archive_entry(
+        &a.join("Tools").join("FS25_Foo.zip"),
+        &zip,
+        false
+    ));
+    let other_case = a.join("vehicles").join("fs25_foo.zip");
+    assert!(!in_archive_entry(&other_case, &zip, false));
+}
+
+/// An entry's spelling on disk: itself when listed; where the filesystem finds it under another
+/// spelling, the listed name (and never a hardlink under another name); `None` when it isn't
+/// there or isn't under the archive.
+#[test]
+fn spelled_on_disk_finds_the_listed_name_of_the_same_entry() {
+    let base = temp_dir_for("spelled_on_disk");
+    let cat = base.join("Vehicles");
+    std::fs::create_dir_all(&cat).unwrap();
+    let zip = cat.join("fs25_foo.zip");
+    std::fs::write(&zip, b"PK").unwrap();
+    std::fs::hard_link(&zip, cat.join("Copy.zip")).unwrap();
+    assert_eq!(spelled_on_disk(&base, &zip), Some(zip.clone()));
+    let asked = base.join("VEHICLES").join("FS25_Foo.zip");
+    let expect = folds_case(&cat).then(|| zip.clone());
+    assert_eq!(spelled_on_disk(&base, &asked), expect);
+    assert_eq!(spelled_on_disk(&base, &cat.join("FS25_Bar.zip")), None);
+    // Two listed names that could both be it (a hardlink whose name differs only in how its
+    // accent is encoded): neither is chosen.
+    let cafe = cat.join("caf\u{e9}.zip");
+    std::fs::write(&cafe, b"PK").unwrap();
+    if std::fs::hard_link(&cafe, cat.join("cafe\u{301}.zip")).is_ok() {
+        assert_eq!(spelled_on_disk(&base, &cat.join("CAF\u{c9}.zip")), None);
+    }
+    assert_eq!(spelled_on_disk(&cat, &base.join("x.zip")), None);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A file in Silo's own archive that no organized mod owns is still listed as unrecognized,
+/// and kept.
+#[test]
+fn flatten_lists_a_file_no_mod_owns_as_unrecognized() {
+    let base = temp_dir_for("flatten_orphan");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let orphan = base.join(ARCHIVE).join("Vehicles").join("orphan.zip");
+    std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    std::fs::write(&orphan, b"PK").unwrap();
+
+    let rep = flatten(&conn, &Layout::default_for(&base));
+
+    assert_eq!(
+        rep.errors,
+        [format!("{UNRECOGNIZED} orphan.zip. Nothing was deleted.")]
+    );
+    assert!(orphan.is_file());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// No archived copy, or a folder where the archived zip should be (the wrong kind): the zip

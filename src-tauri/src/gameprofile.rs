@@ -23,12 +23,59 @@ const SETTING_PREFIX: &str = "game_profile:";
 pub const ON: &str = "on";
 pub const OFF: &str = "off";
 
-/// Whether Silo can launch FS25 on a separate profile on this platform. Windows only for now:
-/// the game executable is started directly with `-profile`. On Linux the game runs through
-/// Proton (the `.exe` can't be started directly, and the path would need translating into the
-/// prefix's drive map); on macOS the build's support for `-profile` is unverified. There the
-/// setting is hidden, with a note, and is always off.
-pub const SUPPORTED: bool = cfg!(windows);
+/// A platform, as a value rather than `#[cfg]`, so what each one supports unit-tests on any
+/// machine (#405).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    Windows,
+    MacOs,
+    Linux,
+    /// Anything else Silo might be built for: no profile launch.
+    Other,
+}
+
+impl Os {
+    /// The platform this build runs on.
+    pub const CURRENT: Os = if cfg!(windows) {
+        Os::Windows
+    } else if cfg!(target_os = "macos") {
+        Os::MacOs
+    } else if cfg!(target_os = "linux") {
+        Os::Linux
+    } else {
+        Os::Other
+    };
+}
+
+/// Pure: why Silo can't launch FS25 on a separate profile on `os`, or `None` where it can. Where
+/// it can't, the setting is hidden, with this reason as its note, and is always off. The evidence
+/// for each platform is in `docs/CROSS-PLATFORM.md` (#405).
+/// - Windows: the game executable is started directly with `-profile` (hands-on test 2026-11-01).
+/// - macOS: no source shows that the Mac build reads `-profile`.
+/// - Linux: the Windows game reads `-profile`, but it runs through Proton, so only Steam can start
+///   it, and nothing shows that Steam on Linux hands a `steam://run` link's arguments to the game
+///   (one report says it ignores them).
+pub const fn unsupported_reason(os: Os) -> Option<&'static str> {
+    match os {
+        Os::Windows => None,
+        Os::Linux => Some(
+            "Silo can't start Farming Simulator 25 with a separate profile on Linux yet: it isn't confirmed that Steam passes the profile on to the game through Proton.",
+        ),
+        Os::MacOs => Some(
+            "Silo can't start Farming Simulator 25 with a separate profile on macOS yet: it isn't confirmed that the Mac version of the game supports one.",
+        ),
+        Os::Other => {
+            Some("Silo can't start Farming Simulator 25 with a separate profile on this system.")
+        }
+    }
+}
+
+/// Why a profile launch doesn't work on this platform ([`unsupported_reason`]), if it doesn't.
+pub const UNSUPPORTED: Option<&str> = unsupported_reason(Os::CURRENT);
+
+/// Whether Silo can launch FS25 on a separate profile on this platform. Where it can't, the
+/// setting is hidden, with a note ([`UNSUPPORTED`]), and is always off.
+pub const SUPPORTED: bool = UNSUPPORTED.is_none();
 
 /// The `app_setting` key holding the choice for the mods folder with identity key `mods_key`.
 pub fn setting_key(mods_key: &str) -> String {
@@ -129,6 +176,8 @@ pub struct GameProfileStatus {
     pub chosen: bool,
     /// Launching on a profile works on this platform ([`SUPPORTED`]).
     pub supported: bool,
+    /// Where it doesn't, why, in plain words ([`UNSUPPORTED`]): the Settings note shows it.
+    pub unsupported_reason: Option<String>,
 }
 
 /// The current mods folder's FS25 profile, as published with the folder's layout.
@@ -446,6 +495,7 @@ mod tests {
             detected,
             chosen: false,
             supported: true,
+            unsupported_reason: None,
         };
         assert!(belongs(&st(true, true)));
         assert!(belongs(&st(true, false)));
@@ -453,6 +503,27 @@ mod tests {
         assert!(belongs(&st(false, true)));
         // Only named `mods`, never used by FS25, launch off: just a folder.
         assert!(!belongs(&st(false, false)));
+    }
+
+    #[test]
+    fn profile_launch_works_on_windows_and_says_why_not_elsewhere() {
+        assert_eq!(unsupported_reason(Os::Windows), None);
+        // Each "not yet" names the platform and the part that isn't confirmed (#405).
+        let mac = unsupported_reason(Os::MacOs).expect("macOS stays off until it's confirmed");
+        assert!(
+            mac.contains("macOS") && mac.contains("isn't confirmed that the Mac version"),
+            "{mac}"
+        );
+        let linux = unsupported_reason(Os::Linux).expect("Linux stays off until it's confirmed");
+        assert!(
+            linux.contains("Linux") && linux.contains("isn't confirmed that Steam passes"),
+            "{linux}"
+        );
+        assert!(unsupported_reason(Os::Other).is_some());
+        // The constants follow the build's own platform.
+        assert_eq!(SUPPORTED, unsupported_reason(Os::CURRENT).is_none());
+        assert_eq!(UNSUPPORTED, unsupported_reason(Os::CURRENT));
+        assert_eq!(SUPPORTED, cfg!(windows));
     }
 
     #[test]

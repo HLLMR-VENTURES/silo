@@ -48,15 +48,75 @@ unverified (?)), else an FS25-named bundle in `/Applications` or `~/Applications
 `com.giants-software.fs25`). Steam installs launch via `steam://rungameid/2300320`;
 the others launch with `open -a <bundle>`.
 
-**FS25 profiles (`-profile <dir>`, #387).** When the mods folder is `<profile>/mods` and its
-"Launch FS25 with this folder's profile" setting is on, Play starts the game executable directly
-with `-profile "<dir>"` (each argument quoted by the Windows command-line rules, no shell), and
-the log, savegames, `modSettings/`, `inputBinding.xml` and config editors read `<dir>` instead of
-the user data dir above (`gameprofile::Place`). If the executable can't be started, the fallback is
-`steam://run/2300320//<percent-encoded args>/`, opened without a shell; Steam asks the user to
-confirm launch arguments. **Windows only:** on Linux the game runs through Proton (the `.exe`
-can't be started directly and the path would need the prefix's drive map), and the macOS build's
-`-profile` support is unverified, so there the setting is hidden, with a note, and always off.
+**FS25 profiles (`-profile <dir>`, #387, #405).** When the mods folder is `<profile>/mods` and its
+"Launch FS25 with this folder's profile" setting is on, Play starts FS25 with `-profile "<dir>"`,
+and the log, savegames, `modSettings/`, `inputBinding.xml` and config editors read `<dir>` instead
+of the user data dir above (`gameprofile::Place`). Where it isn't supported, the setting is
+hidden and always off, and the note under the folder gives `gameprofile::unsupported_reason`.
+
+| OS | Profile launch | Why |
+|----|----------------|-----|
+| Windows | on | The game executable directly (each argument quoted by the Windows command-line rules, no shell). If it can't be started: `steam://run/2300320//<percent-encoded args>/`, opened without a shell; Steam asks the user to confirm launch arguments. A hands-on test loaded the profile (2026-11-01, #390). |
+| Linux (Proton) | hidden | The game reads `-profile`, but only Steam can start it, and nothing shows that Steam on Linux passes a `steam://run` link's arguments to the game. |
+| macOS | hidden | No source shows the Mac build reads `-profile`. |
+
+**Evidence (checked 2026-11-01, FS25 1.25.0.0 on Windows):**
+- **The Windows game reads `-profile`.** In the Steam install, `FarmingSimulator2025.xml` starts
+  `x64\FarmingSimulator2025Game.exe`. The launcher `FarmingSimulator2025.exe` holds the format
+  string `-profile "%s" %s` next to "starting game". `FarmingSimulator2025Game.exe` lists
+  `-profile` among its start options (`-server`, `-name`, `-scriptDebug`, …) next to
+  `Error: Can't read profile path`. The game's Lua (`gameSource.zip`) never mentions it: the engine
+  reads it. GIANTS doesn't document it in anything we found (GDN, forums, the dedicated-server
+  PDFs).
+- **Linux runs that same Windows game, and Proton passes arguments on.** There is no native Linux
+  build. Proton's launcher hands the arguments Steam gives it to its own `steam.exe`
+  ([`proton`, `run()`](https://github.com/ValveSoftware/Proton/blob/proton_10.0/proton)). That
+  `steam.exe` converts only the program path and passes the rest of the command line to the game
+  unchanged
+  ([`steam_helper/steam.c`](https://github.com/ValveSoftware/Proton/blob/proton_10.0/steam_helper/steam.c)).
+- **The missing link on Linux is Steam itself.** Silo can't start the `.exe` without Proton, so it
+  would have to ask Steam (`steam://run/2300320//<args>/`, or `steam -applaunch 2300320 <args>`).
+  Valve's page says only that `run`'s "args are passed to the application as launch parameters"
+  ([Steam browser protocol](https://developer.valvesoftware.com/wiki/Steam_browser_protocol)). It
+  doesn't say how the Linux client decodes or splits them, and a developer reported in 2023 that
+  arguments in a `steam://run` link are ignored
+  ([Steam forum](https://steamcommunity.com/discussions/forum/1/3830914462336948405)). On Windows
+  the Steam client did decode Silo's exact link and pass `-profile "<dir>"` on (#404, 2026-11-01),
+  which makes Linux likely to work, but the Linux client and its way of splitting arguments haven't
+  been tried. Until a tester confirms one way, the switch stays hidden.
+- **How the folder would probably be written on Linux** (a candidate, not established). Inside
+  the prefix the game sees Windows paths. When a prefix has no `dosdevices/z:` link, Proton creates
+  one to `/` (and `c:` to `../drive_c`); an existing link is kept as it is
+  ([`proton`, prefix setup](https://github.com/ValveSoftware/Proton/blob/proton_10.0/proton)). So
+  a host folder is usually `Z:\home\<you>\…`, if that prefix's `z:` is still `/` and the game sees
+  the same files as Silo. That second part isn't a given with the Flatpak Steam: it runs the game
+  in a sandbox without general access to your home folder, where `~` can be the app's own private
+  folder, so `Z:\home\<you>\…` may not be the folder Silo sees
+  ([Steam Flatpak manifest](https://github.com/flathub/com.valvesoftware.Steam/blob/master/com.valvesoftware.Steam.yml),
+  [Flatpak sandbox permissions](https://docs.flatpak.org/en/latest/sandbox-permissions.html)).
+  Prefer `Z:` over `C:\…` even for a folder inside the prefix: `C:\…` means another folder if
+  Steam starts the game in a different prefix than the one Silo found (an old library, or the
+  Flatpak Steam beside the native one). Keep the folder in double quotes and refuse names with
+  `$`, a backtick, `"` or `\`, so the argument splits the same by the Windows rules and as shell
+  words. The follow-up still has to find out which prefix Steam actually launches: a profile's
+  own `gameSettings.xml` names its mods folder in the game's drive letters (possibly `C:\…`),
+  which must be read through that prefix's drive map (`modsroot::PathMap`), refusing `..` (Wine
+  stops `..` at the drive's top folder, a host path doesn't).
+- **macOS: not established.** We have no Mac build to inspect. No GIANTS page, forum post or
+  community tool we found starts FS25 (or FS22) on a Mac with `-profile`. The community tools that
+  pass arguments are Windows only
+  ([FSPassion](https://github.com/Michel-MichelMichel/FSPassion)); others swap the mods folder's
+  contents instead and start the game normally: by symlink on Linux
+  ([FS25 Linux Mod Switcher](https://github.com/william17050/FS25_Linux_Mod_Switcher)), by NTFS
+  hardlink or copy on Windows ([fs25-profile-switcher](https://github.com/Chouteau49/fs25-profile-switcher)).
+  None of them shows anything about `-profile` on a Mac. The Mac build is
+  its own binary inside the `.app` bundle, so the Windows strings say nothing about it. A Mac
+  profile folder would be shaped like the default `~/Library/Application Support/FarmingSimulator2025`.
+
+**To turn either on** (`SMOKE_TEST.md` §1b): on Linux, a tester confirms that the game loads a
+`Z:\…` profile set in Steam's launch options, and that a `steam://run` link (or
+`steam -applaunch`) with those arguments does the same. On macOS, that the game reads `-profile`
+set in Steam's launch options, and then how Silo can pass it.
 
 When the game sits in a Steam library on a removable drive, macOS asks once whether Silo may
 access that drive (seen on Tahoe, #322); after the user allows it, Silo works normally. Silo

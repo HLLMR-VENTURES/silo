@@ -2066,7 +2066,7 @@ fn same_file_key(p: &std::path::Path) -> FileKey {
 }
 
 /// See [`FileKey`].
-fn fold_file_name(name: &str) -> String {
+pub(crate) fn fold_file_name(name: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     let decomposed: String = name.nfd().collect();
     decomposed.to_lowercase().to_uppercase().nfc().collect()
@@ -3381,6 +3381,7 @@ fn game_profile_for(
         detected,
         chosen,
         supported: gameprofile::SUPPORTED,
+        unsupported_reason: gameprofile::UNSUPPORTED.map(str::to_string),
     })
 }
 
@@ -3709,8 +3710,8 @@ fn resolve_mods_root(conn: &rusqlite::Connection, publish: bool) -> ModsRootStat
         .filter(|g| gameprofile::belongs(g))
         .map(|g| {
             let dir = PathBuf::from(&g.dir);
-            // Only where Silo launches profiles: elsewhere (Proton) its setting is in the game's
-            // drive letters, which Silo doesn't translate for a profile, so it isn't judged.
+            // Only where Silo launches profiles (Windows): elsewhere (Proton) its setting is in the
+            // game's drive letters, which Silo doesn't translate for a profile, so it isn't judged.
             let reads = if gameprofile::SUPPORTED {
                 profile_game_reads(&dir).map(Some)
             } else {
@@ -3914,10 +3915,12 @@ async fn set_game_profile(
         let conn = db::open(&db)?;
         let st = resolve_mods_root(&conn, false);
         let (Some(path), Some(_)) = (st.path.as_deref(), st.game_profile.as_ref()) else {
-            return Err("This mods folder isn't inside a separate Farming Simulator 25 profile.".into());
+            return Err(
+                "This mods folder isn't inside a separate Farming Simulator 25 profile.".into(),
+            );
         };
-        if !gameprofile::SUPPORTED {
-            return Err("Launching Farming Simulator 25 with a separate profile works on Windows only for now.".into());
+        if let Some(why) = gameprofile::UNSUPPORTED {
+            return Err(why.into());
         }
         let value = if enabled {
             gameprofile::ON
@@ -10306,6 +10309,12 @@ mod tests {
         let st = super::game_profile_for(&conn, &mods, Some(&main)).unwrap();
         assert!(st.detected && !st.chosen);
         assert_eq!(st.enabled, crate::gameprofile::SUPPORTED);
+        // Where it isn't supported, the status says why (the Settings note shows it).
+        assert_eq!(st.supported, crate::gameprofile::SUPPORTED);
+        assert_eq!(
+            st.unsupported_reason.as_deref(),
+            crate::gameprofile::UNSUPPORTED
+        );
 
         // Turned off for this folder: stays off though it's detected.
         let key = crate::gameprofile::setting_key(&crate::modsroot::canonical_key(&mods));

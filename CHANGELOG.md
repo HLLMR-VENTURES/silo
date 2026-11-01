@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- On macOS and Linux, the note under a mods folder that sits in a separate FS25 profile now says
+  why Silo can't start the game with that profile there yet: on macOS it isn't confirmed that the
+  Mac version of the game supports one, and on Linux that Steam passes it on to the game through
+  Proton. Play still starts your main profile. (#405)
 - Updated the HTTP library Silo uses to talk to GitHub, its catalog and download hosts (ureq 3).
   Requests work as before. One difference: when GitHub answers a star, watch, gist or
   collection upload with a temporary redirect, Silo now shows an error instead of reporting a
@@ -59,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folder copy made by an older Silo that no longer matches the archive copy now stays where it
   is too, instead of going to `backups`, since Silo can't tell a change from a damaged archive
   copy. (#399)
+- When restoring a plain mods folder keeps a mod where it is, Silo no longer also lists that
+  mod's files in your library archive as unrecognized. (#410)
 - Moving your library archive, organizing, re-linking mods in your mods folder and mod
   updates no longer delete Silo's temporary files just by their name. Each temporary file now
   has a name of its own, and Silo only removes one once it has checked that it isn't the only
