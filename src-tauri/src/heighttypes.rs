@@ -128,8 +128,9 @@ pub const MAX_LIST_NAMES: usize = 10_000;
 pub const MAX_NAME_BYTES: usize = 256;
 
 /// The most script-loaded lists Silo reads from one mod for its estimate (real mods ship up to
-/// five). Once the estimate holds [`MAX_LIST_NAMES`] names it stops growing too: it's far past
-/// any cap by then.
+/// five). Once a mod's names reach [`MAX_LIST_NAMES`] no further list is read, so they stay under
+/// twice that (each list is capped too); the estimate is far past any game cap by then, so where
+/// exactly it stops doesn't change the verdict.
 pub const MAX_LIST_FILES: usize = 100;
 
 /// Append the items `seen` doesn't hold yet to `out`, in order, and remember them. Linear, so a
