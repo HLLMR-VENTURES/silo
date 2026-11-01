@@ -64,16 +64,20 @@ pub fn canon_path(raw: &str) -> String {
     trimmed.nfc().collect()
 }
 
-/// Compute `manifestHash` from the file entries (spec §4): canonicalize paths, sort by
+/// Compute `manifestHash` from the file entries (spec §4): NFC-normalize paths, sort by
 /// UTF-8 byte order, emit `<path>\0<sha256-hex>\n` per entry, sha256 the concatenation.
 /// Returns lowercase hex. Order-independent of the input (it sorts).
+///
+/// Paths are expected canonical already ([`canon_path`] runs once, when the zip is read). Only
+/// NFC is applied here, exactly as SiloAPI's `manifestHash` does: `canon_path` isn't idempotent
+/// (`././a` → `./a` → `a`), so a second pass would hash a different path than the server.
 ///
 /// Duplicate canonical paths are a spec anomaly (§4) — the caller that builds `Entry`s
 /// from a real zip must fail loud on them; this pure function assumes distinct paths.
 pub fn manifest_hash(entries: &[Entry]) -> String {
     let mut norm: Vec<(String, &str)> = entries
         .iter()
-        .map(|e| (canon_path(&e.path), e.sha256.as_str()))
+        .map(|e| (e.path.nfc().collect::<String>(), e.sha256.as_str()))
         .collect();
     // §4.2 — UTF-8 byte order. Rust's default `String` Ord already IS byte order; sorting
     // on `.as_bytes()` makes the contract explicit and immune to any future Ord change.
@@ -324,6 +328,30 @@ mod tests {
         );
     }
 
+    // A `././` entry name canonicalizes ONCE (at zip read) to `./scripts/a.lua`; the hash then
+    // applies NFC only. Expected value computed with SiloAPI's `manifestHash(canonicalPath(..))`
+    // (src/lib/manifest.ts). Canonicalizing twice would hash `scripts/a.lua` instead
+    // (61b5f323…), a false "Modified" against the server.
+    #[test]
+    fn vector_3_dot_slash_entry_is_canonicalized_once() {
+        let canon = canon_path("././scripts/a.lua");
+        assert_eq!(canon, "./scripts/a.lua");
+        let entries = [
+            e(
+                "modDesc.xml",
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+            ),
+            e(
+                &canon,
+                "486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a7",
+            ),
+        ];
+        assert_eq!(
+            manifest_hash(&entries),
+            "26524b7cdeb98d9387b616cc1b3cceadcbfd71b8d5e0377cc5e69be5e32438ef"
+        );
+    }
+
     #[test]
     fn empty_manifest_is_sha256_of_nothing() {
         assert_eq!(
@@ -374,6 +402,40 @@ mod tests {
             ),
         ]);
         assert_eq!(m.manifest_hash, expected);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // `././a.lua` and `a.lua` are distinct entries: each is canonicalized once at read, so they
+    // stay `./a.lua` and `a.lua` (never merged into one hashed path), and the manifest hash is the
+    // server's (SiloAPI `manifestHash(canonicalPath(..))` over the same two entries).
+    #[test]
+    fn manifest_from_zip_canonicalizes_entry_names_once() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("silo_prov_dot_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let zpath = dir.join("m.zip");
+        {
+            let f = std::fs::File::create(&zpath).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zw.start_file("././a.lua", opts).unwrap();
+            zw.write_all(b"hello").unwrap();
+            zw.start_file("a.lua", opts).unwrap();
+            zw.write_all(b"world").unwrap();
+            zw.finish().unwrap();
+        }
+
+        let m = manifest_from_zip(&zpath).unwrap();
+        let mut paths: Vec<&str> = m.entries.iter().map(|e| e.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["./a.lua", "a.lua"]);
+        assert_eq!(
+            m.manifest_hash,
+            "9b7f4b32bdc8b1674d345c63dd4f516343654271188961b1b2abacd98f337a27"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
