@@ -3067,7 +3067,22 @@
         ? info(msg, { duration: 12_000 })
         : reportError(msg, "Moving your library"),
     refreshModsStatus: async () => {
-      modsStatus = await modsRootStatus().catch(() => modsStatus);
+      // This refresh may publish another FS25 profile (#387): crash looks pause around it,
+      // and a changed profile's files are dropped and read again (not `applyModsStatus`, which
+      // refreshes the archive move that is calling here).
+      crashWatch.pause();
+      try {
+        const st = await modsRootStatus().catch(() => modsStatus);
+        const changed = profileInUse(st) !== shownProfile;
+        modsStatus = st;
+        if (changed) {
+          forgetGameFiles();
+          await loadGameFiles(true);
+        }
+      } finally {
+        crashWatch.resume();
+        void crashWatch.check();
+      }
     },
     runScan: () => runScan(),
     // One adopt offer at a time (a second settle pass mustn't replace an open preview).
@@ -4482,6 +4497,7 @@
     >
       <div class="page-card">
         <LogTriage
+          gameProfile={profileInUse(modsStatus)}
           activeMods={[...activeSet]}
           activeMaps={mods.filter((m) => activeSet.has(m.techName) && m.isMap).map((m) => m.techName)}
           activeFixed={mods.filter((m) => activeSet.has(m.techName) && !m.organized && m.kind !== "zip").map((m) => m.techName)}

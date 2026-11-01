@@ -135,6 +135,44 @@ describe("check (window focus)", () => {
     expect(deps.onRun).not.toHaveBeenCalled();
   });
 
+  it("nested pauses resume only when the last one ends (#387)", async () => {
+    const { deps, watch } = setup();
+    watch.pause(); // a switch
+    watch.pause(); // a refresh inside it
+    watch.resume();
+    await watch.check();
+    expect(deps.status).not.toHaveBeenCalled();
+    watch.resume();
+    await watch.check();
+    expect(deps.status).toHaveBeenCalledTimes(1);
+  });
+
+  it("remembering the current log skips a log that changed or a switch under way (#387)", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const status = vi.fn(async () => {
+      await gate;
+      return statusOf();
+    });
+    const statusOf = () => status_({ lastSeenMs: null });
+    const status_ = (o: Partial<LogStatus>) => ({
+      path: "F:/prof/log.txt",
+      modifiedMs: NOW - 1000,
+      gameRunning: false,
+      lastSeenMs: NOW - 5000,
+      ...o,
+    });
+    const { deps, watch } = setup({ status });
+    const marking = watch.markCurrentSeen();
+    watch.pause();
+    release();
+    await marking;
+    expect(deps.markSeen).not.toHaveBeenCalled();
+    // And while paused, it doesn't even look.
+    await watch.markCurrentSeen();
+    expect(status).toHaveBeenCalledTimes(1);
+  });
+
   it("looks nothing up while a mods-folder switch runs, and looks again after (#387)", async () => {
     const { deps, watch } = setup();
     watch.pause();

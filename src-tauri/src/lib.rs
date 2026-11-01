@@ -2966,6 +2966,11 @@ fn game_profile_for(
     mods: &std::path::Path,
     main_user_dir: Option<&std::path::Path>,
 ) -> Option<gameprofile::GameProfileStatus> {
+    // A profile is started as `-profile <dir>` from the game's own folder: only a full path
+    // means the same folder to Silo and to the game.
+    if !mods.is_absolute() {
+        return None;
+    }
     // Files, not just names: a folder called `game.xml` doesn't make a profile.
     let is_file = |p: &std::path::Path| p.is_file();
     let covers = |dir: &std::path::Path, main: &std::path::Path| {
@@ -2980,27 +2985,38 @@ fn game_profile_for(
     let keys = profile_setting_keys(mods);
     // Remembered once seen, so a profile whose files can't be seen for a while doesn't turn into
     // "not a profile" and send Diagnose, savegames and Play to the main user folder.
-    let seen_before = keys
+    let seen: Vec<bool> = keys
         .iter()
-        .any(|k| db::get_app_setting(conn, &gameprofile::seen_key(k)).is_some());
+        .map(|k| db::get_app_setting(conn, &gameprofile::seen_key(k)).is_some())
+        .collect();
+    let seen_before = seen.iter().any(|s| *s);
     let looks_now = gameprofile::looks_like_profile(&dir, is_file);
-    if looks_now && !seen_before {
+    let stored = keys
+        .iter()
+        .find_map(|k| db::get_app_setting(conn, &gameprofile::setting_key(k)));
+    // Every key gets the mark and the choice any key has, so whichever spelling the folder is
+    // reached by later (a junction, its target) still finds them while it can't be resolved.
+    // Best effort: what's known now still counts for this look.
+    let remember = |key: String, value: &str| {
+        if let Err(e) = db::set_app_setting(conn, &key, Some(value)) {
+            log::warn!("couldn't remember {}'s FS25 profile: {e}", dir.display());
+        }
+    };
+    if looks_now || seen_before {
+        for (k, s) in keys.iter().zip(&seen) {
+            if !s {
+                remember(gameprofile::seen_key(k), gameprofile::ON);
+            }
+        }
+    }
+    if let Some(v) = stored.as_deref() {
         for k in &keys {
-            if let Err(e) =
-                db::set_app_setting(conn, &gameprofile::seen_key(k), Some(gameprofile::ON))
-            {
-                // Still detected now; it's only not remembered for a later look.
-                log::warn!(
-                    "couldn't remember {} as an FS25 profile: {e}",
-                    dir.display()
-                );
+            if db::get_app_setting(conn, &gameprofile::setting_key(k)).as_deref() != Some(v) {
+                remember(gameprofile::setting_key(k), v);
             }
         }
     }
     let detected = gameprofile::detected(looks_now, seen_before);
-    let stored = keys
-        .iter()
-        .find_map(|k| db::get_app_setting(conn, &gameprofile::setting_key(k)));
     let chosen = matches!(
         stored.as_deref(),
         Some(gameprofile::ON) | Some(gameprofile::OFF)
@@ -3575,23 +3591,68 @@ async fn mods_root_status(app: tauri::AppHandle) -> Result<ModsRootStatus, Strin
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db::open(&db)?;
-        Ok(refresh_mods_root(&conn))
+        refresh_mods_root(&conn)
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
+const STATUS_WAITS: &str =
+    "Silo is busy with your library. The mods folder status updates when it's done.";
+
 /// Resolve and describe the mods folder for a refresh (the status command, startup). A refresh
 /// can pick up a change of FS25's own folder setting, so it publishes only under the library
 /// lock (`status_publish_lock`), like a switch, or before the first resolution (`may_publish`);
-/// otherwise it only describes.
-fn refresh_mods_root(conn: &rusqlite::Connection) -> ModsRootStatus {
+/// otherwise it only describes — and only when that describes the folder and FS25 profile in
+/// use. A different one (FS25's own setting changed meanwhile) is refused (`STATUS_WAITS`):
+/// the app never shows a folder or profile Play, Diagnose and the game-file commands don't use
+/// (#387).
+fn refresh_mods_root(conn: &rusqlite::Connection) -> Result<ModsRootStatus, String> {
     let lock = status_publish_lock();
     let publish = may_publish(lock.is_some(), modsroot::resolved());
     if !publish {
         log::info!("mods folder status read while the library is busy; not republished");
     }
-    resolve_mods_root(conn, publish)
+    let st = resolve_mods_root(conn, publish);
+    if !publish {
+        let (active, blocked) = modsroot::published();
+        let folder = active
+            .map(|a| a.layout.mods)
+            .or_else(|| blocked.map(|b| b.mods));
+        let profile = gameprofile::published().map(|p| p.dir);
+        let candidate = st.game_profile.as_ref().map(|g| PathBuf::from(&g.dir));
+        if status_differs(
+            st.path.as_deref(),
+            folder.as_deref(),
+            candidate.as_deref(),
+            profile.as_deref(),
+        ) {
+            return Err(STATUS_WAITS.into());
+        }
+    }
+    Ok(st)
+}
+
+/// Pure: whether a described status names another mods folder than the published `folder`
+/// (when one is), or another FS25 profile than the published `profile` (`candidate`: the
+/// described folder's profile, if it can be one).
+fn status_differs(
+    path: Option<&str>,
+    folder: Option<&std::path::Path>,
+    candidate: Option<&std::path::Path>,
+    profile: Option<&std::path::Path>,
+) -> bool {
+    let other_folder = match (path, folder) {
+        (Some(p), Some(f)) => !modsroot::same_folder(std::path::Path::new(p), f),
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    let other_profile = match (candidate, profile) {
+        (_, None) => false,
+        (Some(c), Some(p)) => !modsroot::same_folder(c, p),
+        (None, Some(_)) => true,
+    };
+    other_folder || other_profile
 }
 
 /// Pure: whether a refresh may publish: holding the library lock, or before anything was ever
@@ -3756,8 +3817,11 @@ async fn create_mods_folder(app: tauri::AppHandle) -> Result<ModsRootStatus, err
         let _write = mods_root_switch_lock()?;
         let conn = db::open(&db)?;
         // Only while Silo is on the game's default folder and it's missing (the only time the
-        // offer shows): never for another folder, an FS25 profile's included (#387).
-        if !resolve_mods_root(&conn, false).mods_folder_missing {
+        // offer shows): never for another folder, an FS25 profile's included (#387). Resolved
+        // and published here under the switch lock, so what's checked is what's in use.
+        if !compute_mods_root_status(&conn).mods_folder_missing
+            || gameprofile::published().is_some()
+        {
             return Err("There's no missing mods folder to create.".into());
         }
         let loc = fsgame::locate().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
@@ -7022,6 +7086,8 @@ async fn get_savegames() -> Result<Vec<savegame::Savegame>, String> {
 #[tauri::command]
 async fn backup_savegame(folder: String, user_dir: Option<String>) -> Result<String, String> {
     off_main(move || {
+        // Held through the backup: the profile can't be switched while a save is copied.
+        let _profile = game_files_guard();
         let dir = gameprofile::user_dir(gameprofile::Place::Savegames).ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         // `user_dir`: the folder the save was listed from. A save named in one FS25 profile is
         // never backed up from another one's same-named folder (#387).
@@ -9734,6 +9800,80 @@ mod tests {
         assert!(crate::gameprofile::belongs(&st));
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The profile was used by its real path first (mark and an explicit "off" stored there),
+    /// then picked through a junction to it, then the drive goes: the junction spelling got both.
+    #[cfg(windows)]
+    #[test]
+    fn a_profile_seen_by_its_real_path_first_stays_one_through_a_junction() {
+        let base = temp_base("gameprofile_junction_order");
+        let target = base.join("drive").join("Farm");
+        std::fs::create_dir_all(target.join("mods")).unwrap();
+        std::fs::write(target.join("gameSettings.xml"), "<gameSettings/>").unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let main = base.join("main");
+        let real = target.join("mods");
+        assert!(super::game_profile_for(&conn, &real, Some(&main)).is_some_and(|g| g.detected));
+        for k in super::profile_setting_keys(&real) {
+            crate::db::set_app_setting(&conn, &crate::gameprofile::setting_key(&k), Some("off"))
+                .unwrap();
+        }
+        let link = base.join("Farm");
+        if crate::organize::junction_to(&target, &link).is_err() {
+            eprintln!("no junctions here (not NTFS?): skipped");
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        let mods = link.join("mods");
+        // Seen through the junction once: the mark and the choice are copied to its spelling.
+        let st = super::game_profile_for(&conn, &mods, Some(&main)).unwrap();
+        assert!(st.detected && st.chosen && !st.enabled);
+        std::fs::remove_dir_all(base.join("drive")).unwrap();
+        let st = super::game_profile_for(&conn, &mods, Some(&main)).unwrap();
+        assert!(st.detected && st.chosen && !st.enabled, "{st:?}");
+        drop(conn);
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_relative_mods_folder_is_never_a_profile() {
+        let conn = crate::db::open(&temp_base("gameprofile_relative").join("silo.db")).unwrap();
+        assert_eq!(
+            super::game_profile_for(&conn, std::path::Path::new("profiles/Farm/mods"), None),
+            None
+        );
+    }
+
+    #[test]
+    fn a_busy_refresh_only_describes_the_folder_and_profile_in_use() {
+        use std::path::Path;
+        let a = Path::new("/f/a");
+        let am = "/f/a/mods";
+        // Same folder and profile: fine.
+        assert!(!super::status_differs(
+            Some(am),
+            Some(Path::new(am)),
+            Some(a),
+            Some(a)
+        ));
+        // FS25's setting moved Silo to another folder meanwhile: refused.
+        assert!(super::status_differs(
+            Some("/f/b/mods"),
+            Some(Path::new(am)),
+            Some(Path::new("/f/b")),
+            Some(a)
+        ));
+        // Same folder, but the published profile isn't this one's: refused.
+        assert!(super::status_differs(
+            Some(am),
+            Some(Path::new(am)),
+            None,
+            Some(a)
+        ));
+        // Nothing published to differ from (no usable folder, no profile): fine.
+        assert!(!super::status_differs(Some(am), None, Some(a), None));
     }
 
     /// The profile is reached through a junction whose target goes away (a removable drive

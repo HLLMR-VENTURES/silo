@@ -169,13 +169,17 @@ export function createCrashWatch(deps: CrashWatchDeps): CrashWatch {
   /** While the mods folder (and so maybe its FS25 profile) is being switched, the backend may
    *  already read the new folder's log while the app still shows the old one: no look runs, and
    *  one already running announces nothing (#387). */
+  /** Pauses can nest (a refresh inside a switch): looking resumes when the last one ends. */
+  let pauses = 0;
   let paused = false;
   function pause() {
+    pauses++;
     paused = true;
     logEpoch++;
   }
   function resume() {
-    paused = false;
+    pauses = Math.max(0, pauses - 1);
+    paused = pauses > 0;
   }
 
   function clearTimer() {
@@ -234,8 +238,13 @@ export function createCrashWatch(deps: CrashWatchDeps): CrashWatch {
   }
 
   async function markCurrentSeen() {
+    // Like a look: never during a switch, and not once the watched log changed meanwhile, so
+    // another profile's unseen run isn't remembered without being read (#387).
+    if (paused) return;
+    const epoch = logEpoch;
     try {
       const s = await deps.status();
+      if (paused || epoch !== logEpoch) return;
       if (s.modifiedMs != null && s.modifiedMs !== s.lastSeenMs) {
         await deps.markSeen(s.modifiedMs, s.path);
         setHandled(s, s.modifiedMs);
