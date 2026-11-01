@@ -63,6 +63,19 @@ pub struct MoveMarker {
     /// the moved mods' categories, as it did then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<Vec<String>>,
+    /// Mods-folder links that reached a mod right before Silo renamed it (#401), saved before
+    /// the rename and dropped once re-pointed: a crash in between is mended from this, not from
+    /// recognizing the link afterwards (`mend_renamed_links`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relinking: Vec<LinkNote>,
+}
+
+/// One `MoveMarker::relinking` entry: the mod, and the link's target as Silo read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkNote {
+    pub tech_name: String,
+    pub target: PathBuf,
 }
 
 impl MoveMarker {
@@ -77,6 +90,7 @@ impl MoveMarker {
             errors: Vec::new(),
             moved: Vec::new(),
             created: Some(Vec::new()),
+            relinking: Vec::new(),
         }
     }
 }
@@ -569,10 +583,28 @@ fn resolves_to(link: &Path, p: &Path) -> bool {
     )
 }
 
+/// Point the link entry `link` at `to`, whatever it names (`from` is where the mod was): for a
+/// link proven to reach the mod before its rename (`links_to`, `MoveMarker::relinking`) that
+/// `repoint` can't recognize now. It must reach the copy afterwards.
+fn relink_entry(
+    env: &Env,
+    row: &OrganizedRow,
+    link: &Path,
+    to: &Path,
+    from: &Path,
+    policy: &mut LinkPolicy,
+) -> Result<(), StepErr> {
+    if row.kind == "dir" {
+        organize::replace_dir_link(link, to, from, policy).map_err(relink_err)?;
+        return reaches_the_copy(link, &row.kind).map_err(StepErr::Failed);
+    }
+    replace_zip_link(env, row, link, to, policy)
+}
+
 /// Right after `src` was renamed to `dst`: re-point the mod's mods-folder entry at once (no
 /// pause in between, so a boundary never leaves a link to the old place), then flush the rename
-/// (`Env::flush`). `linked` (`links_to`, asked before the rename): the entry was a link reaching
-/// `src`, so it must reach a copy of the mod now; a re-point that left it dangling fails. If the re-point fails, the
+/// (`Env::flush`). `linked` (`Env::note_link`, asked before the rename): the entry was a link
+/// reaching `src`, so one `repoint` left dangling is re-pointed anyway (`relink_entry`). If the re-point fails, the
 /// mod is renamed back and its entry re-pointed back at `src` (whatever the failed re-point
 /// left: a missing entry is made again), then flushed: `Err((_, true))`, nothing changed. If any
 /// of that fails it stays where it ended up and the marker keeps it, so Resume or Cancel mends
@@ -588,10 +620,9 @@ fn relink_renamed(
     let link = env.mods.join(&row.file_name);
     let relinked = repoint(env, row, src, dst, policy).and_then(|()| {
         if linked && reaches_the_copy(&link, &row.kind).is_err() {
-            return Err(StepErr::Failed(format!(
-                "relink: Silo couldn't re-point the link at {}. Check it, then retry.",
-                link.display()
-            )));
+            // It reached the mod before the rename, but isn't recognized now (spelled through
+            // the mod's own name, say): re-pointed on that proof.
+            relink_entry(env, row, &link, dst, src, policy)?;
         }
         Ok(())
     });
@@ -611,7 +642,7 @@ fn relink_renamed(
 /// every such entry of a recorded active mod is re-pointed at (or made again for) whichever of
 /// its two places holds the mod now, when that is the real copy. Returns what couldn't be
 /// mended, phrased like a step's errors: the run then pauses at once, listing them.
-fn mend_renamed_links(env: &Env, marker: &MoveMarker) -> Vec<String> {
+fn mend_renamed_links(env: &Env, marker: &mut MoveMarker) -> Vec<String> {
     let rows = db::load_organized(env.conn, env.mods_key);
     let journal = env.journal();
     let room = |src: &Path, entry: &Path| {
@@ -619,6 +650,51 @@ fn mend_renamed_links(env: &Env, marker: &MoveMarker) -> Vec<String> {
             .map_err(|why| std::io::Error::other(organize::NoRoom(why)))
     };
     let mut errors = Vec::new();
+    // The links noted before a rename (`Env::note_link`): only the very link noted, still
+    // dangling, is re-pointed (anything else at its name isn't Silo's to change now); then the
+    // note goes. One that can't be re-pointed yet is kept.
+    let notes = std::mem::take(&mut marker.relinking);
+    let noted = notes.len();
+    for note in notes {
+        let Some(row) = rows.iter().find(|r| r.tech_name == note.tech_name) else {
+            continue;
+        };
+        let link = env.mods.join(&row.file_name);
+        let same_link = std::fs::read_link(&link).is_ok_and(|t| t == note.target);
+        if !same_link || reaches_the_copy(&link, &row.kind).is_ok() {
+            continue;
+        }
+        let a = organize::archive_path(&marker.from, &row.category, &row.file_name);
+        let b = organize::archive_path(&marker.to, &row.category, &row.file_name);
+        let (gone, here, archive) = match (exists(&a), exists(&b)) {
+            (false, true) => (a, b, &marker.to),
+            (true, false) => (b, a, &marker.from),
+            _ => {
+                marker.relinking.push(note);
+                continue;
+            }
+        };
+        if real_copy(&here, &row.kind).is_none() {
+            marker.relinking.push(note);
+            continue;
+        }
+        let layout = Layout {
+            mods: env.mods.to_path_buf(),
+            archive: archive.clone(),
+        };
+        let mut policy = LinkPolicy::new(&layout)
+            .with_journal(&journal)
+            .with_room_check(&room);
+        if let Err(e) = relink_entry(env, row, &link, &here, &gone, &mut policy) {
+            errors.push(format!("{}: {}", row.tech_name, failed(e)));
+            marker.relinking.push(note);
+        }
+    }
+    if marker.relinking.len() != noted {
+        if let Err(e) = env.save(marker) {
+            errors.push(failed(e));
+        }
+    }
     for row in rows
         .iter()
         .filter(|r| r.active && marker.moved.contains(&r.tech_name))
@@ -1083,6 +1159,37 @@ impl Env<'_> {
         self.save(m)
     }
 
+    /// Right before `row`'s mod is renamed away from `src`: when its entry is a link reaching it
+    /// (`links_to`), note the link in the marker (saved), so it's re-pointed even if Silo can't
+    /// recognize it once `src` is gone. Whether it's noted.
+    fn note_link(
+        &self,
+        m: &mut MoveMarker,
+        row: &OrganizedRow,
+        src: &Path,
+    ) -> Result<bool, StepErr> {
+        if !self.same_volume || !links_to(self, row, src) {
+            return Ok(false);
+        }
+        let target = std::fs::read_link(self.mods.join(&row.file_name)).map_err(relink_err)?;
+        m.relinking.retain(|n| n.tech_name != row.tech_name);
+        m.relinking.push(LinkNote {
+            tech_name: row.tech_name.clone(),
+            target,
+        });
+        self.save(m)?;
+        Ok(true)
+    }
+
+    /// Drop `tech`'s `note_link` entry, if any (its link is re-pointed, or no rename happened).
+    fn forget_link(&self, m: &mut MoveMarker, tech: &str) -> Result<(), StepErr> {
+        if !m.relinking.iter().any(|n| n.tech_name == tech) {
+            return Ok(());
+        }
+        m.relinking.retain(|n| n.tech_name != tech);
+        self.save(m)
+    }
+
     /// A zip's mods-folder entry was just (re)made by Silo: refresh its projection record so
     /// later deactivates prove it's Silo's without hashing. A symlink is identified
     /// structurally and keeps none.
@@ -1201,14 +1308,22 @@ fn forward_one(
                 }
             }
             env.record(marker, tech)?;
-            let linked = links_to(env, row, &src);
-            match rename_or_copy(env, &src, &dst, &row.kind, abort) {
+            let linked = env.note_link(marker, row, &src)?;
+            let placed = rename_or_copy(env, &src, &dst, &row.kind, abort);
+            if !matches!(placed, Ok(Placed::Renamed)) {
+                env.forget_link(marker, tech)?;
+            }
+            match placed {
                 Ok(Placed::Copied) => {}
                 Ok(Placed::Renamed) => {
                     return match relink_renamed(env, row, &src, &dst, linked, policy) {
-                        Ok(()) => Ok(Step::Moved),
+                        Ok(()) => {
+                            env.forget_link(marker, tech)?;
+                            Ok(Step::Moved)
+                        }
                         Err((e, restored)) => {
                             if restored {
+                                env.forget_link(marker, tech)?;
                                 env.unrecord(marker, tech)?;
                             }
                             Err(e)
@@ -1274,12 +1389,23 @@ fn back_one(
             }
         }
         (true, false) => {
-            let linked = links_to(env, row, &src);
-            if rename_or_copy(env, &src, &home, &row.kind, abort)? == Placed::Renamed {
+            let tech = row.tech_name.as_str();
+            let linked = env.note_link(marker, row, &src)?;
+            let placed = rename_or_copy(env, &src, &home, &row.kind, abort);
+            if !matches!(placed, Ok(Placed::Renamed)) {
+                env.forget_link(marker, tech)?;
+            }
+            if placed? == Placed::Renamed {
                 // Renamed back: still recorded until its link is home too (a put-back leaves it
                 // in `to`, recorded, for the retry).
-                relink_renamed(env, row, &src, &home, linked, policy).map_err(|(e, _)| e)?;
-                env.unrecord(marker, &row.tech_name)?;
+                if let Err((e, restored)) = relink_renamed(env, row, &src, &home, linked, policy) {
+                    if restored {
+                        env.forget_link(marker, tech)?;
+                    }
+                    return Err(e);
+                }
+                env.forget_link(marker, tech)?;
+                env.unrecord(marker, tech)?;
                 return Ok(Step::Moved);
             }
         }
@@ -1940,7 +2066,7 @@ fn run_locked(
         // Relink temps an earlier run left are cleared first (only those proven redundant), so
         // the space a finished one holds is free before the mend may need it.
         scratch::sweep_where(&env.journal(), &|e| e.role == scratch::Role::RelinkTmp);
-        let unmended = mend_renamed_links(&env, &marker);
+        let unmended = mend_renamed_links(&env, &mut marker);
         if !unmended.is_empty() {
             marker.errors.extend(unmended);
             return pause(&env, marker);
@@ -5176,30 +5302,170 @@ mod tests {
     }
 
     /// A link that reached the mod before its rename but that Silo can't recognize afterwards
-    /// (its target goes through the mod's own name, then `..`) isn't left dangling as a
-    /// success: the step fails and the mod is renamed back, its link working again.
+    /// (its target goes through the mod's own name, then `..`; Windows resolves `..` by name,
+    /// so this is unix-only): re-pointed on the note saved before the rename, right away and
+    /// after a crash in between (Resume or Cancel paused at once, Resume run through).
     #[cfg(unix)]
     #[test]
-    fn a_link_silo_cant_follow_after_the_rename_puts_the_mod_back() {
-        let f = fx("renameguard");
+    fn a_link_silo_cant_recognize_after_the_rename_is_relinked_from_its_note() {
+        let cases = [
+            ("renamenote0", None),
+            ("renamenote1", Some((Op::Resume, PAUSE))),
+            ("renamenote2", Some((Op::Cancel, PAUSE))),
+            ("renamenote3", Some((Op::Resume, 0))),
+        ];
+        for (tag, crash) in cases {
+            let f = fx(tag);
+            add_dir(&f, "FS25_D", true);
+            let (src, dst) = (f.old.join("Tools/FS25_D"), f.new.join("Tools/FS25_D"));
+            let link = f.mods.join("FS25_D");
+            let target = src.join("..").join("FS25_D");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            match crash {
+                None => assert!(one_drive_run(&f, Op::Start).unwrap().is_none(), "{tag}"),
+                Some((op, request)) => {
+                    // Noted, recorded and renamed, then the crash before the re-point.
+                    let mut m = marker(&f);
+                    env(&f).record(&mut m, "FS25_D").unwrap();
+                    m.relinking.push(LinkNote {
+                        tech_name: "FS25_D".into(),
+                        target: target.clone(),
+                    });
+                    std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+                    crate::paths::rename_no_replace(&src, &dst).unwrap();
+                    m.paused = true;
+                    save_marker(&f.conn, &f.key, &m).unwrap();
+                    let req = AtomicU8::new(request);
+                    let out = run_on_one_drive(&f, op, &req, &mut |_| {}).unwrap();
+                    if let Some(m) = out {
+                        assert!(m.errors.is_empty(), "{tag}: {:?}", m.errors);
+                        assert!(m.relinking.is_empty(), "{tag}: the note goes");
+                    }
+                }
+            }
+            assert_eq!(
+                std::fs::canonicalize(&link).unwrap(),
+                std::fs::canonicalize(&dst).unwrap(),
+                "{tag}"
+            );
+            let _ = std::fs::remove_dir_all(&f.base);
+        }
+    }
+
+    thread_local! {
+        /// The DB and key `rename_after_looking` reads the saved marker from.
+        static PROBE: std::cell::RefCell<Option<(PathBuf, String)>> =
+            const { std::cell::RefCell::new(None) };
+        /// How many link notes the saved marker held when the rename ran.
+        static NOTES_AT_RENAME: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    fn rename_after_looking(a: &Path, b: &Path) -> std::io::Result<()> {
+        PROBE.with(|p| {
+            if let Some((db, key)) = &*p.borrow() {
+                let conn = db::open(db).unwrap();
+                let n = load_marker(&conn, key).map(|m| m.relinking.len());
+                NOTES_AT_RENAME.with(|c| c.set(n));
+            }
+        });
+        crate::paths::rename_no_replace(a, b)
+    }
+
+    /// The note alone re-points a link Silo couldn't recognize after a crash mid-rename (here:
+    /// it went through an alias of the mod that's gone since), and it runs everywhere. Folder
+    /// symlinks need Developer Mode on Windows; skipped where they can't be made.
+    #[test]
+    fn a_noted_link_is_relinked_after_a_crash_even_unrecognized() {
+        let f = fx("renamenotealias");
+        add_dir(&f, "FS25_D", true);
+        let (src, dst) = (f.old.join("Tools/FS25_D"), f.new.join("Tools/FS25_D"));
+        let (alias, link) = (f.base.join("alias_D"), f.mods.join("FS25_D"));
+        if symlink_dir(&src, &alias)
+            .and_then(|()| symlink_dir(&alias, &link))
+            .is_err()
+        {
+            let _ = std::fs::remove_dir_all(&f.base);
+            return;
+        }
+        let mut m = marker(&f);
+        env(&f).record(&mut m, "FS25_D").unwrap();
+        m.relinking.push(LinkNote {
+            tech_name: "FS25_D".into(),
+            target: alias.clone(),
+        });
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        crate::paths::rename_no_replace(&src, &dst).unwrap();
+        std::fs::remove_file(&alias)
+            .or_else(|_| std::fs::remove_dir(&alias))
+            .unwrap();
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        let req = AtomicU8::new(PAUSE);
+        let paused = run_on_one_drive(&f, Op::Resume, &req, &mut |_| {})
+            .unwrap()
+            .unwrap();
+        assert!(paused.errors.is_empty() && paused.relinking.is_empty());
+        assert_eq!(
+            std::fs::canonicalize(&link).unwrap(),
+            std::fs::canonicalize(&dst).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// The note is saved before the rename and gone once the link is re-pointed.
+    #[test]
+    fn a_link_is_noted_before_the_rename_and_forgotten_after_it() {
+        let f = fx("renamenoted");
         let r = add_dir(&f, "FS25_D", true);
         let src = f.old.join("Tools/FS25_D");
-        let link = f.mods.join("FS25_D");
-        std::os::unix::fs::symlink(src.join("..").join("FS25_D"), &link).unwrap();
+        organize::link_dir_native(&src, &f.mods.join("FS25_D")).unwrap();
         let layout = dest(&f);
         let mut m = marker(&f);
         let e = Env {
             same_volume: true,
+            rename: rename_after_looking,
             ..env(&f)
         };
+        PROBE.with(|p| p.replace(Some((f.base.join("silo.db"), f.key.clone()))));
         let out = forward_one(&e, &r, &mut m, &mut LinkPolicy::new(&layout), &|| false);
-        assert!(
-            matches!(&out, Err(StepErr::Failed(s)) if s.contains("couldn't re-point")),
-            "{out:?}"
+        PROBE.with(|p| p.replace(None));
+        assert_eq!(out, Ok(Step::Moved));
+        assert_eq!(
+            NOTES_AT_RENAME.with(|c| c.get()),
+            Some(1),
+            "saved before the rename"
         );
-        assert!(src.join("modDesc.xml").is_file() && !f.new.join("Tools/FS25_D").exists());
-        assert!(link.join("modDesc.xml").is_file(), "the link works again");
-        assert!(m.moved.is_empty());
+        assert!(m.relinking.is_empty());
+        assert!(load_marker(&f.conn, &f.key).unwrap().relinking.is_empty());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// A noted link that was replaced by something else since (here: a link to another
+    /// folder, now gone) isn't Silo's to change: the note is dropped, the entry left as it is.
+    #[test]
+    fn a_noted_link_replaced_since_is_left_alone() {
+        let f = fx("renamenoteforeign");
+        let (src, _, link, _) = crashed_after_rename(&f);
+        let mut m = load_marker(&f.conn, &f.key).unwrap();
+        m.relinking.push(LinkNote {
+            tech_name: "FS25_D".into(),
+            target: src.clone(),
+        });
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        organize::remove_link(&link)
+            .or_else(|_| std::fs::remove_dir(&link))
+            .unwrap();
+        let elsewhere = f.base.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        organize::link_dir_native(&elsewhere, &link).unwrap();
+        std::fs::remove_dir(&elsewhere).unwrap();
+        let theirs = std::fs::read_link(&link).unwrap();
+        let req = AtomicU8::new(PAUSE);
+        let paused = run_on_one_drive(&f, Op::Resume, &req, &mut |_| {})
+            .unwrap()
+            .unwrap();
+        assert!(paused.relinking.is_empty(), "the note is dropped");
+        assert_eq!(std::fs::read_link(&link).unwrap(), theirs, "left as it is");
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
