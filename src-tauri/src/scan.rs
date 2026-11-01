@@ -791,49 +791,49 @@ struct Job<'a> {
     behind: Option<&'a Candidate>,
 }
 
-/// Which archived mod a mods-folder entry would be Silo's projection of: same layout, same
-/// techName and same kind, i.e. the same file name, as `organize` matches them.
-type Slot<'a> = (usize, &'a str, &'static str);
+/// Where a mod sits: its layout and its exact file name (`FS25_A.zip`, or `FS25_A` for a
+/// folder). A mods-folder entry is Silo's projection of an archived mod only at the archived
+/// copy's own file name, which is how `organize` links, parks and checks them.
+type Slot<'a> = (usize, &'a std::ffi::OsStr);
 
 fn slot(c: &Candidate) -> Slot<'_> {
-    (c.layout, c.tech_name.as_str(), c.kind)
+    (c.layout, c.path.file_name().unwrap_or_default())
 }
 
 /// Decide the rows of one scan. Every archived mod gets a row, and so does every mods-folder
 /// entry that isn't at an archived mod's file name (vanilla, or the other kind of the same
 /// techName). An entry at an archived mod's file name marks that mod active. When it is Silo's
-/// projection (cheaply checked by [`looks_like_projection`]) the archived row stands, parsed from
-/// the archive as before; when it is something else (the user swapped in another build or their
-/// own folder), the row describes the file the game actually loads (#353), and the foreign-file
-/// banner offers adopt / restore.
+/// projection (cheaply checked by [`looks_like_projection`]) of any archived copy at that name,
+/// the archived row stands, parsed from the archive as before; when it is something else (the
+/// user swapped in another build or their own folder), the first archived copy's row describes
+/// the file the game actually loads (#353), and the foreign-file banner offers adopt / restore.
 fn plan_jobs<'a>(
     root_cands: &'a [Candidate],
     archive_cands: &'a [Candidate],
     shadowed: &[Candidate],
     records: &[ProjectionRecords],
 ) -> Vec<Job<'a>> {
-    // The first archived copy per slot is what a mods-folder entry is checked against (a second
-    // one only exists in a second category of one archive).
-    let mut archived: HashMap<Slot, &Candidate> = HashMap::new();
-    for c in archive_cands {
-        archived.entry(slot(c)).or_insert(c);
+    // Every archived copy per slot: a second category of one archive can hold the same name, and
+    // a later archive's copy (`shadowed`) can still be a link's target mid archive move.
+    let mut copies: HashMap<Slot, Vec<&Candidate>> = HashMap::new();
+    for c in archive_cands.iter().chain(shadowed) {
+        copies.entry(slot(c)).or_default().push(c);
     }
 
-    // Mods-folder entries of archived mods: checked in parallel (a few stats each).
+    // Mods-folder entries at archived mods' names: checked in parallel (a few stats each).
     let verdicts: Vec<Option<bool>> = root_cands
         .par_iter()
         .map(|r| {
-            let a = archived.get(&slot(r))?;
-            let record = r
-                .path
-                .file_name()
-                .and_then(|n| records.get(r.layout)?.get(n.to_string_lossy().as_ref()))
+            let (layout, name) = slot(r);
+            let candidates = copies.get(&(layout, name))?;
+            let record = records
+                .get(layout)
+                .and_then(|m| m.get(name.to_string_lossy().as_ref()))
                 .copied();
             Some(
-                looks_like_projection(r, a, record)
-                    || shadowed
-                        .iter()
-                        .any(|s| slot(s) == slot(r) && looks_like_projection(r, s, record)),
+                candidates
+                    .iter()
+                    .any(|a| looks_like_projection(r, a, record)),
             )
         })
         .collect();
@@ -860,10 +860,11 @@ fn plan_jobs<'a>(
     }
 
     let mut jobs = Vec::with_capacity(archive_cands.len() + loose.len());
+    let mut stood_in: HashSet<Slot> = HashSet::new();
     for a in archive_cands {
         let key = slot(a);
-        let first = archived.get(&key).is_some_and(|f| f.path == a.path);
-        let stand_in = foreign.get(&key).filter(|_| first);
+        // Only the first archived copy at that name gives up its row to the stand-in.
+        let stand_in = foreign.get(&key).filter(|_| stood_in.insert(key));
         jobs.push(match stand_in {
             Some(r) => Job {
                 read: r,
@@ -1542,6 +1543,62 @@ mod layout_tests {
             assert!(Path::new(&loose.path).starts_with(&mods));
         }
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// One archive holding a name in two categories: a hardlink to either copy is a projection,
+    /// so neither row is replaced.
+    #[test]
+    fn a_link_to_a_second_category_copy_is_a_projection() {
+        let base = fresh("two_cats");
+        let mods = base.join("mods");
+        let arch = base.join("arch");
+        for d in [&mods, &arch.join("Tools"), &arch.join("Misc")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        moddesc_zip(&arch.join("Tools/FS25_Dup.zip"), "Dup in tools");
+        moddesc_zip(
+            &arch.join("Misc/FS25_Dup.zip"),
+            "Dup in misc, a longer title",
+        );
+        for cat in ["Tools", "Misc"] {
+            let flat = mods.join("FS25_Dup.zip");
+            let _ = std::fs::remove_file(&flat);
+            std::fs::hard_link(arch.join(cat).join("FS25_Dup.zip"), &flat).unwrap();
+            let out = scan_one(&mods, &arch);
+            assert!(out.stand_ins.is_empty(), "linked to {cat}");
+            assert_eq!(out.result.mods.len(), 2);
+            assert!(out
+                .result
+                .mods
+                .iter()
+                .all(|m| m.organized && Path::new(&m.path).starts_with(&arch)));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A slot is the exact file name: a zip spelled `.ZIP` is never at an archived `.zip`'s name
+    /// (Silo links under the archived name, and the foreign-file check matches names exactly).
+    #[test]
+    fn a_differently_spelled_extension_is_its_own_row() {
+        let base = fresh("ext_case");
+        let mods = base.join("mods");
+        let arch = base.join("arch");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(arch.join("Tools")).unwrap();
+        moddesc_zip(&arch.join("Tools/FS25_A.zip"), "Archived");
+        moddesc_zip(&mods.join("FS25_A.ZIP"), "Upper case");
+
+        let out = scan_one(&mods, &arch);
+        assert!(out.stand_ins.is_empty());
+        assert_eq!(out.result.mods.len(), 2);
+        let upper = out
+            .result
+            .mods
+            .iter()
+            .find(|m| m.title.as_deref() == Some("Upper case"))
+            .unwrap();
+        assert!(!upper.organized && upper.active);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[cfg(unix)]
