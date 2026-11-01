@@ -28,7 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folder next to `mods` has the game's settings files, and you can turn it off or on in Settings
   → Mods folder. Diagnose, the "last game ended unexpectedly" notice, savegames and game settings
   then use that profile's files, and Silo no longer offers to change your main profile's mods
-  folder setting for it. Windows only for now. (#387)
+  folder setting for it. A library archive can't be moved into a profile folder, the same as
+  the game's own folder. Windows only for now. (#387)
 
 ### Changed
 

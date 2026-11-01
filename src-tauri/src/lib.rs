@@ -3877,6 +3877,9 @@ struct Fences {
     /// Those folders' archives (chosen, or their default).
     other_archives: Vec<PathBuf>,
     user_dir: Option<PathBuf>,
+    /// The FS25 profile folders of the mods folders that belong to one (#387): each is an FS25
+    /// user folder of its own, fenced like `user_dir`.
+    profile_dirs: Vec<PathBuf>,
     app_data: Option<PathBuf>,
 }
 
@@ -3960,8 +3963,31 @@ fn fences_with(
         other_mods,
         other_archives,
         user_dir: user_dir.map(key_path),
+        profile_dirs: profile_dirs_of(conn, &layout.mods, &others, user_dir),
         app_data: app_data.map(key_path),
     })
+}
+
+/// The FS25 profile folders (as `key_path`s, once each) of `mods` and of `others` where that
+/// folder belongs to a profile (`gameprofile::belongs`: its launch is on, or it is or was seen
+/// as one), judged against the main user folder `main_user_dir` (#387).
+fn profile_dirs_of(
+    conn: &rusqlite::Connection,
+    mods: &std::path::Path,
+    others: &[PathBuf],
+    main_user_dir: Option<&std::path::Path>,
+) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = Vec::new();
+    for p in std::iter::once(mods).chain(others.iter().map(PathBuf::as_path)) {
+        let Some(g) = game_profile_for(conn, p, main_user_dir).filter(gameprofile::belongs) else {
+            continue;
+        };
+        let k = key_path(std::path::Path::new(&g.dir));
+        if !v.contains(&k) {
+            v.push(k);
+        }
+    }
+    v
 }
 
 /// Why a folder can't be checked as a mods folder: Silo couldn't read what it knows of the
@@ -4136,6 +4162,8 @@ fn mods_folder_check(
     }))
 }
 
+const OVERLAPS_A_PROFILE: &str = "Pick a folder outside your Farming Simulator 25 profile folders.";
+
 const OVERLAPS_AN_ARCHIVE: &str =
     "That folder overlaps another mods folder's archive. Pick a folder outside it.";
 
@@ -4166,6 +4194,10 @@ fn overlap_problems(new: &std::path::Path, f: &Fences) -> Vec<String> {
     let in_mods = new.starts_with(&f.mods) || f.other_mods.iter().any(|m| new.starts_with(m));
     if !in_mods && f.user_dir.as_ref().is_some_and(overlaps) {
         v.push("Pick a folder outside Farming Simulator 25's own folder.".into());
+    }
+    // The same for a mods folder's own FS25 profile folder (#387): it's a user folder too.
+    if !in_mods && f.profile_dirs.iter().any(overlaps) {
+        v.push(OVERLAPS_A_PROFILE.into());
     }
     if f.app_data.as_ref().is_some_and(overlaps) {
         v.push("Pick a folder outside Silo's own data folder.".into());
@@ -7492,6 +7524,7 @@ mod tests {
             ],
             other_archives: vec![PathBuf::from("/other/mods/archive"), PathBuf::from("/x/a2")],
             user_dir: Some(PathBuf::from("/home/me/fs25")),
+            profile_dirs: vec![PathBuf::from("/f/prof")],
             app_data: Some(PathBuf::from("/home/me/.silo")),
         }
     }
@@ -7520,6 +7553,58 @@ mod tests {
         // The default archive inside the FS25 user dir is fine (only the dir itself, or a
         // folder containing it, is refused).
         assert!(overlap_problems(Path::new("/home/me/fs25/mods/archive"), &fences()).is_empty());
+    }
+
+    #[test]
+    fn overlap_refuses_an_fs25_profile_folder_like_the_main_user_folder() {
+        // #387: a profile folder, a folder inside it, or one holding it is refused...
+        let f = fences();
+        for p in ["/f/prof", "/f/prof/archive", "/f"] {
+            assert!(
+                has(&overlap_problems(Path::new(p), &f), "profile folders"),
+                "{p}"
+            );
+        }
+        // ...but not the default archive inside a mods folder, nor a folder beside it.
+        let mut in_mods = fences();
+        in_mods.other_mods.push(PathBuf::from("/f/prof/mods"));
+        assert!(!has(
+            &overlap_problems(Path::new("/f/prof/mods/archive"), &in_mods),
+            "profile folders"
+        ));
+        assert!(overlap_problems(Path::new("/f/profile-archive"), &f).is_empty());
+    }
+
+    #[test]
+    fn fences_cover_the_profile_folders_of_profile_mods_folders() {
+        let base = temp_base("gameprofile_fences");
+        let prof = base.join("prof");
+        let pmods = prof.join("mods");
+        std::fs::create_dir_all(&pmods).unwrap();
+        std::fs::write(prof.join("gameSettings.xml"), "<gameSettings/>").unwrap();
+        // A plain folder named `mods`, never a profile: not fenced as one.
+        let plain = base.join("plain").join("mods");
+        std::fs::create_dir_all(&plain).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let known = crate::modsroot::add_known(None, &pmods.to_string_lossy());
+        let known = crate::modsroot::add_known(Some(&known), &plain.to_string_lossy());
+        crate::db::set_app_setting(&conn, crate::modsroot::KNOWN_KEY, Some(&known)).unwrap();
+        // Another folder is the active one; the profile is only a known folder.
+        let mods = base.join("mods");
+        let layout = Layout::default_for(&mods);
+        let f = super::fences_with(&conn, &layout, &[], None, None).unwrap();
+        assert_eq!(f.profile_dirs, vec![super::key_path(&prof)]);
+        // An archive inside the profile folder is refused; beside it, fine.
+        assert!(has(
+            &fence_problems(&layout, &prof.join("library"), &f),
+            "profile folders"
+        ));
+        assert!(!has(
+            &fence_problems(&layout, &base.join("library"), &f),
+            "profile folders"
+        ));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -10052,6 +10137,7 @@ mod tests {
             other_mods: vec![],
             other_archives: vec![],
             user_dir: None,
+            profile_dirs: vec![],
             app_data: None,
         };
         // Mods filed in subfolders are the point of a re-point, not a problem.
