@@ -241,7 +241,7 @@ const SCAN_ATTEMPTS: usize = 3;
 /// bigger log gives its first `head` and last `tail` bytes, cut to whole lines, and the report is
 /// marked truncated. The lines skipped in between aren't read, so lines from the end have no line
 /// number. A log that changes size while it's read (the game starting over, say) is read again,
-/// a few times at most.
+/// a few times at most; a rewrite to exactly the same size can't be told apart.
 pub fn scan<R: std::io::Read + std::io::Seek>(
     mut r: R,
     head: u64,
@@ -269,10 +269,15 @@ fn scan_once<R: std::io::Read + std::io::Seek>(
     r.seek(SeekFrom::Start(0))?;
     if len <= limit {
         let mut bytes = Vec::new();
-        r.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
-        // Past the limit, it grew while we read it: start over, as a big log.
-        let fits = bytes.len() as u64 <= limit;
-        return Ok(fits.then(|| parse(&String::from_utf8_lossy(&bytes))));
+        r.by_ref()
+            .take(limit.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        // Any other size, then or now, means it changed while we read it: start over (as a big
+        // log, if it grew past the limit).
+        if bytes.len() as u64 != len || r.seek(SeekFrom::End(0))? != len {
+            return Ok(None);
+        }
+        return Ok(Some(parse(&String::from_utf8_lossy(&bytes))));
     }
     let mut head_bytes = Vec::new();
     r.by_ref().take(head).read_to_end(&mut head_bytes)?;
@@ -839,6 +844,15 @@ Application quit
         let r = scan(&mut shrinks, 100, 100).unwrap();
         assert!(!r.truncated);
         assert_eq!(r.total_findings, 1);
+        // The same below the limit: a small log that grows or shrinks while read is read again.
+        for sizes in [[100, 155], [155, 93]] {
+            let mut v = Virtual::new(&sizes);
+            let r = scan(&mut v, 100, 100).unwrap();
+            assert!(!r.truncated);
+            assert_eq!(v.read, sizes[1] * 2, "{sizes:?}");
+        }
+        let small: Vec<u64> = (1..=7).map(|i| i * 10).collect();
+        assert!(scan(&mut Virtual::new(&small), 100, 100).is_err());
         // A log that never holds still gives up after a few bounded attempts.
         let sizes: Vec<u64> = (1..=7).map(|i| i * 1_000_000).collect();
         let mut churns = Virtual::new(&sizes);
