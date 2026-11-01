@@ -53,6 +53,14 @@ pub fn keychain_available() -> bool {
     }
 }
 
+/// Held by every read that may move a row into the keychain and by every write or clear, so a
+/// read that saw a row can't put it back into the keychain after a disconnect removed it.
+static STORE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn store_lock() -> std::sync::MutexGuard<'static, ()> {
+    STORE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Read a secret. A SQLite row wins over the keychain: every keychain write clears the row, and
 /// the row is only written when the keychain can't be used, so it's never the older of the two.
 /// A row is moved into the keychain once the keychain works (this is also how a token written
@@ -62,6 +70,7 @@ pub fn get(conn: &Connection, key: &str) -> Option<String> {
 }
 
 fn get_with(conn: &Connection, key: &str, keychain: Option<&keyring::Entry>) -> Option<String> {
+    let _held = store_lock();
     if let Some(row) = db::get_app_setting(conn, key) {
         // Best-effort promotion into the keychain, then drop the plaintext copy AND VACUUM so
         // the token isn't left carve-able in the DB's free pages (SQLite doesn't zero deletes).
@@ -102,62 +111,94 @@ fn set_with(
     keychain: Option<&keyring::Entry>,
     probe: impl Fn() -> bool,
 ) -> Result<(), String> {
-    match value {
-        Some(v) => {
-            let Some(e) = keychain else {
-                // Demo profile, or no keychain backend at all.
-                return db::set_app_setting(conn, key, Some(v));
-            };
-            match e.set_password(v) {
-                // Ensure it isn't also left behind in SQLite from a prior build.
-                Ok(()) => clear_fallback(conn, key),
-                Err(err) if no_keychain_service(&err) && !probe() => {
-                    // No usable keychain (e.g. a Linux box without Secret Service): keep the
-                    // feature working via SQLite; the keychain_available warning covers this.
-                    // A locked or access-denied store isn't this case: that's an error above.
-                    // An older token still in the keychain must go first, or a later read
-                    // could pick it up for an account the user no longer has connected.
-                    if e.delete_credential().is_err() && keychain_copy(e) == KeychainCopy::Unknown {
-                        log::warn!("{key}: no usable keychain, and its old copy wouldn't delete");
-                        return Err(STALE_COPY.into());
-                    }
-                    log::warn!("{key}: no usable keychain ({err}); storing it in the database");
-                    db::set_app_setting(conn, key, Some(v))
-                }
-                Err(err) => {
-                    log::warn!("{key}: couldn't save to the keychain: {err}");
-                    Err(SAVE_FAILED.into())
-                }
+    let _held = store_lock();
+    match (value, keychain) {
+        // Demo profile, or no keychain backend at all.
+        (Some(v), None) => db::set_app_setting(conn, key, Some(v)),
+        (Some(v), Some(e)) => save(conn, key, v, e, probe),
+        (None, None) => clear_fallback(conn, key),
+        (None, Some(e)) => remove(conn, key, e, probe),
+    }
+}
+
+/// Save to the keychain; SQLite only when there's no keychain service at all.
+fn save(
+    conn: &Connection,
+    key: &str,
+    v: &str,
+    e: &keyring::Entry,
+    probe: impl Fn() -> bool,
+) -> Result<(), String> {
+    match e.set_password(v) {
+        // Ensure it isn't also left behind in SQLite from a prior build.
+        Ok(()) => clear_fallback(conn, key),
+        Err(err) if no_keychain_service(&err) && !probe() => {
+            // No usable keychain (e.g. a Linux box without Secret Service): keep the feature
+            // working via SQLite; the keychain_available warning covers this. A locked or
+            // access-denied store isn't this case: that's an error below. An older token still
+            // in the keychain must go first, or a later read could pick it up for an account
+            // the user no longer has connected.
+            if clear_keychain(e) == Cleared::Kept {
+                log::warn!("{key}: no usable keychain, and its old copy wouldn't delete");
+                return Err(STALE_COPY.into());
             }
+            log::warn!("{key}: no usable keychain ({err}); storing it in the database");
+            db::set_app_setting(conn, key, Some(v))
         }
-        None => {
-            let had_row = db::get_app_setting(conn, key).is_some();
-            let removed = match keychain {
-                None => Ok(()),
-                Some(e) => match e.delete_credential() {
-                    Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-                    Err(err) => {
-                        let copy = keychain_copy(e);
-                        // The token lived in SQLite because there's no keychain service at all
-                        // (not merely a locked one): there's no copy there to remove.
-                        let no_keychain = had_row
-                            && no_keychain_service(&err)
-                            && copy == KeychainCopy::NoService
-                            && !probe();
-                        if copy == KeychainCopy::Gone || no_keychain {
-                            Ok(())
-                        } else {
-                            log::warn!("{key}: couldn't remove from the keychain: {err}");
-                            Err(REMOVE_FAILED.to_string())
-                        }
-                    }
-                },
-            };
-            // The SQLite copy goes either way.
-            clear_fallback(conn, key)?;
-            removed
+        Err(err) => {
+            log::warn!("{key}: couldn't save to the keychain: {err}");
+            Err(SAVE_FAILED.into())
         }
     }
+}
+
+#[derive(Debug, PartialEq)]
+enum Cleared {
+    /// The keychain holds no copy.
+    Gone,
+    /// The store's service fails on both the delete and a read: no keychain to hold one.
+    NoService,
+    /// A copy may remain (readable, locked, or refused).
+    Kept,
+}
+
+/// Delete the keychain copy and say what's left. A locked store is never "cleared".
+fn clear_keychain(e: &keyring::Entry) -> Cleared {
+    match e.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Cleared::Gone,
+        Err(err) => match keychain_copy(e) {
+            KeychainCopy::Gone => Cleared::Gone,
+            KeychainCopy::NoService if no_keychain_service(&err) => Cleared::NoService,
+            _ => Cleared::Kept,
+        },
+    }
+}
+
+/// Disconnect: remove the keychain copy and the SQLite row. Only a copy confirmed gone counts
+/// as removed, except where there's no keychain service and the token lived in SQLite.
+fn remove(
+    conn: &Connection,
+    key: &str,
+    e: &keyring::Entry,
+    probe: impl Fn() -> bool,
+) -> Result<(), String> {
+    let row = db::get_app_setting(conn, key);
+    let removed = match clear_keychain(e) {
+        Cleared::Gone => true,
+        Cleared::NoService => row.is_some() && !probe(),
+        Cleared::Kept => false,
+    };
+    if removed {
+        return clear_fallback(conn, key);
+    }
+    log::warn!("{key}: couldn't remove it from the keychain");
+    // The plaintext copy goes too, unless the keychain still holds a different token: then the
+    // row is the one the shown account belongs to, and dropping it would switch accounts.
+    let other_in_keychain = matches!(e.get_password(), Ok(t) if Some(&t) != row.as_ref());
+    if !other_in_keychain {
+        clear_fallback(conn, key)?;
+    }
+    Err(REMOVE_FAILED.to_string())
 }
 
 /// A keychain error saying the platform's store itself failed (in keyring 3.6: no Secret
@@ -269,6 +310,8 @@ mod tests {
         set_fails: Option<Fail>,
         get_fails: Option<Fail>,
         delete_fails: Option<Fail>,
+        /// The next write says so on the first channel, then waits for the second.
+        pause: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     }
 
     /// A keychain entry whose failures stay until the test changes them.
@@ -277,6 +320,11 @@ mod tests {
 
     impl CredentialApi for FakeKeychain {
         fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
+            let pause = self.0.lock().unwrap().pause.take();
+            if let Some((entered, go)) = pause {
+                entered.send(()).unwrap();
+                go.recv().unwrap();
+            }
             let mut s = self.0.lock().unwrap();
             if let Some(f) = s.set_fails {
                 return Err(err(f));
@@ -430,6 +478,21 @@ mod tests {
     }
 
     #[test]
+    fn the_fallback_refuses_when_the_delete_says_the_store_is_locked() {
+        // The service fails to write and read, but the delete reports a locked store: there may
+        // be an old copy behind the lock.
+        let conn = mem_db();
+        let k = FakeKeychain::with(|s| {
+            s.set_fails = Some(Fail::Platform);
+            s.get_fails = Some(Fail::Platform);
+            s.delete_fails = Some(Fail::NoAccess);
+        });
+        let e = set_with(&conn, KEY, Some("new"), Some(&k.entry()), NO_KEYCHAIN);
+        assert_eq!(e, Err(STALE_COPY.to_string()));
+        assert_eq!(row(&conn), None);
+    }
+
+    #[test]
     fn disconnect_succeeds_when_the_keychain_copy_is_gone() {
         let conn = mem_db();
         db::set_app_setting(&conn, KEY, Some("legacy")).unwrap();
@@ -449,7 +512,7 @@ mod tests {
             (Fail::Invalid, None),
         ] {
             let conn = mem_db();
-            db::set_app_setting(&conn, KEY, Some("row")).unwrap();
+            db::set_app_setting(&conn, KEY, Some("tok")).unwrap();
             let k = FakeKeychain::with(|s| {
                 s.stored = Some("tok".into());
                 s.delete_fails = Some(delete);
@@ -460,6 +523,70 @@ mod tests {
             assert_eq!(row(&conn), None, "the SQLite copy goes either way");
             assert_eq!(k.stored().as_deref(), Some("tok"));
         }
+    }
+
+    #[test]
+    fn a_failed_disconnect_never_switches_to_another_accounts_token() {
+        // Left by an older build: account A in the keychain, account B's token in SQLite after
+        // a silent fallback. The keychain reads but won't write or delete.
+        let conn = mem_db();
+        db::set_app_setting(&conn, KEY, Some("account-b")).unwrap();
+        let k = FakeKeychain::with(|s| {
+            s.stored = Some("account-a".into());
+            s.set_fails = Some(Fail::Platform);
+            s.delete_fails = Some(Fail::Platform);
+        });
+        assert_eq!(
+            get_with(&conn, KEY, Some(&k.entry())).as_deref(),
+            Some("account-b")
+        );
+        let e = set_with(&conn, KEY, None, Some(&k.entry()), NO_KEYCHAIN);
+        assert_eq!(e, Err(REMOVE_FAILED.to_string()));
+        // Still account B (the one shown as connected), not A.
+        assert_eq!(
+            get_with(&conn, KEY, Some(&k.entry())).as_deref(),
+            Some("account-b")
+        );
+    }
+
+    #[test]
+    fn a_read_moving_a_row_into_the_keychain_cant_outlast_a_disconnect() {
+        // The read pauses inside its keychain write; a disconnect starts meanwhile. Whatever
+        // the timing, nothing is left once both are done.
+        let dir = std::env::temp_dir().join(format!("silo_secret_race_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("silo.db");
+        let conn = db::open(&path).unwrap();
+        db::set_app_setting(&conn, KEY, Some("row")).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let k = FakeKeychain::default();
+        k.0.lock().unwrap().pause = Some((entered_tx, go_rx));
+
+        let reader = {
+            let (k, path) = (k.clone(), path.clone());
+            std::thread::spawn(move || {
+                let conn = db::open(&path).unwrap();
+                get_with(&conn, KEY, Some(&k.entry()))
+            })
+        };
+        entered_rx.recv().unwrap(); // the read is inside set_password now
+        let remover = {
+            let (k, path) = (k.clone(), path.clone());
+            std::thread::spawn(move || {
+                let conn = db::open(&path).unwrap();
+                set_with(&conn, KEY, None, Some(&k.entry()), KEYCHAIN_WORKS)
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        go_tx.send(()).unwrap();
+        assert_eq!(reader.join().unwrap().as_deref(), Some("row"));
+        remover.join().unwrap().unwrap();
+        assert_eq!(k.stored(), None);
+        assert_eq!(row(&conn), None);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

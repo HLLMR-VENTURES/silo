@@ -65,12 +65,19 @@ export function deviceFlowActive(): boolean {
   return githubAuth.flow !== null;
 }
 
-/** Re-read the connection status from the backend. */
+/** Bumped by every status read; an answer for an older read is dropped. */
+let statusRead = 0;
+
+/** Re-read the connection status from the backend. When reads overlap, the last one started wins. */
 export async function refreshGithub(): Promise<void> {
+  const read = ++statusRead;
   try {
-    githubAuth.status = await ghStatus();
-    setGithubConnected(!!githubAuth.status.user);
+    const status = await ghStatus();
+    if (read !== statusRead) return; // a newer read (e.g. after Disconnect) is on its way
+    githubAuth.status = status;
+    setGithubConnected(!!status.user);
   } catch (e) {
+    if (read !== statusRead) return;
     githubAuth.message = inlineError(e, "Checking your GitHub connection");
   }
 }
@@ -109,10 +116,11 @@ async function poll(gen: number, deviceCode: string, seconds: number): Promise<v
   if (gen !== generation) return;
   switch (r.status) {
     case "ok": {
-      generation++; // done: nothing of this flow may run again
+      const done = ++generation; // done: nothing of this flow may run again
       githubAuth.flow = null;
       githubAuth.message = null;
       await refreshGithub();
+      if (done !== generation) return; // disconnected (or restarted) meanwhile: no "Connected" toast
       if (views === 0) {
         const who = githubAuth.status.user;
         success(who ? `Connected to GitHub as ${who}` : "Connected to GitHub");

@@ -169,16 +169,30 @@ pub fn is_newer(latest_tag: &str, current: &str) -> bool {
 }
 
 /// A version's numeric parts and its `-prerelease` suffix, with any `+build` metadata dropped.
-/// A suffix of numbers only (`1.0.0-2`) is more version parts, not a prerelease. Parts that
-/// aren't numbers are skipped, as they always were.
+/// A suffix of numbers only (`1.0.0-2`) is more version parts, not a prerelease, and a version
+/// that starts with a word has none (`release-1.2`). Parts that aren't numbers are skipped, as
+/// they always were.
 fn split_version(s: &str) -> (Vec<u64>, Option<&str>) {
     let s = s.trim().trim_start_matches(['v', 'V']);
     let s = s.split_once('+').map_or(s, |(v, _build)| v);
-    let (core, pre) = match s.split_once('-') {
-        Some((core, pre)) if pre.split(['.', '-', '_']).any(|id| !is_digits(id)) => {
-            (core, Some(pre))
+    // The prerelease starts at the first `-` whose next part has a word in it; the parts
+    // before it, `-`-separated or not, are the version (`1-2-4-rc.1` is 1.2.4, prerelease rc.1).
+    let numeric = |part: &str| {
+        part.bytes()
+            .all(|b| b.is_ascii_digit() || b == b'.' || b == b'_')
+    };
+    let mut cut = None;
+    let mut at = 0;
+    for part in s.split('-') {
+        if at > 0 && !numeric(part) {
+            cut = Some(at - 1);
+            break;
         }
-        _ => (s, None),
+        at += part.len() + 1;
+    }
+    let (core, pre) = match cut {
+        Some(i) => (&s[..i], Some(&s[i + 1..])),
+        None => (s, None),
     };
     let nums = core
         .split(['.', '-', '_'])
@@ -1317,6 +1331,14 @@ mod tests {
         assert!(is_newer("1.0.0-2", "1.0.0-1"));
         assert!(is_newer("1.0.0-1", "1.0.0"));
         assert!(!is_newer("1.0.0", "1.0.0-0"));
+        // Mixed: hyphen-separated numbers, then a prerelease.
+        assert!(is_newer("1-2-4-rc.1", "1.2.3"));
+        assert!(is_newer("1-2-3", "1-2-3-rc.1"));
+        assert!(!is_newer("1-2-3-rc.1", "1.2.3"));
+        assert!(is_newer("1-2-3-rc.2", "1.2.3-rc.1"));
+        // A leading word is skipped, as before.
+        assert!(is_newer("release-1.3", "1.2"));
+        assert!(!is_newer("release-1.2", "1.2"));
         assert!(!is_newer("", "1.0.0.0"));
         assert!(is_newer("1.0.0.0", ""));
     }

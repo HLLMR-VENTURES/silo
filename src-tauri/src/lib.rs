@@ -595,6 +595,8 @@ async fn gh_device_poll(
 /// let a 403 surface a reconnect hint if a specific permission is missing.
 #[tauri::command]
 async fn gh_set_pat(app: tauri::AppHandle, pat: String) -> Result<String, String> {
+    // Like a device-flow poll: a Disconnect while GitHub checks the token wins.
+    let ticket = GH_SIGN_OUTS.ticket();
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let pat = github::clean_pat(&pat)?;
@@ -603,14 +605,18 @@ async fn gh_set_pat(app: tauri::AppHandle, pat: String) -> Result<String, String
             return Err("GitHub didn't accept that token. Check it and paste it again.".into());
         }
         let conn = db::open(&db)?;
-        secrets::set(&conn, "gh_token", Some(&pat))?;
-        db::set_app_setting(&conn, "gh_user", Some(&user))?;
         let stored = if scopes.trim().is_empty() {
             "*".to_string()
         } else {
             scopes
         };
-        db::set_app_setting(&conn, "gh_scopes", Some(&stored))?;
+        GH_SIGN_OUTS
+            .store_if_current(ticket, || -> Result<(), String> {
+                secrets::set(&conn, "gh_token", Some(&pat))?;
+                db::set_app_setting(&conn, "gh_user", Some(&user))?;
+                db::set_app_setting(&conn, "gh_scopes", Some(&stored))
+            })
+            .ok_or_else(|| "GitHub was disconnected while Silo checked the token.".to_string())??;
         Ok(user)
     })
     .await

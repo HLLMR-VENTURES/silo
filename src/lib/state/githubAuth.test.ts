@@ -227,6 +227,24 @@ describe("disconnecting GitHub", () => {
     expect(githubAuth.status.user).toBeNull();
   });
 
+  it("a status read that started before Disconnect can't bring the account back, nor toast", async () => {
+    // A poll succeeds and starts reading the status; that read is slow. Disconnect meanwhile.
+    vi.mocked(ghDevicePoll).mockResolvedValue(answer("ok"));
+    vi.mocked(ghLogout).mockResolvedValue();
+    let answerStatus!: (s: typeof connected) => void;
+    vi.mocked(ghStatus).mockReturnValueOnce(new Promise((r) => (answerStatus = r)));
+    await startDeviceFlow();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(ghStatus).toHaveBeenCalledTimes(1);
+    vi.mocked(ghStatus).mockResolvedValue(disconnected);
+    await disconnectGithub();
+    expect(githubAuth.status.user).toBeNull();
+    answerStatus(connected); // the old read answers last
+    await flush();
+    expect(githubAuth.status.user).toBeNull();
+    expect(toasts.some((t) => /Connected to GitHub/.test(t.message))).toBe(false);
+  });
+
   it("shows the backend's reason when the credential store kept the token", async () => {
     const reason =
       "Silo couldn't remove the token from your system's credential store, so you're still signed in. If it's locked, unlock it and try again.";
