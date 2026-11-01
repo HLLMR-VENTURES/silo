@@ -126,6 +126,7 @@
     heldRefresh,
     holdRefresh,
     refreshTargets,
+    releaseInstalled,
     sameStamps,
     linkRefresh,
     mergeRows,
@@ -2277,13 +2278,15 @@
     updateResults = updateResults.map((r) =>
       r.techName === row.techName ? { ...r, hasUpdate: false, current: r.latest } : r,
     );
-    // The library still shows the old file until a scan reads the new one (#402).
-    installedUnscanned.add(row.techName);
+    // The library still shows the old file until a scan started after this reads the new one.
+    installedUnscanned.set(row.techName, ++installSeq);
   }
 
-  /** Mods updated since the last scan that worked: the library's entry is still the old file,
-   *  so a link refresh (#402) leaves their rows alone until a scan reads the new one. */
-  const installedUnscanned = new Set<string>();
+  /** Mods updated that no scan started since has read yet (by the update's number): the
+   *  library's entry is still the old file, so a link refresh (#402) leaves their rows alone. */
+  const installedUnscanned = new Map<string, number>();
+  /** Counts updates installed, to tell which ones a scan started after. */
+  let installSeq = 0;
 
   /** A failed install turns its row into the error, with Try again and Copy details there. */
   function markInstallFailed(row: UpdateRow, e: unknown) {
@@ -3536,6 +3539,8 @@
     scanOp = op;
     scanning = true;
     scansStarted++;
+    // Updates installed before this point are on disk for this scan to read (#402).
+    const scanFrom = installSeq;
     progress = { done: 0, total: 0 };
     let scanned = false;
     try {
@@ -3544,7 +3549,7 @@
       const r = await scanMods(roots.length ? roots : undefined, autoCheckEnabled());
       result = r;
       mods = r.mods;
-      installedUnscanned.clear();
+      releaseInstalled(installedUnscanned, scanFrom);
       libraryScanned = true;
       scanFailed = false;
       activeSet = new Set(r.mods.filter((m) => m.active).map((m) => m.techName));

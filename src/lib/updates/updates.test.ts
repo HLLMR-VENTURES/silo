@@ -30,6 +30,7 @@ import {
   mergeRows,
   recheckRow,
   refreshTargets,
+  releaseInstalled,
   sameStamps,
   runUpdateCheck,
   updateAll,
@@ -685,6 +686,20 @@ describe("checking again when Silo links mods to the catalog (#402)", () => {
     expect(refreshTargets(["A", "B"], lib, (t) => installed.has(t))).toEqual([
       lib[1],
     ]);
+  });
+
+  it("keeps an update made while a scan ran protected from that scan's old files", () => {
+    const installed = new Map<string, number>();
+    let seq = 0;
+    // A scan starts (nothing installed yet), then A is updated while it runs.
+    const scanFrom = seq;
+    installed.set("A", ++seq);
+    // That scan ends with A's old file: A stays protected.
+    releaseInstalled(installed, scanFrom);
+    expect(installed.has("A")).toBe(true);
+    // A scan started after the update reads the new file: A is released.
+    releaseInstalled(installed, seq);
+    expect(installed.has("A")).toBe(false);
   });
 
   it("tells when the library's files changed under a refresh", () => {

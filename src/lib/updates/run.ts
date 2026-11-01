@@ -165,6 +165,20 @@ export function refreshTargets<M extends { techName: string }>(
   return mods.filter((m) => want.has(m.techName) && !leftOut(m.techName));
 }
 
+/**
+ * After a scan that worked, the updates it read: those installed (`installed`, techName to the
+ * update's number) before it started (`scanFrom`, the count then) are dropped. One installed
+ * while it ran stays: that scan may have read the old file.
+ */
+export function releaseInstalled(
+  installed: Map<string, number>,
+  scanFrom: number,
+): void {
+  for (const [techName, n] of installed) {
+    if (n <= scanFrom) installed.delete(techName);
+  }
+}
+
 /** Which file each of `mods` is (path, size, modified time, version), by techName. */
 export function fileStamps(
   mods: {
