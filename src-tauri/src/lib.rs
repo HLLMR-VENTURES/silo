@@ -2066,7 +2066,7 @@ fn same_file_key(p: &std::path::Path) -> FileKey {
 }
 
 /// See [`FileKey`].
-fn fold_file_name(name: &str) -> String {
+pub(crate) fn fold_file_name(name: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     let decomposed: String = name.nfd().collect();
     decomposed.to_lowercase().to_uppercase().nfc().collect()

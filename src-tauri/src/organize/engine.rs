@@ -319,16 +319,21 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
     let key = crate::modsroot::canonical_key(root);
     let mut rep = Report::default();
     let mut categories: HashSet<String> = HashSet::new();
+    // The archive entry of each mod this pass reported by name and may have left in the archive
+    // (and whether it's a folder mod): its files aren't unrecognized (#410).
+    let mut reported: Vec<(PathBuf, bool)> = Vec::new();
     for row in db::load_organized(conn, &key) {
         categories.insert(row.category.clone());
         let link = root.join(&row.file_name);
         let src = archive_path(&layout.archive, &row.category, &row.file_name);
+        let is_dir = row.kind == "dir";
 
         if src.exists() {
             // A stale link (its target gone) holds nothing: drop it, then restore as usual.
             if let Err(e) = remove_dangling_link(&link) {
                 rep.errors
                     .push(format!("{}: remove stale link: {e}", row.tech_name));
+                reported.push((src, is_dir));
                 continue;
             }
             let occupied = link.symlink_metadata().is_ok();
@@ -346,6 +351,7 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
                     row.tech_name
                 ));
                 rep.skipped += 1;
+                reported.push((src, is_dir));
                 continue;
             }
             // Normal restore: drop our projection to free the slot, then move the archived
@@ -356,6 +362,7 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
                     Ok(k) => kept = k,
                     Err(e) => {
                         rep.errors.push(format!("{}: {e}", row.tech_name));
+                        reported.push((src, is_dir));
                         continue;
                     }
                 }
@@ -367,6 +374,7 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
             }
             if let Err(e) = restored {
                 rep.errors.push(format!("{}: restore: {e}", row.tech_name));
+                reported.push((src, is_dir));
                 continue;
             }
         } else if link.exists() {
@@ -378,6 +386,8 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
                 "{}: there's no copy in your library archive, so Silo kept the file in your mods folder.",
                 row.tech_name
             ));
+            // Whatever sits at the archive path anyway (a dead link) is that mod's.
+            reported.push((src, is_dir));
         }
         // else: neither archive nor root file — nothing to restore; just clear the row.
         if let Err(e) = db::delete_organized(conn, &key, &row.tech_name) {
@@ -395,9 +405,28 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
     // The default archive is Silo's own. NEVER `remove_dir_all` it — that would destroy any
     // file we don't have a manifest row for (e.g. a mod whose manifest write failed on a
     // crash). Remove only provably-empty directories, and surface anything left untouched.
+    // A mod reported by name above (kept, left alone, or not restored) isn't repeated as its
+    // archived files being unrecognized (#410).
     match cleanup_empty_archive(&layout.archive, true) {
         Ok(leftover) => {
-            for p in leftover {
+            // Each entry as spelled on disk, so a leftover listed under the folder's real
+            // spelling matches it (looked up only when something was left).
+            let reported: Vec<(PathBuf, bool)> = if leftover.is_empty() {
+                Vec::new()
+            } else {
+                reported
+                    .into_iter()
+                    .map(|(entry, is_dir)| {
+                        let spelled = spelled_on_disk(&layout.archive, &entry);
+                        (spelled.unwrap_or(entry), is_dir)
+                    })
+                    .collect()
+            };
+            for p in leftover.into_iter().filter(|p| {
+                !reported
+                    .iter()
+                    .any(|(entry, is_dir)| in_archive_entry(p, entry, *is_dir))
+            }) {
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
                 rep.errors.push(format!(
                     "Silo kept an unrecognized file in your library archive: {}. Nothing was deleted.",
@@ -408,6 +437,51 @@ pub fn flatten(conn: &Connection, layout: &Layout) -> Report {
         Err(e) => rep.errors.push(format!("archive cleanup: {e}")),
     }
     rep
+}
+
+/// Whether `path` is the archive entry `entry`, or a file inside it when it's a folder mod's
+/// (`is_dir`; a zip mod's entry owns nothing below it). Compared as spelled: pass the entry as
+/// [`spelled_on_disk`] finds it.
+pub(crate) fn in_archive_entry(path: &Path, entry: &Path, is_dir: bool) -> bool {
+    path == entry || (is_dir && path.starts_with(entry))
+}
+
+/// `entry` (a path under `archive`) spelled as its folders list it. A name listed exactly is
+/// itself, even beside one that differs only in case (a case-sensitive folder: two entries). A
+/// name not listed but found anyway (NTFS and APFS ignore case and, on APFS, how an accent is
+/// encoded) is the one listed name that differs only that way and is the same entry on disk
+/// (`scratch::entry_number`, never following a link). When more than one listed name could be
+/// it (hardlinks whose names differ only that way), Silo can't tell which, so `None`, as when a
+/// part can't be listed or found: the caller then matches the recorded spelling only, so no
+/// other file is ever taken for the entry.
+pub(crate) fn spelled_on_disk(archive: &Path, entry: &Path) -> Option<PathBuf> {
+    let mut cur = archive.to_path_buf();
+    for part in entry.strip_prefix(archive).ok()?.components() {
+        let name = part.as_os_str();
+        let listed: Vec<std::ffi::OsString> = std::fs::read_dir(&cur)
+            .ok()?
+            .map(|e| e.map(|e| e.file_name()))
+            .collect::<std::io::Result<_>>()
+            .ok()?;
+        if listed.iter().any(|n| n == name) {
+            cur.push(name);
+            continue;
+        }
+        let found = crate::scratch::entry_number(&cur.join(name))?;
+        let wanted = name.to_string_lossy();
+        let mut candidates = listed.into_iter().filter(|n| {
+            let n_str = n.to_string_lossy();
+            (crate::fold_file_name(&n_str) == crate::fold_file_name(&wanted)
+                || n_str.to_uppercase() == wanted.to_uppercase())
+                && crate::scratch::entry_number(&cur.join(n)) == Some(found)
+        });
+        let spelled = candidates.next()?;
+        if candidates.next().is_some() {
+            return None;
+        }
+        cur.push(spelled);
+    }
+    Some(cur)
 }
 
 /// Remove each category folder Silo filed into under `archive`, but only if it is empty.

@@ -219,6 +219,22 @@ fn sha256_prefix(p: &Path, n: u64) -> Option<String> {
     (n == u64::MAX || got == n).then(|| format!("{:x}", h.finalize()))
 }
 
+/// The volume and file number of the entry at `p` itself, never following a link at it: a link
+/// (even one whose target is gone) has its own. `None` when it can't be read.
+#[cfg(windows)]
+pub(crate) fn entry_number(p: &Path) -> Option<(u64, u64)> {
+    let f = open_no_follow(p).ok()?;
+    let m = f.metadata().ok()?;
+    file_number(&f, &m)
+}
+
+#[cfg(unix)]
+pub(crate) fn entry_number(p: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = p.symlink_metadata().ok()?;
+    Some((m.dev(), m.ino()))
+}
+
 /// Open `p` for its attributes only, never following a link at it (a link opens as itself).
 #[cfg(windows)]
 fn open_no_follow(p: &Path) -> std::io::Result<std::fs::File> {
