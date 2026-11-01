@@ -3033,7 +3033,8 @@ fn fences_with(
     user_dir: Option<&std::path::Path>,
     app_data: Option<&std::path::Path>,
 ) -> Result<Fences, String> {
-    let others = known_mods_folders(conn, extra);
+    let others = with_organized_roots(conn, known_mods_folders(conn, extra))
+        .map_err(|e| archive_list_unreadable(&e))?;
     let mine = key_path(&layout.mods);
     let mut other_mods: Vec<PathBuf> = Vec::new();
     for p in &others {
@@ -3136,6 +3137,17 @@ fn other_archives(
     Ok(v)
 }
 
+/// `known` plus every folder Silo has organized mods for (`db::organized_roots`): a folder it
+/// only followed through FS25's override never joins the known list, but its layout is still
+/// on disk. An unreadable library list is an error.
+fn with_organized_roots(
+    conn: &rusqlite::Connection,
+    mut known: Vec<PathBuf>,
+) -> Result<Vec<PathBuf>, String> {
+    known.extend(db::organized_roots(conn)?.into_iter().map(PathBuf::from));
+    Ok(known)
+}
+
 /// Why a folder can't be a mods folder, and the folder it runs into.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FolderProblem {
@@ -3187,8 +3199,11 @@ fn mods_folder_check(
     known: &[PathBuf],
 ) -> Result<Option<FolderProblem>, String> {
     let mine = key_path(mods);
-    let archives = other_archives(conn, mods, known)?;
-    let others: Vec<&PathBuf> = known.iter().filter(|k| key_path(k) != mine).collect();
+    let known = with_organized_roots(conn, known.to_vec())?;
+    let archives = other_archives(conn, mods, &known)?;
+    let mut others: Vec<&PathBuf> = known.iter().filter(|k| key_path(k) != mine).collect();
+    let mut seen = HashSet::new();
+    others.retain(|p| seen.insert(key_path(p)));
     let shown: HashMap<PathBuf, PathBuf> = archives
         .iter()
         .chain(others.iter().copied())
@@ -7251,6 +7266,45 @@ mod tests {
             crate::db::get_app_setting(&conn, crate::modsroot::CHOICE_KEY),
             None
         );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// An override-only folder X (organized rows, never known) is a mods folder to keep clear
+    /// of, not just its archive: D's archive can't be re-pointed at an empty folder inside X.
+    #[test]
+    fn an_override_only_folder_is_fenced_as_a_mods_folder() {
+        let base = temp_base("fences_override_mods");
+        let d = base.join("d-mods");
+        let x = base.join("x-mods");
+        let inside = x.join("OtherLibrary");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::create_dir_all(&inside).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let row = crate::db::OrganizedRow {
+            tech_name: "FS25_A".into(),
+            file_name: "FS25_A.zip".into(),
+            kind: "zip".into(),
+            category: "Tools".into(),
+            subcategory: None,
+            active: false,
+        };
+        crate::db::upsert_organized(&conn, &crate::modsroot::canonical_key(&x), &row).unwrap();
+        let layout = Layout::default_for(&d);
+        let f = super::fences_with(&conn, &layout, &[], None, None).unwrap();
+        assert_eq!(f.other_mods, vec![super::key_path(&x)]);
+        let problems = fence_problems(&layout, &inside, &f);
+        assert!(
+            has(&problems, "overlaps another mods folder Silo knows"),
+            "{problems:?}"
+        );
+        // The library list can't be read: refused, never passed.
+        conn.execute_batch("DROP TABLE organized").unwrap();
+        assert_eq!(
+            super::fences_with(&conn, &layout, &[], None, None).err().as_deref(),
+            Some("Silo couldn't read its list of archives, so it can't check this folder. Try again.")
+        );
+        assert!(super::mods_folder_check(&conn, &d, &[]).is_err());
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -1326,20 +1326,53 @@ pub(crate) fn symlinks_usable(layout: &Layout) -> bool {
 }
 
 /// A folder mod's link from the mods folder into this archive might end up a full copy
-/// (`make_link`'s dir branch): always inside a Mac App Store container; otherwise when symlinks
-/// don't work there, except on Windows with a local archive, where an NTFS junction needs no
-/// privilege. Probes a symlink (`symlinks_usable`).
+/// (`make_link`'s dir branch): always inside a Mac App Store container; otherwise unless a probe
+/// folder link, made the way `make_link` makes one, actually worked (`dir_links_between`).
 pub(crate) fn dir_link_may_copy(layout: &Layout) -> bool {
-    if in_mac_app_container(&layout.mods) {
-        return true;
+    in_mac_app_container(&layout.mods)
+        || dir_links_between(&layout.mods, &layout.archive) != Some(true)
+}
+
+/// Whether a folder link from the mods folder into the archive can be made here, the way
+/// `make_link` makes one (`link_dir_native`: a symlink, or on Windows a junction, which a FAT
+/// or exFAT mods folder or a network archive refuses): an empty probe folder in `archive`
+/// linked into `mods`, both removed again. `Some(worked)`, or `None` when no probe could be
+/// made. Never creates `mods` or `archive`; a crash's leftovers are swept by
+/// `sweep_link_probes`.
+pub(crate) fn dir_links_between(mods: &Path, archive: &Path) -> Option<bool> {
+    use std::io::ErrorKind::AlreadyExists;
+    if !archive.is_dir() || !mods.is_dir() {
+        return None;
     }
-    if symlinks_usable(layout) {
-        return false;
+    let prefix = format!("{SYMLINK_PROBE}-dir");
+    for name in probe_names(&prefix).take(PROBE_TRIES) {
+        let target = archive.join(&name);
+        match std::fs::create_dir(&target) {
+            Ok(()) => {}
+            Err(e) if e.kind() == AlreadyExists => continue,
+            Err(_) => return None,
+        }
+        let at = mods.join(format!("{name}.link"));
+        let r = link_dir_native(&target, &at);
+        let taken = matches!(&r, Err(e) if e.kind() == AlreadyExists);
+        if !taken {
+            let _ = remove_probe_link(&at);
+        }
+        // Only ever an empty folder: the probe Silo just made.
+        let _ = std::fs::remove_dir(&target);
+        match r {
+            Ok(()) => return Some(true),
+            Err(_) if taken => continue,
+            Err(_) => return Some(false),
+        }
     }
-    let network = std::fs::canonicalize(&layout.archive)
-        .map(|c| is_network_path(&c.to_string_lossy()))
-        .unwrap_or(true);
-    !cfg!(windows) || network
+    None
+}
+
+/// Remove a probe link: a file link, or a folder link (a dir symlink or junction, which Windows
+/// removes as a folder — `remove_dir` never removes a folder with anything in it).
+fn remove_probe_link(at: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(at).or_else(|_| std::fs::remove_dir(at))
 }
 
 /// The Mac App Store FS25 is sandboxed: it can't follow a link out of its container. Compared
@@ -1687,7 +1720,16 @@ pub(crate) fn sweep_link_probes(dir: &Path, min_age: std::time::Duration) {
             .ok()
             .and_then(|m| now.duration_since(m).ok())
             .is_some_and(|age| age >= min_age);
-        if old && !meta.is_dir() && std::fs::remove_file(e.path()).is_ok() {
+        if !old {
+            continue;
+        }
+        // A probe folder (`dir_links_between`) only while empty; a link of either kind.
+        let removed = if meta.is_dir() {
+            std::fs::remove_dir(e.path())
+        } else {
+            remove_probe_link(&e.path())
+        };
+        if removed.is_ok() {
             crate::fslog::changed("remove-stale-probe", &e.path());
         }
     }
@@ -1728,24 +1770,21 @@ fn device_of(p: &Path) -> Option<u64> {
 }
 
 /// Pure: which of `mounts` (normalized mount point, device id) holds the path `key` (normalized,
-/// device id `dev`). The longest mount point that contains it — when the device ids agree, or
-/// can't be compared (Windows). When they differ, the path is on a filesystem the longest
-/// match doesn't hold: a listed mount with the path's device id (macOS keeps `/Users` on the
-/// data volume, listed at `/System/Volumes/Data`, not at `/`), else none — an unlisted mount
-/// below a listed one (a network share at `/mnt/share` under `/`) is unknown, never its parent.
+/// device id `dev`). With a device id (Unix) the filesystem decides: the first listed mount of
+/// that device, so every path on one filesystem names the same mount (a bind-mounted alias, or
+/// macOS keeping `/Users` on the data volume listed at `/System/Volumes/Data`, not at `/`), and
+/// none when the device isn't listed — an unlisted mount below a listed one (a network share at
+/// `/mnt/share` under `/`) is unknown, never its parent. Without device ids (Windows), the
+/// longest mount point that contains the path.
 fn pick_mount(key: &Path, dev: Option<u64>, mounts: &[(PathBuf, Option<u64>)]) -> Option<usize> {
-    let longest = mounts
-        .iter()
-        .enumerate()
-        .filter(|(_, (m, _))| key.starts_with(m))
-        .max_by_key(|(_, (m, _))| m.components().count())
-        .map(|(i, _)| i);
-    let Some(dev) = dev else {
-        return longest;
-    };
-    match longest {
-        Some(i) if !matches!(mounts[i].1, Some(d) if d != dev) => Some(i),
-        _ => mounts.iter().position(|(_, d)| *d == Some(dev)),
+    match dev {
+        Some(dev) => mounts.iter().position(|(_, d)| *d == Some(dev)),
+        None => mounts
+            .iter()
+            .enumerate()
+            .filter(|(_, (m, _))| key.starts_with(m))
+            .max_by_key(|(_, (m, _))| m.components().count())
+            .map(|(i, _)| i),
     }
 }
 
@@ -4244,10 +4283,45 @@ mod tests {
             Some(1),
             "no device ids: longest prefix"
         );
+        // Two listed mounts of one filesystem: every path on it names the first.
+        let aliased = vec![
+            m("/", Some(1)),
+            m("/data", Some(5)),
+            m("/srv/alias", Some(5)),
+        ];
+        assert_eq!(
+            pick_mount(Path::new("/srv/alias/x"), Some(5), &aliased),
+            Some(1)
+        );
+        assert_eq!(pick_mount(Path::new("/data/y"), Some(5), &aliased), Some(1));
         // Windows lists no device ids: drive letters decide.
         let no_dev = vec![m("/c", None), m("/d", None)];
         assert_eq!(pick_mount(Path::new("/d/mods"), None, &no_dev), Some(1));
         assert_eq!(pick_mount(Path::new("/e/mods"), None, &no_dev), None);
+    }
+
+    /// A real folder pair: the probe folder link is made and both probes are removed again; a
+    /// missing folder is inconclusive and never created (#188).
+    #[test]
+    fn a_folder_link_probe_cleans_up_after_itself() {
+        let base = std::env::temp_dir().join(format!("silo_dirlink_probe_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        let archive = base.join("lib");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(&archive).unwrap();
+        // Symlinks on Unix, junctions on NTFS: both work in a temp folder.
+        assert_eq!(dir_links_between(&mods, &archive), Some(true));
+        assert_eq!(std::fs::read_dir(&mods).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(&archive).unwrap().count(), 0);
+        assert_eq!(dir_links_between(&mods, &base.join("missing")), None);
+        assert!(!base.join("missing").exists());
+        let layout = Layout {
+            mods: mods.clone(),
+            archive: archive.clone(),
+        };
+        assert!(!dir_link_may_copy(&layout));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -4436,6 +4510,25 @@ mod tests {
         assert!(!old.exists() && !old_sym.exists(), "stale probes removed");
         assert!(fresh.exists(), "a probe running right now is kept");
         assert!(mine.exists(), "never anything else");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A crash's folder probe (`dir_links_between`) is swept only while empty; a folder with
+    /// anything in it, or under another name, is never touched.
+    #[test]
+    fn stale_folder_probes_are_swept_only_while_empty() {
+        let (base, _mods, archive) = probe_dirs("sweepdir");
+        let empty = archive.join(".silo-symlink-probe-dir-1-0");
+        let full = archive.join(".silo-symlink-probe-dir-1-1");
+        let category = archive.join("Tools");
+        for d in [&empty, &full, &category] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(full.join("keep.txt"), b"x").unwrap();
+        sweep_link_probes(&archive, std::time::Duration::ZERO);
+        assert!(!empty.exists());
+        assert!(full.join("keep.txt").exists());
+        assert!(category.exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 
