@@ -64,6 +64,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - When applying a shared mod set, a download that failed because the catalog didn't answer is
   now shown as failed, with the reason, and counted. It used to say the site doesn't allow direct
   downloads. (#350)
+- The **multiplayer check** no longer says "You match" for a mod Silo couldn't fingerprint, such as
+  an unpacked folder on both sides or a zip that couldn't be read. Those mods now show under
+  **Silo can't check these**, and file sizes are compared too. Saving a check file names any zip
+  Silo couldn't read. Check files from earlier versions still open. (#355)
+- A multiplayer check that was still running when you chose another file no longer shows its
+  result under the new file. (#355)
+- Closing the Share dialog while a link was being made, then sharing another set, no longer shows
+  the first set's link under the second. (#355)
+- Sharing a link now names the mods Silo couldn't fingerprint. Before, they went on the link
+  without one and you weren't told. (#355)
+- Sharing a set as a public GitHub repository, or updating one, no longer fails because its README
+  couldn't be written (the link works without it, and Silo says so). If saving the list itself
+  fails, the error names the new repository and trying again carries on there instead of saying the
+  name is taken. **Update link** also names any mods it couldn't fingerprint. (#355)
+- **Your shared links** shows an error when Silo can't reach GitHub, instead of "Nothing shared
+  yet", and says so when it could read only part of the list. (#355)
 - Saving a mod's settings or a game settings form changes only the values you edited. Before,
   every other value in the file was rewritten too, so a line break or tab stored in one turned
   into a space, and a value Silo couldn't read was saved empty. (#354)

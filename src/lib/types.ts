@@ -428,8 +428,17 @@ export interface MpModRef {
 export interface MpManifestEntry {
   techName: string;
   version: string | null;
+  /** "" when Silo has no fingerprint for it (an unpacked folder, or a zip it couldn't read). */
   hash: string;
   size: number;
+}
+/** A mod Silo couldn't compare, because a copy of it has no fingerprint. */
+export interface MpUnverifiable {
+  techName: string;
+  /** The server's check file has no fingerprint for it. */
+  server: boolean;
+  /** Silo couldn't fingerprint your copy (an unpacked folder, or an unreadable zip). */
+  yours: boolean;
 }
 export interface MpMismatch {
   techName: string;
@@ -441,7 +450,15 @@ export interface MpVerifyReport {
   missing: MpManifestEntry[];
   versionMismatch: MpMismatch[];
   hashMismatch: MpMismatch[];
+  /** Same version, but a copy has no fingerprint: never counted as a match. */
+  unverifiable: MpUnverifiable[];
   extra: string[];
+}
+/** A saved Multiplayer check file. */
+export interface MpExportResult {
+  count: number;
+  /** Packaged mods whose zip Silo couldn't read: listed without a fingerprint. */
+  unreadable: string[];
 }
 
 // ── Collections ──
@@ -452,6 +469,10 @@ export interface CollectionExportResult {
   count: number;
   /** Dev/unpacked (directory) mods left out — no stable bytes to pin. */
   omitted: string[];
+  /** Packaged mods listed without the curator's fingerprint (their zip couldn't be read). */
+  unpinned: string[];
+  /** The link works, but something around it didn't (e.g. the README couldn't be written). */
+  warning: string | null;
 }
 export interface ImportPlanRow {
   techName: string;

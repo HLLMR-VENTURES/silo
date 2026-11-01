@@ -38,7 +38,15 @@
   let busy = $state(false);
   let error = $state("");
   let note = $state("");
+  /** Something the last save couldn't do fully (mods it couldn't fingerprint). */
+  let warn = $state("");
   let result = $state<CollectionExportResult | null>(null);
+  /**
+   * Bumped each time the dialog opens. The dialog is reused, so a link or file still being made
+   * when it closed would otherwise show under the next set's Share (#355): results from an older
+   * session are dropped.
+   */
+  let session = 0;
 
   const OPTIONS: ChoiceOption<How>[] = [
     {
@@ -68,31 +76,44 @@
   });
   const folders = $derived(refs.have.filter((r) => r.kind !== "zip").length);
   const count = (n: number) => `${formatCount(n)} ${plural(n, { one: "mod", other: "mods" })}`;
+  const titleOf = $derived(new Map(library.map((m) => [m.techName, m.title ?? m.techName])));
+  /** Every one of these mods by name: the curator needs each to fix it. */
+  const names = (techs: string[]) => techs.map((t) => titleOf.get(t) ?? t).join(", ");
 
   // Each time it opens: start from the top, name the link after the set, check GitHub.
   $effect(() => {
     if (!open) return;
+    session++;
     how = "link";
     linkName = name;
     error = "";
     note = "";
+    warn = "";
     result = null;
     canGist = null;
+    const my = session;
     ghStatus()
-      .then((s) => (canGist = s.canGist))
-      .catch(() => (canGist = false));
+      .then((s) => {
+        if (my === session) canGist = s.canGist;
+      })
+      .catch(() => {
+        if (my === session) canGist = false;
+      });
   });
 
   async function createLink() {
     if (!linkName.trim() || busy) return;
+    const my = session;
     busy = true;
     error = "";
     const op = start("Creating a share link");
     try {
-      result = await collectionExport(linkName.trim(), null, false, refs.have);
-      onShared?.();
+      const r = await collectionExport(linkName.trim(), null, false, refs.have);
+      onShared?.(); // a link exists either way, so the list of links refreshes
+      if (my === session) result = r;
     } catch (e) {
-      error = inlineError(e, "Creating the share link");
+      const msg = inlineError(e, "Creating the share link");
+      if (my === session) error = msg;
     } finally {
       busy = false;
       op.end();
@@ -110,26 +131,43 @@
   }
 
   async function saveSetFile() {
+    if (busy) return;
+    const my = session;
+    const n = mods.length;
     busy = true;
     error = "";
+    // A note and its warning belong to one save: never leave one without the other.
+    note = "";
+    warn = "";
     try {
-      if (await exportSetFile(name, mods)) note = `Saved ${count(mods.length)} to a .silo file.`;
+      const saved = await exportSetFile(name, mods);
+      if (saved && my === session) note = `Saved ${count(n)} to a .silo file.`;
     } catch (e) {
-      error = inlineError(e, "Saving the .silo file");
+      const msg = inlineError(e, "Saving the .silo file");
+      if (my === session) error = msg;
     } finally {
       busy = false;
     }
   }
 
   async function saveCheckFile() {
+    if (busy) return;
+    const my = session;
     busy = true;
     error = "";
+    note = "";
+    warn = "";
     const op = start("Fingerprinting your mods");
     try {
-      const n = await mpExport(refs.have, name);
-      if (n != null) note = `Saved a multiplayer check file for ${count(n)}. Send it to the friends joining your server.`;
+      const r = await mpExport(refs.have, name);
+      if (r != null && my === session) {
+        note = `Saved a multiplayer check file for ${count(r.count)}. Send it to the friends joining your server.`;
+        if (r.unreadable.length > 0)
+          warn = `Silo couldn't read ${count(r.unreadable.length)} (${names(r.unreadable)}), so the file has no fingerprint for ${r.unreadable.length === 1 ? "it" : "them"} and friends' check will say Silo can't check ${r.unreadable.length === 1 ? "it" : "them"}. Make sure the ${r.unreadable.length === 1 ? "file is" : "files are"} on this computer and not open elsewhere, then save again.`;
+      }
     } catch (e) {
-      error = inlineError(e, "Saving the multiplayer check file");
+      const msg = inlineError(e, "Saving the multiplayer check file");
+      if (my === session) error = msg;
     } finally {
       busy = false;
       op.end();
@@ -161,6 +199,14 @@
             out: Silo can only share mods packed as .zip files.
           </p>
         {/if}
+        {#if result.unpinned.length > 0}
+          <p class="warn">
+            Silo couldn't read {count(result.unpinned.length)} ({names(result.unpinned)}), so the link lists
+            {result.unpinned.length === 1 ? "it" : "them"} without a fingerprint. Friends can still get
+            {result.unpinned.length === 1 ? "it" : "them"}, but Silo can't confirm they got the same file.
+          </p>
+        {/if}
+        {#if result.warning}<p class="warn">{result.warning}</p>{/if}
       {:else if canGist === null}
         <p class="note">Checking your GitHub connection…</p>
       {:else if !canGist}
@@ -200,7 +246,7 @@
       >
       {#if folders > 0}
         <p class="note">
-          {count(folders)} in unpacked folders can't be fingerprinted, so friends will see {folders === 1 ? "it" : "them"} as not matching.
+          {count(folders)} in unpacked folders can't be fingerprinted, so friends' check will say Silo can't check {folders === 1 ? "it" : "them"}.
         </p>
       {/if}
     {/if}
@@ -211,6 +257,7 @@
       </p>
     {/if}
     {#if note}<p class="ok">{note}</p>{/if}
+    {#if warn}<p class="warn">{warn}</p>{/if}
     {#if error}<p class="err" role="status">{error}</p>{/if}
   </div>
 
@@ -263,6 +310,12 @@
     margin: 0;
     font-size: var(--fs-sm);
     color: var(--primary-text);
+  }
+  .warn {
+    margin: 0;
+    font-size: var(--fs-sm);
+    color: var(--warn-text);
+    line-height: 1.5;
   }
   .err {
     margin: 0;

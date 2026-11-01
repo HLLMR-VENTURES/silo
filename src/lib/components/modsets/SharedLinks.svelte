@@ -28,6 +28,10 @@
   let links = $state<CollectionSummary[]>([]);
   let loading = $state(false);
   let error = $state("");
+  /** Only part of the list could be read (gists or repos failed). */
+  let warning = $state("");
+  /** What the last Update link couldn't do fully (mods without a fingerprint, the README). */
+  let updateWarn = $state("");
   let busyRef = $state<string | null>(null);
 
   const zips = $derived(active.filter((m) => m.kind === "zip").length);
@@ -44,8 +48,11 @@
     loading = true;
     error = "";
     try {
-      links = await collectionsList();
+      const list = await collectionsList();
+      links = list.items;
+      warning = list.warning ?? "";
     } catch (e) {
+      warning = "";
       error = inlineError(e, "Loading your shared links");
     } finally {
       loading = false;
@@ -85,9 +92,18 @@
       return;
     busyRef = c.reference;
     error = "";
+    updateWarn = "";
     try {
       const r = await collectionUpdate(c.reference, active);
       toast({ message: `Updated the link for ${c.name} to ${count(r.count)}.` });
+      // Kept on the page (not just in the toast), naming the mods, so they can be fixed (#355).
+      const notes: string[] = [];
+      if (r.unpinned.length)
+        notes.push(
+          `Silo couldn't read ${count(r.unpinned.length)} (${r.unpinned.join(", ")}), so the link for ${c.name} lists ${r.unpinned.length === 1 ? "it" : "them"} without a fingerprint.`,
+        );
+      if (r.warning) notes.push(r.warning);
+      updateWarn = notes.join(" ");
       await load();
     } catch (e) {
       error = inlineError(e, "Updating the link");
@@ -132,9 +148,11 @@
       <p class="muted">Loading your shared links…</p>
     {:else if error}
       <p class="err" role="status">{error}</p>
-    {:else if links.length === 0}
+    {:else if links.length === 0 && !warning}
       <p class="muted">Nothing shared yet. Use Share on a set to create a link.</p>
     {/if}
+    {#if !error && warning}<p class="warn" role="status">{warning}</p>{/if}
+    {#if updateWarn}<p class="warn">{updateWarn}</p>{/if}
     {#each links as c (c.reference)}
       <div class="row">
         <div class="info">
@@ -193,6 +211,11 @@
     margin: 0;
     font-size: var(--fs-xs);
     color: var(--text-muted);
+  }
+  .warn {
+    margin: 0;
+    font-size: var(--fs-sm);
+    color: var(--warn-text);
   }
   .err {
     margin: 0;
