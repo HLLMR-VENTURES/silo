@@ -526,8 +526,23 @@ fn launch_profile(dir: &Path) -> Result<(), String> {
     started
 }
 
+/// The detected install, or, in a debug build only, with its exe replaced by
+/// `SILO_DEBUG_FS25_EXE` (a path that won't start forces the Steam fallback, so a tester can
+/// check it end to end). Release builds ignore the variable.
+fn with_debug_exe(info: Option<GameInfo>, over: Option<String>, debug: bool) -> Option<GameInfo> {
+    match (info, over.filter(|s| debug && !s.trim().is_empty())) {
+        (Some(i), Some(exe)) => Some(GameInfo { exe, ..i }),
+        (info, _) => info,
+    }
+}
+
 fn launch_profile_now(dir: &Path) -> Result<(), String> {
-    match profile_launch_plan(detect().as_ref(), dir) {
+    let info = with_debug_exe(
+        detect(),
+        std::env::var("SILO_DEBUG_FS25_EXE").ok(),
+        cfg!(debug_assertions),
+    );
+    match profile_launch_plan(info.as_ref(), dir) {
         LaunchPlan::Exe { program, args, cwd } => match spawn_exe(&program, &args, &cwd) {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -714,6 +729,28 @@ mod tests {
             install_dir: install.into(),
             store: Store::Steam,
         }
+    }
+
+    #[test]
+    fn the_debug_exe_override_applies_in_debug_builds_only() {
+        let real = steam_game(r"E:\FS25\FarmingSimulator2025.exe", r"E:\FS25");
+        let over = || Some(r"E:\nowhere\missing.exe".to_string());
+        let forced = with_debug_exe(Some(real.clone()), over(), true).unwrap();
+        assert_eq!(forced.exe, r"E:\nowhere\missing.exe");
+        assert_eq!(forced.install_dir, real.install_dir);
+        let exe = |i: Option<GameInfo>| i.map(|i| i.exe);
+        assert_eq!(
+            exe(with_debug_exe(Some(real.clone()), over(), false)),
+            Some(real.exe.clone())
+        );
+        assert_eq!(
+            exe(with_debug_exe(Some(real.clone()), Some(" ".into()), true)),
+            Some(real.exe.clone())
+        );
+        assert!(
+            with_debug_exe(None, over(), true).is_none(),
+            "no install, nothing to change"
+        );
     }
 
     #[test]
