@@ -35,6 +35,7 @@ pub mod provenance;
 pub mod relocate;
 pub mod savegame;
 pub mod scan;
+mod scratch;
 pub mod secrets;
 pub mod settings_form;
 pub mod siloapi;
@@ -967,7 +968,10 @@ async fn download_update(
         // A finished download waits out a busy spell instead of being thrown away.
         let _write = library_write_within(PLACE_WAIT)?;
         let layout = update_recheck(&dest)?;
-        let mut policy = organize::LinkPolicy::new(&layout);
+        // A relink temp the swap makes is recorded, so one a crash leaves can be swept (#394).
+        let journal_conn = db::open(&db)?;
+        let journal = scratch::DbJournal(&journal_conn);
+        let mut policy = organize::LinkPolicy::new(&layout).with_journal(&journal);
         // Finish an earlier, interrupted update first (the user asked: every step is retried),
         // so it doesn't block this one; if it can't be finished, say exactly why.
         let mut dirs = update::layout_dirs(&layout);
@@ -4623,6 +4627,7 @@ fn with_move_ctx(
             game_check_interval: std::time::Duration::from_secs(2),
             request: relocate::requests(),
             progress: &mut progress,
+            free_space: &|p| organize::mount_of(p).map(|(_, free)| free),
         };
         let out = f(&mut ctx, &layout);
         let _ = compute_mods_root_status(&conn);

@@ -24,18 +24,57 @@ pub(crate) fn make_link(
                 // Copying into a folder that's already there would merge into it.
                 return Err(std::io::ErrorKind::AlreadyExists.into());
             }
+            check_room(policy.room, src, link)?;
             return copy_dir_projection(src, link);
         }
-        link_dir_or_copy(src, link, link_dir_native)
+        let room = policy.room;
+        link_dir_or(src, link, link_dir_native, |s, l| {
+            check_room(room, s, l)?;
+            copy_dir_projection(s, l)
+        })
     } else {
-        link_zip(
+        let room = policy.room;
+        link_zip_or(
             src,
             link,
             || policy.allow_symlink(),
             |s, l| std::fs::hard_link(s, l),
             symlink_file,
+            |s, l| {
+                check_room(room, s, l)?;
+                copy_new(s, l)
+            },
         )
     }
+}
+
+/// Asked right before a projection falls back to a full copy of `src` at `entry`: `Err` stops
+/// the copy before it starts (an archive move pauses when the drive is short of room, see
+/// [`NoRoom`]).
+pub(crate) type RoomCheck<'a> = &'a dyn Fn(&Path, &Path) -> std::io::Result<()>;
+
+fn check_room(room: Option<RoomCheck>, src: &Path, entry: &Path) -> std::io::Result<()> {
+    room.map_or(Ok(()), |r| r(src, entry))
+}
+
+/// The error a [`RoomCheck`] returns when a copy won't fit: the plain-words reason. Carried
+/// inside an `io::Error` (find it with [`no_room`]).
+#[derive(Debug)]
+pub(crate) struct NoRoom(pub String);
+
+impl std::fmt::Display for NoRoom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NoRoom {}
+
+/// The [`NoRoom`] reason inside `e`, if that's what stopped it.
+pub(crate) fn no_room(e: &std::io::Error) -> Option<&str> {
+    e.get_ref()
+        .and_then(|i| i.downcast_ref::<NoRoom>())
+        .map(|n| n.0.as_str())
 }
 
 /// Whether a zip projection may fall back to a symlink — decided lazily, at most once per
@@ -48,6 +87,11 @@ pub(crate) struct LinkPolicy<'a> {
     cross_volume: Option<bool>,
     /// A probe hardlink from the mods folder into the archive worked (`hardlink_known`).
     hardlinks: Option<bool>,
+    /// Where the relinks made under this policy record their temps (`scratch`). Without one a
+    /// temp a crash leaves behind is never recorded, so it's never removed either.
+    journal: Option<&'a dyn crate::scratch::Journal>,
+    /// Asked before a projection falls back to a full copy (`RoomCheck`).
+    room: Option<RoomCheck<'a>>,
 }
 
 impl<'a> LinkPolicy<'a> {
@@ -57,7 +101,26 @@ impl<'a> LinkPolicy<'a> {
             cached: None,
             cross_volume: None,
             hardlinks: None,
+            journal: None,
+            room: None,
         }
+    }
+
+    /// Record relink temps in `journal`.
+    pub(crate) fn with_journal(mut self, journal: &'a dyn crate::scratch::Journal) -> Self {
+        self.journal = Some(journal);
+        self
+    }
+
+    /// Ask `room` before any full copy.
+    pub(crate) fn with_room_check(mut self, room: RoomCheck<'a>) -> Self {
+        self.room = Some(room);
+        self
+    }
+
+    /// The journal relink temps are recorded in, if any.
+    pub(crate) fn journal(&self) -> Option<&'a dyn crate::scratch::Journal> {
+        self.journal
     }
 
     /// A policy that decided the archive is on another drive with no symlinks (copies only).
@@ -80,6 +143,8 @@ impl<'a> LinkPolicy<'a> {
             cached: Some(symlinks),
             cross_volume: Some(cross_volume),
             hardlinks: Some(hardlinks),
+            journal: None,
+            room: None,
         }
     }
 
@@ -172,12 +237,25 @@ pub(crate) fn symlink_file(src: &Path, link: &Path) -> std::io::Result<()> {
 /// a new file. Never dangles: a missing `src` (the hardlink's `NotFound`, or no file there
 /// before a symlink) is an error, since a symlink to nothing would still be created. The
 /// strategies are injected so the order is unit-testable.
+#[cfg(test)]
 pub(super) fn link_zip(
     src: &Path,
     link: &Path,
     allow_symlink: impl FnOnce() -> bool,
     hard: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
     soft: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    link_zip_or(src, link, allow_symlink, hard, soft, copy_new)
+}
+
+/// [`link_zip`] with the final copy injected (`make_link` checks for room first).
+pub(super) fn link_zip_or(
+    src: &Path,
+    link: &Path,
+    allow_symlink: impl FnOnce() -> bool,
+    hard: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    soft: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    copy: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     use std::io::ErrorKind::{AlreadyExists, NotFound};
     match hard(src, link) {
@@ -204,20 +282,31 @@ pub(super) fn link_zip(
             Err(_) => {}
         }
     }
-    copy_new(src, link)
+    copy(src, link)
 }
 
 /// Dir projection: `symlink` (a symlink or junction, see [`link_dir_native`]), or a marked copy
 /// when the filesystem refuses links (exFAT/FAT drives, a network archive). Never falls back
 /// when `link` already exists — copying into a folder that's already there would merge into it
 /// and stamp it as ours.
+#[cfg(test)]
 pub(super) fn link_dir_or_copy(
     src: &Path,
     link: &Path,
     symlink: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
+    link_dir_or(src, link, symlink, copy_dir_projection)
+}
+
+/// [`link_dir_or_copy`] with the fallback copy injected (`make_link` checks for room first).
+pub(super) fn link_dir_or(
+    src: &Path,
+    link: &Path,
+    symlink: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    copy: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     match symlink(src, link) {
-        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => copy_dir_projection(src, link),
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => copy(src, link),
         Ok(()) => {
             crate::fslog::moved("link", src, link);
             Ok(())
