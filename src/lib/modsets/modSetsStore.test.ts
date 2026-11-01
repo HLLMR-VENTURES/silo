@@ -40,18 +40,20 @@ function setup(active: string[] = ["A", "B"], library = ["A", "B", "C", "D"]) {
   const editRefused = vi.fn(() => false);
   const activeUndoBlocked = vi.fn((_expected: string[]) => null as string | null);
   const park = vi.fn();
+  const settle = vi.fn(async () => true);
   const store = createModSets({
     active: () => current,
     library: () => new Set(library),
     title: (t) => `Mod ${t}`,
     setActiveSetTo,
+    settle,
     undo: undo as never,
     editRefused,
     refuse,
     activeUndoBlocked,
     park,
   });
-  return { store, setActiveSetTo, undo, refuse, editRefused, activeUndoBlocked, park, active: () => current };
+  return { store, setActiveSetTo, settle, undo, refuse, editRefused, activeUndoBlocked, park, active: () => current };
 }
 
 beforeEach(() => {
@@ -118,6 +120,63 @@ describe("switchTo", () => {
     await t.store.load();
     t.setActiveSetTo.mockResolvedValueOnce(null);
     await t.store.switchTo(forestry);
+    expect(saveAutoSnapshot).not.toHaveBeenCalled();
+    expect(t.undo.offer).not.toHaveBeenCalled();
+  });
+
+  it("a switch that failed with nothing changed isn't recorded: no snapshot, not remembered, no Undo (#347)", async () => {
+    const t = setup();
+    await t.store.load();
+    // App's switch threw (the archive drive was unplugged, say), reported it and rescanned: the
+    // mods folder still holds the old set, so it says nothing changed.
+    t.setActiveSetTo.mockResolvedValueOnce(null);
+    await t.store.switchTo(forestry);
+    expect(saveAutoSnapshot).not.toHaveBeenCalled();
+    expect(t.undo.offer).not.toHaveBeenCalled();
+    expect(t.store.lastApplied).toBeNull();
+    expect(t.store.state).toMatchObject({ kind: "set", name: "Harvest 2026" });
+  });
+
+  it("a switch that changed some mods but finished with problems is recorded with a warning", async () => {
+    const t = setup();
+    await t.store.load();
+    t.setActiveSetTo.mockResolvedValueOnce(false);
+    await t.store.switchTo(forestry);
+    expect(saveAutoSnapshot).toHaveBeenCalledWith("Before Forestry weekend", ["A", "B"]);
+    expect(t.undo.offer).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "Switch to Forestry weekend finished with problems.", tone: "warn" }),
+    );
+  });
+
+  it("Undo expects what the switch left, not a change a scan brought in while the snapshot saved (#347)", async () => {
+    const t = setup();
+    await t.store.load();
+    vi.mocked(saveAutoSnapshot).mockImplementationOnce(async () => {
+      (t.active() as Set<string>).add("X"); // turned on outside Silo; a scan landed meanwhile
+      return 60;
+    });
+    await t.store.switchTo(forestry);
+    expect(t.undo.offer).toHaveBeenCalledWith(expect.objectContaining({ expected: ["C", "D", "Z"] }));
+  });
+
+  it("waits for a running scan before it reads the active mods, and asks nothing when it still runs (#347)", async () => {
+    const t = setup();
+    await t.store.load();
+    t.settle.mockResolvedValueOnce(false);
+    await t.store.switchTo(forestry);
+    expect(ask).not.toHaveBeenCalled();
+    expect(t.setActiveSetTo).not.toHaveBeenCalled();
+    expect(saveAutoSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("waits again after the confirmation, before it keeps the mods for the snapshot (#347)", async () => {
+    const t = setup();
+    await t.store.load();
+    // A scan started while the dialog was open, and still runs.
+    t.settle.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    await t.store.switchTo(forestry);
+    expect(ask).toHaveBeenCalled();
+    expect(t.setActiveSetTo).not.toHaveBeenCalled();
     expect(saveAutoSnapshot).not.toHaveBeenCalled();
     expect(t.undo.offer).not.toHaveBeenCalled();
   });
@@ -290,6 +349,40 @@ describe("useSave", () => {
     expect(t.setActiveSetTo).not.toHaveBeenCalled();
   });
 
+  it("a switch that failed with nothing changed saves no set named after the save (#347)", async () => {
+    const t = setup();
+    await t.store.load();
+    t.setActiveSetTo.mockResolvedValueOnce(null);
+    await t.store.useSave(save);
+    expect(saveLoadout).not.toHaveBeenCalled();
+    expect(saveAutoSnapshot).not.toHaveBeenCalled();
+    expect(t.undo.offer).not.toHaveBeenCalled();
+    expect(t.store.lastApplied).toBeNull();
+  });
+
+  it("reads the library after a running scan, so a mod it finds counts (#347)", async () => {
+    const library = ["A", "B", "C"];
+    const t = setup(["A", "B"], library);
+    await t.store.load();
+    // The scan running when the user clicked finds Q.
+    t.settle.mockImplementationOnce(async () => {
+      library.push("Q");
+      return true;
+    });
+    await t.store.useSave(save);
+    expect(t.setActiveSetTo).toHaveBeenCalledWith(["C", "Q"], "Switching to Riverbend");
+    expect(saveLoadout).toHaveBeenCalledWith(null, "Riverbend", ["C", "Q"]);
+  });
+
+  it("asks nothing while a scan still runs (#347)", async () => {
+    const t = setup();
+    await t.store.load();
+    t.settle.mockResolvedValueOnce(false);
+    await t.store.useSave(save);
+    expect(ask).not.toHaveBeenCalled();
+    expect(t.setActiveSetTo).not.toHaveBeenCalled();
+  });
+
   it("says so when none of the save's mods are in the library", async () => {
     const t = setup(["A"], ["A"]);
     await t.store.useSave(save);
@@ -355,6 +448,27 @@ describe("applyMembership (the Library's Mod sets… dialog, #323)", () => {
     expect(toast).not.toHaveBeenCalled();
   });
 
+  it("saves nothing while a scan still runs (#347)", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    t.settle.mockResolvedValueOnce(false);
+    expect(await t.store.applyMembership(["B"], editsFor(t, ["B"], [[1, "none"]]))).toBe(false);
+    expect(t.setActiveSetTo).not.toHaveBeenCalled();
+    expect(replaceLoadoutMods).not.toHaveBeenCalled();
+  });
+
+  it("saves nothing when a library change started while it waited for the scan (#347)", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    t.settle.mockImplementationOnce(async () => {
+      t.editRefused.mockReturnValue(true);
+      return true;
+    });
+    expect(await t.store.applyMembership(["A"], editsFor(t, ["A"], [[2, "all"]]))).toBe(false);
+    expect(t.setActiveSetTo).not.toHaveBeenCalled();
+    expect(replaceLoadoutMods).not.toHaveBeenCalled();
+  });
+
   it("saves nothing while a library change runs", async () => {
     const t = setup(["A", "B"]);
     await t.store.load();
@@ -408,6 +522,56 @@ describe("applyMembership (the Library's Mod sets… dialog, #323)", () => {
       ["A", "B"],
       ["C", "D", "Z"],
     ]);
+  });
+
+  it("Undo waits for a running scan before its check, and comes back when the scan still runs (#347)", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    await t.store.applyMembership(["B"], editsFor(t, ["B"], [[1, "none"]]));
+    const opts = lastToast();
+    vi.mocked(toast).mockClear();
+    vi.mocked(replaceLoadoutMods).mockClear();
+    t.setActiveSetTo.mockClear();
+    t.settle.mockResolvedValueOnce(false);
+    await opts.action!.run();
+    expect(t.activeUndoBlocked).not.toHaveBeenCalled();
+    expect(t.setActiveSetTo).not.toHaveBeenCalled();
+    expect(replaceLoadoutMods).not.toHaveBeenCalled();
+    // The same Undo again, to try once the scan is done.
+    expect(lastToast()).toMatchObject({ message: opts.message, action: { label: "Undo" } });
+    await lastToast().action!.run();
+    expect(t.setActiveSetTo).toHaveBeenLastCalledWith(["A", "B"], "Switching back");
+  });
+
+  it("Undo expects what the switch left, not a change a scan brought in while the sets saved (#347)", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    vi.mocked(replaceLoadoutMods).mockImplementationOnce(async (edits) => {
+      for (const e of edits) db.find((l) => l.id === e.id)!.mods = [...e.mods];
+      (t.active() as Set<string>).add("X");
+    });
+    await t.store.applyMembership(["B"], editsFor(t, ["B"], [[1, "none"]]));
+    await lastToast().action!.run();
+    expect(t.activeUndoBlocked).toHaveBeenCalledWith(["A"]);
+  });
+
+  it("Undo checks the sets after waiting for a scan, so a set saved meanwhile stops it (#347)", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    await t.store.applyMembership(["B"], editsFor(t, ["B"], [[1, "none"]]));
+    const undo = lastToast().action!;
+    t.setActiveSetTo.mockClear();
+    vi.mocked(replaceLoadoutMods).mockClear();
+    // While Undo waits for the scan, Harvest is saved again (Update from current mods).
+    t.settle.mockImplementationOnce(async () => {
+      db[0].mods = ["A", "Q"];
+      await t.store.load();
+      return true;
+    });
+    await undo.run();
+    expect(lastToast()).toMatchObject({ message: "Can't undo: Harvest 2026 changed since.", tone: "warn" });
+    expect(t.setActiveSetTo).not.toHaveBeenCalled();
+    expect(replaceLoadoutMods).not.toHaveBeenCalled();
   });
 
   it("Undo refuses once a set changed since", async () => {
