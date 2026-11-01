@@ -4761,9 +4761,13 @@ async fn scan_log() -> Result<logscan::LogReport, error::AppError> {
             ));
         }
         // Logs are read as lossy UTF-8; FS writes mostly ASCII but paths can carry stray bytes.
-        let bytes = std::fs::read(&path)?;
-        let text = String::from_utf8_lossy(&bytes);
-        Ok(logscan::parse(&text))
+        // A runaway log is read as its start and end only, so it can't exhaust memory (#351).
+        let file = std::fs::File::open(&path)?;
+        Ok(logscan::scan(
+            file,
+            logscan::LOG_HEAD_BYTES,
+            logscan::LOG_TAIL_BYTES,
+        )?)
     })
     .await
     .map_err(|e| error::AppError::from(e.to_string()))?

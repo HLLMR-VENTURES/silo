@@ -382,7 +382,8 @@ export interface LogModHealth {
   warnings: number;
   benign: number;
   sample: string;
-  sampleLine: number;
+  /** The sample's line in log.txt; null for a line from the end of a log too big to read whole (#351). */
+  sampleLine: number | null;
 }
 
 /** `log_status`: where log.txt is, when it changed, whether FS25 runs, and what Silo last saw. */
@@ -411,6 +412,8 @@ export interface LogReport {
   fillTypeCap: number | null;
   /** The fill types it skipped because of that limit. */
   droppedFillTypes: string[];
+  /** The log was too big to read whole: only its start and its end were read (#351). */
+  truncated: boolean;
 }
 
 // ── Multiplayer mod-set sync ──
