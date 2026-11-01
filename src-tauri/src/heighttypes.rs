@@ -148,6 +148,142 @@ pub(crate) fn push_new(
     }
 }
 
+/// A mod's map-specific estimate lists: (the [`match_key`] of their `mod_support/<dir>/` folder,
+/// their names). They count only where that folder's map is the one loading (#385).
+pub type Scoped = Vec<(String, Vec<String>)>;
+
+/// The form Silo compares a `mod_support/<dir>/` folder with a map's tech name or title in:
+/// lower-case ASCII letters and digits only, without a leading `fs25` (what's left of an `FS25_`
+/// prefix). So `FS25_The_Mechet`, `The Mechet` and `the-mechet` all match. Empty when nothing is
+/// left. Pure.
+pub fn match_key(name: &str) -> String {
+    let key: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    match key.strip_prefix("fs25") {
+        Some(rest) if !rest.is_empty() => rest.to_string(),
+        _ => key,
+    }
+}
+
+/// The match keys of a map: its tech name's and its title's [`match_key`], non-empty and
+/// distinct. Pure.
+pub fn map_keys(tech_name: &str, title: &str) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for k in [match_key(tech_name), match_key(title)] {
+        if !k.is_empty() && !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    keys
+}
+
+/// The [`match_key`] of the folder a member sits in under a `mod_support/` directory, as in
+/// `mod_support/FS25_HofBergmann/v1.4/fillTypes.xml`: mods like Realistic Livestock ship one
+/// such folder per map they support and load it only when that map does. `None` for any other
+/// member, and when the folder's key is empty (it can't name a map, so its lists count as usual).
+/// Pure.
+pub fn support_key(member: &str) -> Option<String> {
+    let parts: Vec<&str> = member.split(['/', '\\']).collect();
+    let at = parts
+        .iter()
+        .position(|p| p.eq_ignore_ascii_case("mod_support"))?;
+    // The folder, and something inside it: a file directly in mod_support/ has no map.
+    if parts.len() < at + 3 {
+        return None;
+    }
+    Some(match_key(parts[at + 1])).filter(|k| !k.is_empty())
+}
+
+/// Read a mod's script-loaded lists for its estimate: every candidate but the declared file,
+/// capped as [`MAX_LIST_FILES`] and [`MAX_LIST_NAMES`] say. Lists under `mod_support/<dir>/` (see
+/// [`support_key`]) go to the map-specific part, the rest to the plain estimate. Neither repeats
+/// an exact name. Pure.
+pub(crate) fn read_estimates(
+    exact: &[String],
+    declared: Option<&str>,
+    candidates: Vec<String>,
+    read: &dyn Fn(&str) -> Option<Vec<u8>>,
+    parse: fn(&[u8]) -> Vec<String>,
+) -> (Vec<String>, Scoped) {
+    let mut estimate: Vec<String> = Vec::new();
+    let mut scoped: Scoped = Vec::new();
+    // Seeded with the exact names, so an estimate never repeats one.
+    let mut seen: HashSet<String> = exact.iter().cloned().collect();
+    let mut scoped_seen: Vec<HashSet<String>> = Vec::new();
+    let mut scoped_count = 0usize;
+    for m in candidates.into_iter().take(MAX_LIST_FILES) {
+        if seen.len() + scoped_count >= MAX_LIST_NAMES {
+            break;
+        }
+        if Some(m.as_str()) == declared {
+            continue;
+        }
+        let names = read(&m).map(|b| parse(&b)).unwrap_or_default();
+        let Some(key) = support_key(&m) else {
+            push_new(&mut estimate, &mut seen, names);
+            continue;
+        };
+        let i = match scoped.iter().position(|(k, _)| *k == key) {
+            Some(i) => i,
+            None => {
+                scoped.push((key, Vec::new()));
+                scoped_seen.push(exact.iter().cloned().collect());
+                scoped.len() - 1
+            }
+        };
+        let before = scoped[i].1.len();
+        push_new(&mut scoped[i].1, &mut scoped_seen[i], names);
+        scoped_count += scoped[i].1.len() - before;
+    }
+    scoped.retain(|(_, names)| !names.is_empty());
+    (estimate, scoped)
+}
+
+/// Move the map-specific lists whose folder matches one of `keys` into the plain estimate,
+/// skipping names already counted. Pure.
+pub(crate) fn absorb_scoped(
+    exact: &[String],
+    estimate: &mut Vec<String>,
+    scoped: &mut Scoped,
+    keys: &[String],
+) {
+    if !scoped.iter().any(|(k, _)| keys.contains(k)) {
+        return;
+    }
+    let mut seen: HashSet<String> = exact.iter().chain(estimate.iter()).cloned().collect();
+    let (hit, keep): (Scoped, Scoped) = std::mem::take(scoped)
+        .into_iter()
+        .partition(|(k, _)| keys.contains(k));
+    *scoped = keep;
+    for (_, names) in hit {
+        push_new(estimate, &mut seen, names);
+    }
+}
+
+/// `mods` as they load with a map: each one's lists for that map's `keys` counted as estimates.
+/// Borrowed as they are when none applies.
+pub(crate) fn for_map<'a, T: Clone>(
+    mods: &'a [T],
+    keys: &[String],
+    absorb: fn(&mut T, &[String]),
+    scoped: fn(&T) -> &Scoped,
+) -> std::borrow::Cow<'a, [T]> {
+    if !mods
+        .iter()
+        .any(|m| scoped(m).iter().any(|(k, _)| keys.contains(k)))
+    {
+        return std::borrow::Cow::Borrowed(mods);
+    }
+    let mut out = mods.to_vec();
+    for m in &mut out {
+        absorb(m, keys);
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// The `name_attr` values of `<root><list><item>` entries, upper-cased and de-duplicated, and the
 /// list element's `numChannels`. `None` when the XML isn't a complete, well-formed document or
 /// an element on the way has a malformed attribute: the game can't load such a file. Also `None`
@@ -423,11 +559,19 @@ pub struct ModTypes {
     pub exact: Vec<String>,
     /// Found in other `*heightType*.xml` files the mod ships: a script may load them.
     pub estimate: Vec<String>,
+    /// Lists under `mod_support/<dir>/`: estimates only on the map `<dir>` names (#385).
+    pub scoped: Scoped,
 }
 
 impl ModTypes {
     fn all(&self) -> impl Iterator<Item = &str> {
         self.exact.iter().chain(&self.estimate).map(String::as_str)
+    }
+
+    /// Count the map-specific lists for `keys` (a map's, or the active mods') as estimates from
+    /// now on.
+    pub fn absorb_scoped(&mut self, keys: &[String]) {
+        absorb_scoped(&self.exact, &mut self.estimate, &mut self.scoped, keys);
     }
 
     /// Move declared entries whose fill type Silo can't find to the estimates. The game rejects a
@@ -465,6 +609,8 @@ pub enum MapList {
 #[derive(Debug, Clone)]
 pub struct MapTypes {
     pub label: String,
+    /// The map's [`map_keys`]: which `mod_support/<dir>/` lists load with it.
+    pub keys: Vec<String>,
     pub list: MapList,
     /// What the map's modDesc adds on top, like any mod.
     pub extra: Option<ModTypes>,
@@ -492,7 +638,7 @@ pub fn is_candidate(member: &str) -> bool {
 }
 
 /// Read a mod's height types: the modDesc-declared file exactly, plus (for non-maps) any other
-/// `*heightType*.xml` in it as an estimate. `read` fetches a member's bytes; `candidates` lists the
+/// `*heightType*.xml` in it as an estimate, map-specific under `mod_support/<dir>/`. `read` fetches a member's bytes; `candidates` lists the
 /// members that pass [`is_candidate`].
 pub fn mod_types(
     label: &str,
@@ -506,26 +652,17 @@ pub fn mod_types(
         .and_then(read)
         .map(|b| parse_list(&b).0)
         .unwrap_or_default();
-    let mut estimate: Vec<String> = Vec::new();
-    if !md.is_map && exact.len() < MAX_LIST_NAMES {
-        // Seeded with the exact names, so an estimate never repeats one.
-        let mut seen: HashSet<String> = exact.iter().cloned().collect();
-        for m in candidates().into_iter().take(MAX_LIST_FILES) {
-            if seen.len() >= MAX_LIST_NAMES {
-                break;
-            }
-            if Some(m.as_str()) == declared {
-                continue;
-            }
-            let names = read(&m).map(|b| parse_list(&b).0).unwrap_or_default();
-            push_new(&mut estimate, &mut seen, names);
-        }
-    }
-    (!exact.is_empty() || !estimate.is_empty()).then(|| ModTypes {
+    let (estimate, scoped) = if !md.is_map && exact.len() < MAX_LIST_NAMES {
+        read_estimates(&exact, declared, candidates(), read, |b| parse_list(b).0)
+    } else {
+        Default::default()
+    };
+    (!exact.is_empty() || !estimate.is_empty() || !scoped.is_empty()).then(|| ModTypes {
         label: label.into(),
         tech_name: tech_name.into(),
         exact,
         estimate,
+        scoped,
     })
 }
 
@@ -554,7 +691,8 @@ pub struct Budget {
     pub mods: Vec<(String, String, usize, bool)>,
 }
 
-/// Count one map's slots. Pure.
+/// Count one map's slots. Mods' map-specific lists (`scoped`) don't count here: [`worst`] adds
+/// the ones for each map. Pure.
 pub fn evaluate(game: &GameData, map: Option<&MapTypes>, mods: &[ModTypes]) -> Budget {
     let (base, unsure, channels, cap_unsure) = match map.map(|m| &m.list) {
         None | Some(MapList::Base) => (game.base.clone(), vec![], game.base_channels, false),
@@ -639,11 +777,15 @@ pub(crate) fn severity_rank(s: Option<&str>) -> u8 {
 }
 
 /// The worst budget across the maps the save might use: the base-game maps and each active mod
-/// map (only the savegame's map loads, and Silo doesn't know which that is). Worst means most
-/// serious first, then least room. Pure.
+/// map (only the savegame's map loads, and Silo doesn't know which that is). Mods' lists for a
+/// map count only with that map; the base-game maps match none. Worst means most serious first,
+/// then least room. Pure.
 pub fn worst(game: &GameData, maps: &[MapTypes], mods: &[ModTypes]) -> Budget {
     std::iter::once(evaluate(game, None, mods))
-        .chain(maps.iter().map(|m| evaluate(game, Some(m), mods)))
+        .chain(maps.iter().map(|m| {
+            let on_map = for_map(mods, &m.keys, ModTypes::absorb_scoped, |t| &t.scoped);
+            evaluate(game, Some(m), &on_map)
+        }))
         .max_by_key(|b| (severity_rank(severity(b)), b.total as i64 - b.cap as i64))
         .expect("the base-game maps are always a candidate")
 }
@@ -766,6 +908,7 @@ mod tests {
             tech_name: format!("FS25_{label}"),
             exact,
             estimate,
+            scoped: vec![],
         }
     }
 
@@ -988,6 +1131,7 @@ mod tests {
     fn a_map_with_its_own_list_replaces_the_base_and_sets_the_cap() {
         let map = MapTypes {
             label: "Big Valley".into(),
+            keys: vec![],
             list: MapList::Own {
                 names: many("M", 40),
                 unsure: vec![],
@@ -1009,6 +1153,7 @@ mod tests {
     fn worst_map_wins_and_no_maps_means_the_base_list() {
         let roomy = MapTypes {
             label: "Roomy".into(),
+            keys: vec![],
             list: MapList::Own {
                 names: many("M", 10),
                 unsure: vec![],
@@ -1018,6 +1163,7 @@ mod tests {
         };
         let stock = MapTypes {
             label: "Stock-list map".into(),
+            keys: vec![],
             list: MapList::Base,
             extra: None,
         };
@@ -1035,6 +1181,7 @@ mod tests {
     fn a_roomy_mod_map_does_not_hide_the_base_maps() {
         let roomy = MapTypes {
             label: "Roomy".into(),
+            keys: vec![],
             list: MapList::Own {
                 names: many("M", 40),
                 unsure: vec![],
@@ -1057,6 +1204,7 @@ mod tests {
     fn an_empty_map_list_still_sets_the_channels() {
         let map = MapTypes {
             label: "Wide".into(),
+            keys: vec![],
             list: MapList::Unsure { channels: Some(7) },
             extra: None,
         };
@@ -1078,6 +1226,7 @@ mod tests {
     fn an_unreadable_map_list_is_never_a_problem() {
         let wide = MapTypes {
             label: "Unknown".into(),
+            keys: vec![],
             list: MapList::Unsure { channels: None },
             extra: None,
         };
@@ -1090,6 +1239,7 @@ mod tests {
         assert_eq!(severity(&b), Some("warning"));
         let map = MapTypes {
             label: "Broken".into(),
+            keys: vec![],
             list: MapList::Unsure { channels: None },
             extra: None,
         };
@@ -1107,6 +1257,7 @@ mod tests {
     fn a_map_lists_unknown_entries_become_estimates() {
         let mut map = MapTypes {
             label: "Own".into(),
+            keys: vec![],
             list: MapList::Own {
                 names: many("M", 64),
                 unsure: vec![],
@@ -1132,6 +1283,7 @@ mod tests {
         own.extend(many("M", 47));
         let tight = MapTypes {
             label: "Tight".into(),
+            keys: vec![],
             list: MapList::Own {
                 names: own,
                 unsure: vec![],
@@ -1187,6 +1339,135 @@ mod tests {
         assert!(mod_types("M", "FS25_M", &map, &read, &candidates).is_none());
         // Nothing found: no entry.
         assert!(mod_types("M", "FS25_M", &ModDesc::default(), &read, &Vec::new).is_none());
+    }
+
+    #[test]
+    fn match_keys_ignore_case_the_fs25_prefix_and_punctuation() {
+        assert_eq!(match_key("FS25_The_Mechet"), "themechet");
+        assert_eq!(match_key("The Mechet"), "themechet");
+        assert_eq!(match_key("fs25-hof-bergmann"), "hofbergmann");
+        // Only a leading FS25 goes, and never the whole name.
+        assert_eq!(match_key("Valley FS25"), "valleyfs25");
+        assert_eq!(match_key("FS25"), "fs25");
+        assert_eq!(match_key("__"), "");
+        assert_eq!(
+            map_keys("FS25_HofBergmann", "Hof Bergmann"),
+            ["hofbergmann"]
+        );
+        assert_eq!(
+            map_keys("FS25_Mechet_v2", "The Mechet"),
+            ["mechetv2", "themechet"]
+        );
+        assert_eq!(map_keys("FS25_X", "!!"), ["x"]);
+    }
+
+    #[test]
+    fn support_keys_only_inside_a_mod_support_folder() {
+        assert_eq!(
+            support_key("mod_support/FS25_HofBergmann/v1.4/fillTypes.xml").as_deref(),
+            Some("hofbergmann")
+        );
+        assert_eq!(
+            support_key("Mod_Support\\FS25_Witcombe\\heightTypes.xml").as_deref(),
+            Some("witcombe")
+        );
+        assert_eq!(
+            support_key("xml/mod_support/The_Mechet/a.xml").as_deref(),
+            Some("themechet")
+        );
+        // Directly in mod_support/, elsewhere, or a folder name with no letters: not map-specific.
+        assert_eq!(support_key("mod_support/fillTypes.xml"), None);
+        assert_eq!(support_key("xml/fillTypes.xml"), None);
+        assert_eq!(support_key("mod_support/__/fillTypes.xml"), None);
+    }
+
+    /// #385: lists under `mod_support/<map>/` count only with that map; the base-game maps match
+    /// none, and an active mod named by the folder makes them count everywhere.
+    #[test]
+    fn map_specific_lists_count_only_on_their_map() {
+        let list = |names: &[&str]| -> Vec<u8> {
+            let entries: String = names
+                .iter()
+                .map(|n| format!(r#"<densityMapHeightType fillTypeName="{n}"/>"#))
+                .collect();
+            format!("<map><densityMapHeightTypes>{entries}</densityMapHeightTypes></map>")
+                .into_bytes()
+        };
+        let read = |name: &str| match name {
+            "xml/heightTypes.xml" => Some(list(&["A"])),
+            "mod_support/FS25_Witcombe/v1.0/heightTypes.xml" => Some(list(&["A", "W1", "W2"])),
+            "mod_support/FS25_Witcombe/v1.1/heightTypes.xml" => Some(list(&["W2", "W3"])),
+            "mod_support/FS25_OtherMod/heightTypes.xml" => Some(list(&["O1"])),
+            _ => None,
+        };
+        let candidates = || {
+            vec![
+                "xml/heightTypes.xml".to_string(),
+                "mod_support/FS25_Witcombe/v1.0/heightTypes.xml".to_string(),
+                "mod_support/FS25_Witcombe/v1.1/heightTypes.xml".to_string(),
+                "mod_support/FS25_OtherMod/heightTypes.xml".to_string(),
+            ]
+        };
+        let declared = ModDesc {
+            height_types_file: Some("xml/heightTypes.xml".into()),
+            ..Default::default()
+        };
+        let t = mod_types("L", "FS25_L", &declared, &read, &candidates).unwrap();
+        assert_eq!(t.exact, ["A"]);
+        assert!(t.estimate.is_empty());
+        // One entry per folder, its versions merged, never repeating an exact name.
+        assert_eq!(
+            t.scoped,
+            [
+                (
+                    "witcombe".to_string(),
+                    vec!["W1".into(), "W2".into(), "W3".into()]
+                ),
+                ("othermod".to_string(), vec!["O1".to_string()]),
+            ]
+        );
+        // Only map-specific lists: still an entry.
+        let only = mod_types("L", "FS25_L", &ModDesc::default(), &read, &|| {
+            vec!["mod_support/FS25_OtherMod/heightTypes.xml".to_string()]
+        })
+        .unwrap();
+        assert_eq!(only.scoped.len(), 1);
+
+        let g = game(48, &[]);
+        let map = |label: &str, tech: &str| MapTypes {
+            label: label.into(),
+            keys: map_keys(tech, label),
+            list: MapList::Base,
+            extra: None,
+        };
+        let mods = [t.clone()];
+        // Base-game maps: 48 + A.
+        assert_eq!(evaluate(&g, None, &mods).total, 49);
+        assert_eq!(worst(&g, &[], &mods).total, 49);
+        // On Witcombe its three count, as an estimate.
+        let w = worst(&g, &[map("Witcombe", "FS25_Witcombe")], &mods);
+        assert_eq!(
+            (w.map.as_deref(), w.exact_total, w.total),
+            (Some("Witcombe"), 49, 52)
+        );
+        assert_eq!(w.mods, [("L".into(), "FS25_L".into(), 4, false)]);
+        // Another map: none.
+        assert_eq!(
+            worst(&g, &[map("Elmcreek X", "FS25_ElmX")], &mods).total,
+            49
+        );
+
+        // An active mod the folder names: those lists count on every map.
+        let mut with_mod = t.clone();
+        with_mod.absorb_scoped(&map_keys("FS25_OtherMod", "Other Mod"));
+        assert_eq!(with_mod.estimate, ["O1"]);
+        assert_eq!(with_mod.scoped.len(), 1);
+        assert_eq!(evaluate(&g, None, &[with_mod.clone()]).total, 50);
+        // Absorbing again, or a folder already counted, adds nothing twice.
+        with_mod.absorb_scoped(&["othermod".into(), "witcombe".into()]);
+        with_mod.absorb_scoped(&["witcombe".into()]);
+        assert_eq!(with_mod.estimate, ["O1", "W1", "W2", "W3"]);
+        assert!(with_mod.scoped.is_empty());
     }
 
     #[test]
@@ -1249,6 +1530,7 @@ mod tests {
         // A map with its own list still loads the base crops.
         let map = MapTypes {
             label: "Own list".into(),
+            keys: vec![],
             list: MapList::Own {
                 names: many("M", 10),
                 unsure: vec![],

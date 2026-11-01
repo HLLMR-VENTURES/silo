@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { displayVersion, modSizeLabel } from "./format";
+import { displayPath, displayVersion, modSizeLabel } from "./format";
 
 describe("displayVersion (C2)", () => {
   it("strips a leading v, V or V. and never adds one", () => {
@@ -14,6 +14,19 @@ describe("displayVersion (C2)", () => {
   it("leaves a version that doesn't start with v and a number alone", () => {
     expect(displayVersion("vanilla-2")).toBe("vanilla-2");
     expect(displayVersion("beta 3")).toBe("beta 3");
+  });
+});
+
+describe("displayPath (#385)", () => {
+  it("gives a Windows path backslashes throughout and leaves others alone", () => {
+    expect(
+      displayPath("E:/SteamLibrary\\steamapps/common\\Farming Simulator 25"),
+    ).toBe("E:\\SteamLibrary\\steamapps\\common\\Farming Simulator 25");
+    expect(displayPath("C:")).toBe("C:");
+    expect(displayPath("//nas/share/FS25")).toBe("\\\\nas\\share\\FS25");
+    expect(
+      displayPath("/Users/me/Library/Application Support/FarmingSimulator2025"),
+    ).toBe("/Users/me/Library/Application Support/FarmingSimulator2025");
   });
 });
 

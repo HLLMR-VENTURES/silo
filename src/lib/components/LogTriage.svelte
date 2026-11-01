@@ -22,7 +22,7 @@
   import type { LibraryLookup } from "../diagnose/crashNotice";
   import { formatCount, plural } from "../plural";
   import { latestOnly } from "../diagnose/latest";
-  import { fillTypeCapNote, groundPileCapNote } from "../diagnose/conflictCopy";
+  import { fillTypeCapNote, groundPileCapNote, siloFoldersNote } from "../diagnose/conflictCopy";
   import { describeError, NO_LOG_COPY } from "../errorCopy";
 
   interface Props {
@@ -293,6 +293,10 @@
         {#if revealError}
           <div class="verdict bad" role="alert">{revealError}</div>
         {/if}
+      {/if}
+
+      {#if r.siloFolders.length > 0}
+        <p class="foot">{siloFoldersNote(r.siloFolders)}</p>
       {/if}
 
       {#if r.mods.length === 0 && r.unattributed === 0}

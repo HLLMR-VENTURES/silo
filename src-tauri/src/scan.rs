@@ -204,6 +204,15 @@ fn collect_root_candidates(root: &Path) -> Vec<Candidate> {
     out
 }
 
+/// The file names of the mods in a mods folder itself, as a scan lists them: zips and unpacked
+/// folder mods, without `archive/`, `backups/` and Silo's scratch entries.
+pub fn root_mod_names(root: &Path) -> Vec<String> {
+    collect_root_candidates(root)
+        .into_iter()
+        .filter_map(|c| c.path.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect()
+}
+
 /// Mods parked in an archive folder's `<Category>/` subfolders (Silo-managed, one level of folders).
 fn collect_archive_candidates(archive: &Path) -> Vec<Candidate> {
     let mut out = Vec::new();

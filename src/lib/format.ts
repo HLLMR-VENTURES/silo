@@ -28,3 +28,15 @@ export function modSizeLabel(m: { kind: string; size: number }): string | null {
   if (m.kind !== "zip" && m.size <= 0) return null;
   return fmtSize(m.size);
 }
+
+/**
+ * A path as the OS spells it, for display: a Windows path (drive letter or `\\server\share`) gets
+ * backslashes throughout, since Steam and Silo can build one with mixed slashes
+ * ("E:/SteamLibrary\steamapps/common\..."). Any other path is shown as it is (#385).
+ *   displayPath("E:/SteamLibrary\\steamapps/common") -> "E:\\SteamLibrary\\steamapps\\common"
+ * @param p the path as stored or received
+ */
+export function displayPath(p: string): string {
+  const windows = /^[A-Za-z]:([\\/]|$)/.test(p) || /^[\\/]{2}[^\\/]/.test(p);
+  return windows ? p.replace(/\//g, "\\") : p;
+}

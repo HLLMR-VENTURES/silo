@@ -21,6 +21,8 @@
     confirm: string;
     cancel?: string;
     tone?: "neutral" | "danger";
+    /** The button focused on open; default "cancel" for danger, "confirm" otherwise. */
+    focus?: "confirm" | "cancel";
     /** A checkbox under the body; its state is the second argument of `onresult`. */
     checkbox?: { label: string; checked?: boolean };
     /** true = confirm button; false = Cancel, Esc, scrim, or closed from outside. */
@@ -36,6 +38,7 @@
     confirm,
     cancel = "Cancel",
     tone = "neutral",
+    focus,
     checkbox,
     onresult,
   }: Props = $props();
@@ -49,6 +52,7 @@
   const uid = $props.id();
   const bodyId = `${uid}-body`;
   const danger = $derived(tone === "danger");
+  const focusCancel = $derived((focus ?? (danger ? "cancel" : "confirm")) === "cancel");
   const arm = armTimer();
 
   $effect(() => {
@@ -116,10 +120,10 @@
     <div class="option"><Checkbox bind:checked={optionChecked} label={checkbox.label} /></div>
   {/if}
   {#snippet footer()}
-    <Button data-autofocus={danger ? "" : undefined} onclick={() => answer(false)}>{cancel}</Button>
+    <Button data-autofocus={focusCancel ? "" : undefined} onclick={() => answer(false)}>{cancel}</Button>
     <Button
       variant={danger ? "danger" : "primary"}
-      data-autofocus={danger ? undefined : ""}
+      data-autofocus={focusCancel ? undefined : ""}
       onclick={onVerbClick}
       onkeydown={onVerbKeydown}
     >

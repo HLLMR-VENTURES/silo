@@ -416,6 +416,8 @@ export interface LogReport {
   droppedFillTypes: string[];
   /** The log was too big to read whole: only its start and its end were read (#351). */
   truncated: boolean;
+  /** Silo's own folders in mods (archive, backups) the game tried to open as mods; harmless (#385). */
+  siloFolders: string[];
 }
 
 // ── Multiplayer mod-set sync ──

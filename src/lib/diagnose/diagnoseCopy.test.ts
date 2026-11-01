@@ -2,7 +2,7 @@
 // and keeping only the newest conflict check.
 import { describe, expect, it } from "vitest";
 import { bisectRounds, crashNoticeOffers, crashNoticeText, likelyCulprit } from "./crashNotice";
-import { canParkOne, conflictCounts, conflictHeadline, conflictTitle, fillTypeCapNote, groundPileCapNote, severityLabel } from "./conflictCopy";
+import { canParkOne, conflictCounts, conflictHeadline, conflictTitle, fillTypeCapNote, groundPileCapNote, severityLabel, siloFoldersNote } from "./conflictCopy";
 import { countsLine, groupLogMods, lastRunMeta, lastRunVerdict, logModDetails, logTimeLabel } from "./lastRun";
 import { latestOnly } from "./latest";
 import type { LogModHealth, LogReport } from "../types";
@@ -18,7 +18,7 @@ function report(crashed: boolean, mods: LogModHealth[], over: Partial<LogReport>
     crashed,
     mods,
     unattributed: 0,
-    totalFindings: 0, groundPileCap: null, groundPileDisabled: [], fillTypeCap: null, droppedFillTypes: [], truncated: false,
+    totalFindings: 0, groundPileCap: null, groundPileDisabled: [], fillTypeCap: null, droppedFillTypes: [], truncated: false, siloFolders: [],
     ...over,
   };
 }
@@ -258,6 +258,23 @@ describe("ground-pile cap note (#339)", () => {
     expect(none).toContain("it rejected the ones that didn't fit");
     expect(none).not.toMatch(/Straw Harvest|Pumps/);
     expect(none).not.toMatch(/height type|densityMap|—/);
+  });
+});
+
+describe("Silo's own folders in the log (#385)", () => {
+  it("names them in one plain line, once each", () => {
+    const both = siloFoldersNote([
+      "C:/Users/me/Documents/My Games/FarmingSimulator2025/mods/archive",
+      "C:/Users/me/Documents/My Games/FarmingSimulator2025/mods/backups",
+      "D:\\Mods\\backups",
+    ]);
+    expect(both).toBe(
+      "Harmless: Farming Simulator 25 looks inside every folder in mods for a mod, so it logged that it couldn't open the archive and backups folders. Those are Silo's own folders, not broken mods.",
+    );
+    expect(siloFoldersNote(["D:/Mods/backups"])).toContain(
+      "couldn't open the backups folder.",
+    );
+    expect(siloFoldersNote([])).toBe("");
   });
 });
 

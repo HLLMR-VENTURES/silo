@@ -291,7 +291,7 @@
   } from "./lib/views/libraryStatus";
   import { back, go, nav, searchPlaceholderFor, searchTargetFor } from "./lib/state/nav.svelte";
   import type { MenuItem } from "./lib/ui/overlayTypes";
-  import { displayVersion, fmtSize } from "./lib/format";
+  import { displayPath, displayVersion, fmtSize } from "./lib/format";
   import {
     MODS_FOLDER_KEY,
     OVERRIDE_FOLLOWED_KEY,
@@ -881,7 +881,7 @@
     L.push(`Generated: ${new Date().toISOString()}`, "");
     L.push("## Environment");
     L.push(`- Mods folder: ${roots[0] ?? "not detected"}`);
-    L.push(`- Game: ${gameInfo ? gameInfo.installDir : "not detected"}`, "");
+    L.push(`- Game: ${gameInfo ? displayPath(gameInfo.installDir) : "not detected"}`, "");
     L.push("## Library");
     L.push(`- Mods: ${mods.length}  (organized ${organizedCount}, active ${activeSet.size})`);
     L.push(`- Total size: ${fmtSize(libStats.totalSize)}`);
@@ -2821,6 +2821,8 @@
     libraryScanned = false;
     scanFailed = false;
     activeSet = new Set();
+    // The status line spoke of the old folder's scan: clear it, and announce the new one (#385).
+    scanSaid = "";
     // The other folder's foreign files: drop a check still running, and its "Use this version"
     // offers (#358).
     foreignGen++;
@@ -2834,7 +2836,7 @@
     updateCheckedTechs = undefined;
     updateRowStates = {};
     if (roots.length) {
-      await runScan();
+      await rescanAnnounced();
       hardlinkSupport()
         .then((ok) => (cloudSynced = !ok))
         .catch(() => {});
@@ -2894,6 +2896,8 @@
           ],
           confirm: "Update the game's setting",
           cancel: "Only in Silo",
+          // Enter keeps the choice that changes nothing outside Silo (#385).
+          focus: "cancel",
         }))
       ) {
         await pointGameHere();

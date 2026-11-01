@@ -319,7 +319,20 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
         .collect();
     let (heights, fills): (Vec<_>, Vec<_>) = per_mod.into_iter().unzip();
     let mut mod_heights: Vec<heighttypes::ModTypes> = heights.into_iter().flatten().collect();
-    let mod_fills: Vec<filltypes::ModFills> = fills.into_iter().flatten().collect();
+    let mut mod_fills: Vec<filltypes::ModFills> = fills.into_iter().flatten().collect();
+    // A mod's `mod_support/<dir>/` lists load with the mod `<dir>` names (#385). For an active
+    // non-map mod that's every scenario; for a map, only its own (`worst` adds those).
+    let active_keys: Vec<String> = parsed
+        .iter()
+        .filter(|p| !p.md.is_map)
+        .flat_map(|p| heighttypes::map_keys(&p.tech_name, &p.label))
+        .collect();
+    for m in &mut mod_heights {
+        m.absorb_scoped(&active_keys);
+    }
+    for m in &mut mod_fills {
+        m.absorb_scoped(&active_keys);
+    }
 
     // One candidate per map: a mod can ship several, each with its own map.xml.
     let maps: Vec<(&Parsed, String, Option<&str>)> = parsed
@@ -363,6 +376,7 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
             }
             filltypes::MapFills {
                 label: label.clone(),
+                keys: heighttypes::map_keys(&p.tech_name, &p.label),
                 types,
             }
         })
@@ -371,6 +385,7 @@ fn budget_conflicts(parsed: &[Parsed], game: GameLists) -> Vec<Conflict> {
         .iter()
         .map(|(p, label, config)| heighttypes::MapTypes {
             label: label.clone(),
+            keys: heighttypes::map_keys(&p.tech_name, &p.label),
             list: map_list(p, *config),
             extra: heighttypes::mod_types(
                 &p.label,
@@ -871,6 +886,83 @@ mod tests {
             .find(|c| c.kind == "heightTypes")
             .expect("piles");
         assert_eq!(piles.severity, "warning");
+    }
+
+    /// #385: a mod's `mod_support/<map>/fillTypes.xml` (Realistic Livestock's per-map lists)
+    /// counts only when that map is active; with no map, or another one, it doesn't.
+    #[test]
+    fn map_specific_fill_lists_count_only_with_their_map() {
+        let base = std::env::temp_dir().join(format!("silo_conflict_ms_{}", std::process::id()));
+        let livestock = base.join("FS25_Livestock");
+        let support = livestock.join("mod_support/FS25_HofBergmann/v1.4");
+        std::fs::create_dir_all(&support).unwrap();
+        std::fs::write(
+            livestock.join("modDesc.xml"),
+            r#"<modDesc descVersion="92"></modDesc>"#,
+        )
+        .unwrap();
+        let fills: String = (0..80)
+            .map(|n| format!(r#"<fillType name="RL{n}"/>"#))
+            .collect();
+        std::fs::write(
+            support.join("fillTypes.xml"),
+            format!("<map><fillTypes>{fills}</fillTypes></map>"),
+        )
+        .unwrap();
+        let mut maps = Vec::new();
+        for (tech, title) in [
+            ("FS25_HofBergmann", "Hof Bergmann"),
+            ("FS25_Valley", "Valley"),
+        ] {
+            let dir = base.join(tech);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("modDesc.xml"),
+                r#"<modDesc descVersion="92"><maps><map id="M"/></maps></modDesc>"#,
+            )
+            .unwrap();
+            maps.push(ConflictInput {
+                tech_name: tech.into(),
+                title: Some(title.into()),
+                path: dir.to_string_lossy().into_owned(),
+                kind: "dir".into(),
+            });
+        }
+        let rl = ConflictInput {
+            tech_name: "FS25_Livestock".into(),
+            title: Some("Livestock".into()),
+            path: livestock.to_string_lossy().into_owned(),
+            kind: "dir".into(),
+        };
+        let heights = heighttypes::GameData {
+            base: (0..48).map(|n| format!("BASE{n}")).collect(),
+            base_channels: 6,
+            ..Default::default()
+        };
+        let fill_base = filltypes::GameData {
+            base: (0..178).map(|n| format!("BASE{n}")).collect(),
+            ..Default::default()
+        };
+        let game = GameLists {
+            heights: &heights,
+            fills: Some(&fill_base),
+        };
+        let fill_cap = |inputs: &[ConflictInput]| {
+            detect_with(inputs, Some(game))
+                .into_iter()
+                .find(|c| c.kind == "fillTypeCap")
+        };
+        let alone = fill_cap(std::slice::from_ref(&rl));
+        let other_map = fill_cap(&[rl.clone(), maps[1].clone()]);
+        let its_map = fill_cap(&[rl.clone(), maps[0].clone()]);
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(alone.is_none(), "{alone:?}");
+        assert!(other_map.is_none(), "{other_map:?}");
+        // 178 + 80 = 258 on Hof Bergmann, from a script-loaded list: a Review.
+        let c = its_map.expect("budget on Hof Bergmann");
+        assert_eq!(c.severity, "warning");
+        assert!(c.explanation.contains("Hof Bergmann"), "{}", c.explanation);
+        assert_eq!(c.tech_names, ["FS25_Livestock"]);
     }
 
     fn parsed_map(label: &str, tech: &str) -> Parsed {

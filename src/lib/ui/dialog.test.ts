@@ -138,6 +138,18 @@ describe("ask()", () => {
     await waitFor(() => expect(verb).toHaveFocus());
   });
 
+  it("focus: cancel focuses Cancel on a neutral dialog, keeping the primary verb", async () => {
+    await openAsk({ ...moveOpts, cancel: "Only in Silo", focus: "cancel" });
+    expect(screen.getByRole("button", { name: "Move 12 mods" })).toHaveClass(
+      "btn-primary",
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Only in Silo" }),
+      ).toHaveFocus(),
+    );
+  });
+
   it("returns focus to the opener after closing", async () => {
     const { user, opener } = await openAsk(moveOpts);
     await user.click(screen.getByRole("button", { name: "Cancel" }));

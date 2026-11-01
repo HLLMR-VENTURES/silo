@@ -22,7 +22,7 @@ function report(crashed: boolean, errors: number): LogReport {
     crashed,
     mods: [{ modName: "FS25_Thing", errors, warnings: 0, benign: 0, sample: "", sampleLine: 0 }],
     unattributed: 0,
-    totalFindings: errors, groundPileCap: null, groundPileDisabled: [], fillTypeCap: null, droppedFillTypes: [], truncated: false,
+    totalFindings: errors, groundPileCap: null, groundPileDisabled: [], fillTypeCap: null, droppedFillTypes: [], truncated: false, siloFolders: [],
   };
 }
 
