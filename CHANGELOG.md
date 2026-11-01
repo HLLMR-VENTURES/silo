@@ -52,9 +52,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interrupted update is now noted too, so it's cleaned up if Silo stops partway. (#400)
 - A mod Silo installed from Browse under a file name that isn't its catalog name, before Silo
   started remembering which catalog entry such a file came from, is now linked to its entry
-  after a library scan when exactly one entry lists those exact bytes. You no longer have to
-  remove it and install it again to get its drawer details, update checks and **Verify
-  integrity**. (#402)
+  when you check for updates (or after a scan, if Silo checks at startup), provided exactly one
+  entry lists those exact bytes. You no longer have to remove it and install it again to get
+  its drawer details, update checks and **Verify integrity**. (#402)
 - Clicking **Connect**, **Cancel** or **Disconnect** for GitHub in quick succession now always
   reaches Silo in the order you clicked. Before, cancelling a sign-in and connecting or
   disconnecting right after could arrive the other way round. (#403)
