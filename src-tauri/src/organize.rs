@@ -91,7 +91,7 @@ impl Layout {
 /// Dropped inside a copy-fallback **directory** projection so we can later prove Silo
 /// created it (a dir has no hardlink identity to compare). Hardlink/symlink projections
 /// are identified structurally and need no marker.
-const SILO_MARKER: &str = ".silo-projection";
+pub(crate) const SILO_MARKER: &str = ".silo-projection";
 
 /// A mod present in the flat root that could be organized.
 #[derive(Debug, Clone, Serialize, Deserialize)]

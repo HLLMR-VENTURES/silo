@@ -1255,6 +1255,23 @@ pub fn projection_stats(conn: &Connection, root: &str, file_name: &str) -> Optio
     .ok()
 }
 
+/// Every recorded projection in this folder: file name to (size, mtime_ms), as
+/// [`projection_stats`] reads one. Empty when none (or unreadable).
+pub fn load_projections(conn: &Connection, root: &str) -> HashMap<String, (u64, i64)> {
+    let Ok(mut stmt) =
+        conn.prepare("SELECT file_name, size, mtime_ms FROM projection WHERE root = ?1")
+    else {
+        return HashMap::new();
+    };
+    let rows = stmt.query_map([root], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            (r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)?),
+        ))
+    });
+    rows.map(|r| r.flatten().collect()).unwrap_or_default()
+}
+
 /// Drop a projection's provenance (it's been removed from the flat root).
 pub fn forget_projection(conn: &Connection, root: &str, file_name: &str) {
     let _ = conn.execute(
