@@ -26,9 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Updated the HTTP library Silo uses to talk to GitHub, its catalog and download hosts (ureq 3).
-  Requests work as before. One difference: when GitHub
-  answers a star, watch, gist or collection upload with a temporary redirect, Silo now shows an
-  error instead of reporting a change that never happened. (#315)
+  Requests work as before. One difference: when GitHub answers a star, watch, gist or
+  collection upload with a temporary redirect, Silo now shows an error instead of reporting a
+  change that never happened. (#315)
 
 ### Fixed
 
