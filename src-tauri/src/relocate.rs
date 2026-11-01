@@ -574,36 +574,44 @@ fn relink_renamed(
     flushed(env, dst, src).map_err(|e| (e, false))
 }
 
-/// A crash between a rename and its re-link leaves that mod's mods-folder link (a symlink or
-/// junction) naming the place it left. Before the first boundary can pause the move, re-point
-/// every such link of a recorded mod at whichever of its two places holds it now. Failures are
-/// only logged: the mod's own step meets the same link and reports it.
-fn mend_renamed_links(env: &Env, marker: &MoveMarker) {
+/// A crash between a rename and its re-link leaves that mod's mods-folder entry naming the
+/// place it left (a symlink or junction), or missing (Windows' `replace_dir_link` removes the
+/// old folder link before the new one goes in). Before the first boundary can pause the move,
+/// every such entry of a recorded active mod is re-pointed at (or made again for) whichever of
+/// its two places holds the mod now, when that is the real copy. Returns what couldn't be
+/// mended, phrased like a step's errors: the run then pauses at once, listing them.
+fn mend_renamed_links(env: &Env, marker: &MoveMarker) -> Vec<String> {
     let rows = db::load_organized(env.conn, env.mods_key);
     let journal = env.journal();
     let room = |src: &Path, entry: &Path| {
         env.room(size_of(src), entry)
             .map_err(|why| std::io::Error::other(organize::NoRoom(why)))
     };
+    let mut errors = Vec::new();
     for row in rows
         .iter()
         .filter(|r| r.active && marker.moved.contains(&r.tech_name))
     {
-        let is_link = env
-            .mods
-            .join(&row.file_name)
-            .symlink_metadata()
-            .is_ok_and(|m| m.file_type().is_symlink());
-        if !is_link {
-            continue;
+        let link = env.mods.join(&row.file_name);
+        match link.symlink_metadata() {
+            Ok(m) if m.file_type().is_symlink() => {}
+            Ok(_) => continue, // a hardlink or the mod's own copy: a rename never breaks it
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                errors.push(format!("{}: relink: {e}", row.tech_name));
+                continue;
+            }
         }
         let a = organize::archive_path(&marker.from, &row.category, &row.file_name);
         let b = organize::archive_path(&marker.to, &row.category, &row.file_name);
         let (gone, here, archive) = match (exists(&a), exists(&b)) {
             (false, true) => (a, b, &marker.to),
             (true, false) => (b, a, &marker.from),
-            _ => continue,
+            _ => continue, // both or neither: the mod's own step sorts it out
         };
+        if real_copy(&here, &row.kind).is_none() {
+            continue;
+        }
         let layout = Layout {
             mods: env.mods.to_path_buf(),
             archive: archive.clone(),
@@ -612,14 +620,10 @@ fn mend_renamed_links(env: &Env, marker: &MoveMarker) {
             .with_journal(&journal)
             .with_room_check(&room);
         if let Err(e) = repoint(env, row, &gone, &here, &mut policy) {
-            log::warn!(
-                "{}: couldn't re-link it to {} yet: {}",
-                row.tech_name,
-                here.display(),
-                failed(e)
-            );
+            errors.push(format!("{}: {}", row.tech_name, failed(e)));
         }
     }
+    errors
 }
 
 /// Delete a moved mod's old copy `src`, now that `replacement` holds it: rename it aside to a
@@ -799,7 +803,8 @@ fn stale_symlink(link: &Path, src: &Path) -> std::io::Result<bool> {
     };
     let key = |p: &Path| crate::modsroot::normalize_key(&p.to_string_lossy(), cfg!(windows));
     // Where `p`'s folder really is, with its name: still known once `p` itself was renamed
-    // away (#401), for a target spelled through `..` or another link to that folder.
+    // away (#401), for a target spelled through `..`, through another link to its folder, or
+    // through links to the mod itself (followed to their end).
     let in_folder = |p: &Path| {
         let dir = std::fs::canonicalize(p.parent()?).ok()?;
         Some(key(&dir.join(p.file_name()?)))
@@ -809,7 +814,29 @@ fn stale_symlink(link: &Path, src: &Path) -> std::io::Result<bool> {
             (std::fs::canonicalize(link), std::fs::canonicalize(src)),
             (Ok(a), Ok(b)) if a == b
         )
-        || matches!((in_folder(&resolved), in_folder(src)), (Some(a), Some(b)) if a == b))
+        || matches!(
+            (chain_end(link).and_then(|e| in_folder(&e)), in_folder(src)),
+            (Some(a), Some(b)) if a == b
+        ))
+}
+
+/// Where the chain of links that starts at `link` ends, followed one link at a time (at most
+/// 32) so an end that's gone still has a path. `None` for a loop or an unreadable link.
+fn chain_end(link: &Path) -> Option<PathBuf> {
+    let mut p = link.to_path_buf();
+    for _ in 0..32 {
+        match p.symlink_metadata() {
+            Ok(m) if m.file_type().is_symlink() => {
+                let t = std::fs::read_link(&p).ok()?;
+                p = match p.parent() {
+                    Some(d) if t.is_relative() => d.join(t),
+                    _ => t,
+                };
+            }
+            _ => return Some(p),
+        }
+    }
+    None
 }
 
 /// What a move's re-links could cost in space, by case (`repoint`). Bytes, from the archived
@@ -1868,7 +1895,11 @@ fn run_locked(
     marker.errors.clear();
     save_marker(env.conn, env.mods_key, &marker)?;
     if env.same_volume {
-        mend_renamed_links(&env, &marker);
+        let unmended = mend_renamed_links(&env, &marker);
+        if !unmended.is_empty() {
+            marker.errors.extend(unmended);
+            return pause(&env, marker);
+        }
     }
     if let Some(reason) = settle_updates(&env, &marker, marker.direction) {
         marker.pause_reason = Some(reason);
@@ -4942,6 +4973,121 @@ mod tests {
                 "{tag}: the link reaches the renamed copy"
             );
             let _ = std::fs::remove_dir_all(&f.base);
+        }
+    }
+
+    /// A crash mid-`replace_dir_link` after the rename left the folder link missing: Resume
+    /// and Cancel, paused at once, both make it again first.
+    #[test]
+    fn a_link_lost_by_a_crash_mid_rename_is_made_again_before_the_first_pause() {
+        for (tag, op) in [("renamelost1", Op::Resume), ("renamelost2", Op::Cancel)] {
+            let f = fx(tag);
+            add_zip(&f, "FS25_A", false);
+            let (_, dst, link, _) = crashed_after_rename(&f);
+            organize::remove_link(&link)
+                .or_else(|_| std::fs::remove_dir(&link))
+                .unwrap();
+            let req = AtomicU8::new(PAUSE);
+            let paused = run_on_one_drive(&f, op, &req, &mut |_| {})
+                .unwrap()
+                .unwrap();
+            assert!(paused.paused && paused.errors.is_empty(), "{tag}");
+            assert_eq!(
+                std::fs::canonicalize(&link).unwrap(),
+                std::fs::canonicalize(&dst).unwrap(),
+                "{tag}"
+            );
+            let _ = std::fs::remove_dir_all(&f.base);
+        }
+    }
+
+    /// A link that can't be mended before the first boundary isn't skipped: the run pauses at
+    /// once, listing it.
+    #[test]
+    fn a_link_that_cant_be_mended_pauses_the_move_saying_so() {
+        let f = fx("renamemendfail");
+        let (_, _, _, _) = crashed_after_rename(&f);
+        REPOINT_FAULT.with(|c| c.set(Some(|_: &Path| {})));
+        let paused = one_drive_run(&f, Op::Resume).unwrap().unwrap();
+        assert!(paused.paused);
+        assert_eq!(
+            paused.errors,
+            vec!["FS25_D: relink: injected failure".to_string()]
+        );
+        // Nothing else was done: the mod stays recorded where it is.
+        assert_eq!(paused.moved, vec!["FS25_D".to_string()]);
+        assert!(f.new.join("Tools/FS25_D/modDesc.xml").is_file());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// A folder mod linked through another link to the mod itself (not to its folder): its
+    /// link is followed to the end, so it's re-pointed after the rename, and mended after a
+    /// crash. Folder symlinks need Developer Mode on Windows (a junction would resolve the
+    /// alias when made); skipped where they can't be made.
+    #[test]
+    fn a_link_through_an_alias_of_the_mod_is_relinked_after_a_rename() {
+        for (tag, crash) in [("renamealiasd1", false), ("renamealiasd2", true)] {
+            let f = fx(tag);
+            add_dir(&f, "FS25_D", true);
+            let (src, dst) = (f.old.join("Tools/FS25_D"), f.new.join("Tools/FS25_D"));
+            let alias = f.base.join("alias_D");
+            let link = f.mods.join("FS25_D");
+            let made = symlink_dir(&src, &alias).and_then(|()| symlink_dir(&alias, &link));
+            if made.is_err() {
+                let _ = std::fs::remove_dir_all(&f.base);
+                return;
+            }
+            if crash {
+                let mut m = marker(&f);
+                env(&f).record(&mut m, "FS25_D").unwrap();
+                std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+                crate::paths::rename_no_replace(&src, &dst).unwrap();
+                m.paused = true;
+                save_marker(&f.conn, &f.key, &m).unwrap();
+                let req = AtomicU8::new(PAUSE);
+                let paused = run_on_one_drive(&f, Op::Resume, &req, &mut |_| {})
+                    .unwrap()
+                    .unwrap();
+                assert!(paused.errors.is_empty(), "{tag}: {:?}", paused.errors);
+            } else {
+                assert!(one_drive_run(&f, Op::Start).unwrap().is_none(), "{tag}");
+            }
+            assert_eq!(
+                std::fs::canonicalize(&link).unwrap(),
+                std::fs::canonicalize(&dst).unwrap(),
+                "{tag}"
+            );
+            let _ = std::fs::remove_dir_all(&f.base);
+        }
+    }
+
+    #[test]
+    fn a_link_chain_is_followed_to_its_end_and_a_loop_gives_up() {
+        let f = fx("chain");
+        let end = f.base.join("gone.zip");
+        let (one, two) = (f.base.join("one"), f.base.join("two"));
+        if organize::symlink_file(&end, &two).is_err() {
+            let _ = std::fs::remove_dir_all(&f.base);
+            return;
+        }
+        organize::symlink_file(Path::new("two"), &one).unwrap();
+        assert_eq!(chain_end(&one), Some(end));
+        let (x, y) = (f.base.join("x"), f.base.join("y"));
+        organize::symlink_file(&y, &x).unwrap();
+        organize::symlink_file(&x, &y).unwrap();
+        assert_eq!(chain_end(&x), None);
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// A real folder symlink (never a junction, which resolves its target when made).
+    fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(target, link)
         }
     }
 }
