@@ -48,7 +48,9 @@
           {#if s.mapTitle}<span><Icon name="map" size={14} /> {s.mapTitle}</span>{/if}
           {#if played}<span>Last played {played}</span>{/if}
         </p>
-        {#if libraryRead}
+        {#if s.error}
+          <p class="mods warn"><Icon name="problem" size={14} /> Silo couldn't read this save's mod list: {s.error}.</p>
+        {:else if libraryRead}
           <p class="mods" class:warn={st.missing.length > 0}>
             {#if st.missing.length > 0}<Icon name="problem" size={14} />{/if}
             {saveModsLine(st)}{#if st.missing.length > 0}. {formatCount(st.missing.length)} missing.{/if}
@@ -60,8 +62,12 @@
           <Button
             variant="primary"
             size="sm"
-            disabled={!libraryRead || st.present.length === 0}
-            title={st.present.length === 0 ? "None of this save's mods are in your library yet" : undefined}
+            disabled={!!s.error || !libraryRead || st.present.length === 0}
+            title={s.error
+              ? "Silo couldn't read this save's mod list"
+              : st.present.length === 0
+                ? "None of this save's mods are in your library yet"
+                : undefined}
             onclick={() => onUse(s)}>Use this save's mods</Button
           >
           <Button size="sm" disabled={!!lockReason} title={lockReason || "A safe copy; the save itself isn't changed"} onclick={() => onBackup(s)}

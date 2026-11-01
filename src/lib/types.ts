@@ -151,6 +151,8 @@ export interface Savegame {
   /** When the game last saved it, as written in the save ("2026-08-02"), or null. */
   saveDate: string | null;
   mods: SaveMod[];
+  /** Why careerSavegame.xml couldn't be read (cut off, damaged, empty): then `mods` is empty. */
+  error?: string | null;
 }
 
 export interface ConflictInput {
@@ -382,7 +384,8 @@ export interface LogModHealth {
   warnings: number;
   benign: number;
   sample: string;
-  sampleLine: number;
+  /** The sample's line in log.txt; null for a line from the end of a log too big to read whole (#351). */
+  sampleLine: number | null;
 }
 
 /** `log_status`: where log.txt is, when it changed, whether FS25 runs, and what Silo last saw. */
@@ -411,6 +414,8 @@ export interface LogReport {
   fillTypeCap: number | null;
   /** The fill types it skipped because of that limit. */
   droppedFillTypes: string[];
+  /** The log was too big to read whole: only its start and its end were read (#351). */
+  truncated: boolean;
 }
 
 // ── Multiplayer mod-set sync ──

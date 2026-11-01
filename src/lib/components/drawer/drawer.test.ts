@@ -155,7 +155,7 @@ describe("drawer header badges", () => {
       crashed: true,
       mods: [{ modName: "FS25_Mod3", errors: 14, warnings: 0, benign: 0, sample: "Error: boom", sampleLine: 1 }],
       unattributed: 0,
-      totalFindings: 14, groundPileCap: null, groundPileDisabled: [], fillTypeCap: null, droppedFillTypes: [],
+      totalFindings: 14, groundPileCap: null, groundPileDisabled: [], fillTypeCap: null, droppedFillTypes: [], truncated: false,
     };
     vi.mocked(scanLog).mockImplementation(() => Promise.resolve(log));
     render(ModDetail, props(entry(3, { path: "C:/mods/badges3.zip" })));
@@ -181,6 +181,19 @@ describe("drawer Check for updates switch (#333)", () => {
     await rerender({ ...p, curation: { ...p.curation, skipUpdates: true } });
     expect(screen.getByRole("switch", { name: "Check for updates" })).toHaveAttribute("aria-checked", "false");
     expect(screen.getByText(/leaves this mod out of update checks and Update all/)).toBeInTheDocument();
+  });
+
+  it("goes through App's saveCuration when given, which puts the row back on a failure (#358)", async () => {
+    const saveCuration = vi.fn(() => Promise.reject(new Error("database is locked")));
+    const p = props(entry(2), { saveCuration });
+    vi.mocked(setCuration).mockClear();
+    render(ModDetail, p);
+    await settle();
+    await userEvent.setup().click(screen.getByRole("switch", { name: "Check for updates" }));
+    await settle();
+    expect(saveCuration).toHaveBeenCalledWith(expect.objectContaining({ skipUpdates: true }));
+    expect(p.onCurationChange).not.toHaveBeenCalled();
+    expect(setCuration).not.toHaveBeenCalled();
   });
 });
 

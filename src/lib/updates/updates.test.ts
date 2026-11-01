@@ -13,6 +13,7 @@ import {
   lastCheckedText,
   newDroppedBuilds,
   droppedKey,
+  isModHubPage,
   isNewerVersion,
   normVersion,
   sourceLabel,
@@ -207,6 +208,22 @@ describe("row words", () => {
     expect(sourceLabel({ source: "github" })).toBe("GitHub");
     expect(sourceLabel({ pageUrl: "https://www.farming-simulator.com/mod.php?mod_id=9" })).toBe("ModHub");
     expect(sourceLabel({})).toBeNull();
+    expect(sourceLabel({ pageUrl: "https://example.com/?ref=farming-simulator.com" })).toBeNull();
+  });
+
+  it("calls a page ModHub only when its host is farming-simulator.com (#358)", () => {
+    expect(isModHubPage("https://www.farming-simulator.com/mod.php?mod_id=9")).toBe(true);
+    expect(isModHubPage("https://farming-simulator.com/mods")).toBe(true);
+    expect(isModHubPage("HTTPS://WWW.Farming-Simulator.COM/mod.php")).toBe(true);
+    expect(isModHubPage("https://farming-simulator.com.example.net/mod.php")).toBe(false);
+    expect(isModHubPage("https://evil-farming-simulator.com/mod.php")).toBe(false);
+    expect(isModHubPage("https://example.com/farming-simulator.com/mod.php")).toBe(false);
+    expect(isModHubPage("https://example.com/?u=https://www.farming-simulator.com")).toBe(false);
+    expect(isModHubPage("https://farming-simulator.com@example.com/")).toBe(false);
+    expect(isModHubPage("http://www.farming-simulator.com/mod.php")).toBe(false);
+    expect(isModHubPage("farming-simulator.com")).toBe(false);
+    expect(isModHubPage(null)).toBe(false);
+    expect(isModHubPage("")).toBe(false);
   });
 
   it("says when the last check ran", () => {

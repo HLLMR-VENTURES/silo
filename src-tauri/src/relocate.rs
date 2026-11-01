@@ -298,15 +298,38 @@ fn listing(root: &Path) -> Result<BTreeMap<PathBuf, u64>, String> {
     Ok(out)
 }
 
-/// Same content? Zips: same size, then SHA-256. Folders: the same relative paths with the same
-/// sizes. `Err` when either side can't be read (or a folder holds a link).
-fn verify(src: &Path, dst: &Path, kind: &str) -> Result<bool, String> {
+/// How closely [`verify`] compares a mod folder.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Check {
+    /// The same relative paths with the same sizes: enough right after Silo copied the folder.
+    Listing,
+    /// Also the same SHA-256 per file. For a copy found from an earlier run (a resume after a
+    /// pause or crash), where the original may have been edited in between, keeping its sizes.
+    Contents,
+}
+
+/// Same content? Zips: same size, then SHA-256. Folders: per `check`. `Err` when either side
+/// can't be read (or a folder holds a link).
+fn verify(src: &Path, dst: &Path, kind: &str, check: Check) -> Result<bool, String> {
     let fail = |e: String| format!("verify: {e}");
     if kind == "dir" {
         if !dst.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false) {
             return Ok(false);
         }
-        return Ok(listing(src).map_err(fail)? == listing(dst).map_err(fail)?);
+        let files = listing(src).map_err(fail)?;
+        if files != listing(dst).map_err(fail)? {
+            return Ok(false);
+        }
+        if check == Check::Contents {
+            for rel in files.keys() {
+                let sa = crate::provenance::sha256_file(&src.join(rel)).map_err(fail)?;
+                let sb = crate::provenance::sha256_file(&dst.join(rel)).map_err(fail)?;
+                if sa != sb {
+                    return Ok(false);
+                }
+            }
+        }
+        return Ok(true);
     }
     let (a, b) = match (
         std::fs::symlink_metadata(src),
@@ -385,7 +408,7 @@ fn copy_to_temp_and_place(
     } else {
         copy_file_abortable(src, tmp, abort)?;
     }
-    if !verify(src, tmp, kind).map_err(StepErr::Failed)? {
+    if !verify(src, tmp, kind, Check::Listing).map_err(StepErr::Failed)? {
         return Err(StepErr::Failed(
             "verify: the copy didn't match the original".into(),
         ));
@@ -578,7 +601,9 @@ fn forward_one(
             if !ours {
                 return Err(occupied(&dst));
             }
-            if !verify(&src, &dst, &row.kind).map_err(StepErr::Failed)? {
+            // Placed by an earlier run: the original may have changed since (same sizes), so
+            // compare contents before its deletion.
+            if !verify(&src, &dst, &row.kind, Check::Contents).map_err(StepErr::Failed)? {
                 // Not a copy Silo can vouch for: stop claiming it, so a cancel leaves it alone.
                 env.unrecord(marker, tech)?;
                 return Err(occupied(&dst));
@@ -637,7 +662,7 @@ fn back_one(
             return Ok(Step::AlreadyDone);
         }
         (true, true) => {
-            if !verify(&src, &home, &row.kind).map_err(StepErr::Failed)? {
+            if !verify(&src, &home, &row.kind, Check::Contents).map_err(StepErr::Failed)? {
                 return Err(occupied(&home));
             }
         }
@@ -978,14 +1003,14 @@ fn filed_mods_with(
     let cats = match list(archive) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
+        Err(e) => return Err(cant_read(archive, e)),
     };
     let mut out = Vec::new();
     for (cat, is_dir) in cats {
         if !is_dir {
             continue;
         }
-        for (p, _) in list(&cat)? {
+        for (p, is_dir) in list(&cat).map_err(|e| cant_read(&cat, e))? {
             let n = p
                 .file_name()
                 .map(|n| n.to_string_lossy().to_lowercase())
@@ -993,7 +1018,7 @@ fn filed_mods_with(
             if crate::scan::is_silo_temp(&n) {
                 continue;
             }
-            if n.ends_with(".zip") || p.join("modDesc.xml").is_file() {
+            if n.ends_with(".zip") || has_moddesc(&p, is_dir)? {
                 out.push(p);
             }
         }
@@ -1001,22 +1026,48 @@ fn filed_mods_with(
     Ok(out)
 }
 
+/// Whether `p` is a folder mod (holds a `modDesc.xml`). A folder that can't be looked into is
+/// an error naming it, never "not a mod". Anything that isn't a plain folder (a file, a link)
+/// is checked as before, best effort.
+fn has_moddesc(p: &Path, is_dir: bool) -> std::io::Result<bool> {
+    let desc = p.join("modDesc.xml");
+    if !is_dir {
+        return Ok(desc.is_file());
+    }
+    match std::fs::metadata(&desc) {
+        Ok(m) => Ok(m.is_file()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(cant_read(p, e)),
+    }
+}
+
+/// A listing error that names the folder Silo couldn't read (same kind as `e`).
+fn cant_read(folder: &Path, e: std::io::Error) -> std::io::Error {
+    std::io::Error::new(e.kind(), format!("{} ({e})", folder.display()))
+}
+
+/// The problem shown when `unknown_mods` can't list an archive folder (its error names the
+/// folder): Silo can't tell whether it holds mods a move would leave behind.
+pub fn unreadable_archive_message(e: &std::io::Error, then: &str) -> String {
+    format!("Silo can't read {e}, so it can't tell which mods are in it. Check that the folder can be opened, {then}")
+}
+
 /// Mods filed under `archive/<category>/` (`filed_mods`) that have no organized row — a move
 /// would leave them behind. Preflight calls this before any marker is written; a forward run
-/// re-checks it at every start. An unreadable archive lists none here (each mod then fails
-/// its own step, and the move pauses with nothing removed).
-pub fn unknown_mods(archive: &Path, rows: &[OrganizedRow]) -> Vec<PathBuf> {
+/// re-checks it at every start. An archive or category folder that can't be listed is an error
+/// (`unreadable_archive_message`), never "no unknown mods": its unrecorded mods would be left
+/// behind in an archive Silo no longer tracks.
+pub fn unknown_mods(archive: &Path, rows: &[OrganizedRow]) -> std::io::Result<Vec<PathBuf>> {
     let windows = cfg!(windows);
     let key = |p: &Path| crate::modsroot::normalize_key(&p.to_string_lossy(), windows);
     let known: HashSet<String> = rows
         .iter()
         .map(|r| key(&organize::archive_path(archive, &r.category, &r.file_name)))
         .collect();
-    filed_mods(archive)
-        .unwrap_or_default()
+    Ok(filed_mods(archive)?
         .into_iter()
         .filter(|p| !known.contains(&key(p)))
-        .collect()
+        .collect())
 }
 
 /// Rows whose destination `<new>/<category>/<file>` already exists, or whose file name or
@@ -1221,15 +1272,23 @@ fn run_locked(
 
     if marker.direction == Direction::Forward {
         let rows = db::load_organized(env.conn, env.mods_key);
-        let unknown = unknown_mods(&marker.from, &rows);
-        if !unknown.is_empty() {
-            marker.errors.extend(unknown_messages(
-                &unknown,
-                &rows,
-                "then resume.",
-                "cancel the move, rescan, then start again.",
-            ));
-            return pause(&env, marker);
+        match unknown_mods(&marker.from, &rows) {
+            Ok(unknown) if unknown.is_empty() => {}
+            Ok(unknown) => {
+                marker.errors.extend(unknown_messages(
+                    &unknown,
+                    &rows,
+                    "then resume.",
+                    "cancel the move, rescan, then start again.",
+                ));
+                return pause(&env, marker);
+            }
+            Err(e) => {
+                marker
+                    .errors
+                    .push(unreadable_archive_message(&e, "then resume."));
+                return pause(&env, marker);
+            }
         }
     }
 
@@ -2161,7 +2220,7 @@ mod tests {
             out.errors
         );
         assert_eq!(
-            unknown_mods(&f.old, &db::load_organized(&f.conn, &f.key)),
+            unknown_mods(&f.old, &db::load_organized(&f.conn, &f.key)).unwrap(),
             vec![zip_at(&f.old, "FS25_Stray")],
             "the same check preflight runs"
         );
@@ -2491,7 +2550,9 @@ mod tests {
         let dir_tmp = f.old.join("Tools/.FS25_C.silo-tmp");
         std::fs::create_dir_all(&dir_tmp).unwrap();
         std::fs::write(dir_tmp.join("modDesc.xml"), b"<modDesc/>").unwrap();
-        assert!(unknown_mods(&f.old, std::slice::from_ref(&r)).is_empty());
+        assert!(unknown_mods(&f.old, std::slice::from_ref(&r))
+            .unwrap()
+            .is_empty());
         assert!(run_with(&f, Op::Start, &|| false).unwrap().is_none());
         assert!(!zip_tmp.exists() && !dir_tmp.exists());
         assert!(zip_at(&f.new, "FS25_A").exists());
@@ -2506,7 +2567,7 @@ mod tests {
         std::fs::write(f.old.join("Maps/FS25_A.zip"), b"PK\x03\x04 FS25_A").unwrap();
         std::fs::write(zip_at(&f.old, "FS25_Stray"), b"PK").unwrap();
         let rows = vec![r];
-        let unknown = unknown_mods(&f.old, &rows);
+        let unknown = unknown_mods(&f.old, &rows).unwrap();
         assert_eq!(unknown.len(), 2);
         assert_eq!(filed_twice(&unknown, &rows), vec!["FS25_A.zip".to_string()]);
         let out = run_with(&f, Op::Start, &|| false).unwrap().unwrap();
@@ -2542,7 +2603,75 @@ mod tests {
                 Err(std::io::ErrorKind::PermissionDenied.into())
             }
         };
-        assert!(filed_mods_with(&f.old, &list).is_err());
+        // ... and it names the folder, for the "can't read" problem a move shows.
+        let e = filed_mods_with(&f.old, &list).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+        let msg = unreadable_archive_message(&e, "then try again.");
+        assert!(
+            msg.starts_with("Silo can't read ")
+                && msg.contains(&f.old.join("Tools").display().to_string()),
+            "{msg}"
+        );
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    // A category folder Silo can't list may hold unrecorded mods: the move pauses with nothing
+    // moved, rather than leaving them behind in an archive it no longer tracks.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_category_pauses_the_move_before_anything_moves() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fx("unreadable");
+        add_zip(&f, "FS25_A", false);
+        let locked = f.old.join("Maps");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("FS25_Stray.zip"), b"PK").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // Running as root: permissions don't stop a listing, so there's nothing to test.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_dir_all(&f.base);
+            return;
+        }
+        let rows = db::load_organized(&f.conn, &f.key);
+        assert!(unknown_mods(&f.old, &rows).is_err());
+        let out = run_with(&f, Op::Start, &|| false).unwrap().unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(out.paused);
+        assert!(
+            out.errors[0].starts_with("Silo can't read "),
+            "{:?}",
+            out.errors
+        );
+        assert!(zip_at(&f.old, "FS25_A").exists() && !zip_at(&f.new, "FS25_A").exists());
+        assert!(locked.join("FS25_Stray.zip").exists());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    // The category lists fine, but an unrecorded folder mod in it can't be looked into: that's
+    // "can't read", not "not a mod".
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_mod_that_cant_be_looked_into_is_an_error_not_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fx("unreadable_mod");
+        let stray = f.old.join("Tools/FS25_Stray");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::set_permissions(&stray, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::metadata(stray.join("modDesc.xml")).is_ok() {
+            // Running as root: permissions don't stop the look, so there's nothing to test.
+            std::fs::set_permissions(&stray, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_dir_all(&f.base);
+            return;
+        }
+        let res = unknown_mods(&f.old, &[]);
+        std::fs::set_permissions(&stray, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let e = res.unwrap_err();
+        assert!(e.to_string().contains("FS25_Stray"), "{e}");
+        // A plain folder without a modDesc is still just "not a mod".
+        std::fs::create_dir_all(f.old.join("Tools/notes")).unwrap();
+        assert_eq!(unknown_mods(&f.old, &[]).unwrap(), vec![stray]);
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
@@ -2748,10 +2877,57 @@ mod tests {
         std::fs::create_dir_all(&b).unwrap();
         std::fs::write(a.join("x.xml"), b"12").unwrap();
         std::fs::write(b.join("y.xml"), b"34").unwrap(); // same count + total size
-        assert_eq!(verify(&a, &b, "dir"), Ok(false));
+        assert_eq!(verify(&a, &b, "dir", Check::Listing), Ok(false));
+        assert_eq!(verify(&a, &b, "dir", Check::Contents), Ok(false));
         std::fs::remove_file(b.join("y.xml")).unwrap();
         std::fs::write(b.join("x.xml"), b"34").unwrap();
-        assert_eq!(verify(&a, &b, "dir"), Ok(true));
+        // Same paths and sizes, different bytes: only a contents check tells them apart.
+        assert_eq!(verify(&a, &b, "dir", Check::Listing), Ok(true));
+        assert_eq!(verify(&a, &b, "dir", Check::Contents), Ok(false));
+        std::fs::write(b.join("x.xml"), b"12").unwrap();
+        assert_eq!(verify(&a, &b, "dir", Check::Contents), Ok(true));
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    // Paused after placing a folder mod's copy but before deleting the original: an edit to the
+    // original that keeps every size must not pass the resume check, or the edit is deleted.
+    #[test]
+    fn a_same_size_edit_while_paused_keeps_the_folder_original() {
+        let f = fx("dirresume");
+        let src = f.old.join("Tools/FS25_D");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::write(src.join("a.xml"), b"<v>1</v>").unwrap();
+        let r = row("FS25_D", "FS25_D", "dir", false);
+        db::upsert_organized(&f.conn, &f.key, &r).unwrap();
+        // The earlier run's placed copy, recorded as Silo's.
+        let dst = f.new.join("Tools/FS25_D");
+        copy_dir_abortable(&src, &dst, &|| false).unwrap();
+        let mut m = marker(&f);
+        env(&f).record(&mut m, "FS25_D").unwrap();
+        // The user edits the original while the move is paused: same length, new value.
+        std::fs::write(src.join("a.xml"), b"<v>2</v>").unwrap();
+
+        let layout = dest(&f);
+        let mut pol = LinkPolicy::new(&layout);
+        let out = forward_one(&env(&f), &r, &mut m, &mut pol, &|| false);
+        assert!(matches!(out, Err(StepErr::Failed(_))), "{out:?}");
+        assert_eq!(std::fs::read(src.join("a.xml")).unwrap(), b"<v>2</v>");
+        assert!(dst.exists(), "the copy is left for the user to check");
+        assert!(
+            m.moved.is_empty(),
+            "no longer claimed, so a cancel leaves it alone"
+        );
+
+        // An untouched original still resumes: the copy matches, the original goes.
+        std::fs::write(src.join("a.xml"), b"<v>1</v>").unwrap();
+        env(&f).record(&mut m, "FS25_D").unwrap();
+        assert_eq!(
+            forward_one(&env(&f), &r, &mut m, &mut pol, &|| false),
+            Ok(Step::Moved)
+        );
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(dst.join("a.xml")).unwrap(), b"<v>1</v>");
         let _ = std::fs::remove_dir_all(&f.base);
     }
 

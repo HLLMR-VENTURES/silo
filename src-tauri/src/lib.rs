@@ -514,11 +514,15 @@ async fn gh_device_start(
     // sharing. GitHub accumulates scopes across authorizations, so the caller requests
     // the union of what it already holds plus the new capability.
     let scope = build_gh_scope(write.unwrap_or(false), gist.unwrap_or(false));
+    // The flow's polls store only if no Disconnect happened since this point.
+    let ticket = GH_SIGN_OUTS.ticket();
     tauri::async_runtime::spawn_blocking(move || -> Result<github::DeviceCode, String> {
         let conn = db::open(&db)?;
         let cid = effective_client_id(&conn)
             .ok_or_else(|| "No GitHub OAuth App Client ID configured".to_string())?;
-        github::device_start(&cid, &scope)
+        let dc = github::device_start(&cid, &scope)?;
+        GH_SIGN_OUTS.remember_flow(&dc.device_code, ticket);
+        Ok(dc)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -537,11 +541,28 @@ fn build_gh_scope(write: bool, gist: bool) -> String {
     scopes.join(" ")
 }
 
+/// Disconnect vs. a sign-in that's still out (see `github::SignOutGate`).
+static GH_SIGN_OUTS: github::SignOutGate = github::SignOutGate::new();
+
+/// A poll's answer for a device flow that a Disconnect ended: nothing was stored.
+fn signed_out_poll() -> github::PollResult {
+    github::PollResult {
+        status: "expired".into(),
+        token: None,
+        scope: None,
+        error: None,
+    }
+}
+
 #[tauri::command]
 async fn gh_device_poll(
     app: tauri::AppHandle,
     device_code: String,
 ) -> Result<github::PollResult, String> {
+    // The ticket the flow started under: a Disconnect since then wins, however late this runs.
+    let Some(ticket) = GH_SIGN_OUTS.flow_ticket(&device_code) else {
+        return Ok(signed_out_poll());
+    };
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<github::PollResult, String> {
         let conn = db::open(&db)?;
@@ -551,11 +572,22 @@ async fn gh_device_poll(
         if res.status == "ok" {
             if let Some(tok) = &res.token {
                 let user = github::whoami(tok).unwrap_or_default();
-                secrets::set(&conn, "gh_token", Some(tok))?;
-                db::set_app_setting(&conn, "gh_user", Some(&user))?;
-                // Store the scopes GitHub actually granted — capability is derived from
-                // these, not from what we asked for. Accumulates across re-auth.
-                db::set_app_setting(&conn, "gh_scopes", Some(res.scope.as_deref().unwrap_or("")))?;
+                let stored = GH_SIGN_OUTS.store_if_current(ticket, || -> Result<(), String> {
+                    secrets::set(&conn, "gh_token", Some(tok))?;
+                    db::set_app_setting(&conn, "gh_user", Some(&user))?;
+                    // Store the scopes GitHub actually granted — capability is derived from
+                    // these, not from what we asked for. Accumulates across re-auth.
+                    db::set_app_setting(
+                        &conn,
+                        "gh_scopes",
+                        Some(res.scope.as_deref().unwrap_or("")),
+                    )
+                });
+                match stored {
+                    Some(r) => r?,
+                    // Disconnected while this flow was out: the sign-in is dropped.
+                    None => return Ok(signed_out_poll()),
+                }
             }
         }
         // Never expose the raw token to the frontend.
@@ -572,6 +604,8 @@ async fn gh_device_poll(
 /// let a 403 surface a reconnect hint if a specific permission is missing.
 #[tauri::command]
 async fn gh_set_pat(app: tauri::AppHandle, pat: String) -> Result<String, String> {
+    // Like a device-flow poll: a Disconnect while GitHub checks the token wins.
+    let ticket = GH_SIGN_OUTS.ticket();
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let pat = github::clean_pat(&pat)?;
@@ -580,14 +614,18 @@ async fn gh_set_pat(app: tauri::AppHandle, pat: String) -> Result<String, String
             return Err("GitHub didn't accept that token. Check it and paste it again.".into());
         }
         let conn = db::open(&db)?;
-        secrets::set(&conn, "gh_token", Some(&pat))?;
-        db::set_app_setting(&conn, "gh_user", Some(&user))?;
         let stored = if scopes.trim().is_empty() {
             "*".to_string()
         } else {
             scopes
         };
-        db::set_app_setting(&conn, "gh_scopes", Some(&stored))?;
+        GH_SIGN_OUTS
+            .store_if_current(ticket, || -> Result<(), String> {
+                secrets::set(&conn, "gh_token", Some(&pat))?;
+                db::set_app_setting(&conn, "gh_user", Some(&user))?;
+                db::set_app_setting(&conn, "gh_scopes", Some(&stored))
+            })
+            .ok_or_else(|| "GitHub was disconnected while Silo checked the token.".to_string())??;
         Ok(user)
     })
     .await
@@ -1490,13 +1528,22 @@ async fn gh_logout(app: tauri::AppHandle) -> Result<(), String> {
     let db = db_path(&app)?;
     off_main(move || {
         let conn = db::open(&db)?;
-        secrets::set(&conn, "gh_token", None)?;
-        db::set_app_setting(&conn, "gh_user", None)?;
-        db::set_app_setting(&conn, "gh_scopes", None)?;
-        // Legacy flags from before scope capture — clear them too so nothing lingers.
-        db::set_app_setting(&conn, "gh_write", None)?;
-        db::set_app_setting(&conn, "gh_gist", None)?;
-        Ok(())
+        GH_SIGN_OUTS.sign_out(|| {
+            // Silo stops using the token even when the keychain keeps a copy it couldn't
+            // delete (it's distrusted, and removed once the store allows), so the account is
+            // disconnected either way; that leftover is still reported below.
+            let removed = secrets::clear(&conn, "gh_token")?;
+            db::set_app_setting(&conn, "gh_user", None)?;
+            db::set_app_setting(&conn, "gh_scopes", None)?;
+            // Legacy flags from before scope capture — clear them too so nothing lingers.
+            db::set_app_setting(&conn, "gh_write", None)?;
+            db::set_app_setting(&conn, "gh_gist", None)?;
+            if removed {
+                Ok(())
+            } else {
+                Err(secrets::REMOVE_FAILED.to_string())
+            }
+        })
     })
     .await
 }
@@ -2963,9 +3010,13 @@ fn target_problems(
     let mut v = fence_problems(layout, new, &f);
     // Mods filed in `<new>/<subfolder>/` that Silo doesn't know would mix with the library.
     // (Loose mods at the top level are fine — that's adopt.)
-    let foreign = relocate::unknown_mods(new, &[]).len();
-    if foreign > 0 {
-        v.push(foreign_mods_problem(foreign));
+    match relocate::unknown_mods(new, &[]) {
+        Ok(foreign) if !foreign.is_empty() => v.push(foreign_mods_problem(foreign.len())),
+        Ok(_) => {}
+        Err(e) => v.push(relocate::unreadable_archive_message(
+            &e,
+            "or choose another folder.",
+        )),
     }
     v
 }
@@ -3063,15 +3114,19 @@ fn check_move(
     // For space, an unknown mount is another drive: the whole archive must fit.
     let archive_same_drive =
         organize::known_same_mount(&organize::mount_of(&layout.archive), &new_mount);
-    let unknown = relocate::unknown_mods(&layout.archive, &rows);
-    let problems = move_problems(MoveFacts {
-        target,
-        unknown: relocate::unknown_messages(
+    // An archive folder Silo can't list may hold unrecorded mods the move would leave behind.
+    let unknown = match relocate::unknown_mods(&layout.archive, &rows) {
+        Ok(unknown) => relocate::unknown_messages(
             &unknown,
             &rows,
             "then try again.",
             "rescan, then try again.",
         ),
+        Err(e) => vec![relocate::unreadable_archive_message(&e, "then try again.")],
+    };
+    let problems = move_problems(MoveFacts {
+        target,
+        unknown,
         missing,
         collisions: relocate::collisions(new, &rows),
         space: Space {
@@ -4880,9 +4935,13 @@ async fn scan_log() -> Result<logscan::LogReport, error::AppError> {
             ));
         }
         // Logs are read as lossy UTF-8; FS writes mostly ASCII but paths can carry stray bytes.
-        let bytes = std::fs::read(&path)?;
-        let text = String::from_utf8_lossy(&bytes);
-        Ok(logscan::parse(&text))
+        // A runaway log is read as its start and end only, so it can't exhaust memory (#351).
+        let file = std::fs::File::open(&path)?;
+        Ok(logscan::scan(
+            file,
+            logscan::LOG_HEAD_BYTES,
+            logscan::LOG_TAIL_BYTES,
+        )?)
     })
     .await
     .map_err(|e| error::AppError::from(e.to_string()))?
@@ -5085,9 +5144,11 @@ async fn save_mod_settings_raw(path: String, content: String) -> Result<(), Stri
 }
 
 /// Refuse text that isn't one well-formed XML document (parsed to the end: every tag closed
-/// and matched, one root element, nothing but whitespace or comments around it). The raw
-/// editor writes what the user typed, and a broken settings file makes the mod fall back to
-/// its defaults or fail to load.
+/// and matched, one root element, nothing but whitespace or comments around it; valid
+/// names; every attribute quoted and named once; only the five predefined entities and
+/// character references; an XML declaration only at the very start and a DOCTYPE only
+/// before the root). The raw editor writes what the user typed, and a broken settings file
+/// makes the mod fall back to its defaults or fail to load.
 fn ensure_well_formed(xml: &str) -> Result<(), String> {
     use quick_xml::events::Event;
     let refuse = |why: String| {
@@ -5095,15 +5156,58 @@ fn ensure_well_formed(xml: &str) -> Result<(), String> {
             "That isn't valid XML, so Silo didn't save it ({why}). Fix it and save again."
         ))
     };
+    if let Err(why) = xmltext::check_chars(xml) {
+        return refuse(why);
+    }
     let mut reader = quick_xml::Reader::from_str(xml);
+    reader.config_mut().check_comments = true; // no `--` inside a comment
     let mut depth = 0usize;
     let mut roots = 0usize;
+    let mut first = true;
+    let mut doctype = false;
     loop {
-        match reader.read_event() {
+        let event = reader.read_event();
+        if let Ok(Event::Start(e) | Event::Empty(e)) = &event {
+            if let Err(why) =
+                xmltext::check_name(e.name().as_ref()).and_then(|()| xmltext::check_attributes(e))
+            {
+                return refuse(format!("before byte {}: {why}", reader.buffer_position()));
+            }
+        }
+        let at_start = std::mem::replace(&mut first, false);
+        match event {
             Err(e) => {
                 return refuse(format!("at byte {}: {e}", reader.error_position()));
             }
             Ok(Event::Eof) => break,
+            Ok(Event::Decl(_)) if !at_start => {
+                return refuse("the <?xml ...?> declaration must come first".into());
+            }
+            Ok(Event::Decl(d)) => {
+                if let Err(why) = xmltext::check_decl(&d) {
+                    return refuse(why);
+                }
+            }
+            Ok(Event::PI(p)) => {
+                let target = p.target();
+                if let Err(why) = xmltext::check_name(target) {
+                    return refuse(format!("before byte {}: {why}", reader.buffer_position()));
+                }
+                if target.eq_ignore_ascii_case(b"xml") {
+                    return refuse("the <?xml ...?> declaration must come first".into());
+                }
+            }
+            Ok(Event::DocType(_)) if doctype || depth > 0 || roots > 0 => {
+                return refuse("a <!DOCTYPE> can only come once, before the root element".into());
+            }
+            // Settings files have no DTD: only a bare `<!DOCTYPE name>` passes, since Silo
+            // can't check an internal subset or an external one.
+            Ok(Event::DocType(d)) => {
+                if xmltext::check_name(String::from_utf8_lossy(&d).trim().as_bytes()).is_err() {
+                    return refuse("a <!DOCTYPE> can only name the root element".into());
+                }
+                doctype = true;
+            }
             Ok(Event::Start(_)) => {
                 if depth == 0 {
                     roots += 1;
@@ -5117,6 +5221,15 @@ fn ensure_well_formed(xml: &str) -> Result<(), String> {
             }
             Ok(Event::GeneralRef(_) | Event::CData(_)) if depth == 0 => {
                 return refuse("text outside the root element".into());
+            }
+            // Only a CDATA section may end with `]]>`; in text it must be `]]&gt;`.
+            Ok(Event::Text(t)) if t.windows(3).any(|w| w == b"]]>") => {
+                return refuse("text contains ]]> outside a CDATA section".into());
+            }
+            Ok(Event::GeneralRef(r)) => {
+                if let Err(why) = xmltext::check_reference(&String::from_utf8_lossy(&r)) {
+                    return refuse(format!("before byte {}: {why}", reader.buffer_position()));
+                }
             }
             Ok(_) => {}
         }
@@ -5587,6 +5700,10 @@ mod tests {
             r#"<?xml version="1.0" encoding="utf-8"?><settings a="1"><x>2</x></settings>"#,
             "<!-- c --><settings/>\n",
             "  <settings>\n  <x>a &amp; b</x>\n</settings>  ",
+            r#"<settings><a v='say "hi"' w="&lt;&#10;&#x9;&quot;"/>&apos;&#233;</settings>"#,
+            "\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<!DOCTYPE settings>\n<settings xsi:x=\"1\"><x-y.z/></settings>\n",
+            "<settings><?app-hint keep this?><!-- a - b --></settings>",
+            "<settings><v>hello]]&gt;</v><v><![CDATA[hello]]></v><v>a]]b ]> ]]</v></settings>",
         ] {
             assert!(super::ensure_well_formed(good).is_ok(), "{good}");
         }
@@ -5598,8 +5715,39 @@ mod tests {
             "just text",
             "<settings>a & b</settings>",
             "<settings/>trailing",
+            // #354: unquoted or duplicated attributes, and entities nothing declares.
+            "<settings><a value=5/></settings>",
+            r#"<settings><a value="5" value="6"/></settings>"#,
+            r#"<settings value="5" value="6"></settings>"#,
+            "<settings>&missing;</settings>",
+            r#"<settings><a v="&missing;"/></settings>"#,
+            r#"<settings><a v="a & b"/></settings>"#,
+            r#"<settings><a v="<"/></settings>"#,
+            "<settings>&#1;</settings>",
+            r#"<settings><a v="&#0;"/></settings>"#,
+            "<settings value=\"\u{1}\"/>",
+            "<settings>a\u{1}b</settings>",
+            "<settings><![CDATA[\u{FFFF}]]></settings>",
+            r#"<settings 1value="5"/>"#,
+            r#"<1settings/>"#,
+            r#"<settings><?xml version="1.0"?></settings>"#,
+            r#"<settings/><?xml version="1.0"?>"#,
+            "<!-- c --><?xml version=\"1.0\"?><settings/>",
+            "<settings><!DOCTYPE settings></settings>",
+            "<!DOCTYPE a><!DOCTYPE b><settings/>",
+            "<?xml version=1.0?><settings/>",
+            r#"<?xml version="1.0" version="1.0"?><settings/>"#,
+            "<settings><!-- a--b --></settings>",
+            "<settings><!-- a---></settings>",
+            "<settings><?1bad data?></settings>",
+            "<settings><?XML data?></settings>",
+            "<settings><value>hello]]></value></settings>",
+            "<!DOCTYPE settings [garbage]>\n<settings/>",
+            "<!DOCTYPE settings SYSTEM \"x.dtd\"><settings/>",
         ] {
-            let e = super::ensure_well_formed(bad).unwrap_err();
+            let Err(e) = super::ensure_well_formed(bad) else {
+                panic!("accepted {bad:?}");
+            };
             assert!(e.contains("didn't save it"), "{bad}: {e}");
         }
     }

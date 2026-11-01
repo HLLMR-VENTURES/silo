@@ -81,6 +81,7 @@ fn parse_store_category(xml: &str) -> Option<String> {
             }
             Ok(Event::Text(t)) => run.push_text(&t),
             Ok(Event::GeneralRef(r)) => run.push_ref(&r),
+            Ok(Event::CData(c)) => run.push_str(&String::from_utf8_lossy(&c)),
             _ => {}
         }
         buf.clear();
@@ -143,6 +144,13 @@ mod tests {
     fn reads_category_with_an_entity() {
         let xml = r#"<vehicle><storeData><category>a&amp;b</category></storeData></vehicle>"#;
         assert_eq!(parse_store_category(xml).as_deref(), Some("a&b"));
+    }
+
+    /// #354: a category written as CDATA is read, not dropped.
+    #[test]
+    fn reads_category_in_cdata() {
+        let xml = r#"<vehicle><storeData><category><![CDATA[tractorsL]]></category></storeData></vehicle>"#;
+        assert_eq!(parse_store_category(xml).as_deref(), Some("tractorsL"));
     }
 
     #[test]

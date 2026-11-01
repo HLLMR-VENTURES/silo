@@ -21,7 +21,7 @@
 //! kept the count the same in-game (the mod's settings replace the base ones).
 
 use crate::moddesc::ModDesc;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -118,16 +118,47 @@ pub fn parse_list_checked(xml: &[u8]) -> Option<(Vec<String>, Option<u32>)> {
     .map(|(names, channels)| (names, channels.and_then(|v| v.trim().parse().ok())))
 }
 
+/// The most distinct names Silo reads from one list. The game's own limits are 255 fill types
+/// and 63 height types, and the biggest real lists hold a few hundred, so a list past this is
+/// junk (a 32 MiB member of tiny entries compresses to almost nothing) and counts as unreadable.
+pub const MAX_LIST_NAMES: usize = 10_000;
+
+/// The longest name Silo reads (real ones are a few dozen bytes); a list with a longer one counts
+/// as unreadable, so a handful of giant names can't hold gigabytes.
+pub const MAX_NAME_BYTES: usize = 256;
+
+/// The most script-loaded lists Silo reads from one mod for its estimate (real mods ship up to
+/// five). Once a mod's names reach [`MAX_LIST_NAMES`] no further list is read, so they stay under
+/// twice that (each list is capped too); the estimate is far past any game cap by then, so where
+/// exactly it stops doesn't change the verdict.
+pub const MAX_LIST_FILES: usize = 100;
+
+/// Append the items `seen` doesn't hold yet to `out`, in order, and remember them. Linear, so a
+/// huge list can't stall a check the way `Vec::contains` would.
+pub(crate) fn push_new(
+    out: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    items: impl IntoIterator<Item = String>,
+) {
+    for t in items {
+        if !seen.contains(&t) {
+            seen.insert(t.clone());
+            out.push(t);
+        }
+    }
+}
+
 /// The `name_attr` values of `<root><list><item>` entries, upper-cased and de-duplicated, and the
 /// list element's `numChannels`. `None` when the XML isn't a complete, well-formed document or
-/// an element on the way has a malformed attribute: the game can't load such a file. Pure.
+/// an element on the way has a malformed attribute: the game can't load such a file. Also `None`
+/// past [`MAX_LIST_NAMES`] distinct names or with a name over [`MAX_NAME_BYTES`]. Pure.
 pub(crate) fn named_list(
     xml: &[u8],
     list: &[u8],
     item: &[u8],
     name_attr: &[u8],
 ) -> Option<(Vec<String>, Option<String>)> {
-    let (mut names, mut channels) = (Vec::new(), None);
+    let (mut names, mut seen, mut channels) = (Vec::new(), HashSet::new(), None);
     walk(xml, |depth, parent, e| {
         let name = e.name();
         if depth == 1 && name.as_ref() == list && channels.is_none() {
@@ -136,7 +167,14 @@ pub(crate) fn named_list(
         if depth == 2 && parent == list && name.as_ref() == item {
             if let Some(n) = attr(e, name_attr)? {
                 let n = n.trim().to_uppercase();
-                if !n.is_empty() && !names.contains(&n) {
+                if n.len() > MAX_NAME_BYTES {
+                    return None;
+                }
+                if !n.is_empty() && !seen.contains(&n) {
+                    if names.len() >= MAX_LIST_NAMES {
+                        return None;
+                    }
+                    seen.insert(n.clone());
                     names.push(n);
                 }
             }
@@ -284,7 +322,7 @@ fn foliage_types(install_dir: &Path) -> Option<Vec<String>> {
 /// Every name `parse` finds in the base crops' `data/foliage/<crop>/*.xml`, de-duplicated. The
 /// crops a map grows bring these with them (ground-pile types, and fill types for #341).
 pub fn foliage_names(install_dir: &Path, parse: fn(&[u8]) -> Vec<String>) -> Option<Vec<String>> {
-    let mut out: Vec<String> = Vec::new();
+    let (mut out, mut seen) = (Vec::new(), HashSet::new());
     for crop in std::fs::read_dir(install_dir.join("data/foliage"))
         .ok()?
         .flatten()
@@ -297,11 +335,8 @@ pub fn foliage_names(install_dir: &Path, parse: fn(&[u8]) -> Vec<String>) -> Opt
             if p.extension().and_then(|e| e.to_str()) != Some("xml") {
                 continue;
             }
-            for t in std::fs::read(&p).map(|b| parse(&b)).unwrap_or_default() {
-                if !out.contains(&t) {
-                    out.push(t);
-                }
-            }
+            let names = std::fs::read(&p).map(|b| parse(&b)).unwrap_or_default();
+            push_new(&mut out, &mut seen, names);
         }
     }
     Some(out)
@@ -399,15 +434,12 @@ impl ModTypes {
     /// height type whose fill type isn't registered ("has invalid fill type"), but a mod or map may
     /// register the fill type somewhere Silo doesn't look (a script, a crop file), so not finding
     /// it is no proof: the entry still counts, just not toward a Problem.
-    pub fn downgrade_unknown(&mut self, known: &std::collections::HashSet<String>) {
+    pub fn downgrade_unknown(&mut self, known: &HashSet<String>) {
         let (keep, unsure): (Vec<String>, Vec<String>) =
             self.exact.drain(..).partition(|t| known.contains(t));
         self.exact = keep;
-        for t in unsure {
-            if !self.estimate.contains(&t) {
-                self.estimate.push(t);
-            }
-        }
+        let mut seen: HashSet<String> = self.estimate.iter().cloned().collect();
+        push_new(&mut self.estimate, &mut seen, unsure);
     }
 }
 
@@ -440,7 +472,7 @@ pub struct MapTypes {
 
 impl MapTypes {
     /// [`ModTypes::downgrade_unknown`] for the map's own list and its extras.
-    pub fn downgrade_unknown(&mut self, known: &std::collections::HashSet<String>) {
+    pub fn downgrade_unknown(&mut self, known: &HashSet<String>) {
         if let MapList::Own { names, unsure, .. } = &mut self.list {
             let (keep, move_out): (Vec<String>, Vec<String>) =
                 names.drain(..).partition(|t| known.contains(t));
@@ -475,16 +507,18 @@ pub fn mod_types(
         .map(|b| parse_list(&b).0)
         .unwrap_or_default();
     let mut estimate: Vec<String> = Vec::new();
-    if !md.is_map {
-        for m in candidates() {
+    if !md.is_map && exact.len() < MAX_LIST_NAMES {
+        // Seeded with the exact names, so an estimate never repeats one.
+        let mut seen: HashSet<String> = exact.iter().cloned().collect();
+        for m in candidates().into_iter().take(MAX_LIST_FILES) {
+            if seen.len() >= MAX_LIST_NAMES {
+                break;
+            }
             if Some(m.as_str()) == declared {
                 continue;
             }
-            for t in read(&m).map(|b| parse_list(&b).0).unwrap_or_default() {
-                if !exact.contains(&t) && !estimate.contains(&t) {
-                    estimate.push(t);
-                }
-            }
+            let names = read(&m).map(|b| parse_list(&b).0).unwrap_or_default();
+            push_new(&mut estimate, &mut seen, names);
         }
     }
     (!exact.is_empty() || !estimate.is_empty()).then(|| ModTypes {
@@ -780,6 +814,48 @@ mod tests {
             parse_list_checked(b"<map><densityMapHeightTypes/></map>"),
             Some((vec![], None))
         );
+    }
+
+    /// Past [`MAX_LIST_NAMES`] distinct names a height-type list can't be read, the same as a
+    /// broken file, so the map's list counts as unsure (#351).
+    #[test]
+    fn a_list_past_the_name_cap_is_unreadable() {
+        let list = |n: usize| {
+            let mut xml = String::from("<map><densityMapHeightTypes numChannels=\"7\">");
+            for i in 0..n {
+                xml.push_str(&format!("<densityMapHeightType fillTypeName=\"t{i}\"/>"));
+            }
+            xml.push_str("</densityMapHeightTypes></map>");
+            xml.into_bytes()
+        };
+        let (names, ch) = parse_list_checked(&list(MAX_LIST_NAMES)).unwrap();
+        assert_eq!((names.len(), ch), (MAX_LIST_NAMES, Some(7)));
+        assert_eq!(parse_list_checked(&list(MAX_LIST_NAMES + 1)), None);
+        assert!(parse_list(&list(MAX_LIST_NAMES + 1)).0.is_empty());
+        // A name over MAX_NAME_BYTES makes the list unreadable too.
+        let named = |n: &str| {
+            format!("<map><densityMapHeightTypes><densityMapHeightType fillTypeName=\"{n}\"/></densityMapHeightTypes></map>")
+        };
+        let longest = "a".repeat(MAX_NAME_BYTES);
+        assert_eq!(
+            parse_list_checked(named(&longest).as_bytes()).unwrap().0,
+            [longest.to_uppercase()]
+        );
+        let over = "a".repeat(MAX_NAME_BYTES + 1);
+        assert_eq!(parse_list_checked(named(&over).as_bytes()), None);
+    }
+
+    #[test]
+    fn push_new_keeps_order_and_skips_seen() {
+        let mut out = vec!["A".to_string()];
+        let mut seen: HashSet<String> = ["A".to_string(), "Z".to_string()].into();
+        push_new(
+            &mut out,
+            &mut seen,
+            ["B", "A", "Z", "C", "B"].map(String::from),
+        );
+        assert_eq!(out, ["A", "B", "C"]);
+        assert!(seen.contains("C"));
     }
 
     #[test]

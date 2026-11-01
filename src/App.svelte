@@ -9,6 +9,7 @@
     askWithOption,
     EmptyState,
     toast,
+    type ToastHandle,
   } from "./lib/ui";
   import {
     modsRootStatus,
@@ -201,6 +202,8 @@
   import { Selection } from "./lib/state/selection.svelte";
   import { createSwitchUndo, switchMessage } from "./lib/state/switchUndo";
   import { setSwitchOutcome, switchOutcome } from "./lib/state/switchOutcome";
+  import { SaveLedger, withEntry } from "./lib/state/optimistic";
+  import { serialDrained, serialPendingUnder } from "./lib/serial";
   import { getVerdict } from "./lib/provenanceCache.svelte";
   import FilterBar from "./lib/components/FilterBar.svelte";
   import ModSettings from "./lib/components/ModSettings.svelte";
@@ -307,12 +310,16 @@
   // library" counts are only shown against a library Silo has actually read.
   let libraryScanned = $state(false);
   let foreignFiles = $state<ForeignFile[]>([]);
+  /** Bumped by every foreign-file check and by a folder switch: an older check's answer is dropped. */
+  let foreignGen = 0;
   let scanning = $state(false);
   // The last scan failed (its notice is up): the status chip says so instead of "All good".
   let scanFailed = $state(false);
   // Epoch-ms of the last scan attempt — throttles the auto-rescan-on-focus so alt-tabbing
   // doesn't re-scan on every focus.
   let lastScanAt = 0;
+  /** Scans started so far: filing that waited checks no scan started meanwhile. */
+  let scansStarted = 0;
   /** The running scan's op (progress events report into it). */
   let scanOp: OpToken | null = null;
   let progress = $state({ done: 0, total: 0 });
@@ -342,6 +349,9 @@
   let overrideMap = $state<
     Record<string, { category: string; subcategory: string | null }>
   >({});
+  // What the database holds for each map, so a failed save goes back to it (#358).
+  const curationSaved = new SaveLedger<CurationRow>();
+  const overrideSaved = new SaveLedger<{ category: string; subcategory: string | null }>();
   // The Library's filters (lib/components/library/filters): the All / Active / Parked segment
   // (remembered), the Favorites / Needs attention chips and the Filters popover. Category and
   // search are libCat/libSub and `query`.
@@ -644,12 +654,22 @@
 
   async function applyUpdate() {
     if (updating) return;
+    // Set before the first await, so a second click can't start a second install (#358).
+    updating = true;
     // Installing relaunches Silo: never in the middle of a change to the library.
-    if (await changingFiles()) {
+    let busy: boolean;
+    try {
+      busy = await changingFiles();
+    } catch (e) {
+      updating = false;
+      reportError(e, "Updating Silo");
+      return;
+    }
+    if (busy) {
+      updating = false;
       refuse(FINISH_FIRST);
       return;
     }
-    updating = true;
     let blocking = false;
     try {
       // The download changes nothing. Right before installing, block new library changes in
@@ -1321,6 +1341,11 @@
   // Returns true when it worked; false when it was refused (another write) or failed, so the
   // drawer stays open.
   async function resolveForeign(fileName: string, action: "adopt" | "restore"): Promise<boolean> {
+    // The file was found in the folder shown; mid-switch, Silo may already use the next one (#358).
+    if (folderSwitches > 0) {
+      refuse(FOLDER_SWITCH_WAIT);
+      return false;
+    }
     const op = beginWrite(action === "adopt" ? "Using the version in your mods folder" : "Putting Silo's version back");
     if (!op) return false;
     let done = false;
@@ -1334,8 +1359,20 @@
       op.end();
     }
     await runScan(false);
-    foreignFiles = await detectForeignFiles(roots[0]).catch(() => []);
+    await refreshForeignFiles();
     return done;
+  }
+
+  /**
+   * Look for files at a managed name that aren't Silo's projection, in the current mods folder.
+   * The answer is dropped when a newer check started or the folder changed meanwhile (#358):
+   * hashing can be slow on a cloud-synced folder, and the old folder's files mustn't show.
+   */
+  async function refreshForeignFiles(): Promise<void> {
+    const gen = ++foreignGen;
+    const root = roots[0];
+    const found = await detectForeignFiles(root).catch(() => []);
+    if (gen === foreignGen && roots[0] === root) foreignFiles = found;
   }
 
   // Build the organize inputs for every loose (unorganized) zip currently in view.
@@ -1365,6 +1402,21 @@
     opts: { auto?: boolean; onStart?: () => void; onProgress?: (done: number, total: number) => void } = {},
   ): Promise<FilingRun | null> {
     if (inputs.length === 0) return null;
+    // A category pick still being saved decides where a mod goes: wait until none is, then file
+    // by the categories as they are then (no await between that and taking the write), so one
+    // whose save failed isn't used (#358). If the folder changed or a scan started meanwhile
+    // (even one that has ended), these inputs may be stale: refuse, as a busy library would.
+    if (serialPendingUnder("override:")) {
+      const root = roots[0];
+      const scans = scansStarted;
+      await serialDrained("override:");
+      const moved = folderSwitches > 0 || roots[0] !== root;
+      if (moved || scanning || scansStarted !== scans) {
+        if (!opts.auto) refuse(moved ? FOLDER_SWITCH_WAIT : SCAN_WAIT);
+        return null;
+      }
+    }
+    inputs = withCategoriesNow(inputs);
     const op = beginWrite(`Filing ${modsCount(inputs.length)} into the library`, !!opts.onProgress, {
       silent: opts.auto,
     });
@@ -1398,6 +1450,15 @@
     await runScan(false);
     if (out.relinkError !== undefined) reportError(out.relinkError, "Turning your filed mods back on");
     return out;
+  }
+
+  /** Organize inputs with each mod's category as the library shows it now (its override, if any). */
+  function withCategoriesNow(inputs: ModInput[]): ModInput[] {
+    const now = new Map(effectiveMods.map((m) => [m.techName, m]));
+    return inputs.map((i) => {
+      const m = now.get(i.techName);
+      return m ? { ...i, category: m.category, subcategory: m.subcategory } : i;
+    });
   }
 
   // Apply a prepared set of organize inputs, reporting any problem as a toast (with Try again).
@@ -1853,27 +1914,43 @@
     category: string,
     subcategory: string | null = null,
   ) {
-    overrideMap = {
-      ...overrideMap,
-      [techName]: { category, subcategory },
-    };
     editing = null;
     try {
-      await setOverride({ techName, category, subcategory });
+      await saveOverride(techName, { category, subcategory });
     } catch (e) {
       reportError(e, "Saving the category");
     }
   }
 
   async function resetCategory(techName: string) {
-    const next = { ...overrideMap };
-    delete next[techName];
-    overrideMap = next;
     editing = null;
     try {
-      await setOverride({ techName, category: "", subcategory: null });
+      await saveOverride(techName, undefined);
     } catch (e) {
       reportError(e, "Resetting the category");
+    }
+  }
+
+  /**
+   * Show a mod's category change at once and save it. A failed save puts back the category the
+   * database holds (unless a newer pick was made meanwhile), so Organize never files the mod under
+   * a category that isn't stored (#358).
+   * @param value the category, or undefined for Silo's own
+   * @throws the save's error, after putting the category back
+   */
+  async function saveOverride(
+    techName: string,
+    value: { category: string; subcategory: string | null } | undefined,
+  ): Promise<void> {
+    const token = overrideSaved.begin(techName);
+    overrideMap = withEntry(overrideMap, techName, value);
+    try {
+      await setOverride({ techName, category: value?.category ?? "", subcategory: value?.subcategory ?? null });
+      overrideSaved.saved(techName, value);
+    } catch (e) {
+      const back = overrideSaved.failed(techName, token);
+      if (back) overrideMap = withEntry(overrideMap, techName, back.value);
+      throw e;
     }
   }
 
@@ -2184,23 +2261,32 @@
   // ModHub's open-then-use loop: the zip the user saved from the page lands in the mods folder as
   // a different build at the mod's name; the focus rescan finds it and Silo offers to use it.
   const announcedDrops = new Set<string>();
+  /** The "Use this version" offers shown for this mods folder: a folder switch takes them down. */
+  let dropToasts: ToastHandle[] = [];
   $effect(() => {
     const arrivals = newDroppedBuilds(updateSections.modhub, foreignFiles, announcedDrops);
     // Untracked: showing a toast mustn't make this effect depend on the toast list.
     untrack(() => announceDrops(arrivals));
   });
   function announceDrops(arrivals: ReturnType<typeof newDroppedBuilds>) {
+    const root = roots[0];
     for (const { row, file } of arrivals) {
       announcedDrops.add(droppedKey(file));
-      toast({
+      const t = toast({
         message: `Found a newer ${row.title} (${displayVersion(file.flatVersion)}).`,
         duration: 15_000,
         action: {
           label: "Use this version",
-          run: () => void resolveForeign(file.fileName, "adopt"),
+          // Found in this mods folder: never acted on after a switch to another one (#358).
+          run: () => {
+            if (roots[0] === root) void resolveForeign(file.fileName, "adopt");
+          },
         },
       });
+      dropToasts.push(t);
     }
+    // Keep the list short: the oldest offers go (taken down too, so none outlives a folder switch).
+    if (dropToasts.length > 20) for (const old of dropToasts.splice(0, dropToasts.length - 20)) old.dismiss();
   }
 
   // The opt-in startup check: once the first scan has filled the library (a queued or skipped
@@ -2222,12 +2308,31 @@
     flag: "favorite" | "hidden" | "broken" | "skipUpdates",
   ) {
     const c = cur(techName);
-    const next: CurationRow = { ...c, [flag]: !c[flag] };
-    curationMap = { ...curationMap, [techName]: next };
     try {
-      await setCuration(next);
+      await saveCurationRow({ ...c, [flag]: !c[flag] });
     } catch (e) {
       reportError(e, "Saving your mod flags");
+    }
+  }
+
+  /**
+   * Show a mod's new flags / note / rating at once and save them. A failed save puts back the row
+   * the database holds (unless a newer edit was made meanwhile), so nothing unsaved is shown as
+   * current (#358). Every curation write goes through here, the drawer's too.
+   * @param next the whole row to save
+   * @throws the save's error, after putting the row back
+   */
+  async function saveCurationRow(next: CurationRow): Promise<void> {
+    const t = next.techName;
+    const token = curationSaved.begin(t);
+    curationMap = withEntry(curationMap, t, next);
+    try {
+      await setCuration(next);
+      curationSaved.saved(t, next);
+    } catch (e) {
+      const back = curationSaved.failed(t, token);
+      if (back) curationMap = withEntry(curationMap, t, back.value);
+      throw e;
     }
   }
 
@@ -2536,14 +2641,12 @@
   async function setCurationFor(list: ModEntry[], flag: "favorite" | "hidden" | "skipUpdates", value: boolean) {
     const before = list.map((m) => cur(m.techName)).filter((c) => c[flag] !== value);
     if (before.length === 0) return;
-    /** Save each row; only the saved ones show their new flag. */
-    const write = async (rows: CurationRow[]) => {
-      const res = await saveEach(rows, (r) => setCuration(r));
-      if (res.written.length)
-        curationMap = { ...curationMap, ...Object.fromEntries(res.written.map((r) => [r.techName, r])) };
-      return res;
-    };
-    const res = await write(before.map((c) => ({ ...c, [flag]: value })));
+    /** Set the flag on each mod in turn. Each row is built from the mod's flags, note and rating
+     *  as they are when its turn comes, so an edit made in the drawer meanwhile is kept (#358);
+     *  a row whose save fails goes back. */
+    const write = (changes: { techName: string; on: boolean }[]) =>
+      saveEach(changes, ({ techName, on }) => saveCurationRow({ ...cur(techName), [flag]: on }));
+    const res = await write(before.map((c) => ({ techName: c.techName, on: value })));
     if (res.written.length === 0) {
       reportError(res.error, "Saving your mod flags");
       return;
@@ -2573,7 +2676,7 @@
         label: "Undo",
         run: async () => {
           // Put back each mod's flag as it was, leaving its other flags as they are now.
-          const back = await write(changed.map((c) => ({ ...cur(c.techName), [flag]: c[flag] })));
+          const back = await write(changed.map((c) => ({ techName: c.techName, on: c[flag] })));
           if (back.failed.length === 0) return;
           reportError(back.error, "Saving your mod flags", { quiet: true });
           toast({ message: `Couldn't update ${modsCount(back.failed.length)}.`, tone: "warn" });
@@ -2718,7 +2821,11 @@
     libraryScanned = false;
     scanFailed = false;
     activeSet = new Set();
+    // The other folder's foreign files: drop a check still running, and its "Use this version"
+    // offers (#358).
+    foreignGen++;
     foreignFiles = [];
+    for (const t of dropToasts.splice(0)) t.dismiss();
     // The last update check was of the other folder's files (and one still running is too).
     updateFolderGen++;
     updateResults = [];
@@ -2735,8 +2842,10 @@
     await loadSavegames();
   }
 
-  /** Mods-folder switches under way (the picker, its dialogs, the rescan): no focus rescan. */
+  /** Mods-folder switches under way (the picker, its dialogs, the rescan): no focus rescan, and
+   *  no acting on a foreign file found in the folder being left. */
   let folderSwitches = 0;
+  const FOLDER_SWITCH_WAIT = "Wait for the mods folder switch to finish.";
   async function whileSwitchingFolder<T>(fn: () => Promise<T>): Promise<T> {
     folderSwitches++;
     try {
@@ -3181,7 +3290,9 @@
     const op = start(label ?? "Rescanning your library", { quiet: !label });
     scanOp = op;
     scanning = true;
+    scansStarted++;
     progress = { done: 0, total: 0 };
+    let scanned = false;
     try {
       const r = await scanMods(roots.length ? roots : undefined);
       result = r;
@@ -3189,6 +3300,7 @@
       libraryScanned = true;
       scanFailed = false;
       activeSet = new Set(r.mods.filter((m) => m.active).map((m) => m.techName));
+      scanned = true;
       // Interrupted mod updates Silo finished or rolled back before scanning. The scan owns
       // only the `scan` notice: other producers' notices stay up across rescans.
       if (r.notices?.length) info(r.notices.join(" "), { duration: 10_000 });
@@ -3204,9 +3316,7 @@
           : null,
       );
       // Filesystem-level check (Rust): files at a managed name that aren't Silo's projection.
-      detectForeignFiles(roots[0])
-        .then((f) => (foreignFiles = f))
-        .catch(() => (foreignFiles = []));
+      void refreshForeignFiles();
       // Privacy: a scan never sends the library to the catalog. Catalog calls happen only
       // when the user asks (Browse, a mod's details, Updates, integrity check).
       // NOTE: the update check is NOT auto-run on launch — on a large library the burst of
@@ -3236,8 +3346,9 @@
     }
     // Auto-file any mods still loose in the flat root (e.g. freshly downloaded),
     // keeping them active so filing is transparent to the game.
-    // Never auto-file mid-move: library writes are refused until the move finishes.
-    if (auto && autoFileNew && !archiveMove.unfinished) {
+    // Never auto-file mid-move: library writes are refused until the move finishes. Never after
+    // a failed scan either: `mods` and `activeSet` are still the last scan's (#358).
+    if (scanned && auto && autoFileNew && !archiveMove.unfinished) {
       if (mods.some(isFileable)) {
         await autoFile();
       }
@@ -3270,11 +3381,12 @@
       moveUnlisten = await archiveMove.listen();
       try {
         const rows = await getCuration();
+        curationSaved.load(rows.map((r) => [r.techName, r] as const));
         curationMap = Object.fromEntries(rows.map((r) => [r.techName, r]));
         const ovs = await getOverrides();
-        overrideMap = Object.fromEntries(
-          ovs.map((o) => [o.techName, { category: o.category, subcategory: o.subcategory }]),
-        );
+        const ovRows = ovs.map((o) => [o.techName, { category: o.category, subcategory: o.subcategory }] as const);
+        overrideSaved.load(ovRows);
+        overrideMap = Object.fromEntries(ovRows);
         await loadTags();
         await loadRepos();
         await loadSources();
@@ -3715,6 +3827,7 @@
           (settingsMod = { techName: dm.techName, title: dm.title ?? dm.techName })}
         onFindInBrowse={() => openInBrowse(dm)}
         onCurationChange={(row) => (curationMap = { ...curationMap, [row.techName]: row })}
+        saveCuration={saveCurationRow}
         onTagsChange={(t) => (tagMap = { ...tagMap, [dm.techName]: t })}
         onFilterTag={(t) => {
           libFilters = { ...libFilters, tag: t };

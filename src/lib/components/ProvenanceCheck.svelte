@@ -4,7 +4,7 @@
   import { inlineError } from "../state/notify.svelte";
   import type { ModEntry, VerifyResult } from "../types";
   import { verifyMod } from "../api";
-  import { getVerdict, isVerifying, provKey, setVerdict, setVerifying } from "../provenanceCache.svelte";
+  import { getFailure, getVerdict, isVerifying, setFailure, setVerdict, setVerifying } from "../provenanceCache.svelte";
 
   let { mod }: { mod: ModEntry } = $props();
 
@@ -12,24 +12,24 @@
   let phase = $state<Phase>("idle");
   let result = $state<VerifyResult | null>(null);
   let err = $state("");
-  /** The file the shown error belongs to. */
-  let errFor = $state<string | null>(null);
 
   // The panel follows the file shown, across drawer switches: a check still running for it
-  // (started before a switch away and back), its verdict from this session, its error, or the
-  // button.
+  // (started before a switch away and back), its error, its verdict from this session, or the
+  // button. The error comes before the verdict: a failed Re-check mustn't show the old verdict
+  // as if it had been confirmed (#358).
   $effect(() => {
-    const key = provKey(mod);
     const cached = getVerdict(mod);
+    const failed = getFailure(mod);
     if (isVerifying(mod)) {
       phase = "running";
       err = "";
+    } else if (failed !== undefined) {
+      phase = "error";
+      err = failed;
     } else if (cached) {
       result = cached;
       phase = "done";
       err = "";
-    } else if (errFor === key) {
-      phase = "error";
     } else {
       phase = "idle";
       result = null;
@@ -43,17 +43,14 @@
     // The verdict belongs to the file that was hashed: the drawer may show another mod by the
     // time it lands (this panel is reused across mods). The effect above shows the outcome.
     const m = mod;
-    const key = provKey(m);
     if (isVerifying(m)) return;
-    errFor = null;
+    setFailure(m, null);
     setVerifying(m, true);
     try {
       setVerdict(m, await verifyMod(m.techName, m.version, m.path));
     } catch (e) {
-      if (provKey(mod) === key) {
-        err = inlineError(e, "Checking the mod's integrity");
-        errFor = key;
-      }
+      // Kept under the file that was hashed, whichever mod the drawer shows now (#358).
+      setFailure(m, inlineError(e, "Checking the mod's integrity"));
     } finally {
       setVerifying(m, false);
     }
