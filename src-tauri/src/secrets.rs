@@ -138,10 +138,6 @@ fn get_with(conn: &Connection, key: &str, keychain: Option<&keyring::Entry>) -> 
 /// Shown when the keychain refused to store a token on a machine that has one.
 const SAVE_FAILED: &str = "Silo couldn't save the token in your system's credential store. \
      If it's locked, unlock it and try again.";
-/// Shown when there's no usable keychain but it may hold an older token Silo couldn't remove.
-const STALE_COPY: &str = "Silo couldn't save the token: your system's credential store \
-     can't be used right now, and Silo couldn't clear an older token from it. \
-     Unlock it and try again.";
 /// Shown when disconnecting couldn't delete the keychain copy (Silo has stopped using it).
 pub(crate) const REMOVE_FAILED: &str = "Silo couldn't remove the token from your system's \
      credential store. Silo won't use it, and removes it once the store allows (for example \
@@ -194,38 +190,30 @@ fn save(
         Ok(()) => saved_to_keychain(conn, key),
         // No usable keychain (e.g. a Linux box without Secret Service): keep the feature working
         // via SQLite; the keychain_available warning covers this. Only when the write, a read,
-        // the probe and the delete below all fail at the platform level: a store that answers
-        // at all (an entry, "no entry", locked, access denied) exists, so its failure is an
-        // error. The SQLite row then wins over any copy Silo can't see (`get`), and a
-        // disconnect that can't confirm that copy gone distrusts it.
+        // the probe (a throwaway entry) and one more write all fail at the platform level: a
+        // store that answers at all (an entry, "no entry", locked, access denied) exists, so its
+        // failure is an error. The existing entry is never deleted here, so a failed save
+        // always leaves the account that's connected now intact. The SQLite row then wins over
+        // any keychain copy (`get`), and a disconnect that can't confirm that copy gone
+        // distrusts it.
         Err(err)
             if no_keychain_service(&err)
                 && keychain_copy(e) == KeychainCopy::NoService
                 && missing() =>
         {
-            // An older copy must go first, or a later read could pick it up for an account the
-            // user no longer has connected.
-            match e.delete_credential() {
-                Err(d) if no_keychain_service(&d) => {}
-                // The store came back mid-save: try the keychain once more.
-                Ok(()) | Err(keyring::Error::NoEntry) => {
-                    return match e.set_password(v) {
-                        Ok(()) => saved_to_keychain(conn, key),
-                        Err(err) => {
-                            log::warn!(
-                                "{key}: the keychain answered, but refused the write: {err}"
-                            );
-                            Err(SAVE_FAILED.into())
-                        }
-                    };
+            // The store may have come back meanwhile: try the keychain once more, as an
+            // overwrite (never delete-then-write).
+            match e.set_password(v) {
+                Ok(()) => saved_to_keychain(conn, key),
+                Err(again) if no_keychain_service(&again) => {
+                    log::warn!("{key}: no usable keychain ({err}); storing it in the database");
+                    db::set_app_setting(conn, key, Some(v))
                 }
-                Err(d) => {
-                    log::warn!("{key}: no usable keychain, and its old copy wouldn't delete: {d}");
-                    return Err(STALE_COPY.into());
+                Err(again) => {
+                    log::warn!("{key}: the keychain answered, but refused the write: {again}");
+                    Err(SAVE_FAILED.into())
                 }
             }
-            log::warn!("{key}: no usable keychain ({err}); storing it in the database");
-            db::set_app_setting(conn, key, Some(v))
         }
         Err(err) => {
             log::warn!("{key}: couldn't save to the keychain: {err}");
@@ -574,10 +562,11 @@ mod tests {
 
     #[test]
     fn a_store_that_comes_back_mid_save_gets_the_token() {
-        // Write and read fail at the platform level, then the delete works: the store is back,
-        // so the token goes into it, not into SQLite.
+        // Write and read fail at the platform level, then the store is back: the retried
+        // write overwrites the old token in place, nothing goes into SQLite.
         let conn = mem_db();
         let k = FakeKeychain::with(|s| {
+            s.stored = Some("account-a".into());
             s.set_fails = Some(Fail::Platform);
             s.get_fails = Some(Fail::Platform);
         });
@@ -621,18 +610,45 @@ mod tests {
     }
 
     #[test]
-    fn the_fallback_refuses_when_the_delete_says_the_store_is_locked() {
-        // The service fails to write and read, but the delete reports a locked store: there may
-        // be an old copy behind the lock.
+    fn a_failed_replacement_after_recovery_leaves_the_connected_token() {
+        // Account A in the keychain. Connecting B: write, read and probe fail at the platform
+        // level, then the store recovers but refuses B. A must still be there and in use.
+        for retry in [Fail::NoAccess, Fail::Invalid] {
+            let conn = mem_db();
+            let k = FakeKeychain::with(|s| {
+                s.stored = Some("account-a".into());
+                s.set_fails = Some(Fail::Platform);
+                s.get_fails = Some(Fail::Platform);
+            });
+            let entry = k.entry();
+            let recover = || {
+                let mut s = k.0.lock().unwrap();
+                s.get_fails = None;
+                s.set_fails = Some(retry);
+                true // the probe ran while it was still down
+            };
+            let e = set_with(&conn, KEY, Some("account-b"), Some(&entry), recover);
+            assert_eq!(e, Err(SAVE_FAILED.to_string()));
+            assert_eq!(k.stored().as_deref(), Some("account-a"));
+            assert_eq!(row(&conn), None);
+            assert_eq!(
+                get_with(&conn, KEY, Some(&entry)).as_deref(),
+                Some("account-a")
+            );
+        }
+        // Still down on the retry: B goes to SQLite (and wins), A is left untouched.
         let conn = mem_db();
         let k = FakeKeychain::with(|s| {
+            s.stored = Some("account-a".into());
             s.set_fails = Some(Fail::Platform);
             s.get_fails = Some(Fail::Platform);
-            s.delete_fails = Some(Fail::NoAccess);
         });
-        let e = set_with(&conn, KEY, Some("new"), Some(&k.entry()), NO_KEYCHAIN);
-        assert_eq!(e, Err(STALE_COPY.to_string()));
-        assert_eq!(row(&conn), None);
+        set_with(&conn, KEY, Some("account-b"), Some(&k.entry()), NO_KEYCHAIN).unwrap();
+        assert_eq!(k.stored().as_deref(), Some("account-a"));
+        assert_eq!(
+            get_with(&conn, KEY, Some(&k.entry())).as_deref(),
+            Some("account-b")
+        );
     }
 
     #[test]
