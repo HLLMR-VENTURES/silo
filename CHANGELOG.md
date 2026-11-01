@@ -99,6 +99,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Conflicts** busy for hours: such a list is now treated as unreadable, like a broken file.
   (#351)
 - A mod packed with oversized script files no longer slows down scanning your library. (#351)
+- **Connecting GitHub** no longer quietly saves your token in Silo's database when your system's
+  credential store refuses it (for example while it's locked). Silo now says the store couldn't
+  save it, and only uses the database on systems that have no credential store at all. (#349)
+- **Disconnecting GitHub** now tells you when your system's credential store kept the token.
+  Before, Silo said it was disconnected but kept using that token. Now Silo stops using it and
+  removes it from the store as soon as the store allows. (#349)
+- **Disconnect** now also cancels a GitHub sign-in that's still waiting for its code, so
+  approving it later, or just before, can't reconnect the account. (#349)
+- **Update checks** now treat a prerelease such as `1.2.3-rc.1` as older than `1.2.3`, and ignore
+  build tags such as `+build.5`. (#349)
+- A repository set to **Ignore** on GitHub no longer shows as watched. (#349)
 - A category change, or a **Hide**, **Flag**, **Check for updates**, rating or note change, that
   Silo couldn't save now goes back on screen and says so. Before, it stayed as if saved: Organize
   could file the mod under a category that was never stored, and the change quietly went away on

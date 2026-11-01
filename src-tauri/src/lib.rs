@@ -514,11 +514,15 @@ async fn gh_device_start(
     // sharing. GitHub accumulates scopes across authorizations, so the caller requests
     // the union of what it already holds plus the new capability.
     let scope = build_gh_scope(write.unwrap_or(false), gist.unwrap_or(false));
+    // The flow's polls store only if no Disconnect happened since this point.
+    let ticket = GH_SIGN_OUTS.ticket();
     tauri::async_runtime::spawn_blocking(move || -> Result<github::DeviceCode, String> {
         let conn = db::open(&db)?;
         let cid = effective_client_id(&conn)
             .ok_or_else(|| "No GitHub OAuth App Client ID configured".to_string())?;
-        github::device_start(&cid, &scope)
+        let dc = github::device_start(&cid, &scope)?;
+        GH_SIGN_OUTS.remember_flow(&dc.device_code, ticket);
+        Ok(dc)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -537,11 +541,28 @@ fn build_gh_scope(write: bool, gist: bool) -> String {
     scopes.join(" ")
 }
 
+/// Disconnect vs. a sign-in that's still out (see `github::SignOutGate`).
+static GH_SIGN_OUTS: github::SignOutGate = github::SignOutGate::new();
+
+/// A poll's answer for a device flow that a Disconnect ended: nothing was stored.
+fn signed_out_poll() -> github::PollResult {
+    github::PollResult {
+        status: "expired".into(),
+        token: None,
+        scope: None,
+        error: None,
+    }
+}
+
 #[tauri::command]
 async fn gh_device_poll(
     app: tauri::AppHandle,
     device_code: String,
 ) -> Result<github::PollResult, String> {
+    // The ticket the flow started under: a Disconnect since then wins, however late this runs.
+    let Some(ticket) = GH_SIGN_OUTS.flow_ticket(&device_code) else {
+        return Ok(signed_out_poll());
+    };
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<github::PollResult, String> {
         let conn = db::open(&db)?;
@@ -551,11 +572,22 @@ async fn gh_device_poll(
         if res.status == "ok" {
             if let Some(tok) = &res.token {
                 let user = github::whoami(tok).unwrap_or_default();
-                secrets::set(&conn, "gh_token", Some(tok))?;
-                db::set_app_setting(&conn, "gh_user", Some(&user))?;
-                // Store the scopes GitHub actually granted — capability is derived from
-                // these, not from what we asked for. Accumulates across re-auth.
-                db::set_app_setting(&conn, "gh_scopes", Some(res.scope.as_deref().unwrap_or("")))?;
+                let stored = GH_SIGN_OUTS.store_if_current(ticket, || -> Result<(), String> {
+                    secrets::set(&conn, "gh_token", Some(tok))?;
+                    db::set_app_setting(&conn, "gh_user", Some(&user))?;
+                    // Store the scopes GitHub actually granted — capability is derived from
+                    // these, not from what we asked for. Accumulates across re-auth.
+                    db::set_app_setting(
+                        &conn,
+                        "gh_scopes",
+                        Some(res.scope.as_deref().unwrap_or("")),
+                    )
+                });
+                match stored {
+                    Some(r) => r?,
+                    // Disconnected while this flow was out: the sign-in is dropped.
+                    None => return Ok(signed_out_poll()),
+                }
             }
         }
         // Never expose the raw token to the frontend.
@@ -572,6 +604,8 @@ async fn gh_device_poll(
 /// let a 403 surface a reconnect hint if a specific permission is missing.
 #[tauri::command]
 async fn gh_set_pat(app: tauri::AppHandle, pat: String) -> Result<String, String> {
+    // Like a device-flow poll: a Disconnect while GitHub checks the token wins.
+    let ticket = GH_SIGN_OUTS.ticket();
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let pat = github::clean_pat(&pat)?;
@@ -580,14 +614,18 @@ async fn gh_set_pat(app: tauri::AppHandle, pat: String) -> Result<String, String
             return Err("GitHub didn't accept that token. Check it and paste it again.".into());
         }
         let conn = db::open(&db)?;
-        secrets::set(&conn, "gh_token", Some(&pat))?;
-        db::set_app_setting(&conn, "gh_user", Some(&user))?;
         let stored = if scopes.trim().is_empty() {
             "*".to_string()
         } else {
             scopes
         };
-        db::set_app_setting(&conn, "gh_scopes", Some(&stored))?;
+        GH_SIGN_OUTS
+            .store_if_current(ticket, || -> Result<(), String> {
+                secrets::set(&conn, "gh_token", Some(&pat))?;
+                db::set_app_setting(&conn, "gh_user", Some(&user))?;
+                db::set_app_setting(&conn, "gh_scopes", Some(&stored))
+            })
+            .ok_or_else(|| "GitHub was disconnected while Silo checked the token.".to_string())??;
         Ok(user)
     })
     .await
@@ -1429,13 +1467,22 @@ async fn gh_logout(app: tauri::AppHandle) -> Result<(), String> {
     let db = db_path(&app)?;
     off_main(move || {
         let conn = db::open(&db)?;
-        secrets::set(&conn, "gh_token", None)?;
-        db::set_app_setting(&conn, "gh_user", None)?;
-        db::set_app_setting(&conn, "gh_scopes", None)?;
-        // Legacy flags from before scope capture — clear them too so nothing lingers.
-        db::set_app_setting(&conn, "gh_write", None)?;
-        db::set_app_setting(&conn, "gh_gist", None)?;
-        Ok(())
+        GH_SIGN_OUTS.sign_out(|| {
+            // Silo stops using the token even when the keychain keeps a copy it couldn't
+            // delete (it's distrusted, and removed once the store allows), so the account is
+            // disconnected either way; that leftover is still reported below.
+            let removed = secrets::clear(&conn, "gh_token")?;
+            db::set_app_setting(&conn, "gh_user", None)?;
+            db::set_app_setting(&conn, "gh_scopes", None)?;
+            // Legacy flags from before scope capture — clear them too so nothing lingers.
+            db::set_app_setting(&conn, "gh_write", None)?;
+            db::set_app_setting(&conn, "gh_gist", None)?;
+            if removed {
+                Ok(())
+            } else {
+                Err(secrets::REMOVE_FAILED.to_string())
+            }
+        })
     })
     .await
 }

@@ -7,16 +7,18 @@ vi.mock("../api", async (importOriginal) => ({
   ghStatus: vi.fn(),
   ghDeviceStart: vi.fn(),
   ghDevicePoll: vi.fn(),
+  ghLogout: vi.fn(),
   openExternal: vi.fn(() => Promise.resolve()),
   logFrontendError: vi.fn(() => Promise.resolve()),
 }));
-import { ghDevicePoll, ghDeviceStart, ghStatus, openExternal } from "../api";
+import { ghDevicePoll, ghDeviceStart, ghLogout, ghStatus, openExternal } from "../api";
 import type { PollResult } from "../types";
 import { dismissToast, toasts } from "../ui/toasts.svelte";
 import { activity, clearActivity } from "./activity.svelte";
 import {
   attachGithubView,
   cancelDeviceFlow,
+  disconnectGithub,
   githubAuth,
   pollArmed,
   resetGithubAuth,
@@ -183,5 +185,73 @@ describe("githubAuth device flow", () => {
     expect(githubAuth.message).toBe("The code expired. Try again.");
     expect(toasts).toHaveLength(1); // only the first one, shown while no view was mounted
     detach();
+  });
+});
+
+describe("disconnecting GitHub", () => {
+  const disconnected = { ...connected, user: null };
+
+  it("cancels a sign-in still waiting, so a later approval can't reconnect the account", async () => {
+    vi.mocked(ghDevicePoll).mockResolvedValue(answer("pending"));
+    vi.mocked(ghLogout).mockResolvedValue();
+    await startDeviceFlow(true);
+    expect(githubAuth.flow).not.toBeNull();
+    vi.mocked(ghStatus).mockResolvedValue(disconnected);
+
+    await disconnectGithub();
+    expect(githubAuth.flow).toBeNull();
+    expect(pollArmed()).toBe(false);
+    expect(ghLogout).toHaveBeenCalledTimes(1);
+    expect(githubAuth.status.user).toBeNull();
+
+    // The user approves on github.com afterwards: nothing polls, so nothing stores a token.
+    vi.mocked(ghDevicePoll).mockResolvedValue(answer("ok"));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(ghDevicePoll).not.toHaveBeenCalled();
+    expect(githubAuth.status.user).toBeNull();
+  });
+
+  it("a poll already on its way when Disconnect is clicked is ignored", async () => {
+    let answerPoll!: (r: PollResult) => void;
+    vi.mocked(ghDevicePoll).mockReturnValue(new Promise((r) => (answerPoll = r)));
+    vi.mocked(ghLogout).mockResolvedValue();
+    await startDeviceFlow();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(ghDevicePoll).toHaveBeenCalledTimes(1);
+    vi.mocked(ghStatus).mockResolvedValue(disconnected);
+    await disconnectGithub();
+    vi.mocked(ghStatus).mockClear();
+    answerPoll(answer("ok"));
+    await flush();
+    expect(ghStatus).not.toHaveBeenCalled();
+    expect(githubAuth.status.user).toBeNull();
+  });
+
+  it("a status read that started before Disconnect can't bring the account back, nor toast", async () => {
+    // A poll succeeds and starts reading the status; that read is slow. Disconnect meanwhile.
+    vi.mocked(ghDevicePoll).mockResolvedValue(answer("ok"));
+    vi.mocked(ghLogout).mockResolvedValue();
+    let answerStatus!: (s: typeof connected) => void;
+    vi.mocked(ghStatus).mockReturnValueOnce(new Promise((r) => (answerStatus = r)));
+    await startDeviceFlow();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(ghStatus).toHaveBeenCalledTimes(1);
+    vi.mocked(ghStatus).mockResolvedValue(disconnected);
+    await disconnectGithub();
+    expect(githubAuth.status.user).toBeNull();
+    answerStatus(connected); // the old read answers last
+    await flush();
+    expect(githubAuth.status.user).toBeNull();
+    expect(toasts.some((t) => /Connected to GitHub/.test(t.message))).toBe(false);
+  });
+
+  it("shows the backend's reason when the credential store kept the token", async () => {
+    const reason =
+      "Silo couldn't remove the token from your system's credential store. Silo won't use it, and removes it once the store allows (for example after you unlock it). You can also delete the com.hllmr.silo entry there yourself.";
+    vi.mocked(ghLogout).mockRejectedValue(reason);
+    vi.mocked(ghStatus).mockResolvedValue(disconnected);
+    await disconnectGithub();
+    expect(githubAuth.message).toContain("couldn't remove the token from your system's credential store");
+    expect(githubAuth.status.user).toBeNull();
   });
 });
