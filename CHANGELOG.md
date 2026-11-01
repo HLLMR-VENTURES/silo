@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An unpacked (folder) mod you edit in place now shows its new title, version, dependencies and
+  map flag after the next scan, and its new icon. Before, Silo kept showing what it read the
+  first time until you cleared the scan cache. (#353)
+- When you put a different build of a library mod into your mods folder yourself, the Library,
+  the conflict check, multiplayer sharing and integrity check now describe that file, the one the
+  game loads, instead of the copy in your library. The banner still offers to keep it or put
+  Silo's copy back. (#353)
+- Mod icons listed as `.dds` but shipped as `.png` now show instead of a blank tile, and a mod
+  zip rebuilt with the same timestamp gets its new icon. (#353)
 - Fewer false conflict warnings. Two maps no longer show as a **Problem** or **Review** for
   adding the same brand, shop category, control action or fill type: the game loads only the map
   your savegame uses, so they never meet. A map still conflicts with a non-map mod that adds the

@@ -13,8 +13,8 @@ use std::path::Path;
 pub const THUMB: u32 = 128;
 
 /// Return a cached PNG thumbnail as a `data:` URL, decoding + caching on first
-/// use. Keyed by mod path + mtime + icon name, so it only decodes once per mod
-/// version and survives app restarts. Returns None on any failure (missing icon,
+/// use. Keyed by mod path + icon file identity + icon name, so it only decodes once per
+/// icon version and survives app restarts. Returns None on any failure (missing icon,
 /// undecodable format) so the UI just falls back to the placeholder tile.
 pub fn cached_data_url(
     cache_dir: &Path,
@@ -35,15 +35,11 @@ pub fn cached_thumbnail(
     kind: &str,
     icon_filename: &str,
 ) -> Result<Vec<u8>, String> {
-    let meta = std::fs::metadata(mod_path).map_err(|e| e.to_string())?;
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-
-    let cached = cache_dir.join(format!("{}.png", cache_key(mod_path, mtime, icon_filename)));
+    let (mtime, size) = icon_stamp(mod_path, kind, icon_filename)?;
+    let cached = cache_dir.join(format!(
+        "{}.png",
+        cache_key(mod_path, mtime, size, icon_filename)
+    ));
 
     if let Ok(bytes) = std::fs::read(&cached) {
         return Ok(bytes);
@@ -54,13 +50,34 @@ pub fn cached_thumbnail(
     Ok(png)
 }
 
+/// The `(mtime_ms, size)` the thumbnail cache is keyed on: the zip's own for a zip, which
+/// changes with any rebuild. For a folder mod, the icon file's own: the folder's mtime doesn't
+/// change when the icon inside it is edited in place (#353).
+fn icon_stamp(mod_path: &Path, kind: &str, icon_filename: &str) -> Result<(u128, u64), String> {
+    let meta = match kind {
+        "zip" => std::fs::metadata(mod_path).map_err(|e| e.to_string())?,
+        _ => {
+            let (f, _) = open_dir_icon(mod_path, icon_filename)?;
+            f.metadata().map_err(|e| e.to_string())?
+        }
+    };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    Ok((mtime, meta.len()))
+}
+
 /// Cache file stem for a mod's icon: the same across runs, builds and Rust versions.
-fn cache_key(mod_path: &Path, mtime_ms: u128, icon_filename: &str) -> String {
+fn cache_key(mod_path: &Path, mtime_ms: u128, size: u64, icon_filename: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(mod_path.to_string_lossy().as_bytes());
     h.update([0u8]);
     h.update(mtime_ms.to_le_bytes());
+    h.update(size.to_le_bytes());
     h.update([0u8]);
     h.update(icon_filename.as_bytes());
     h.finalize()[..16]
@@ -76,7 +93,7 @@ pub fn extract_icon_png(
     icon_filename: &str,
 ) -> Result<Vec<u8>, String> {
     let raw = read_icon_bytes(mod_path, kind, icon_filename)?;
-    let img = decode(&raw, icon_filename)?;
+    let img = decode(&raw)?;
     let thumb = img.resize(THUMB, THUMB, FilterType::Triangle);
     let mut out = Cursor::new(Vec::new());
     thumb
@@ -118,20 +135,28 @@ fn read_icon_bytes(mod_path: &Path, kind: &str, icon_filename: &str) -> Result<V
             Err(format!("icon '{icon_filename}' not found in archive"))
         }
         _ => {
-            for cand in icon_candidates(icon_filename) {
-                // Only a file inside the mod's own folder, capped like the zip branch.
-                if let Some(f) = crate::paths::open_inside(mod_path, &cand) {
-                    return crate::scan::read_capped(f, ICON_LIMIT, &cand);
-                }
-            }
-            Err(format!("icon '{icon_filename}' not found"))
+            let (f, cand) = open_dir_icon(mod_path, icon_filename)?;
+            crate::scan::read_capped(f, ICON_LIMIT, &cand)
         }
     }
 }
 
-fn decode(raw: &[u8], name: &str) -> Result<image::DynamicImage, String> {
-    let is_dds = raw.starts_with(b"DDS ") || name.to_lowercase().ends_with(".dds");
-    if is_dds {
+/// Open a folder mod's icon, trying the swapped extension too (see [`icon_candidates`]): only
+/// a file inside the mod's own folder. Returns the open file and the name it was found under.
+fn open_dir_icon(mod_path: &Path, icon_filename: &str) -> Result<(std::fs::File, String), String> {
+    for cand in icon_candidates(icon_filename) {
+        if let Some(f) = crate::paths::open_inside(mod_path, &cand) {
+            return Ok((f, cand));
+        }
+    }
+    Err(format!("icon '{icon_filename}' not found"))
+}
+
+/// Decode an icon by what the bytes are, not what they're called: the swapped-extension
+/// fallback reads a PNG under a `.dds` name (and the reverse), so only the `DDS ` magic picks
+/// the DDS decoder; anything else goes to `image`, which recognises PNG and JPEG itself.
+fn decode(raw: &[u8]) -> Result<image::DynamicImage, String> {
+    if raw.starts_with(b"DDS ") {
         let dds = image_dds::ddsfile::Dds::read(Cursor::new(raw)).map_err(|e| e.to_string())?;
         let rgba = image_dds::image_from_dds(&dds, 0).map_err(|e| e.to_string())?;
         Ok(image::DynamicImage::ImageRgba8(rgba))
@@ -146,14 +171,95 @@ mod tests {
 
     #[test]
     fn the_icon_cache_key_is_stable() {
-        let k = cache_key(std::path::Path::new("/mods/FS25_A.zip"), 1234, "icon.dds");
-        // sha256("/mods/FS25_A.zip" 0x00 1234u128-LE 0x00 "icon.dds"), first 16 bytes as hex.
-        assert_eq!(k, "6c7699e483c86ced8f1ae81b22b4740b");
+        let zip = std::path::Path::new("/mods/FS25_A.zip");
+        let k = cache_key(zip, 1234, 99, "icon.dds");
+        // sha256("/mods/FS25_A.zip" 0x00 1234u128-LE 99u64-LE 0x00 "icon.dds"), first 16 bytes.
+        assert_eq!(k, "81176ae74d9c77a401fb798880379bcc");
         assert_eq!(k.len(), 32);
-        assert_ne!(
-            k,
-            cache_key(std::path::Path::new("/mods/FS25_A.zip"), 1235, "icon.dds")
+        assert_ne!(k, cache_key(zip, 1235, 99, "icon.dds"));
+        // A rebuilt zip with the same mtime but another size gets its own thumbnail (#353).
+        assert_ne!(k, cache_key(zip, 1234, 100, "icon.dds"));
+    }
+
+    /// A one-colour `w`×`h` PNG.
+    fn png(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(w, h, image::Rgb(rgb));
+        let mut out = Cursor::new(Vec::new());
+        img.write_to(&mut out, ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    fn temp(tag: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!("silo_icon_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    /// #353: the decoder is picked by the bytes, so a PNG read under its listed `.dds` name (the
+    /// swapped-extension fallback) decodes instead of failing in the DDS reader.
+    #[test]
+    fn a_png_shipped_for_a_listed_dds_decodes() {
+        let raw = png(4, 4, [255, 0, 0]);
+        assert_eq!(decode(&raw).unwrap().width(), 4);
+        assert!(
+            decode(b"DDS not really").is_err(),
+            "DDS magic goes to the DDS reader"
         );
+
+        let base = temp("dds_png");
+        let dir = base.join("FS25_A");
+        std::fs::create_dir_all(dir.join("icons")).unwrap();
+        std::fs::write(dir.join("icons").join("icon.png"), &raw).unwrap();
+        assert!(extract_icon_png(&dir, "dir", "icons/icon.dds").is_ok());
+
+        let zip = base.join("FS25_B.zip");
+        let mut w = zip::ZipWriter::new(std::fs::File::create(&zip).unwrap());
+        w.start_file("icon.png", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut w, &raw).unwrap();
+        w.finish().unwrap();
+        assert!(extract_icon_png(&zip, "zip", "icon.dds").is_ok());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// #353: a folder mod's thumbnail follows edits to its icon file, which don't change the
+    /// folder's own mtime.
+    #[test]
+    fn a_folder_mods_thumbnail_follows_its_icon_file() {
+        let base = temp("dir_refresh");
+        let dir = base.join("FS25_A");
+        let cache = base.join("cache");
+        std::fs::create_dir_all(&dir).unwrap();
+        let icon = dir.join("icon.png");
+        std::fs::write(&icon, png(4, 4, [255, 0, 0])).unwrap();
+        let red = cached_thumbnail(&cache, &dir, "dir", "icon.png").unwrap();
+        assert_eq!(
+            cached_thumbnail(&cache, &dir, "dir", "icon.png").unwrap(),
+            red,
+            "served from the cache"
+        );
+
+        // Rewrite the icon in place; the folder's own mtime doesn't move.
+        let folder_mtime = std::fs::metadata(&dir).unwrap().modified().unwrap();
+        let later = std::fs::metadata(&icon).unwrap().modified().unwrap()
+            + std::time::Duration::from_secs(5);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&icon)
+            .unwrap();
+        std::io::Write::write_all(&mut f, &png(4, 4, [0, 0, 255])).unwrap();
+        f.set_modified(later).unwrap();
+        drop(f);
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().modified().unwrap(),
+            folder_mtime
+        );
+
+        let blue = cached_thumbnail(&cache, &dir, "dir", "icon.png").unwrap();
+        assert_ne!(blue, red, "the edited icon is decoded again");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// An unpacked mod's icon is read only from inside its own folder, and capped like a zip's.

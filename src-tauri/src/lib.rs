@@ -218,16 +218,23 @@ fn scan_library(
             .result
             .mods
             .iter()
-            .filter(|m| out.fresh_paths.contains(&m.path))
             .filter_map(|m| {
+                let key = out.fresh_paths.get(&m.path)?;
                 serde_json::to_string(m)
                     .ok()
-                    .map(|json| (m.path.clone(), m.mtime_ms, m.size, json))
+                    .map(|json| (m.path.clone(), key.mtime_ms, key.size, json))
             })
             .collect();
         let _ = db::upsert_many(conn, &fresh_rows);
 
-        let present: HashSet<String> = out.result.mods.iter().map(|m| m.path.clone()).collect();
+        // An archived copy hidden behind a stand-in is still on disk: keep its cached row.
+        let present: HashSet<String> = out
+            .result
+            .mods
+            .iter()
+            .map(|m| m.path.clone())
+            .chain(out.stand_ins.values().map(|a| a.path.clone()))
+            .collect();
         let _ = db::prune_missing(conn, &present);
 
         // Keep the `organized` manifest in step with what's physically in `archive/`, so an
@@ -240,13 +247,19 @@ fn scan_library(
             .iter()
             .filter(|m| m.organized)
             .filter_map(|m| {
-                let p = std::path::Path::new(&m.path);
+                // A row standing in for an archived mod describes the mods-folder file; the
+                // manifest names the archived copy behind it (#353).
+                let (path, kind) = match out.stand_ins.get(&m.path) {
+                    Some(a) => (&a.path, &a.kind),
+                    None => (&m.path, &m.kind),
+                };
+                let p = std::path::Path::new(path);
                 let file_name = p.file_name()?.to_string_lossy().into_owned();
                 let category = p.parent()?.file_name()?.to_string_lossy().into_owned();
                 Some(db::OrganizedRow {
                     tech_name: m.tech_name.clone(),
                     file_name,
-                    kind: m.kind.clone(),
+                    kind: kind.clone(),
                     category,
                     subcategory: None,
                     active: m.active,
@@ -6070,6 +6083,43 @@ mod tests {
         assert_eq!(plan.reconcile_key.as_deref(), Some(key.as_str()));
         scan(&mut conn, &plan);
         assert_eq!(organized(&conn).len(), 1);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// #353: a different build swapped in at an archived mod's name is listed as the file the
+    /// game loads, while the manifest keeps naming the archived copy (category, file, kind).
+    #[test]
+    fn a_swapped_in_zip_is_listed_but_the_manifest_keeps_the_archive() {
+        static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static E: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let base = temp_base("scanstandin");
+        let mods = base.join("mods");
+        mod_zip(&mods.join("archive/Tools/FS25_A.zip"));
+        std::fs::write(mods.join("FS25_A.zip"), b"not the archived build").unwrap();
+        let key = crate::modsroot::canonical_key(&mods);
+        let mut conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let active = crate::modsroot::Active {
+            layout: Layout::default_for(&mods),
+            move_to: None,
+        };
+        let plan = super::scan_plan(Vec::new(), std::slice::from_ref(&mods), Some(&active));
+        let start = super::quiet_epoch(&L, &E);
+        let found = super::scan_library(&mut conn, &plan, None, &L, &E, start, |_, _| {});
+
+        assert_eq!(found.mods.len(), 1);
+        let m = &found.mods[0];
+        assert_eq!(Path::new(&m.path), mods.join("FS25_A.zip"));
+        assert!(m.organized && m.active);
+        assert!(m.error.is_some(), "described from the swapped-in file");
+        let rows = crate::db::load_organized(&conn, &key);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].category.as_str(), rows[0].file_name.as_str()),
+            ("Tools", "FS25_A.zip")
+        );
+        assert!(rows[0].active);
+        assert!(crate::db::load_cache(&conn).contains_key(m.path.as_str()));
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -105,16 +105,29 @@ pub struct ScanResult {
 }
 
 /// Result of a cached scan: the full list plus which paths were freshly parsed
-/// (cache misses) so the caller can persist just those.
+/// (cache misses), with the key to cache each under, so the caller can persist just those.
 pub struct ScanOutput {
     pub result: ScanResult,
-    pub fresh_paths: HashSet<String>,
+    pub fresh_paths: HashMap<String, CacheKey>,
+    /// The archived copy behind each mods-folder entry that stands in for it (see
+    /// [`looks_like_projection`]), keyed by the entry's path. Its row in `result` describes the
+    /// file the game loads; the library's manifest still names the archived copy.
+    pub stand_ins: HashMap<String, ArchivedCopy>,
+}
+
+/// An archived mod hidden behind a different file at its name in the mods folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedCopy {
+    pub path: String,
+    pub kind: String,
 }
 
 struct Candidate {
     path: PathBuf,
     tech_name: String,
     kind: &'static str,
+    /// Which scanned layout (mods folder + its archives) the entry was found in.
+    layout: usize,
 }
 
 /// Build a Candidate from a directory entry (a `.zip` file or an unpacked mod dir),
@@ -138,6 +151,7 @@ fn candidate_from(path: PathBuf, name: &str, ft: std::fs::FileType) -> Option<Ca
                 tech_name: name.to_string(),
                 path,
                 kind: "dir",
+                layout: 0,
             });
         }
     } else if is_file && name.to_lowercase().ends_with(".zip") {
@@ -146,6 +160,7 @@ fn candidate_from(path: PathBuf, name: &str, ft: std::fs::FileType) -> Option<Ca
             tech_name,
             path,
             kind: "zip",
+            layout: 0,
         });
     }
     None
@@ -496,31 +511,91 @@ fn detect_settings_dir(path: &Path) -> (bool, SettingsSource) {
     (false, SettingsSource::None)
 }
 
-/// Resolve one candidate: reuse the cached entry when mtime+size are unchanged
-/// (no archive open), otherwise parse fresh. Returns (entry, was_freshly_parsed).
-fn resolve_entry(c: &Candidate, cache: &HashMap<String, CacheEntry>) -> (ModEntry, bool) {
-    let meta = fs::metadata(&c.path).ok();
-    let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+/// What a scan-cache row is keyed on besides its path: when it changes, the mod is parsed again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheKey {
+    pub mtime_ms: u64,
+    pub size: u64,
+}
+
+/// A path's `(mtime_ms, size)`, following links; zeros when it can't be read.
+fn stamp(path: &Path) -> (u64, u64) {
+    let Ok(meta) = fs::metadata(path) else {
+        return (0, 0);
+    };
     let mtime_ms = meta
-        .as_ref()
-        .and_then(|m| m.modified().ok())
+        .modified()
+        .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+    (mtime_ms, meta.len())
+}
 
+/// The cache key for a candidate. A zip's is its own mtime and size. A folder's own mtime and
+/// size don't change when a file inside it is rewritten in place (its size is 0 on Windows), so
+/// a folder mod's key also folds in `modDesc.xml`'s, which is where everything the scan reads
+/// lives (#353). The fold (`a ^ b.rotate_left(32)`) changes whenever either side alone does.
+fn cache_key(c: &Candidate) -> CacheKey {
+    let (mut mtime_ms, mut size) = stamp(&c.path);
+    if c.kind == "dir" {
+        let (desc_mtime, desc_size) = stamp(&c.path.join("modDesc.xml"));
+        mtime_ms ^= desc_mtime.rotate_left(32);
+        size ^= desc_size.rotate_left(32);
+    }
+    CacheKey { mtime_ms, size }
+}
+
+/// Resolve one candidate: reuse the cached entry when its [`cache_key`] is unchanged (no
+/// archive open), otherwise parse fresh. Returns the entry and, when it was freshly parsed, the
+/// key to cache it under.
+fn resolve_entry(
+    c: &Candidate,
+    cache: &HashMap<String, CacheEntry>,
+) -> (ModEntry, Option<CacheKey>) {
+    let key = cache_key(c);
     if let Some(ce) = cache.get(c.path.to_string_lossy().as_ref()) {
-        if ce.mtime_ms == mtime_ms && ce.size == size {
+        if ce.mtime_ms == key.mtime_ms && ce.size == key.size {
             // A schema change that fails deserialization simply falls through to a
             // fresh parse — we never trust a partial decode.
             // A row from an older parser is re-read too (see `PARSE_REV`).
             if let Ok(entry) = serde_json::from_str::<ModEntry>(&ce.json) {
                 if entry.parse_rev >= PARSE_REV {
-                    return (entry, false);
+                    return (entry, None);
                 }
             }
         }
     }
-    (build_entry(c), true)
+    (build_entry(c), Some(key))
+}
+
+/// Cheap check that mods-folder entry `link` is Silo's projection of archived `src`: the
+/// structural tests of `organize::is_silo_projection` without its content hash, which a scan
+/// never pays for. A link must resolve to `src`, a real folder must carry Silo's marker, and a
+/// plain file must be `src`'s size (a hardlink always is, and so is a byte-for-byte copy). A
+/// different kind, link target or size proves the entry is something else the user put there.
+/// A same-size replacement passes; the foreign-file check after each scan hashes those.
+fn looks_like_projection(link: &Candidate, src: &Candidate) -> bool {
+    if link.kind != src.kind {
+        return false;
+    }
+    // Gone since it was listed: nothing to show instead, so keep the archived entry.
+    let Ok(meta) = fs::symlink_metadata(&link.path) else {
+        return true;
+    };
+    if meta.file_type().is_symlink() {
+        // Silo's symlink or junction resolves to the archived copy.
+        return matches!(
+            (fs::canonicalize(&link.path), fs::canonicalize(&src.path)),
+            (Ok(a), Ok(b)) if a == b
+        );
+    }
+    if meta.is_dir() {
+        return link.path.join(crate::organize::SILO_MARKER).is_file();
+    }
+    fs::metadata(&src.path)
+        .map(|s| s.len() == meta.len())
+        .unwrap_or(true)
 }
 
 /// Core scan over mods folders with explicit archive folders. Archives are read in order and a
@@ -537,16 +612,25 @@ where
     let started = std::time::Instant::now();
     let mut root_cands: Vec<Candidate> = Vec::new();
     let mut archive_cands: Vec<Candidate> = Vec::new();
-    for (root, archives) in &layouts {
+    for (layout, (root, archives)) in layouts.iter().enumerate() {
+        let tag = |mut c: Candidate| {
+            c.layout = layout;
+            c
+        };
         // Dedupe is per layout: two mods folders may legitimately each hold the same techName.
         let mut seen: HashSet<String> = HashSet::new();
-        root_cands.extend(collect_root_candidates(root));
+        root_cands.extend(collect_root_candidates(root).into_iter().map(tag));
         for a in archives {
             // Skip only names seen in an EARLIER archive; a single archive's own contents are
             // kept as-is so a one-archive scan behaves exactly as before.
             let cands = collect_archive_candidates(a);
             let names: Vec<String> = cands.iter().map(|c| c.tech_name.clone()).collect();
-            archive_cands.extend(cands.into_iter().filter(|c| !seen.contains(&c.tech_name)));
+            archive_cands.extend(
+                cands
+                    .into_iter()
+                    .filter(|c| !seen.contains(&c.tech_name))
+                    .map(tag),
+            );
             seen.extend(names);
         }
     }
@@ -586,42 +670,19 @@ fn finish_scan<F>(
 where
     F: Fn(usize, usize) + Sync + Send,
 {
-    // Tech-names present in the archive (organized) and in the flat root (loaded).
-    let archived: HashSet<String> = archive_cands.iter().map(|c| c.tech_name.clone()).collect();
-    let in_root: HashSet<String> = root_cands.iter().map(|c| c.tech_name.clone()).collect();
-
-    // Parse every archived mod, plus flat-root mods that AREN'T organized (vanilla).
-    // A flat-root entry whose tech-name is already in the archive is just an active
-    // projection (hardlink) — we don't re-parse it, only flag the archive entry.
-    let to_parse: Vec<(&Candidate, bool)> = archive_cands
-        .iter()
-        .map(|c| (c, true))
-        .chain(
-            root_cands
-                .iter()
-                .filter(|c| !archived.contains(&c.tech_name))
-                .map(|c| (c, false)),
-        )
-        .collect();
-
-    let total = to_parse.len();
+    let jobs = plan_jobs(&root_cands, &archive_cands);
+    let total = jobs.len();
     progress(0, total);
 
     let done = AtomicUsize::new(0);
     let step = (total / 100).max(10);
 
-    let pairs: Vec<(ModEntry, bool)> = to_parse
+    let pairs: Vec<(ModEntry, Option<CacheKey>)> = jobs
         .par_iter()
-        .map(|(c, organized)| {
-            let (mut entry, fresh) = resolve_entry(c, cache);
-            entry.organized = *organized;
-            // Organized mods are "active" only when also linked into the flat root;
-            // vanilla (unorganized) mods sit in the root, so they're active.
-            entry.active = if *organized {
-                in_root.contains(&entry.tech_name)
-            } else {
-                true
-            };
+        .map(|job| {
+            let (mut entry, fresh) = resolve_entry(job.read, cache);
+            entry.organized = job.organized;
+            entry.active = job.active;
             let n = done.fetch_add(1, Ordering::Relaxed) + 1;
             if n % step == 0 || n == total {
                 progress(n, total);
@@ -630,11 +691,25 @@ where
         })
         .collect();
 
-    let mut fresh_paths = HashSet::new();
+    let stand_ins = jobs
+        .iter()
+        .filter_map(|job| {
+            let behind = job.behind?;
+            Some((
+                job.read.path.to_string_lossy().into_owned(),
+                ArchivedCopy {
+                    path: behind.path.to_string_lossy().into_owned(),
+                    kind: behind.kind.to_string(),
+                },
+            ))
+        })
+        .collect();
+
+    let mut fresh_paths = HashMap::new();
     let mut mods = Vec::with_capacity(pairs.len());
     for (entry, fresh) in pairs {
-        if fresh {
-            fresh_paths.insert(entry.path.clone());
+        if let Some(key) = fresh {
+            fresh_paths.insert(entry.path.clone(), key);
         }
         mods.push(entry);
     }
@@ -660,7 +735,95 @@ where
             problems: Vec::new(),
         },
         fresh_paths,
+        stand_ins,
     }
+}
+
+/// One library row to produce: the entry to read and how it sits in the library.
+struct Job<'a> {
+    /// The file or folder whose `modDesc.xml` describes the row.
+    read: &'a Candidate,
+    organized: bool,
+    active: bool,
+    /// For a mods-folder entry standing in for an archived mod, that archived copy.
+    behind: Option<&'a Candidate>,
+}
+
+/// Decide the rows of one scan. Every archived mod gets a row, and so does every mods-folder
+/// entry that isn't organized (vanilla). A mods-folder entry named like an archived mod of the
+/// same layout marks that mod active. When it is Silo's projection (cheaply checked by
+/// [`looks_like_projection`]) the archived row stands, parsed from the archive as before; when
+/// it is something else at that name (the user swapped in another build), the row describes the
+/// file the game will actually load (#353), and the foreign-file banner offers adopt / restore.
+fn plan_jobs<'a>(root_cands: &'a [Candidate], archive_cands: &'a [Candidate]) -> Vec<Job<'a>> {
+    // The first archived copy per (layout, techName) is what a mods-folder entry is checked
+    // against (a second one only exists in a second category of one archive).
+    let mut archived: HashMap<(usize, &str), &Candidate> = HashMap::new();
+    for c in archive_cands {
+        archived
+            .entry((c.layout, c.tech_name.as_str()))
+            .or_insert(c);
+    }
+
+    // Mods-folder entries of archived mods: checked in parallel (a few stats each).
+    let verdicts: Vec<Option<bool>> = root_cands
+        .par_iter()
+        .map(|r| {
+            let a = archived.get(&(r.layout, r.tech_name.as_str()))?;
+            Some(looks_like_projection(r, a))
+        })
+        .collect();
+
+    let mut in_root: HashSet<(usize, &str)> = HashSet::new();
+    let mut projected: HashSet<(usize, &str)> = HashSet::new();
+    let mut foreign: HashMap<(usize, &str), &Candidate> = HashMap::new();
+    let mut loose = Vec::new();
+    for (r, verdict) in root_cands.iter().zip(verdicts) {
+        let key = (r.layout, r.tech_name.as_str());
+        match verdict {
+            None => loose.push(Job {
+                read: r,
+                organized: false,
+                active: true, // a vanilla mod sits in the mods folder, so it loads
+                behind: None,
+            }),
+            Some(ours) => {
+                in_root.insert(key);
+                if ours {
+                    projected.insert(key);
+                } else {
+                    foreign.entry(key).or_insert(r);
+                }
+            }
+        }
+    }
+
+    let mut jobs = Vec::with_capacity(archive_cands.len() + loose.len());
+    for a in archive_cands {
+        let key = (a.layout, a.tech_name.as_str());
+        let first = archived.get(&key).is_some_and(|f| f.path == a.path);
+        // A projection under the same name wins over a foreign entry beside it.
+        let stand_in = foreign
+            .get(&key)
+            .filter(|_| first && !projected.contains(&key));
+        jobs.push(match stand_in {
+            Some(r) => Job {
+                read: r,
+                organized: true,
+                active: true,
+                behind: Some(a),
+            },
+            // Organized mods are "active" only when also present in the mods folder.
+            None => Job {
+                read: a,
+                organized: true,
+                active: in_root.contains(&key),
+                behind: None,
+            },
+        });
+    }
+    jobs.extend(loose);
+    jobs
 }
 
 /// Convenience wrapper with no cache — used by the example harness and tests.
@@ -910,29 +1073,30 @@ mod layout_tests {
             path: zip.clone(),
             tech_name: "FS25_ElmAsh".into(),
             kind: "zip",
+            layout: 0,
         };
         let (fresh_entry, parsed) = resolve_entry(&c, &HashMap::new());
-        assert!(parsed);
+        let cache_key = parsed.expect("parsed fresh");
         assert_eq!(fresh_entry.title.as_deref(), Some("Elm & Ash"));
 
         let mut old = serde_json::to_value(&fresh_entry).unwrap();
         old["title"] = "Elm".into();
         old.as_object_mut().unwrap().remove("parseRev");
         let row = |json: String| CacheEntry {
-            mtime_ms: fresh_entry.mtime_ms,
-            size: fresh_entry.size,
+            mtime_ms: cache_key.mtime_ms,
+            size: cache_key.size,
             json,
         };
         let key = zip.to_string_lossy().into_owned();
 
         let stale = HashMap::from([(key.clone(), row(old.to_string()))]);
         let (entry, parsed) = resolve_entry(&c, &stale);
-        assert!(parsed, "an old-parser row must be re-read");
+        assert!(parsed.is_some(), "an old-parser row must be re-read");
         assert_eq!(entry.title.as_deref(), Some("Elm & Ash"));
 
         let current = HashMap::from([(key, row(serde_json::to_string(&fresh_entry).unwrap()))]);
         let (_, parsed) = resolve_entry(&c, &current);
-        assert!(!parsed, "a current row is reused");
+        assert!(parsed.is_none(), "a current row is reused");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1077,5 +1241,237 @@ mod layout_tests {
         assert!(!is_silo_temp("FS25_X.silo-tmp")); // only the dot-prefixed form is organize's
         assert!(!is_silo_temp("FS25_X.zip"));
         assert!(!is_silo_temp("FS25_X"));
+    }
+
+    /// A folder mod with a modDesc titled `title`.
+    fn moddesc_dir(dir: &std::path::Path, title: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("modDesc.xml"),
+            format!("<modDesc descVersion=\"92\"><title><en>{title}</en></title></modDesc>"),
+        )
+        .unwrap();
+    }
+
+    /// #353: a folder mod's cache key follows its modDesc.xml, so an in-place edit (which
+    /// leaves the folder's own mtime and size alone) is parsed again.
+    #[test]
+    fn an_in_place_moddesc_edit_refreshes_a_folder_mod() {
+        let base = fresh("dir_cache");
+        let dir = base.join("FS25_Dev");
+        moddesc_dir(&dir, "Before");
+        let c = Candidate {
+            path: dir.clone(),
+            tech_name: "FS25_Dev".into(),
+            kind: "dir",
+            layout: 0,
+        };
+        let (entry, key) = resolve_entry(&c, &HashMap::new());
+        let key = key.expect("parsed fresh");
+        let cache = HashMap::from([(
+            dir.to_string_lossy().into_owned(),
+            CacheEntry {
+                mtime_ms: key.mtime_ms,
+                size: key.size,
+                json: serde_json::to_string(&entry).unwrap(),
+            },
+        )]);
+        assert!(resolve_entry(&c, &cache).1.is_none(), "unchanged: reused");
+
+        // Rewrite modDesc.xml in place (a later mtime); the folder's own mtime doesn't move.
+        let folder_mtime = fs::metadata(&dir).unwrap().modified().unwrap();
+        let desc = dir.join("modDesc.xml");
+        let later =
+            fs::metadata(&desc).unwrap().modified().unwrap() + std::time::Duration::from_secs(5);
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&desc)
+            .unwrap();
+        std::io::Write::write_all(
+            &mut f,
+            b"<modDesc descVersion=\"92\"><title><en>After!</en></title></modDesc>",
+        )
+        .unwrap();
+        f.set_modified(later).unwrap();
+        drop(f);
+        assert_eq!(
+            fs::metadata(&dir).unwrap().modified().unwrap(),
+            folder_mtime
+        );
+
+        let (entry, key) = resolve_entry(&c, &cache);
+        assert!(key.is_some(), "the edit is noticed");
+        assert_eq!(entry.title.as_deref(), Some("After!"));
+
+        // A zip's key is still just its own mtime and size.
+        let zip = base.join("FS25_Z.zip");
+        moddesc_zip(&zip, "Z");
+        let (m, s) = stamp(&zip);
+        let z = Candidate {
+            path: zip,
+            tech_name: "FS25_Z".into(),
+            kind: "zip",
+            layout: 0,
+        };
+        assert_eq!(
+            cache_key(&z),
+            CacheKey {
+                mtime_ms: m,
+                size: s
+            }
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// One mods folder with its archive, scanned with the stand-in map.
+    fn scan_one(mods: &Path, arch: &Path) -> ScanOutput {
+        scan_layouts(
+            vec![(mods.to_path_buf(), vec![arch.to_path_buf()])],
+            &HashMap::new(),
+            |_, _| {},
+        )
+    }
+
+    /// Silo's projections (a hardlink, a byte-for-byte copy, a marked folder copy) still fold
+    /// into the archived entry exactly as before (#353).
+    #[test]
+    fn projections_fold_into_the_archived_entry() {
+        let base = fresh("projections");
+        let mods = base.join("mods");
+        let arch = base.join("arch");
+        let cat = arch.join("Tools");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(&cat).unwrap();
+        moddesc_zip(&cat.join("FS25_Linked.zip"), "Linked");
+        moddesc_zip(&cat.join("FS25_Copied.zip"), "Copied");
+        moddesc_dir(&cat.join("FS25_Folder"), "Folder");
+        std::fs::hard_link(cat.join("FS25_Linked.zip"), mods.join("FS25_Linked.zip")).unwrap();
+        std::fs::copy(cat.join("FS25_Copied.zip"), mods.join("FS25_Copied.zip")).unwrap();
+        let copy = mods.join("FS25_Folder");
+        moddesc_dir(&copy, "Folder");
+        std::fs::write(copy.join(crate::organize::SILO_MARKER), b"silo\n").unwrap();
+
+        let out = scan_one(&mods, &arch);
+        assert!(out.stand_ins.is_empty());
+        assert_eq!(out.result.mods.len(), 3);
+        for m in &out.result.mods {
+            assert!(m.organized && m.active, "{}", m.tech_name);
+            assert!(Path::new(&m.path).starts_with(&arch), "{}", m.path);
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A different file at an archived mod's name (another build, the user's own folder, a
+    /// folder where a zip is archived) is what the game loads, so its row describes that file;
+    /// the archived copy behind it is reported for the manifest (#353).
+    #[test]
+    fn a_swapped_in_file_stands_in_for_the_archived_mod() {
+        let base = fresh("stand_in");
+        let mods = base.join("mods");
+        let arch = base.join("arch");
+        let cat = arch.join("Tools");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(&cat).unwrap();
+        moddesc_zip(&cat.join("FS25_Zip.zip"), "Archived v1");
+        moddesc_zip(&mods.join("FS25_Zip.zip"), "Swapped in v2");
+        moddesc_dir(&cat.join("FS25_Dir"), "Archived dir");
+        moddesc_dir(&mods.join("FS25_Dir"), "Own dir"); // no Silo marker
+        moddesc_zip(&cat.join("FS25_Kind.zip"), "Archived zip");
+        moddesc_dir(&mods.join("FS25_Kind"), "Unpacked"); // same techName, other kind
+
+        let out = scan_one(&mods, &arch);
+        assert_eq!(out.result.mods.len(), 3, "one row per mod");
+        for (name, title, kind) in [
+            ("FS25_Zip", "Swapped in v2", "zip"),
+            ("FS25_Dir", "Own dir", "dir"),
+            ("FS25_Kind", "Unpacked", "dir"),
+        ] {
+            let m = out
+                .result
+                .mods
+                .iter()
+                .find(|m| m.tech_name == name)
+                .unwrap();
+            assert_eq!(m.title.as_deref(), Some(title));
+            assert_eq!(m.kind, kind);
+            assert!(Path::new(&m.path).starts_with(&mods), "{}", m.path);
+            assert!(m.organized && m.active);
+            let behind = &out.stand_ins[&m.path];
+            assert!(Path::new(&behind.path).starts_with(&cat), "{}", behind.path);
+        }
+        let kind = mods.join("FS25_Kind").to_string_lossy().into_owned();
+        assert_eq!(out.stand_ins[&kind].kind, "zip");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    fn symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(src, dst)
+    }
+    #[cfg(windows)]
+    fn symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(src, dst)
+    }
+
+    /// A link at an archived mod's name is Silo's projection only when it resolves to the
+    /// archived copy; a dev link pointing elsewhere stands in for it (#353).
+    #[test]
+    fn a_link_is_a_projection_only_when_it_points_at_the_archive() {
+        let base = fresh("links");
+        let mods = base.join("mods");
+        let arch = base.join("arch");
+        let cat = arch.join("Tools");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::create_dir_all(&cat).unwrap();
+        moddesc_dir(&cat.join("FS25_Ours"), "Ours");
+        moddesc_dir(&cat.join("FS25_Dev"), "Archived dev");
+        let dev = base.join("dev");
+        moddesc_dir(&dev, "Working copy");
+        if symlink(&cat.join("FS25_Ours"), &mods.join("FS25_Ours")).is_err()
+            || symlink(&dev, &mods.join("FS25_Dev")).is_err()
+        {
+            // Symlinks need privilege on Windows (Developer Mode/admin): skip without it.
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        let out = scan_one(&mods, &arch);
+        let row = |n: &str| {
+            out.result
+                .mods
+                .iter()
+                .find(|m| m.tech_name == n)
+                .unwrap()
+                .clone()
+        };
+        assert!(Path::new(&row("FS25_Ours").path).starts_with(&arch));
+        assert_eq!(row("FS25_Dev").title.as_deref(), Some("Working copy"));
+        assert_eq!(out.stand_ins.len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A mods-folder entry is matched only against its own layout's archive: a name archived in
+    /// another layout is that folder's own loose mod, not hidden behind the other archive.
+    #[test]
+    fn a_name_archived_in_another_layout_is_a_loose_mod() {
+        let base = fresh("cross_layout");
+        let (mods1, mods2) = (base.join("mods1"), base.join("mods2"));
+        let (arch1, arch2) = (base.join("arch1"), base.join("arch2"));
+        for d in [&mods1, &mods2, &arch1.join("Tools"), &arch2] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        moddesc_zip(&arch1.join("Tools/FS25_A.zip"), "Archived");
+        moddesc_zip(&mods2.join("FS25_A.zip"), "Loose in two");
+
+        let found = scan(vec![(mods1, vec![arch1]), (mods2.clone(), vec![arch2])]);
+        assert_eq!(found.len(), 2);
+        let archived = found.iter().find(|m| m.organized).unwrap();
+        assert!(
+            !archived.active,
+            "nothing at its name in its own mods folder"
+        );
+        let loose = found.iter().find(|m| !m.organized).unwrap();
+        assert!(loose.active && Path::new(&loose.path).starts_with(&mods2));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
