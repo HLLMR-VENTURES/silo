@@ -25,14 +25,25 @@ const PLAIN_VERSION = /^\d+\.\d+\.\d+$/;
  * The `version` of Cargo.toml's `[package]` table, or null when it has none (or inherits it with
  * `version.workspace = true`, which this check doesn't follow). Reads the plain `key = "value"`
  * (or `'value'`) form Cargo writes, with optional trailing comments; anything fancier reads as
- * no version, so the guard fails closed.
+ * no version, so the guard fails closed. Lines inside a multi-line `"""`/`'''` string are text,
+ * never keys or headers.
  * @param {string} toml Cargo.toml text
  * @returns {string | null}
  */
 export function cargoPackageVersion(toml) {
   let inPackage = false;
+  let openString = null; // the delimiter of a multi-line string still open, if any
   for (const raw of toml.split(/\r?\n/)) {
     const line = raw.trim();
+    if (openString) {
+      if (line.split(openString).length % 2 === 0) openString = null;
+      continue;
+    }
+    const opens = ['"""', "'''"].find((q) => line.split(q).length % 2 === 0);
+    if (opens) {
+      openString = opens;
+      continue;
+    }
     if (line.startsWith("[")) {
       inPackage = /^\[\s*package\s*\]\s*(?:#.*)?$/.test(line);
       continue;

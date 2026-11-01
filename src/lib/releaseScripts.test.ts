@@ -78,6 +78,14 @@ describe("check-release-version", () => {
     expect(cargoPackageVersion(`[package.metadata]\nversion = "1.2.3"\n`)).toBeNull();
   });
 
+  it("ignores lines inside a multi-line string", () => {
+    const toml = `[package]\nname = "silo"\ndescription = """\nversion = "1.2.3"\n[package]\n"""\nversion = "1.2.2"\n`;
+    expect(cargoPackageVersion(toml)).toBe("1.2.2");
+    const literal = `[package]\nreadme = '''\nversion = "9.9.9"'''\nversion = "1.0.0"\n`;
+    expect(cargoPackageVersion(literal)).toBe("1.0.0");
+    expect(cargoPackageVersion(`[package]\ndescription = """one line"""\nversion = "1.0.0"\n`)).toBe("1.0.0");
+  });
+
   it("reads a JSON version only when it is a string", () => {
     expect(jsonVersion(`{"version":"1.0.0"}`)).toBe("1.0.0");
     expect(jsonVersion(`{"version":1}`)).toBeNull();
@@ -156,6 +164,13 @@ describe("release-assets", () => {
     for (const k of ["darwin-x86_64", "darwin-x86_64-app"]) r.manifest.platforms[k].signature = `sig of ${a}`;
     const p = check(r);
     expect(p.filter((s) => s.includes("isn't what the build recorded"))).toHaveLength(4);
+  });
+
+  it("fails an unrecorded asset named __proto__", () => {
+    const r = release();
+    const assets: Record<string, string> = Object.assign(Object.create(null), r.assets);
+    assets["__proto__"] = hex(701);
+    expect(check({ ...r, assets })).toContain(`__proto__ (sha256 ${hex(701)}) isn't a file the build jobs recorded.`);
   });
 
   it("fails an asset nobody recorded and a recorded file missing from the release", () => {

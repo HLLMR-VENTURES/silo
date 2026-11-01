@@ -241,8 +241,9 @@ function verify(digestsDir, assetsDir, repo, tag) {
   const recorded = filesIn(digestsDir)
     .filter((n) => n.endsWith(".sha256"))
     .flatMap((n) => parseDigests(readFileSync(join(digestsDir, n), "utf8")));
-  const assets = {};
-  const sigText = {};
+  // No prototype: an asset named `__proto__` must become a key like any other, not vanish.
+  const assets = Object.create(null);
+  const sigText = Object.create(null);
   for (const n of filesIn(assetsDir)) {
     assets[n] = sha256File(join(assetsDir, n));
     if (n.endsWith(".sig")) sigText[n] = readFileSync(join(assetsDir, n), "utf8");
