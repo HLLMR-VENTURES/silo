@@ -420,4 +420,26 @@ describe("Savegames", () => {
     await fireEvent.click(screen.getByRole("button", { name: "Use this save's mods" }));
     expect(onUse).toHaveBeenCalledWith(s);
   });
+
+  it("an unreadable save says why and can't be used", async () => {
+    const s = {
+      index: 3,
+      folder: "savegame3",
+      name: "savegame3",
+      mapTitle: null,
+      saveDate: null,
+      mods: [],
+      error: "careerSavegame.xml is cut off or damaged",
+    };
+    const st = { total: 0, present: [], missing: [] };
+    const onUse = vi.fn();
+    render(SavegamesTab, { rows: [{ s, st }], onUse, onBackup: vi.fn(), onSettings: vi.fn(), onFindInBrowse: vi.fn() });
+    expect(screen.getByText(/couldn't read this save's mod list: careerSavegame\.xml is cut off or damaged/)).toBeInTheDocument();
+    expect(screen.queryByText("Uses no mods")).toBeNull();
+    const use = screen.getByRole("button", { name: "Use this save's mods" });
+    expect(use).toBeDisabled();
+    await fireEvent.click(use);
+    expect(onUse).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Back up" })).toBeEnabled();
+  });
 });
