@@ -23,6 +23,10 @@
 //! Otherwise nothing is recorded. A zip whose bytes already have a link is left alone. The record
 //! is an install's (`catalogalias::record`), made under the library lock.
 //!
+//! Not covered (it needs a hash lookup on the server): an entry that has since renamed its
+//! download is no candidate, and its older builds aren't seen, so a zip of such a build isn't
+//! linked, and such an entry doesn't count against another one listing the same bytes.
+//!
 //! When it runs: it sends some mod names (and, for those, their versions) to the catalog, so only
 //! with the user's leave to check for updates, and never for a mod left out of update checks:
 //! after a library scan when the startup update check is on, and beside an update check of the
@@ -46,8 +50,10 @@ use std::path::{Path, PathBuf};
 /// The most files one run hashes and looks up.
 pub const MAX_HASHED: usize = 25;
 
-/// How much one run may do: files hashed, manifest requests, and time (checked between files
-/// and before each request, so a run ends within about one request's timeout of it).
+/// How much one run may do: files hashed, manifest requests, and time. They're checked before
+/// each catalog request a run starts for the whole library (the listing's pages, the name
+/// lookup) and before each file; a file once started has all its manifest requests (one per
+/// entry downloading a file of its name), so every run finishes at least one file.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     pub max_hashed: usize,
@@ -83,14 +89,14 @@ impl Budget {
         std::time::Instant::now() >= self.until
     }
 
-    /// Take one manifest request, if the run has one left.
-    fn take_manifest(&self) -> bool {
-        let left = self.manifests.get();
-        if left == 0 || self.out_of_time() {
-            return false;
-        }
-        self.manifests.set(left - 1);
-        true
+    /// Whether the run may start another file.
+    fn has_room(&self) -> bool {
+        self.manifests.get() > 0 && !self.out_of_time()
+    }
+
+    /// Count one manifest request.
+    fn spend_manifest(&self) {
+        self.manifests.set(self.manifests.get().saturating_sub(1));
     }
 }
 
@@ -165,8 +171,9 @@ impl Entry {
 
 /// What the backfill asks the catalog.
 pub trait Catalog {
-    /// Every entry Silo can download from directly.
-    fn entries(&self) -> Result<Vec<Entry>, String>;
+    /// Every entry Silo can download from directly; an error once `out_of_time` says so before
+    /// a request.
+    fn entries(&self, out_of_time: &dyn Fn() -> bool) -> Result<Vec<Entry>, String>;
     /// Which of `names` are an entry's techName, exactly.
     fn known_tech_names(&self, names: &[String]) -> Result<HashSet<String>, String>;
     /// The whole-zip SHA-256 the catalog has for entry `id`'s build of `version`; None when it
@@ -180,8 +187,8 @@ pub struct SiloApi {
 }
 
 impl Catalog for SiloApi {
-    fn entries(&self) -> Result<Vec<Entry>, String> {
-        let mods = siloapi::list_source(&self.base, "github", MAX_LIST_PAGES)?;
+    fn entries(&self, out_of_time: &dyn Fn() -> bool) -> Result<Vec<Entry>, String> {
+        let mods = siloapi::list_source(&self.base, "github", MAX_LIST_PAGES, out_of_time)?;
         Ok(mods.iter().map(Entry::from).collect())
     }
 
@@ -290,7 +297,7 @@ pub fn run_with<G>(
     // Files never tried first, then the ones that have waited longest, so a file that keeps
     // failing never holds up the rest.
     pending.sort_by_key(|p| p.noted.as_ref().map(|n| n.attempted_ms));
-    let entries = match catalog.entries() {
+    let entries = match catalog.entries(&|| budget.out_of_time()) {
         Ok(e) => e,
         Err(e) => {
             log::info!("[catalog] link backfill skipped, trying after the next scan: {e}");
@@ -331,7 +338,12 @@ pub fn run_with<G>(
     }
 
     let names: Vec<String> = named.iter().map(|(p, _)| p.zip.tech_name.clone()).collect();
-    let known = match catalog.known_tech_names(&names) {
+    let known = if budget.out_of_time() {
+        Err(BUDGET_USED.to_string())
+    } else {
+        catalog.known_tech_names(&names)
+    };
+    let known = match known {
         Ok(k) => k,
         Err(e) => {
             log::info!("[catalog] link backfill skipped, trying after the next scan: {e}");
@@ -342,7 +354,7 @@ pub fn run_with<G>(
     for (p, by_name) in named {
         let (outcome, sha) = if known.contains(&p.zip.tech_name) {
             (Outcome::InCatalog, None)
-        } else if budget.out_of_time() {
+        } else if !budget.has_room() {
             (Outcome::Retry(BUDGET_USED.to_string()), None)
         } else {
             check_bytes(conn, &p, &by_name, &entries, catalog, &hash, &lock, &budget)
@@ -435,9 +447,7 @@ fn match_bytes<G>(
             if entry.lists_latest(sha) {
                 continue;
             }
-            if !budget.take_manifest() {
-                return Outcome::Retry(BUDGET_USED.to_string());
-            }
+            budget.spend_manifest();
             match catalog.archive_sha256(&entry.id, version) {
                 Ok(Some(h)) if h.eq_ignore_ascii_case(sha) => add_once(&mut matched, entry),
                 Ok(_) => {}
@@ -650,7 +660,7 @@ mod tests {
     }
 
     impl Catalog for Fake {
-        fn entries(&self) -> Result<Vec<Entry>, String> {
+        fn entries(&self, _out_of_time: &dyn Fn() -> bool) -> Result<Vec<Entry>, String> {
             self.asked_entries.set(self.asked_entries.get() + 1);
             if self.fail_entries {
                 return Err("Silo can't reach its catalog right now".into());
@@ -1290,6 +1300,39 @@ mod tests {
             out,
             [(zips[1].path.clone(), Outcome::Linked("cat-1".into()))]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_once_started_gets_all_its_requests_so_every_run_finishes_one() {
+        let (dir, conn) = setup("one_file");
+        let file = write_zip(&dir, "FS25_FieldToDoList.zip", b"build one");
+        // Three entries ship this file name; only the last lists the build of this version.
+        let mut fake = Fake::default();
+        for i in 0..3 {
+            fake.entries.push(Entry {
+                id: format!("cat-{i}"),
+                tech_name: Some(format!("FS25_ToDo{i}")),
+                archive_sha256: Some(sha(b"newer")),
+                download_urls: vec![TODO_URL.into()],
+            });
+        }
+        let fake = fake.build("cat-2", "1.0", b"build one");
+        let one = Limits {
+            max_manifests: 1,
+            ..Limits::default()
+        };
+        let hash = crate::provenance::sha256_file;
+        let out = run_with(
+            &conn,
+            &[scanned(&file, Some("1.0"))],
+            &fake,
+            hash,
+            || Ok(()),
+            one,
+        );
+        assert_eq!(out[0].1, Outcome::Linked("cat-2".into()));
+        assert_eq!(fake.asked_builds.borrow().len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

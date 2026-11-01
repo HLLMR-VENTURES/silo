@@ -2373,27 +2373,25 @@ struct LocalMod {
     /// The mod's file, for a catalog alias (#386). Absent: joined by techName only.
     #[serde(default)]
     path: Option<String>,
+    /// The file's size and modified time when the library scan read `version` from it, so the
+    /// catalog-link backfill (#402) only takes the file that version belongs to.
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    mtime_ms: Option<u64>,
 }
 
-/// The zips among `mods` (an update check's list) as the catalog-link backfill takes them,
-/// with the size and modified time they have now.
+/// The mods in an update check's list as the catalog-link backfill takes them: those with a
+/// file, with the size and modified time the scan saw when it read their version (a file that
+/// has changed since then is left to a run after the next scan).
 fn local_zips(mods: &[LocalMod]) -> Vec<aliasbackfill::LibraryZip> {
     mods.iter()
         .filter_map(|m| {
-            let path = PathBuf::from(m.path.as_deref()?);
-            let meta = std::fs::metadata(&path)
-                .ok()
-                .filter(|meta| meta.is_file())?;
-            let mtime_ms = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as u64)?;
             Some(aliasbackfill::LibraryZip {
-                path,
+                path: PathBuf::from(m.path.as_deref()?),
                 tech_name: m.tech_name.clone(),
-                size: meta.len(),
-                mtime_ms,
+                size: m.size?,
+                mtime_ms: m.mtime_ms?,
                 version: m.version.clone(),
             })
         })
@@ -8007,6 +8005,28 @@ fn hold_quit() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_update_check_hands_the_backfill_the_file_the_scan_read() {
+        let m = |size, mtime_ms| super::LocalMod {
+            tech_name: "FS25_FieldToDoList".into(),
+            version: Some("1.0".into()),
+            path: Some("C:/mods/FS25_FieldToDoList.zip".into()),
+            size,
+            mtime_ms,
+        };
+        let zips = super::local_zips(&[m(Some(9), Some(77)), m(None, Some(77)), m(Some(9), None)]);
+        // Only a mod with the scan's size and time is taken, keyed on them (never on what the
+        // file has now): a file changed since the scan isn't judged by the old version's number.
+        assert_eq!(zips.len(), 1);
+        assert_eq!((zips[0].size, zips[0].mtime_ms), (9, 77));
+        assert_eq!(zips[0].version.as_deref(), Some("1.0"));
+        let none = super::LocalMod {
+            path: None,
+            ..m(Some(9), Some(77))
+        };
+        assert!(super::local_zips(&[none]).is_empty());
+    }
+
     use super::{
         archive_holds_mods, build_gh_scope, cancel_falls_back, fence_problems,
         foreign_mods_problem, move_outcome, move_outcome_level, move_problems, overlap_problems,

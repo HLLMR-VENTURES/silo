@@ -15,7 +15,19 @@ export interface CheckMod {
   title?: string | null;
   path: string;
   version?: string | null;
+  /** The file's size and modified time when the scan read `version` (#402). */
+  size?: number;
+  mtimeMs?: number;
 }
+
+/** A mod as the catalog check asks about it. */
+export type CatalogAsk = {
+  techName: string;
+  version?: string;
+  path?: string;
+  size?: number;
+  mtimeMs?: number;
+};
 
 /** A linked GitHub repo (the drawer's "Source & updates"). */
 export interface LinkedRepo {
@@ -32,7 +44,7 @@ export interface ExplainedError {
 }
 
 export interface CheckDeps {
-  catalog: (mods: { techName: string; version?: string; path?: string }[]) => Promise<CatalogUpdate[]>;
+  catalog: (mods: CatalogAsk[]) => Promise<CatalogUpdate[]>;
   checkRepo: (owner: string, repo: string, current: string) => Promise<UpdateInfo>;
   /** Log the failure and word it (inlineError + formatDetail). */
   explain: (e: unknown, op: string) => ExplainedError;
@@ -87,15 +99,18 @@ async function checkLinked(
 
 /**
  * What the Updates list does when Silo links mods to their catalog entries in the background
- * (#402): check again now, again once the check that's running ends, or nothing (no check has
- * run yet, and the first one sees the links).
+ * (#402): check again now, once nothing keeps a check from starting (one running, or an update
+ * installing), or nothing (no check has run yet, and the first one sees the links). That check
+ * doesn't link more mods itself, so links never set off check after check.
  */
 export function recheckOnLink(s: {
   checking: boolean;
+  /** Something keeps a check from starting now (an update installing). */
+  blocked: boolean;
   checked: boolean;
 }): "now" | "after" | "no" {
-  if (s.checking) return "after";
-  return s.checked ? "now" : "no";
+  if (!s.checked && !s.checking) return "no";
+  return s.checking || s.blocked ? "after" : "now";
 }
 
 /**
@@ -116,8 +131,15 @@ export async function runUpdateCheck(
 
   try {
     const catalog = await deps.catalog(
-      // The file, so a mod Silo installed under another name finds its catalog entry (#386).
-      mods.map((m) => ({ techName: m.techName, version: m.version ?? undefined, path: m.path })),
+      // The file, so a mod Silo installed under another name finds its catalog entry (#386),
+      // and the size and time the version was read at, for linking older such installs (#402).
+      mods.map((m) => ({
+        techName: m.techName,
+        version: m.version ?? undefined,
+        path: m.path,
+        size: m.size,
+        mtimeMs: m.mtimeMs,
+      })),
     );
     for (const c of catalog) {
       const m = byTech.get(c.techName);

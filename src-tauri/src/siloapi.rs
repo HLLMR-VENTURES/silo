@@ -318,8 +318,14 @@ const LIST_PAGE: u32 = 100;
 /// Every catalog entry with a source of kind `source` (`github`, say), read page by page from
 /// `GET /mods?source=<source>&sort=name` (name order, tie-broken by id on the server). Anything
 /// short of the whole listing is an error, never a partial list: a caller counting the entries
-/// that list some bytes must see them all (see `all_pages`).
-pub fn list_source(base: &str, source: &str, max_pages: u32) -> Result<Vec<BrowseMod>, String> {
+/// that list some bytes must see them all (see `all_pages`). `out_of_time` is asked before each
+/// page; once it says so, no further request starts and the listing is an error.
+pub fn list_source(
+    base: &str,
+    source: &str,
+    max_pages: u32,
+    out_of_time: &dyn Fn() -> bool,
+) -> Result<Vec<BrowseMod>, String> {
     let fetch = |offset: u32| -> Result<BrowsePage, String> {
         let url = format!(
             "{}/mods?source={}&sort=name&limit={LIST_PAGE}&offset={offset}",
@@ -332,22 +338,26 @@ pub fn list_source(base: &str, source: &str, max_pages: u32) -> Result<Vec<Brows
             total: parsed.total,
         })
     };
-    all_pages(fetch, max_pages)
+    all_pages(fetch, max_pages, out_of_time)
 }
 
 /// Read pages of `LIST_PAGE` rows from `fetch(offset)` until the total the first page reported.
 /// An error when a page fails, when the listing changes while it's read (another total, a page
-/// shorter or longer than the rest of the total, an entry seen twice), or when it runs past
-/// `max_pages` pages.
+/// shorter or longer than the rest of the total, an entry seen twice), when it runs past
+/// `max_pages` pages, or when `out_of_time` says so before a page.
 fn all_pages(
     fetch: impl Fn(u32) -> Result<BrowsePage, String>,
     max_pages: u32,
+    out_of_time: &dyn Fn() -> bool,
 ) -> Result<Vec<BrowseMod>, String> {
     let changed = || "Silo's catalog changed while Silo was reading it.".to_string();
     let mut out: Vec<BrowseMod> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut total = None;
     for page in 0..max_pages {
+        if out_of_time() {
+            return Err("Silo stopped reading its catalog: it took too long.".to_string());
+        }
         let got = fetch(page * LIST_PAGE)?;
         let want = *total.get_or_insert(got.total);
         let left = want
@@ -993,16 +1003,18 @@ mod tests {
             let n = 250u32.saturating_sub(offset).min(LIST_PAGE);
             Ok(list_page(offset, n, 250))
         };
-        let all = all_pages(fetch, 10).unwrap();
+        let all = all_pages(fetch, 10, &|| false).unwrap();
         assert_eq!(all.len(), 250);
         assert_eq!(all[249].id, "m249");
         assert_eq!(*asked.borrow(), [0, 100, 200]);
         // Exactly a page, and nothing at all.
         assert_eq!(
-            all_pages(|o| Ok(list_page(o, 100, 100)), 10).unwrap().len(),
+            all_pages(|o| Ok(list_page(o, 100, 100)), 10, &|| false)
+                .unwrap()
+                .len(),
             100
         );
-        assert!(all_pages(|o| Ok(list_page(o, 0, 0)), 10)
+        assert!(all_pages(|o| Ok(list_page(o, 0, 0)), 10, &|| false)
             .unwrap()
             .is_empty());
     }
@@ -1016,21 +1028,36 @@ mod tests {
                 Err("offline".to_string())
             }
         };
-        assert_eq!(all_pages(failing, 10).unwrap_err(), "offline");
+        assert_eq!(all_pages(failing, 10, &|| false).unwrap_err(), "offline");
         // A page that comes back empty or short before the total is reached.
         let empty = |o: u32| Ok(list_page(o, if o == 0 { 100 } else { 0 }, 900));
-        assert!(all_pages(empty, 10).is_err());
+        assert!(all_pages(empty, 10, &|| false).is_err());
         let short = |o: u32| Ok(list_page(o, if o == 0 { 100 } else { 50 }, 300));
-        assert!(all_pages(short, 10).is_err());
+        assert!(all_pages(short, 10, &|| false).is_err());
         // More rows than the total said, or the total moves between pages.
-        assert!(all_pages(|o| Ok(list_page(o, 100, 50)), 10).is_err());
+        assert!(all_pages(|o| Ok(list_page(o, 100, 50)), 10, &|| false).is_err());
         let moving = |o: u32| Ok(list_page(o, 100, if o == 0 { 300 } else { 301 }));
-        assert!(all_pages(moving, 10).is_err());
+        assert!(all_pages(moving, 10, &|| false).is_err());
         // An entry seen on two pages (the order shifted while paging).
         let overlap = |o: u32| Ok(list_page(o.saturating_sub(1), 100, 200));
-        assert!(all_pages(overlap, 10).is_err());
+        assert!(all_pages(overlap, 10, &|| false).is_err());
         let endless = |o: u32| Ok(list_page(o, 100, 1_000_000));
-        assert!(all_pages(endless, 3).is_err());
+        assert!(all_pages(endless, 3, &|| false).is_err());
+    }
+
+    #[test]
+    fn a_source_listing_out_of_time_starts_no_further_request() {
+        let asked = std::cell::Cell::new(0);
+        let fetch = |o: u32| {
+            asked.set(asked.get() + 1);
+            Ok(list_page(o, 100, 300))
+        };
+        // Time runs out after the first page.
+        let late = || asked.get() >= 1;
+        assert!(all_pages(fetch, 10, &late).is_err());
+        assert_eq!(asked.get(), 1);
+        assert!(all_pages(fetch, 10, &|| true).is_err());
+        assert_eq!(asked.get(), 1, "none started once out of time");
     }
 
     #[test]

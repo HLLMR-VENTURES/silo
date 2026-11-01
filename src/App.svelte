@@ -2120,8 +2120,6 @@
   }
 
   const updateCheckDeps = {
-    // This check links older installs under another name to their entry first (#402).
-    catalog: (mods: Parameters<typeof catalogCheckUpdates>[0]) => catalogCheckUpdates(mods, true),
     checkRepo: checkModUpdate,
     explain: explainUpdateError,
   };
@@ -2130,7 +2128,9 @@
   /** Bumped when the mods folder changes: a check of the old folder still running mustn't land. */
   let updateFolderGen = 0;
 
-  async function checkAllUpdates(quiet = false) {
+  /** `link`: also link older installs under another name to their catalog entry, in the
+   *  background (#402). A check that follows such links doesn't. */
+  async function checkAllUpdates(quiet = false, link = true) {
     if (!quiet) go("updates");
     if (updateChecking || updateCheckBlocked) return;
     updateChecking = true;
@@ -2142,6 +2142,7 @@
     try {
       const res = await runUpdateCheck(checkable, repoMap, {
         ...updateCheckDeps,
+        catalog: (asks) => catalogCheckUpdates(asks, link),
         onProgress: (done, total) => {
           if (gen === updateFolderGen) updateProgress = { done, total };
         },
@@ -2157,21 +2158,28 @@
       updateChecking = false;
       updateProgress = null;
     }
-    if (recheckAfterLink) {
-      recheckAfterLink = false;
-      void checkAllUpdates(true);
-    }
   }
 
-  /** Silo linked mods to their catalog entries while a check ran (#402): check once more after. */
-  let recheckAfterLink = false;
+  /** Silo linked mods to their catalog entries while a check couldn't start (#402). */
+  let recheckAfterLink = $state(false);
 
   /** Mods Silo just linked to their catalog entries (#402) get checked again. */
   function onCatalogLinkedMods() {
-    const when = recheckOnLink({ checking: updateChecking, checked: updateCheckedAt != null });
-    if (when === "now") void checkAllUpdates(true);
+    const when = recheckOnLink({
+      checking: updateChecking,
+      blocked: !!updateCheckBlocked,
+      checked: updateCheckedAt != null,
+    });
+    if (when === "now") void checkAllUpdates(true, false);
     else if (when === "after") recheckAfterLink = true;
   }
+
+  // The check held back by links meanwhile, once nothing keeps one from starting.
+  $effect(() => {
+    if (!recheckAfterLink || updateChecking || updateCheckBlocked) return;
+    recheckAfterLink = false;
+    void checkAllUpdates(true, false);
+  });
 
   /** "Couldn't check" → Try again: that mod's linked repo only. */
   async function recheckUpdate(row: UpdateRow) {

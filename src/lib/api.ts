@@ -732,11 +732,23 @@ export function onInstallProgress(
  *  `linkCatalog`: first link such zips installed before Silo kept catalog links (#402); the
  *  Updates check does, the drawer's own check doesn't. */
 export function catalogCheckUpdates(
-  mods: { techName: string; version?: string; path?: string }[],
+  mods: {
+    techName: string;
+    version?: string;
+    path?: string;
+    size?: number;
+    mtimeMs?: number;
+  }[],
   linkCatalog = false,
 ): Promise<CatalogUpdate[]> {
   return invoke<CatalogUpdate[]>("catalog_check_updates", {
-    mods: mods.map((m) => ({ techName: m.techName, version: m.version ?? null, path: m.path ?? null })),
+    mods: mods.map((m) => ({
+      techName: m.techName,
+      version: m.version ?? null,
+      path: m.path ?? null,
+      size: m.size ?? null,
+      mtimeMs: m.mtimeMs ?? null,
+    })),
     linkCatalog,
   });
 }

@@ -600,10 +600,43 @@ describe("automatic update checks (opt-in)", () => {
 });
 
 describe("checking again when Silo links mods to the catalog (#402)", () => {
-  it("checks now after a check, once more after a running one, and not before any", () => {
-    expect(recheckOnLink({ checking: false, checked: true })).toBe("now");
-    expect(recheckOnLink({ checking: true, checked: true })).toBe("after");
-    expect(recheckOnLink({ checking: true, checked: false })).toBe("after");
-    expect(recheckOnLink({ checking: false, checked: false })).toBe("no");
+  const at = (checking: boolean, blocked: boolean, checked: boolean) =>
+    recheckOnLink({ checking, blocked, checked });
+
+  it("checks now after a check, and once nothing holds one back otherwise", () => {
+    expect(at(false, false, true)).toBe("now");
+    expect(at(true, false, true)).toBe("after");
+    expect(at(true, false, false)).toBe("after");
+    // An update installing keeps a check from starting: it waits, it isn't dropped.
+    expect(at(false, true, true)).toBe("after");
+  });
+
+  it("does nothing before any check (the first one sees the links)", () => {
+    expect(at(false, false, false)).toBe("no");
+    expect(at(false, true, false)).toBe("no");
+  });
+
+  it("tells the catalog the size and time each mod's version was read at", async () => {
+    let asked: unknown[] = [];
+    const m = { ...mod("FS25_FieldToDoList"), size: 9, mtimeMs: 77 };
+    await runUpdateCheck([m], {}, {
+      catalog: async (mods) => {
+        asked = mods;
+        return [];
+      },
+      checkRepo: async () => {
+        throw "unused";
+      },
+      explain: (e: unknown) => ({ message: String(e), detail: String(e) }),
+    });
+    expect(asked).toEqual([
+      {
+        techName: "FS25_FieldToDoList",
+        version: "1.0.0.0",
+        path: m.path,
+        size: 9,
+        mtimeMs: 77,
+      },
+    ]);
   });
 });
