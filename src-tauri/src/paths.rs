@@ -340,9 +340,17 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     match rename_noreplace_native(from, to) {
         Some(Ok(())) => Ok(()),
         Some(Err(e)) => Err(taken_or(to, e)),
-        None => rename_checked(from, to),
+        None => {
+            #[cfg(test)]
+            FALLBACK_RENAMES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            rename_checked(from, to)
+        }
     }
 }
+
+/// How often [`rename_no_replace`] fell back to check-then-rename (tests only).
+#[cfg(test)]
+static FALLBACK_RENAMES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// A failed rename whose destination exists is reported as `AlreadyExists` (Windows can say
 /// "access denied" when `to` is a folder), so callers can tell "taken" from a real failure.
@@ -1057,6 +1065,20 @@ mod tests {
     ))]
     #[test]
     fn the_native_no_replace_rename_is_used_where_the_system_has_one() {
+        // Through the wrapper the placement code calls: never the fallback here (no other test
+        // reaches it on these systems either).
+        let d0 = scratch("native_wrapper");
+        std::fs::write(d0.join("a.part"), b"new").unwrap();
+        std::fs::write(d0.join("a.zip"), b"theirs").unwrap();
+        assert!(rename_no_replace(&d0.join("a.part"), &d0.join("a.zip")).is_err());
+        rename_no_replace(&d0.join("a.part"), &d0.join("b.zip")).unwrap();
+        assert_eq!(
+            FALLBACK_RENAMES.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "check-then-rename was used"
+        );
+        let _ = std::fs::remove_dir_all(&d0);
+
         let d = scratch("native");
         std::fs::write(d.join("a.part"), b"new").unwrap();
         std::fs::write(d.join("a.zip"), b"theirs").unwrap();
@@ -1075,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn the_checked_fallback_never_replaces_either() {
+    fn the_checked_fallback_refuses_a_destination_that_already_exists() {
         let d = scratch("fallback");
         std::fs::write(d.join("a.part"), b"new").unwrap();
         std::fs::write(d.join("a.zip"), b"theirs").unwrap();

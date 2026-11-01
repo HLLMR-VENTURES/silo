@@ -1188,28 +1188,31 @@ impl Drop for PartClaim {
     }
 }
 
-/// Paths that name the same file compare equal: the name is lowercased and put in one Unicode
-/// form (NFC) on every system, since Windows ignores case and macOS (APFS, HFS+) ignores both
-/// case and how an accent is encoded (`é` vs `e` + combining accent). On a case-sensitive Linux
-/// folder this only over-claims (two variants can't download at once), which is harmless. The
-/// parent is kept as given; callers join names onto one root.
+/// Paths that name the same file compare equal, on every system: Windows ignores case (by
+/// uppercasing, so `σ` and `ς` are one name), and macOS (APFS, HFS+) ignores both case and how an
+/// accent is encoded (`é` vs `e` + combining accent). So the name is folded wider than either:
+/// decomposed, lowercased, then uppercased (which also merges `σ`/`ς`, `k`/Kelvin sign and the
+/// like), then recomposed (NFC). Folding too much only over-claims (two such variants can't
+/// download at once, also on a case-sensitive Linux folder), which is harmless. The parent is
+/// kept as given; callers join names onto one root.
 fn same_file_key(p: &std::path::Path) -> PathBuf {
-    use unicode_normalization::UnicodeNormalization;
     match p.file_name() {
         Some(name) => {
-            let lower: String = name
-                .to_string_lossy()
-                .nfd()
-                .collect::<String>()
-                .to_lowercase();
-            let lower: String = lower.nfc().collect();
+            let key = fold_file_name(&name.to_string_lossy());
             match p.parent() {
-                Some(parent) => parent.join(lower),
-                None => PathBuf::from(lower),
+                Some(parent) => parent.join(key),
+                None => PathBuf::from(key),
             }
         }
         None => p.to_path_buf(),
     }
+}
+
+/// See [`same_file_key`].
+fn fold_file_name(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let decomposed: String = name.nfd().collect();
+    decomposed.to_lowercase().to_uppercase().nfc().collect()
 }
 
 /// Claim the part file a download of `dest` streams into, refusing while another download
@@ -6659,6 +6662,10 @@ mod tests {
             super::claim_part_at(&mods.join("FS25_FOO.zip"), mods.join("FS25_FOO.zip.part"))
                 .is_err()
         );
+        // NTFS uppercases, so both lowercase sigmas are one name.
+        let _sigma = super::claim_part(&mods.join("FS25_\u{3c3}.zip")).unwrap();
+        assert!(super::claim_part(&mods.join("FS25_\u{3c2}.zip")).is_err());
+        assert!(super::claim_part(&mods.join("FS25_\u{3a3}.zip")).is_err());
         // APFS also treats the two ways of writing an accent as one name.
         let _cafe = super::claim_part(&mods.join("FS25_Caf\u{e9}.zip")).unwrap();
         assert!(super::claim_part(&mods.join("FS25_Cafe\u{301}.zip")).is_err());

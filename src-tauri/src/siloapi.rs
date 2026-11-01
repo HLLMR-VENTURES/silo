@@ -502,12 +502,19 @@ pub fn resolve_download(
     // /manifest endpoint (the server does version-equivalence). Only its 404 means "not hashed
     // yet" (the download is then validated as an archive, not identity-checked). A catalog that
     // doesn't answer, or answers with something unreadable, stops the install instead of
-    // skipping the check. With no version at all there is no build to look up, which is only
-    // acceptable when the catalog says it has no hash for this mod either.
+    // skipping the check. When the version being fetched is the latest, the record's own hash
+    // for it also counts, so a manifest that leaves it out can't switch the check off. With no
+    // version at all there is no build to look up, which is only acceptable when the catalog
+    // says it has no hash for this mod either.
     let expected_sha256 = match version {
-        Some(v) => manifest(base, id, &v)
-            .map_err(|e| Operational(format!("{MANIFEST_UNCHECKED} {e}")))?
-            .and_then(|m| m.archive_sha256),
+        Some(v) => {
+            let is_latest = detail.latest_version.as_deref().map(str::trim) == Some(v.trim());
+            let latest_hash = detail.archive_sha256.clone().filter(|_| is_latest);
+            manifest(base, id, &v)
+                .map_err(|e| Operational(format!("{MANIFEST_UNCHECKED} {e}")))?
+                .and_then(|m| m.archive_sha256)
+                .or(latest_hash)
+        }
         None if detail.archive_sha256.is_some() || detail.verified == Some(true) => {
             return Err(Operational(MANIFEST_UNCHECKED.to_string()));
         }
@@ -852,6 +859,7 @@ mod tests {
         listener: std::net::TcpListener,
         max: usize,
         manifest: (&'static str, &'static str),
+        detail: &'static str,
     ) -> std::thread::JoinHandle<()> {
         use std::io::{Read, Write};
         use std::time::{Duration, Instant};
@@ -887,13 +895,7 @@ mod tests {
                 let (status, body) = if line.contains("/manifest") {
                     manifest
                 } else {
-                    (
-                        "200 OK",
-                        r#"{"id":"m1","techName":"FS25_X","title":"X","latestVersion":"1.0.0.0",
-                            "sources":[{"source":"github","sourceUrl":"https://github.com/a/b",
-                            "installable":true,
-                            "downloadUrl":"https://github.com/a/b/releases/download/v1/FS25_X.zip"}]}"#,
-                    )
+                    ("200 OK", detail)
                 };
                 let resp = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
@@ -905,12 +907,29 @@ mod tests {
         })
     }
 
+    const DETAIL: &str = r#"{"id":"m1","techName":"FS25_X","title":"X","latestVersion":"1.0.0.0",
+        "sources":[{"source":"github","sourceUrl":"https://github.com/a/b","installable":true,
+        "downloadUrl":"https://github.com/a/b/releases/download/v1/FS25_X.zip"}]}"#;
+
+    /// [`DETAIL`], with the latest version's hash on the record.
+    const DETAIL_HASHED: &str = r#"{"id":"m1","techName":"FS25_X","title":"X",
+        "latestVersion":"1.0.0.0","archiveSha256":"latest","verified":true,
+        "sources":[{"source":"github","sourceUrl":"https://github.com/a/b","installable":true,
+        "downloadUrl":"https://github.com/a/b/releases/download/v1/FS25_X.zip"}]}"#;
+
     fn resolve_against(
+        manifest: (&'static str, &'static str),
+    ) -> Result<ResolvedDownload, ResolveError> {
+        resolve_with(DETAIL, manifest)
+    }
+
+    fn resolve_with(
+        detail: &'static str,
         manifest: (&'static str, &'static str),
     ) -> Result<ResolvedDownload, ResolveError> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let server = serve_catalog(listener, 2, manifest);
+        let server = serve_catalog(listener, 2, manifest, detail);
         let r = resolve_download(&base, "m1", Some("github"));
         server.join().unwrap();
         r
@@ -923,6 +942,25 @@ mod tests {
         assert_eq!(r.filename, "FS25_X.zip");
         assert_eq!(r.tech_name.as_deref(), Some("FS25_X"));
         assert_eq!(r.expected_sha256.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn a_manifest_without_the_hash_does_not_switch_off_the_records_own() {
+        for manifest in [
+            ("200 OK", r#"{"manifestHash":"h","archiveSha256":null}"#),
+            ("200 OK", r#"{"manifestHash":"h"}"#),
+            ("404 Not Found", "{}"),
+        ] {
+            let r = resolve_with(DETAIL_HASHED, manifest).unwrap();
+            assert_eq!(r.expected_sha256.as_deref(), Some("latest"), "{manifest:?}");
+        }
+        // The manifest's own hash wins when it has one.
+        let r = resolve_with(
+            DETAIL_HASHED,
+            ("200 OK", r#"{"archiveSha256":"exact","manifestHash":"h"}"#),
+        )
+        .unwrap();
+        assert_eq!(r.expected_sha256.as_deref(), Some("exact"));
     }
 
     #[test]

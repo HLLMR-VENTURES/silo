@@ -29,8 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build for installed without being checked against that build. Silo now stops the install
   instead; only a mod the catalog has never checked installs without that check. (#350)
 - In a cloud-synced mods folder (OneDrive, Proton Drive), installing or organizing a mod could,
-  in a rare moment, replace a file that had just appeared under the same name. Silo now moves
-  files in a way that can never replace one. (#350)
+  in a rare moment, replace a file that had just appeared under the same name. On Windows, macOS
+  and Linux, Silo now moves files with a single step that refuses to replace one. (#350)
 - On macOS, two downloads whose names differed only in upper and lower case could write into the
   same temporary file and damage a mod that had already been checked and added. They're now
   kept apart on every system. (#350)
