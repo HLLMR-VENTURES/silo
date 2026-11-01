@@ -11,6 +11,7 @@
     curation,
     tags,
     onCurationChange,
+    onCurationFailed,
     onTagsChange,
     onFilterTag,
   }: {
@@ -18,6 +19,8 @@
     curation: CurationRow;
     tags: string[];
     onCurationChange: (row: CurationRow) => void;
+    /** Saving `row` failed: put `prev` back (unless a newer edit replaced `row`) (#358). */
+    onCurationFailed?: (row: CurationRow, prev: CurationRow) => void;
     onTagsChange: (tags: string[]) => void;
     onFilterTag: (tag: string) => void;
   } = $props();
@@ -26,12 +29,16 @@
   let noteDraft = $state("");
   /** The row the note draft belongs to: the drawer can move to another mod with a draft unsaved. */
   let noteRow: CurationRow | null = null;
+  /** A note whose save failed: it stays in the field (unsaved, so leaving the field tries again). */
+  let unsavedNote: { techName: string; note: string } | null = null;
   $effect(() => {
     const c = curation;
     untrack(() => {
       if (noteRow && noteRow.techName !== c.techName) saveNote();
       noteRow = c;
-      noteDraft = c.note ?? "";
+      const kept = unsavedNote?.techName === c.techName ? unsavedNote.note : null;
+      unsavedNote = null;
+      noteDraft = kept ?? c.note ?? "";
     });
   });
   // Esc or a view switch removes the field, which doesn't reliably blur it first: keep the draft.
@@ -40,20 +47,34 @@
   let newTag = $state("");
 
   function persistCuration(patch: Partial<CurationRow>) {
-    const next: CurationRow = { ...curation, ...patch };
+    const prev = curation;
+    const next: CurationRow = { ...prev, ...patch };
     onCurationChange(next);
-    setCuration(next).catch((e) => reportError(e, "Saving your mod flags"));
+    setCuration(next).catch((e) => {
+      onCurationFailed?.(next, prev);
+      reportError(e, "Saving your mod flags");
+    });
   }
   function setRating(r: number) {
     persistCuration({ rating: curation.rating === r ? 0 : r });
   }
+  /** Bumped per note sent: only the newest one's failure keeps its text in the field. */
+  let noteSeq = 0;
   function saveNote() {
     const row = noteRow;
     if (!row || (row.note ?? "") === noteDraft) return;
     const next: CurationRow = { ...row, note: noteDraft };
+    const my = ++noteSeq;
     noteRow = next;
     onCurationChange(next);
-    setCuration(next).catch((e) => reportError(e, "Saving your mod flags"));
+    setCuration(next).catch((e) => {
+      // The row goes back to the saved note; the typed one stays in the field while this mod is
+      // open, so leaving the field tries again.
+      if (my === noteSeq && noteRow?.techName === next.techName)
+        unsavedNote = { techName: next.techName, note: next.note ?? "" };
+      onCurationFailed?.(next, row);
+      reportError(e, "Saving your mod flags");
+    });
   }
   function addTag() {
     const t = newTag.trim();

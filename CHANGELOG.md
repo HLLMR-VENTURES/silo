@@ -70,6 +70,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Conflicts** busy for hours: such a list is now treated as unreadable, like a broken file.
   (#351)
 - A mod packed with oversized script files no longer slows down scanning your library. (#351)
+- A category change, or a **Hide**, **Flag**, **Check for updates**, rating or note change, that
+  Silo couldn't save now goes back on screen and says so. Before, it stayed as if saved: Organize
+  could file the mod under a category that was never stored, and the change quietly went away on
+  the next start. Two quick category picks for one mod are now saved in the order you made them.
+  A note that didn't save stays in the field, and leaving the field tries again. (#358)
+- Favorite, Hide or Skip updates on a selection no longer overwrites a note, rating or flag you
+  saved in the mod's details while it ran. (#358)
+- A failed integrity **Re-check** now says what went wrong, instead of showing the old verdict as
+  if it had been confirmed. (#358)
+- The settings editors (game settings, a savegame's settings) no longer mark an edit made while a
+  save is running as saved, and **Save changes** is off until that save is done, so a double-click
+  can't write twice and push out one of your backup copies. (#358)
+- In a mod's settings, saving one file no longer throws away unsaved changes in the mod's other
+  files, and a mod with more than one settings file no longer mixes up their fields. (#358)
+- After you switch mods folders, the previous folder's "you dropped an update" results and its
+  **Use this version** offers no longer show up against the new one. (#358)
+- A library scan that fails no longer goes on to file loose mods using the previous scan's list.
+  (#358)
+- **Find the problem mod**: **Start** stays off while Silo files your loose mods first, so a
+  second click can't open a second "File N mods" dialog. (#358)
+- **Open a shared set**: pressing Enter in the link field while a download runs no longer opens
+  another set, and a set you've replaced can no longer put its conflict warnings on the one shown.
+  (#358)
+- **Restart to update** can no longer start the install twice from a quick double-click. (#358)
+- **Open on ModHub** is only offered for pages on farming-simulator.com itself, not for any link
+  that mentions the name. (#358)
 
 ### Security
 

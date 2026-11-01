@@ -72,6 +72,9 @@
 
   let phase = $state<Phase>("intro");
   let working = $state<string | null>(null); // in-flight action label
+  // onPrepare is running (its dialog, then filing loose mods): Start stays off, so a second click
+  // can't open a second "File N mods" dialog (#358). Not a `working` label: its dialog speaks.
+  let preparing = $state(false);
   let error = $state<string | null>(null);
 
   let current = $state<string[]>([]); // working pool, set once bisection begins
@@ -97,6 +100,7 @@
   }
 
   async function begin() {
+    if (working || preparing) return;
     if (recoveryPending) {
       error = BISECT_RESTORE_FIRST;
       return;
@@ -114,7 +118,13 @@
       }
       if (onPrepare) {
         working = null; // its dialog speaks for itself
-        const ready = await onPrepare();
+        preparing = true;
+        let ready: boolean;
+        try {
+          ready = await onPrepare();
+        } finally {
+          preparing = false;
+        }
         if (destroyed) return abandon();
         if (!ready) return; // declined or refused (said so): nothing was saved
         working = "Saving your current mod set…";
@@ -302,7 +312,7 @@
   }
 
   function exitUnchanged() {
-    if (working) return;
+    if (working || preparing) return;
     onBisecting(false);
     onExit();
   }
@@ -362,8 +372,8 @@
       <div class="err">{BISECT_RESTORE_FIRST}</div>
     {/if}
     <div class="actions">
-      <button class="btn ghost" onclick={exitUnchanged} disabled={!!working}>Not now</button>
-      <button class="btn primary" onclick={begin} disabled={!!working || recoveryPending}>Start</button>
+      <button class="btn ghost" onclick={exitUnchanged} disabled={!!working || preparing}>Not now</button>
+      <button class="btn primary" onclick={begin} disabled={!!working || preparing || recoveryPending}>Start</button>
     </div>
   {:else if phase === "await-launch"}
     {#if step?.kind === "split"}

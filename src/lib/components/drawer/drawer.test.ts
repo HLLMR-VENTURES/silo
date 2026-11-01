@@ -182,6 +182,19 @@ describe("drawer Check for updates switch (#333)", () => {
     expect(screen.getByRole("switch", { name: "Check for updates" })).toHaveAttribute("aria-checked", "false");
     expect(screen.getByText(/leaves this mod out of update checks and Update all/)).toBeInTheDocument();
   });
+
+  it("a switch that didn't save hands the row back to be put back (#358)", async () => {
+    vi.mocked(setCuration).mockRejectedValueOnce("database is locked");
+    const mod = entry(2);
+    const onCurationFailed = vi.fn();
+    const p = props(mod, { onCurationFailed });
+    render(ModDetail, p);
+    await settle();
+    await userEvent.setup().click(screen.getByRole("switch", { name: "Check for updates" }));
+    await settle();
+    const sent = vi.mocked(p.onCurationChange).mock.calls[0][0];
+    expect(onCurationFailed).toHaveBeenCalledWith(sent, p.curation);
+  });
 });
 
 describe("drawer lookups", () => {

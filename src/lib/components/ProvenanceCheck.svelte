@@ -12,24 +12,26 @@
   let phase = $state<Phase>("idle");
   let result = $state<VerifyResult | null>(null);
   let err = $state("");
-  /** The file the shown error belongs to. */
-  let errFor = $state<string | null>(null);
+  /** The last check that failed: the file it was for, and what went wrong. */
+  let failed = $state<{ key: string; msg: string } | null>(null);
 
   // The panel follows the file shown, across drawer switches: a check still running for it
-  // (started before a switch away and back), its verdict from this session, its error, or the
-  // button.
+  // (started before a switch away and back), its error, its verdict from this session, or the
+  // button. The error comes before the verdict: a failed Re-check mustn't show the old verdict
+  // as if it had been confirmed (#358).
   $effect(() => {
     const key = provKey(mod);
     const cached = getVerdict(mod);
     if (isVerifying(mod)) {
       phase = "running";
       err = "";
+    } else if (failed?.key === key) {
+      phase = "error";
+      err = failed.msg;
     } else if (cached) {
       result = cached;
       phase = "done";
       err = "";
-    } else if (errFor === key) {
-      phase = "error";
     } else {
       phase = "idle";
       result = null;
@@ -45,15 +47,12 @@
     const m = mod;
     const key = provKey(m);
     if (isVerifying(m)) return;
-    errFor = null;
+    if (failed?.key === key) failed = null;
     setVerifying(m, true);
     try {
       setVerdict(m, await verifyMod(m.techName, m.version, m.path));
     } catch (e) {
-      if (provKey(mod) === key) {
-        err = inlineError(e, "Checking the mod's integrity");
-        errFor = key;
-      }
+      if (provKey(mod) === key) failed = { key, msg: inlineError(e, "Checking the mod's integrity") };
     } finally {
       setVerifying(m, false);
     }

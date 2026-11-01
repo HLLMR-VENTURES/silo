@@ -54,6 +54,8 @@
     onOpenSettings: () => void;
     onFindInBrowse: () => void;
     onCurationChange: (row: CurationRow) => void;
+    /** Saving `row` failed: put `prev` back (unless a newer edit replaced `row`) (#358). */
+    onCurationFailed?: (row: CurationRow, prev: CurationRow) => void;
     onTagsChange: (tags: string[]) => void;
     onFilterTag: (tag: string) => void;
     repo: { owner: string; repo: string } | null;
@@ -88,6 +90,7 @@
     onOpenSettings,
     onFindInBrowse,
     onCurationChange,
+    onCurationFailed,
     onTagsChange,
     onFilterTag,
     repo,
@@ -263,9 +266,13 @@
         checked={!curation.skipUpdates}
         label="Check for updates"
         onchange={(on) => {
-          const next = { ...curation, skipUpdates: !on };
+          const prev = curation;
+          const next = { ...prev, skipUpdates: !on };
           onCurationChange(next);
-          setCuration(next).catch((e) => reportError(e, "Saving your mod flags"));
+          setCuration(next).catch((e) => {
+            onCurationFailed?.(next, prev);
+            reportError(e, "Saving your mod flags");
+          });
         }}
       />
       {#if curation.skipUpdates}
@@ -279,7 +286,7 @@
 
   <section class="sec" aria-labelledby="{uid}-notes">
     <h3 id="{uid}-notes" class="h">My notes</h3>
-    <ModCuration techName={mod.techName} {curation} {tags} {onCurationChange} {onTagsChange} {onFilterTag} />
+    <ModCuration techName={mod.techName} {curation} {tags} {onCurationChange} {onCurationFailed} {onTagsChange} {onFilterTag} />
   </section>
 
   <DrawerCategory bind:this={category} {mod} {categories} {isOverridden} {onSetCategory} {onResetCategory} />

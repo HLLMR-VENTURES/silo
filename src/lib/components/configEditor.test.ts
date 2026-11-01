@@ -68,6 +68,27 @@ describe("ConfigEditor", () => {
     await waitFor(() => expect(api.setConfig).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
+
+  it("is off while a save is out, and an edit made meanwhile stays unsaved (#358)", async () => {
+    let finish!: () => void;
+    api.setConfig.mockImplementationOnce(() => new Promise<void>((r) => (finish = r)));
+    open();
+    const n = await screen.findByLabelText(/Max lights/);
+    await fireEvent.input(n, { target: { value: "6" } });
+    const user = userEvent.setup();
+    const save = screen.getByRole("button", { name: "Save changes" });
+    await user.click(save);
+    expect(save).toBeDisabled();
+    await user.click(save); // a double-click: still one write
+    await fireEvent.input(n, { target: { value: "7" } });
+    finish();
+    await waitFor(() => expect(save).toBeEnabled());
+    expect(api.setConfig).toHaveBeenCalledTimes(1);
+    expect(api.setConfig).toHaveBeenCalledWith("C:/game.xml", [{ path: "a.n", value: "6" }]);
+    await user.click(save);
+    await waitFor(() => expect(api.setConfig).toHaveBeenCalledTimes(2));
+    expect(api.setConfig).toHaveBeenLastCalledWith("C:/game.xml", [{ path: "a.n", value: "7" }]);
+  });
 });
 
 describe("ConfigEditor: the game's casing", () => {
@@ -134,6 +155,28 @@ describe("ModSettings", () => {
       { id: 1, value: "5" },
       { id: 2, value: "2.25" },
     ]);
+  });
+
+  it("saving one file keeps the unsaved edits in the mod's other file (#358)", async () => {
+    const two = (a: string) => [
+      { path: "C:/ms/a.xml", name: "a.xml", raw: "<a/>", fields: [{ id: 0, label: "Alpha", kind: "int", value: a }] },
+      { path: "C:/ms/b.xml", name: "b.xml", raw: "<b/>", fields: [{ id: 0, label: "Beta", kind: "int", value: "2" }] },
+    ];
+    api.getModSettings.mockReset().mockResolvedValueOnce(two("1")).mockResolvedValue(two("10"));
+    render(ModSettings, { modName: "FS25_X", title: "X", onClose: vi.fn() });
+    const alpha = await screen.findByLabelText("Alpha");
+    const beta = screen.getByLabelText("Beta");
+    // Both files have a field 0: editing one doesn't touch the other.
+    await fireEvent.input(alpha, { target: { value: "10" } });
+    expect(beta).toHaveValue(2);
+    await fireEvent.input(beta, { target: { value: "20" } });
+    const [saveA, saveB] = screen.getAllByRole("button", { name: "Save changes" });
+    await userEvent.setup().click(saveA);
+    expect(api.saveModSettings).toHaveBeenCalledWith("C:/ms/a.xml", [{ id: 0, value: "10" }]);
+    await waitFor(() => expect(api.getModSettings).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(saveA).toBeDisabled()); // saved: nothing left to save there
+    expect(screen.getByLabelText("Beta")).toHaveValue(20);
+    expect(saveB).toBeEnabled();
   });
 });
 
