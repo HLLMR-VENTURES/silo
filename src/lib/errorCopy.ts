@@ -172,7 +172,7 @@ function copyFor(code: ErrorCode, message: string, op: string): string {
       return "Silo is moving your library archive. Pause the move to play, or wait for it to finish.";
     case "MOVE_LINKS_BROKEN":
       // Play asks about this itself (launch.ts); this copy is for anywhere it isn't asked.
-      return "The paused library move left some mods without a working link in your mods folder. Resume the move from the notice at the top, then play.";
+      return "While the library move is paused, some active mods can't be opened from your mods folder. Resume the move from the notice at the top, then play.";
     case "ARCHIVE_UNAVAILABLE":
       return "Your library archive isn't available. Connect the drive, or choose another folder.";
     case "PERMISSION_DENIED":

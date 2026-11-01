@@ -4987,7 +4987,8 @@ fn with_move_ctx(
             conn: &conn,
             mods: &layout.mods,
             mods_key: &key,
-            game_running: &gamelaunch::fs25_running,
+            // A launch Silo just asked for counts too (#415).
+            game_running: &game_running_for_move,
             game_check_interval: std::time::Duration::from_secs(2),
             request: relocate::requests(),
             progress: &mut progress,
@@ -5629,8 +5630,8 @@ fn launch_profile_mismatch(active: Option<&std::path::Path>, expected: Option<&s
 /// How many of a paused move's unreachable mods Play's question names before "and N more".
 const UNREACHABLE_NAMED: usize = 8;
 
-/// Pure: Play's question when a paused archive move left `mods` (sorted techNames, at least
-/// one) without an entry FS25 can open (#415).
+/// Pure: Play's question when, with an archive move paused, FS25 can't open the active `mods`
+/// (sorted techNames, at least one) from the mods folder (#415).
 fn unreachable_message(mods: &[String]) -> String {
     let (who, them) = match mods {
         [one] => (one.clone(), "it"),
@@ -5647,16 +5648,17 @@ fn unreachable_message(mods: &[String]) -> String {
         }
     };
     format!(
-        "The paused library move left {who} without a working link in your mods folder, so \
-         Farming Simulator 25 would start without {them}. Resume the move from the notice at \
-         the top: it mends the links, or says what to check."
+        "While the library move is paused, Farming Simulator 25 can't open {who} from your mods \
+         folder, so it would start without {them}. Resume the move from the notice at the top \
+         to mend the links it made, or fix {them} yourself, then press Play again."
     )
 }
 
 /// Pure: Play's archive-move gate, for every launch (Play, guided bisection, a `-profile`
 /// start). `moving`: a move holds the library lock or is copying (`move_in_progress`): refused,
-/// pause it first, even with `play_anyway`. `unreachable`: what a paused move left FS25 unable
-/// to open (`relocate::unreachable_mods`; empty without a move), or why Silo couldn't look.
+/// pause it first, even with `play_anyway`. `unreachable`: the active mods FS25 can't open
+/// while a move is paused (`relocate::unreachable_mods`; empty without one), or why Silo
+/// couldn't look.
 /// Either of those asks first (`MOVE_LINKS_BROKEN`) unless `play_anyway`. A paused move with
 /// nothing to name plays as before (#415).
 fn move_play_gate(
@@ -5675,9 +5677,9 @@ fn move_play_gate(
         Ok(mods) if mods.is_empty() => return Ok(()),
         Ok(mods) => unreachable_message(&mods),
         Err(e) => format!(
-            "Silo couldn't check whether the paused library move left mods without a working \
-             link in your mods folder ({e}). Resume the move from the notice at the top first, \
-             or play anyway."
+            "Silo couldn't check whether Farming Simulator 25 can open your active mods while \
+             the library move is paused ({e}). Resume the move from the notice at the top \
+             first, or play anyway."
         ),
     };
     Err(error::AppError::new(
@@ -5686,20 +5688,24 @@ fn move_play_gate(
     ))
 }
 
-/// The active mods an unfinished (paused) archive move of the published mods folder — or a
-/// blocked folder's own move — left FS25 unable to open (`relocate::unreachable_mods`). Empty
-/// with no move. Reads the marker from the DB, not the published layout, so a move that paused
-/// or crashed since the last publish is seen as it is.
+/// The active mods an unfinished (paused) archive move of the folder FS25 will read
+/// (`launch_reads`) left it unable to open (`relocate::unreachable_mods`). Empty with no move.
+/// Reads the marker from the DB, not the published layout, so a move that paused or crashed
+/// since the last publish is seen as it is; a DB Silo can't read is an error, never "no move".
 fn paused_move_unreachable(db: &std::path::Path) -> Result<Vec<String>, String> {
     let (active, blocked) = modsroot::published();
-    let Some(mods) = launch_mods_folder(active, blocked) else {
+    let Some(mods) = launch_reads(
+        gameprofile::published(),
+        modsroot::game_reads(),
+        launch_mods_folder(active, blocked),
+    ) else {
         return Ok(Vec::new());
     };
-    Ok(unreachable_in(&db::open(db)?, &mods))
+    unreachable_in(&db::open(db)?, &mods)
 }
 
-/// Pure: the mods folder FS25 is started on, as published: the active one, or a blocked
-/// folder's (whose own unfinished move is still shown). `None` before there is one.
+/// Pure: the mods folder Silo manages, as published: the active one, or a blocked folder's
+/// (whose own unfinished move is still shown). `None` before there is one.
 fn launch_mods_folder(
     active: Option<modsroot::Active>,
     blocked: Option<modsroot::Blocked>,
@@ -5711,14 +5717,68 @@ fn launch_mods_folder(
     }
 }
 
+/// Pure: the mods folder the game Play starts will read (#415): on a profile it launches
+/// (#387), that profile's (`Published::reads`); otherwise the main profile's
+/// (`modsroot::game_reads`). Where Silo couldn't read that, the folder it manages (`managed`),
+/// which is what Play assumes everywhere else.
+fn launch_reads(
+    profile: Option<gameprofile::Published>,
+    game_reads: Option<PathBuf>,
+    managed: Option<PathBuf>,
+) -> Option<PathBuf> {
+    match profile {
+        Some(p) if p.launch => p.reads,
+        _ => game_reads,
+    }
+    .or(managed)
+}
+
 /// `relocate::unreachable_mods` for the unfinished move of the mods folder `mods`, as the DB
-/// records it; empty when it has none.
-fn unreachable_in(conn: &rusqlite::Connection, mods: &std::path::Path) -> Vec<String> {
+/// records it; empty when it has none. A marker or library record Silo can't read is an error.
+fn unreachable_in(
+    conn: &rusqlite::Connection,
+    mods: &std::path::Path,
+) -> Result<Vec<String>, String> {
     let key = modsroot::canonical_key(mods);
-    let Some(marker) = relocate::load_marker(conn, &key) else {
-        return Vec::new();
-    };
-    relocate::unreachable_mods(mods, &marker, &db::load_organized(conn, &key))
+    if relocate::try_load_marker(conn, &key)?.is_none() {
+        return Ok(Vec::new());
+    }
+    let rows = db::try_load_organized(conn, &key)?;
+    Ok(relocate::unreachable_mods(mods, &rows))
+}
+
+/// How long after Silo asks FS25 to start an archive move still won't start or resume, unless
+/// the game has shown up (and so is checked directly) by then (#415). The game takes a few
+/// seconds to appear, longer through Steam.
+const LAUNCH_GRACE_MS: u64 = 30_000;
+
+/// When Silo last asked FS25 to start, as ms since `launch_clock()` plus one (0: not pending).
+/// SeqCst with `MOVE_HOLDS_LOCK`: Play marks this before it checks for a move, and a move
+/// raises that flag before it checks for the game, so of a Play and a Resume at once at least
+/// one sees the other and refuses.
+static LAUNCH_PENDING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn launch_clock() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let start = *START.get_or_init(std::time::Instant::now);
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX - 1)
+}
+
+/// Pure: a launch marked at `marked` (`LAUNCH_PENDING`'s value) is still pending at `now`.
+fn launch_pending_at(marked: u64, now: u64) -> bool {
+    marked != 0 && now.saturating_sub(marked - 1) < LAUNCH_GRACE_MS
+}
+
+/// What an archive move takes for "the game is running" (`RunCtx::game_running`): FS25 is, or
+/// Silo asked it to start moments ago and it hasn't shown up yet (`LAUNCH_GRACE_MS`). Once seen
+/// running, the launch is no longer pending: from then on the game is checked directly.
+fn game_running_for_move() -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    if gamelaunch::fs25_running() {
+        LAUNCH_PENDING.store(0, SeqCst);
+        return true;
+    }
+    launch_pending_at(LAUNCH_PENDING.load(SeqCst), launch_clock())
 }
 
 /// Start FS25. `check_profile`: refuse unless the FS25 profile that would start is
@@ -5751,7 +5811,17 @@ async fn launch_game(
         if !modsroot::resolved() {
             return Err(STILL_LOADING.into());
         }
-        // A running move first (no need to look at the mods then), then what a paused one left.
+        // A running move refuses at once, unmarked: the mark would pause it (`game_running_for_move`).
+        move_play_gate(move_in_progress(), Ok(Vec::new()), true)?;
+        // Then marked before looking again (see `LAUNCH_PENDING`): a Resume or Cancel from here on
+        // refuses as if the game ran, and one that got in first is seen. Unmarked if refused.
+        use std::sync::atomic::Ordering::SeqCst;
+        LAUNCH_PENDING.store(launch_clock() + 1, SeqCst);
+        let refused = |e: error::AppError| {
+            LAUNCH_PENDING.store(0, SeqCst);
+            e
+        };
+        // A move first (no need to look at the mods then), then what a paused one left.
         let moving = move_in_progress();
         let unreachable = if moving || play_anyway.unwrap_or(false) {
             Ok(Vec::new())
@@ -5767,17 +5837,17 @@ async fn launch_game(
                 );
             }
         }
-        move_play_gate(moving, unreachable, play_anyway.unwrap_or(false))?;
+        move_play_gate(moving, unreachable, play_anyway.unwrap_or(false)).map_err(refused)?;
         let game_profile = gameprofile::active();
         if check_profile.unwrap_or(false)
             && launch_profile_mismatch(game_profile.as_deref(), expected_profile.as_deref())
         {
-            return Err(PROFILE_CHANGED.into());
+            return Err(refused(PROFILE_CHANGED.into()));
         }
         if play_anyway.unwrap_or(false) {
             log::warn!("play: Play anyway, past the paused archive move's link check");
         }
-        gamelaunch::launch(game_profile.as_deref()).map_err(error::AppError::from)
+        gamelaunch::launch(game_profile.as_deref()).map_err(|e| refused(error::AppError::from(e)))
     })
     .await
     .map_err(|e| error::AppError::from(e.to_string()))?
@@ -10809,16 +10879,93 @@ mod tests {
         };
         crate::db::upsert_organized(&conn, &key, &row).unwrap();
         // No move: nothing to name, even with the entry missing.
-        assert!(super::unreachable_in(&conn, &mods).is_empty());
+        assert_eq!(super::unreachable_in(&conn, &mods), Ok(vec![]));
         let mut m = crate::relocate::MoveMarker::new(mods.join("archive"), base.join("hdd"));
         m.paused = true;
         m.moved.push("FS25_A".into());
         crate::relocate::save_marker(&conn, &key, &m).unwrap();
-        assert_eq!(super::unreachable_in(&conn, &mods), vec!["FS25_A"]);
+        assert_eq!(
+            super::unreachable_in(&conn, &mods),
+            Ok(vec!["FS25_A".to_string()])
+        );
         std::fs::write(mods.join("FS25_A.zip"), b"PK").unwrap();
-        assert!(super::unreachable_in(&conn, &mods).is_empty());
+        assert_eq!(super::unreachable_in(&conn, &mods), Ok(vec![]));
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A move record or library row Silo can't read is "couldn't check", never "no move".
+    #[test]
+    fn plays_check_reports_a_record_it_cant_read() {
+        let base = std::env::temp_dir().join(format!("silo_play_gate_bad_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&mods);
+        crate::db::set_app_setting(&conn, &format!("archive_move:{key}"), Some("{not json"))
+            .unwrap();
+        assert!(super::unreachable_in(&conn, &mods).is_err());
+        let m = crate::relocate::MoveMarker::new(mods.join("archive"), base.join("hdd"));
+        crate::relocate::save_marker(&conn, &key, &m).unwrap();
+        assert_eq!(super::unreachable_in(&conn, &mods), Ok(vec![]));
+        conn.execute(
+            "INSERT INTO organized(root, tech_name, file_name, kind, category, subcategory, active)
+             VALUES(?1, 'FS25_A', 'FS25_A.zip', 'zip', 'Tools', NULL, 'not a number')",
+            [&key],
+        )
+        .unwrap();
+        assert!(super::unreachable_in(&conn, &mods).is_err());
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The folder checked is the one the started game reads: a launching profile's, else the
+    /// main profile's; only when Silo couldn't read that, the folder it manages.
+    #[test]
+    fn plays_check_looks_at_the_folder_the_game_will_read() {
+        let p = |launch, reads: Option<&str>| crate::gameprofile::Published {
+            dir: PathBuf::from("/prof"),
+            launch,
+            reads: reads.map(PathBuf::from),
+        };
+        let (main, managed) = (Some(PathBuf::from("/main/mods")), Some(PathBuf::from("/b")));
+        let reads = super::launch_reads;
+        assert_eq!(
+            reads(
+                Some(p(true, Some("/prof/mods"))),
+                main.clone(),
+                managed.clone()
+            ),
+            Some(PathBuf::from("/prof/mods"))
+        );
+        assert_eq!(
+            reads(Some(p(true, None)), main.clone(), managed.clone()),
+            managed
+        );
+        assert_eq!(
+            reads(
+                Some(p(false, Some("/prof/mods"))),
+                main.clone(),
+                managed.clone()
+            ),
+            main
+        );
+        assert_eq!(reads(None, main.clone(), managed.clone()), main);
+        assert_eq!(reads(None, None, managed.clone()), managed);
+        assert_eq!(reads(None, None, None), None);
+    }
+
+    /// A launch Silo just asked for counts as the game running for a move, for a while.
+    #[test]
+    fn a_move_waits_for_a_launch_that_hasnt_shown_up_yet() {
+        let grace = super::LAUNCH_GRACE_MS;
+        assert!(!super::launch_pending_at(0, 5));
+        assert!(super::launch_pending_at(1, 0));
+        assert!(super::launch_pending_at(101, 100 + grace - 1));
+        assert!(!super::launch_pending_at(101, 100 + grace));
+        // A clock read before the mark (another thread) is still pending, never an underflow.
+        assert!(super::launch_pending_at(101, 50));
     }
 
     #[test]
@@ -10865,7 +11012,7 @@ mod tests {
     fn the_unreachable_mods_message_names_them_and_counts_the_rest() {
         let names = |n: usize| (1..=n).map(|i| format!("FS25_M{i:02}")).collect::<Vec<_>>();
         let one = super::unreachable_message(&names(1));
-        assert!(one.contains("left FS25_M01 without"), "{one}");
+        assert!(one.contains("can't open FS25_M01 from"), "{one}");
         assert!(one.contains("without it"), "{one}");
         let two = super::unreachable_message(&names(2));
         assert!(two.contains("FS25_M01 and FS25_M02"), "{two}");
