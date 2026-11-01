@@ -944,6 +944,14 @@ fn back_one(
     match (has_src, exists(&home)) {
         (false, false) => return Err(missing_both(env, "move back", &src, &home)),
         (false, true) => {
+            // Home must be the copy itself before the mod stops being Silo's to move back: a
+            // link at its name isn't it (the same check the end of the move makes).
+            if real_copy(&home, &row.kind).is_none() {
+                return Err(StepErr::Failed(format!(
+                    "move back: {} isn't the mod's copy (it's a link or something else). Check it, then resume.",
+                    home.display()
+                )));
+            }
             repoint(env, row, &src, &home, policy)?;
             env.unrecord(marker, &row.tech_name)?;
             return Ok(Step::AlreadyDone);
@@ -2947,6 +2955,37 @@ mod tests {
         assert!(failed(e).contains("no longer match"));
         assert_eq!(std::fs::read(&src).unwrap(), b"PK FS25_A");
         assert!(env(&f).journal().entries().is_empty());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// Cancel → Resume: a mod whose home copy was swapped for a link stays Silo's to move back
+    /// (never un-recorded), so the cancel can't finish around it.
+    #[test]
+    fn a_link_at_home_never_finishes_a_cancel() {
+        let f = fx("homelink");
+        let a = add_zip(&f, "FS25_A", false);
+        let mut m = marker(&f);
+        let home = zip_at(&f.old, "FS25_A");
+        let elsewhere = f.base.join("elsewhere.zip");
+        std::fs::rename(&home, &elsewhere).unwrap();
+        if organize::symlink_file(&elsewhere, &home).is_err() {
+            // No symlinks here (Windows without Developer Mode): nothing to test.
+            let _ = std::fs::remove_dir_all(&f.base);
+            return;
+        }
+        env(&f).record(&mut m, &a.tech_name).unwrap();
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        for op in [Op::Cancel, Op::Resume] {
+            let out = run_with(&f, op, &|| false).unwrap().unwrap();
+            assert!(out.paused, "never finished");
+            assert_eq!(
+                out.moved,
+                vec!["FS25_A".to_string()],
+                "still Silo's to move back"
+            );
+        }
+        assert!(load_marker(&f.conn, &f.key).is_some());
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
