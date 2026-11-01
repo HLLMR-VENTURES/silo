@@ -44,8 +44,11 @@ export interface LogRun {
 
 export interface CrashWatchDeps {
   status: () => Promise<LogStatus>;
-  scan: () => Promise<LogReport>;
-  markSeen: (modifiedMs: number) => Promise<void>;
+  /** Read the log at `path` (the status's), so the report is of the log the status described
+   *  even if the mods folder's FS25 profile changed in between (#387). */
+  scan: (path: string | null) => Promise<LogReport>;
+  /** Remember `modifiedMs` for the log at `path` (the status's), never another profile's. */
+  markSeen: (modifiedMs: number, path: string | null) => Promise<void>;
   /** True while a guided diagnosis runs: it reads the log itself, so nothing is announced. */
   quiet: () => boolean;
   /** A new run was read (not while quiet). The caller announces a crash or clears an old one. */
@@ -64,6 +67,14 @@ export interface CrashWatch {
   readonly polling: boolean;
   /** Stop polling (the app is closing). */
   stop: () => void;
+  /** The log Silo watches changed (another FS25 profile, #387): a look still running for the
+   *  old one announces nothing, and the next `check` doesn't share it. */
+  logChanged: () => void;
+  /** A mods-folder switch is starting (#387): no look until `resume`; one running announces
+   *  nothing. */
+  pause: () => void;
+  /** The switch is done; the caller looks again (`check`). */
+  resume: () => void;
 }
 
 /** @param deps the I/O and callbacks (injected so the timing and gating unit-test) */
@@ -79,36 +90,89 @@ export function createCrashWatch(deps: CrashWatchDeps): CrashWatch {
   /** The log change time this session already handled: a status taken before the stored
    *  last-seen value caught up must not read (and announce) the same run again. */
   let handledMs: number | null = null;
+  /** The log `handledMs` belongs to (each FS25 profile has its own log, #387). */
+  let handledPath: string | null = null;
 
-  async function evaluate(s: LogStatus): Promise<void> {
-    const d = decideLog(s, now());
-    if (d === "skip" || s.modifiedMs == null || s.modifiedMs === handledMs) return;
-    const modifiedMs = s.modifiedMs;
-    if (d === "remember" || deps.quiet()) {
-      await deps.markSeen(modifiedMs);
-      handledMs = modifiedMs;
-      return;
-    }
-    const report = await deps.scan();
-    // Remember it only after a good read, so a failed read is tried again next time.
-    await deps.markSeen(modifiedMs);
+  function handled(s: LogStatus): boolean {
+    return s.modifiedMs === handledMs && s.path === handledPath;
+  }
+  function setHandled(s: LogStatus, modifiedMs: number) {
     handledMs = modifiedMs;
-    if (!deps.quiet()) deps.onRun({ report, modifiedMs });
+    handledPath = s.path;
   }
 
-  /** Run `work` unless a look is already running (then share it). Failures stay quiet. */
+  /** Moves on when the log being watched changes (another FS25 profile, #387): a look started
+   *  before then never announces its run. */
+  let logEpoch = 0;
+  let inFlightEpoch = -1;
+
+  async function evaluate(s: LogStatus, epoch: number): Promise<void> {
+    const d = decideLog(s, now());
+    // A status of a log Silo no longer watches (another FS25 profile, #387) decides nothing.
+    if (epoch !== logEpoch) return;
+    if (d === "skip" || s.modifiedMs == null || handled(s)) return;
+    const modifiedMs = s.modifiedMs;
+    if (d === "remember" || deps.quiet()) {
+      await deps.markSeen(modifiedMs, s.path);
+      setHandled(s, modifiedMs);
+      return;
+    }
+    const report = await deps.scan(s.path);
+    // The watched log changed while this one was read (#387): drop the run unannounced and
+    // unremembered, so it's still news when Silo is back on that log.
+    if (epoch !== logEpoch) return;
+    // Announced first, then remembered (only after a good read, so a failed read is tried again
+    // next time): a run is never remembered without having been announced. The time goes to
+    // that log's own marker (`s.path`).
+    setHandled(s, modifiedMs);
+    if (!deps.quiet()) deps.onRun({ report, modifiedMs });
+    await deps.markSeen(modifiedMs, s.path);
+  }
+
+  /** Run `work` unless a look of the current log is already running (then share it); a look of
+   *  an earlier log is waited for, then this one runs. Failures stay quiet. */
   function once(work: () => Promise<void>): Promise<void> {
-    if (inFlight) return inFlight;
-    inFlight = work()
+    if (inFlight && inFlightEpoch === logEpoch) return inFlight;
+    const before = inFlight;
+    inFlightEpoch = logEpoch;
+    const mine: Promise<void> = (async () => {
+      if (before) await before;
+      await work();
+    })()
       .catch(() => {
         /* background check: the next focus or poll tries again */
       })
-      .finally(() => (inFlight = null));
-    return inFlight;
+      .finally(() => {
+        if (inFlight === mine) inFlight = null;
+      });
+    inFlight = mine;
+    return mine;
   }
 
   function check(): Promise<void> {
-    return once(async () => evaluate(await deps.status()));
+    if (paused) return Promise.resolve();
+    return once(async () => {
+      const epoch = logEpoch;
+      await evaluate(await deps.status(), epoch);
+    });
+  }
+
+  /** The log Silo watches changed (the mods folder's FS25 profile, #387): a look still running
+   *  for the old one won't announce anything, and the next look starts afresh. */
+  function logChanged() {
+    logEpoch++;
+  }
+
+  /** While the mods folder (and so maybe its FS25 profile) is being switched, the backend may
+   *  already read the new folder's log while the app still shows the old one: no look runs, and
+   *  one already running announces nothing (#387). */
+  let paused = false;
+  function pause() {
+    paused = true;
+    logEpoch++;
+  }
+  function resume() {
+    paused = false;
   }
 
   function clearTimer() {
@@ -170,8 +234,8 @@ export function createCrashWatch(deps: CrashWatchDeps): CrashWatch {
     try {
       const s = await deps.status();
       if (s.modifiedMs != null && s.modifiedMs !== s.lastSeenMs) {
-        await deps.markSeen(s.modifiedMs);
-        handledMs = s.modifiedMs;
+        await deps.markSeen(s.modifiedMs, s.path);
+        setHandled(s, s.modifiedMs);
       }
     } catch {
       /* the next look decides again */
@@ -186,5 +250,8 @@ export function createCrashWatch(deps: CrashWatchDeps): CrashWatch {
       return active;
     },
     stop: clearTimer,
+    logChanged,
+    pause,
+    resume,
   };
 }

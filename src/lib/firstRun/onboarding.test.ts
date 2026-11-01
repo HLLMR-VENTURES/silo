@@ -24,6 +24,7 @@ const status = (over: Partial<ModsRootStatus> = {}): ModsRootStatus => ({
   layoutProblem: null,
   layoutProblemCause: null,
   layoutConflict: null,
+  gameProfile: null,
   ...over,
 });
 

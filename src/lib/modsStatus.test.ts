@@ -23,6 +23,7 @@ function status(over: Partial<ModsRootStatus> = {}): ModsRootStatus {
     layoutProblem: null,
     layoutProblemCause: null,
     layoutConflict: null,
+    gameProfile: null,
     ...over,
   };
 }
@@ -180,6 +181,17 @@ describe("modsFolderNotices (#228)", () => {
       acts(),
     );
     expect(labels(cantWrite.override)).toEqual(["Use the game's folder"]);
+  });
+
+  it("a profile reading another folder never offers to leave the profile or change the main setting (#387)", () => {
+    const gameProfile = { dir: "F:/prof", enabled: true, detected: true, chosen: false, supported: true };
+    const n = modsFolderNotices(
+      status({ mismatch: true, gameReads: "F:/elsewhere", canWriteGameSetting: false, gameProfile }),
+      false,
+      acts(),
+    );
+    expect(n.override?.title).toBe("This folder's FS25 profile loads mods from a different folder (F:/elsewhere).");
+    expect(labels(n.override)).toEqual(["Choose another"]);
   });
 
   it("the one-time 'now follows FS25' notice is dismissible and remembers it", () => {

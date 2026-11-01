@@ -44,6 +44,10 @@ closes the app). A packaged build is `npm run tauri:build`.
 - [ ] `[app]` Choose a folder and decline the game update → the "FS25 is reading a different mods folder" notice shows; **Point FS25 here** clears it.
 - [ ] `[app]` Rename the chosen folder while Silo is closed → launch → the "isn't available" notice shows and nothing is scanned; renaming it back + **Try again** recovers.
 - [ ] `[linux]` (tester) Silo finds the Proton prefix user folder; an override set in-game round-trips.
+- [ ] `[game]` **FS25 profile folder (#387, Windows).** Use a scratch profile such as `F:\fs25-silo-smoke` (never the main user folder) that has a `gameSettings.xml` or `game.xml` beside `mods\`. Settings → Mods folder → **Change…** → pick `<profile>\mods` → no "Point Farming Simulator 25 at this folder too?" question, and **Launch FS25 with this folder's profile** shows, already on. The main `Documents\My Games\FarmingSimulator2025\gameSettings.xml` is unchanged (same modified time).
+- [ ] `[game]` With it on, **Play** → FS25 starts on the profile (its own mods load, not the main profile's), with no Steam "launch with these arguments?" question. Quit → the crash banner and Diagnose → Last run read `<profile>\log.txt`; Savegames lists the profile's saves; Graphics settings opens `<profile>\game.xml`.
+- [ ] `[game]` Turn it off → Play starts the main profile, and Diagnose / savegames read the main folder again. Turn it back on → it stays on after a restart; another mods folder keeps its own setting.
+- [ ] `[game]` Also try with Steam closed first, and with a profile path that has spaces (`F:\FS25 Profiles\smoke`). If the exe can't be started, Silo falls back to Steam's `steam://run` link with the same `-profile` argument and Steam asks to confirm: check the game still opens the profile.
 
 ## 1c. Library archive location  _(auto-verified: relocate move/pause/resume/cancel/adopt state machine, Layout, link policy, process matcher)_
 

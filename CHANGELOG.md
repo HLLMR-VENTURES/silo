@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   register after the DLCs, so it's mods' materials that go missing. Silo warns before you launch,
   counting mods that load their materials from a script too, and names the mods adding the most.
   **Last run** lists the materials the game skipped. (#341)
+- **Separate FS25 profiles.** If your mods folder sits in its own FS25 profile folder (one you
+  start the game with using `-profile`), **Play** now starts the game with that profile, so it
+  loads the mods Silo shows instead of your main profile's. Silo turns this on by itself when the
+  folder next to `mods` has the game's settings files, and you can turn it off or on in Settings
+  → Mods folder. Diagnose, the "last game ended unexpectedly" notice, savegames and game settings
+  then use that profile's files, and Silo no longer offers to change your main profile's mods
+  folder setting for it. Windows only for now. (#387)
 
 ### Changed
 

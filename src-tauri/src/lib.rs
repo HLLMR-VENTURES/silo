@@ -16,6 +16,7 @@ pub mod firstrun;
 pub mod fsgame;
 mod fslog;
 pub mod gamelaunch;
+pub mod gameprofile;
 pub mod gh_session;
 pub mod github;
 pub mod heighttypes;
@@ -2368,6 +2369,7 @@ fn trusted_roots(
         }
         Some(a) => vec![a.layout.mods],
         None if resolved => Vec::new(),
+        // The main default (`gameprofile::Place::DefaultModsFolder`): no profile is known yet.
         None => fsgame::default_mods_paths(),
     }
 }
@@ -2935,6 +2937,95 @@ struct ModsRootStatus {
     layout_problem_cause: Option<modsroot::BlockCause>,
     /// The folder it runs into, when known.
     layout_conflict: Option<String>,
+    /// The mods folder's FS25 profile (#387), when the folder can be one's (`<profile>/mods`).
+    /// While it's on, `game_reads` / `mismatch` describe the profile, not the main user folder.
+    game_profile: Option<gameprofile::GameProfileStatus>,
+}
+
+/// The FS25 profile the mods folder `mods` could belong to, and whether it's on (#387). `None`
+/// when the folder can't be a profile's (`gameprofile::candidate_dir`). `main_user_dir` is the
+/// main FS25 user folder.
+fn game_profile_for(
+    conn: &rusqlite::Connection,
+    mods: &std::path::Path,
+    main_user_dir: Option<&std::path::Path>,
+) -> Option<gameprofile::GameProfileStatus> {
+    // Files, not just names: a folder called `game.xml` doesn't make a profile.
+    let is_file = |p: &std::path::Path| p.is_file();
+    let covers = |dir: &std::path::Path, main: &std::path::Path| {
+        gameprofile::key_covers(
+            &modsroot::canonical_key(dir),
+            &modsroot::canonical_key(main),
+        )
+    };
+    let dir = gameprofile::candidate_dir(mods, main_user_dir, covers, |d| {
+        gameprofile::is_install_dir(d, is_file)
+    })?;
+    let mods_key = modsroot::canonical_key(mods);
+    // Remembered once seen, so a profile whose files can't be seen for a while doesn't turn into
+    // "not a profile" and send Diagnose, savegames and Play to the main user folder.
+    let seen_key = gameprofile::seen_key(&mods_key);
+    let seen_before = db::get_app_setting(conn, &seen_key).is_some();
+    let looks_now = gameprofile::looks_like_profile(&dir, is_file);
+    if looks_now && !seen_before {
+        if let Err(e) = db::set_app_setting(conn, &seen_key, Some(gameprofile::ON)) {
+            // Still detected now; it's only not remembered for a later look.
+            log::warn!(
+                "couldn't remember {} as an FS25 profile: {e}",
+                dir.display()
+            );
+        }
+    }
+    let detected = gameprofile::detected(looks_now, seen_before);
+    let stored = db::get_app_setting(conn, &gameprofile::setting_key(&mods_key));
+    let chosen = matches!(
+        stored.as_deref(),
+        Some(gameprofile::ON) | Some(gameprofile::OFF)
+    );
+    Some(gameprofile::GameProfileStatus {
+        dir: dir.to_string_lossy().into_owned(),
+        enabled: gameprofile::enabled(stored.as_deref(), detected, gameprofile::SUPPORTED),
+        detected,
+        chosen,
+        supported: gameprofile::SUPPORTED,
+    })
+}
+
+/// The folder FS25 reads mods from when it runs on profile `dir`: that profile's own mods
+/// folder setting when it's on (the profile's `gameSettings.xml`), else `<dir>/mods` (also when
+/// the file isn't there yet: FS25 then starts with its default). An error when the settings file
+/// is there but can't be read, or its setting can't be turned into a folder: Silo then doesn't
+/// claim to know where the game reads.
+fn profile_game_reads(dir: &std::path::Path) -> Result<PathBuf, String> {
+    let xml = match std::fs::read_to_string(dir.join("gameSettings.xml")) {
+        Ok(x) => x,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(dir.join("mods")),
+        Err(e) => {
+            return Err(format!(
+                "Silo couldn't read this profile's game settings ({e}), so it can't tell which mods folder the game loads."
+            ))
+        }
+    };
+    if modsroot::override_on_without_folder(&xml) {
+        return Err(
+            "This profile's game settings turn on a custom mods folder but don't name it.".into(),
+        );
+    }
+    match modsroot::read_override(&xml).filter(|o| o.active) {
+        None => Ok(dir.join("mods")),
+        // Only a full path is a folder Silo can place (`C:\…` or `\\server\share\…`): an empty,
+        // relative or drive-relative one would be read against some working folder FS25 and
+        // Silo needn't share.
+        Some(o) => modsroot::PathMap::identity()
+            .to_host(&o.directory)
+            .filter(|p| p.is_absolute())
+            .ok_or_else(|| {
+                format!(
+                    "This profile's game settings name a mods folder Silo can't find: {}",
+                    o.directory
+                )
+            }),
+    }
 }
 
 fn path_map(loc: &fsgame::GameLocation) -> modsroot::PathMap {
@@ -2965,15 +3056,19 @@ fn known_mod_count(organized: &[db::OrganizedRow], root_names: &[String]) -> i64
 /// `game_reads`, counted as known), or the check couldn't read the database. When the clash
 /// is only with `game_reads` and `mods` is the user's choice (`chosen`), the cause is FS25's
 /// own setting: pointing FS25 at `mods` clears it. Checked before anything is published.
+/// `profile_reads` is the folder FS25 reads on the folder's own FS25 profile (#387), which
+/// counts as known too.
 fn resolve_layout(
     conn: &rusqlite::Connection,
     mods: &std::path::Path,
     default: Option<&std::path::Path>,
     game_reads: Option<&std::path::Path>,
+    profile_reads: Option<&std::path::Path>,
     chosen: bool,
 ) -> Result<modsroot::Active, modsroot::Blocked> {
     let known = |with_game: bool| {
         let mut extra: Vec<PathBuf> = default.iter().map(PathBuf::from).collect();
+        extra.extend(profile_reads.map(PathBuf::from));
         if with_game {
             extra.extend(game_reads.map(PathBuf::from));
         }
@@ -3133,7 +3228,8 @@ fn rediscovered_archive_fits(
 /// Serializes `compute_mods_root_status`, from reading the stored choice to publishing what it
 /// resolved: a status that read the old choice can't publish after one that read the new choice.
 /// Lock order: the library lock (when held) first, then this one; nothing holding this one
-/// takes the library lock.
+/// takes the library lock. `launch_game` holds it too, from reading the published FS25 profile
+/// to starting the game (#387), so the profile it starts is never half switched.
 static MODS_ROOT_RESOLVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Resolve the live mods folder, publish it (and its archive) as the trusted write roots, and
@@ -3190,17 +3286,79 @@ fn resolve_mods_root(conn: &rusqlite::Connection, publish: bool) -> ModsRootStat
     let mods_folder_missing = !available
         && r.source == modsroot::Source::Default
         && loc.as_ref().map(|l| l.user_dir.is_dir()).unwrap_or(false);
-    // The folder FS25 reads counts as a known mods folder for every overlap check.
+    // The folder's FS25 profile (#387): when it's on, Play starts FS25 on it and the game's own
+    // files are read from it (`gameprofile::Place`).
+    let game_profile = r
+        .path
+        .as_deref()
+        .and_then(|p| game_profile_for(conn, p, loc.as_ref().map(|l| l.user_dir.as_path())));
+    // A refresh that doesn't publish describes the launch setting the backend actually uses
+    // (the published one), so the status never claims a profile Play wouldn't start.
+    let game_profile = game_profile.map(|mut g| {
+        if !publish {
+            g.enabled = gameprofile::active()
+                .is_some_and(|d| modsroot::same_folder(&d, std::path::Path::new(&g.dir)));
+        }
+        g
+    });
+    // A folder that belongs to a profile, even with its launch off, never gets the main
+    // profile's setting changed for it.
+    let profile = game_profile
+        .as_ref()
+        .filter(|g| gameprofile::belongs(g))
+        .map(|g| {
+            let dir = PathBuf::from(&g.dir);
+            // Only where Silo launches profiles: elsewhere (Proton) its setting is in the game's
+            // drive letters, which Silo doesn't translate for a profile, so it isn't judged.
+            let reads = if gameprofile::SUPPORTED {
+                profile_game_reads(&dir).map(Some)
+            } else {
+                Ok(None)
+            };
+            (dir, g.enabled, reads)
+        });
+    let profile_dir = profile
+        .as_ref()
+        .filter(|(_, launch, _)| *launch)
+        .map(|(d, _, _)| d.clone());
+    let profile_reads = profile
+        .as_ref()
+        .and_then(|(_, _, reads)| reads.as_ref().ok().cloned().flatten());
+    // The folder the main FS25 profile reads counts as a known mods folder for every overlap
+    // check, whichever profile is in use: it stays a mods folder of its own. So does the one
+    // the folder's own profile reads (`profile_reads`, published with the profile below).
     if publish {
         modsroot::set_game_reads(r.game_reads.clone());
     }
+    // Where the folder's profile has FS25 read mods can't be told (its settings can't be read):
+    // that folder can't be fenced off, so nothing is written until it can (`Try again`).
+    let profile_unknown = profile
+        .as_ref()
+        .and_then(|(_, _, reads)| reads.as_ref().err().cloned());
     let (active, blocked) = match r.path.as_deref() {
+        Some(p) if available && profile_unknown.is_some() => {
+            let reason = profile_unknown.clone().unwrap_or_default();
+            log::warn!("not managing {}: {reason}", p.display());
+            (
+                None,
+                Some(modsroot::Blocked {
+                    reason,
+                    cause: modsroot::BlockCause::ReadError,
+                    mods: p.to_path_buf(),
+                    conflict: None,
+                    moving: unfinished_move(conn, p).map(Box::new),
+                }),
+            )
+        }
         Some(p) if available => match resolve_layout(
             conn,
             p,
             default.as_deref(),
             r.game_reads.as_deref(),
-            r.source == modsroot::Source::User,
+            profile_reads.as_deref(),
+            // "Point FS25 at this folder" is never the fix for a profile folder: it would write
+            // the main profile's setting. Its overlap is reported as an overlap instead.
+            r.source == modsroot::Source::User && profile.is_none(),
         ) {
             Ok(a) => (Some(a), None),
             Err(b) => {
@@ -3216,8 +3374,19 @@ fn resolve_mods_root(conn: &rusqlite::Connection, publish: bool) -> ModsRootStat
         .as_ref()
         .and_then(|b| b.conflict.as_ref())
         .map(|c| c.to_string_lossy().into_owned());
-    // Together, so no command sees "no layout" without its reason.
+    // Together, so no command sees "no layout" without its reason. The profile first: Play waits
+    // for `modsroot::resolved()`, which this publish sets, so it never starts the main profile
+    // for a folder whose profile isn't published yet.
     if publish {
+        gameprofile::publish(
+            profile
+                .as_ref()
+                .map(|(dir, launch, _)| gameprofile::Published {
+                    dir: dir.clone(),
+                    launch: *launch,
+                    reads: profile_reads.clone(),
+                }),
+        );
         modsroot::publish(active, blocked);
     }
 
@@ -3247,33 +3416,123 @@ fn resolve_mods_root(conn: &rusqlite::Connection, publish: bool) -> ModsRootStat
         })
         .collect();
 
+    // On a profile that launches, what FS25 reads is that profile's mods folder (unknown, and
+    // said so, when its settings can't be read). For any profile folder the main profile's
+    // setting is not Silo's to change (no "Point FS25 here").
+    let (game_reads, mismatch, can_write_game_setting, game_setting_problem) =
+        match profile.as_ref() {
+            Some((_, true, Ok(Some(reads)))) => {
+                let mismatch = r
+                    .path
+                    .as_deref()
+                    .is_some_and(|p| !modsroot::same_folder(p, reads));
+                (Some(reads.clone()), mismatch, false, None)
+            }
+            Some((_, true, Err(why))) => (None, false, false, Some(why.clone())),
+            Some((_, false, _) | (_, true, Ok(None))) => (r.game_reads, r.mismatch, false, None),
+            None => (
+                r.game_reads,
+                r.mismatch,
+                game_setting_problem.is_none(),
+                game_setting_problem,
+            ),
+        };
+
     ModsRootStatus {
         path: r.path.map(|p| p.to_string_lossy().into_owned()),
         source: r.source,
-        game_reads: r.game_reads.map(|p| p.to_string_lossy().into_owned()),
-        mismatch: r.mismatch,
+        game_reads: game_reads.map(|p| p.to_string_lossy().into_owned()),
+        mismatch,
         available,
         mods_folder_missing,
         known,
-        can_write_game_setting: game_setting_problem.is_none(),
+        can_write_game_setting,
         game_setting_problem,
-        unresolved_override: r.unresolved_override,
+        // The main profile's setting: not what FS25 reads on another profile.
+        unresolved_override: r.unresolved_override.filter(|_| profile_dir.is_none()),
         layout_problem,
         layout_problem_cause,
         layout_conflict,
+        game_profile,
     }
 }
 
 /// Point FS25's `modsDirectoryOverride` at `folder`. `guarded_xml_write` keeps the untouched
 /// original (`gameSettings.xml.silo-original.bak`) and the last three versions (`.bak`,
 /// `.bak.2`, `.bak.3`), then swaps the new file in atomically.
+///
+/// This writes the main profile's `gameSettings.xml` (`gameprofile::Place::MainGameSettings`),
+/// so it's refused while the mods folder belongs to its own FS25 profile (#387), with its launch
+/// on or off: that profile has its own settings, and the main one must not be touched for it.
 fn point_game_at(folder: &std::path::Path) -> Result<(), String> {
+    main_settings_refusal(gameprofile::published().map(|p| p.dir).as_deref())?;
     let loc = fsgame::locate().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
     let gs = loc.user_dir.join("gameSettings.xml");
     let roots = [loc.user_dir.clone()];
     let xml = paths::guarded_xml_read(&roots, &gs)?;
     let out = modsroot::write_override(&xml, &path_map(&loc).to_game(folder))?;
     paths::guarded_xml_write(&roots, &gs, &out)
+}
+
+/// Held through a config write into the FS25 user folder that follows the profile (#387): the
+/// folder's profile can't be published in between, so the folder a write is confined to is the
+/// one in use when it lands (one queued from before a switch is refused by its confinement).
+/// Same lock as the mods-folder resolution; nothing holding it takes the library lock.
+fn game_files_guard() -> std::sync::MutexGuard<'static, ()> {
+    MODS_ROOT_RESOLVE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+const SAVES_CHANGED: &str =
+    "Your savegames changed with this mods folder's FS25 profile. Look at the list again.";
+
+/// Pure: refuse a write to the main profile's `gameSettings.xml` while `profile` is in use.
+fn main_settings_refusal(profile: Option<&std::path::Path>) -> Result<(), String> {
+    match profile {
+        Some(_) => Err(PROFILE_KEEPS_MAIN_SETTINGS.into()),
+        None => Ok(()),
+    }
+}
+
+const PROFILE_KEEPS_MAIN_SETTINGS: &str ="This mods folder belongs to its own Farming Simulator 25 profile, so Silo leaves the main game settings alone.";
+
+/// Turn "Launch FS25 with this folder's profile" on or off for the current mods folder (#387).
+/// Stored per folder; the status (and the published profile) follows at once. Changes only
+/// which FS25 user folder Silo reads and which one Play starts: no file is touched.
+#[tauri::command]
+async fn set_game_profile(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<ModsRootStatus, error::AppError> {
+    ensure_no_move()?;
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<ModsRootStatus, String> {
+        // Publishes a new profile beside the same layout: same lock as a folder switch.
+        let _write = mods_root_switch_lock()?;
+        let conn = db::open(&db)?;
+        let st = resolve_mods_root(&conn, false);
+        let (Some(path), Some(_)) = (st.path.as_deref(), st.game_profile.as_ref()) else {
+            return Err("This mods folder isn't inside a separate Farming Simulator 25 profile.".into());
+        };
+        if !gameprofile::SUPPORTED {
+            return Err("Launching Farming Simulator 25 with a separate profile works on Windows only for now.".into());
+        }
+        let mods_key = modsroot::canonical_key(std::path::Path::new(path));
+        let value = if enabled {
+            // Turned on by the user: this folder is a profile's from now on, so turning the
+            // launch off later keeps the main settings protected (`gameprofile::belongs`).
+            db::set_app_setting(&conn, &gameprofile::seen_key(&mods_key), Some(gameprofile::ON))?;
+            gameprofile::ON
+        } else {
+            gameprofile::OFF
+        };
+        db::set_app_setting(&conn, &gameprofile::setting_key(&mods_key), Some(value))?;
+        Ok(compute_mods_root_status(&conn))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// The live mods folder and everything the Settings / banners need to describe it.
@@ -3352,7 +3611,8 @@ async fn set_mods_root(
         let _write = mods_root_switch_lock()?;
         let conn = db::open(&db)?;
         let p = std::path::Path::new(&path);
-        let default = fsgame::user_dir().map(|d| d.join("mods"));
+        let default =
+            gameprofile::user_dir(gameprofile::Place::DefaultModsFolder).map(|d| d.join("mods"));
         let picked = picked::allows(picked::Purpose::ModsFolder, p);
         apply_mods_root_choice(
             &conn,
@@ -3436,8 +3696,15 @@ async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus
             modsroot::active().as_ref(),
             modsroot::blocked_detail().as_ref(),
         )?;
-        point_game_at(&folder)?;
         let conn = db::open(&db)?;
+        // Classified again now, not only as last published: FS25 may have made the folder's
+        // parent a profile since (#387). A profile's folder never gets the main setting changed.
+        let main = fsgame::user_dir();
+        let fresh = game_profile_for(&conn, &folder, main.as_deref())
+            .filter(gameprofile::belongs)
+            .map(|g| PathBuf::from(g.dir));
+        main_settings_refusal(fresh.as_deref())?;
+        point_game_at(&folder)?;
         Ok(compute_mods_root_status(&conn))
     })
     .await
@@ -3445,7 +3712,8 @@ async fn point_game_at_mods_root(app: tauri::AppHandle) -> Result<ModsRootStatus
     .map_err(error::AppError::from)
 }
 
-/// Create `<user dir>/mods` when FS25 hasn't made it yet.
+/// Create `<user dir>/mods` when FS25 hasn't made it yet. The main user folder's
+/// (`gameprofile::Place::DefaultModsFolder`): it's only offered for the default folder.
 #[tauri::command]
 async fn create_mods_folder(app: tauri::AppHandle) -> Result<ModsRootStatus, error::AppError> {
     let db = db_path(&app)?;
@@ -3624,11 +3892,13 @@ fn known_mods_folders(conn: &rusqlite::Connection, extra: &[PathBuf]) -> Vec<Pat
     v
 }
 
-/// The mods folders in use right now: the folder FS25 reads (its override) and the one Silo
-/// manages, as last resolved.
+/// The mods folders in use right now: the folder FS25 reads (its override), the one the current
+/// folder's FS25 profile reads, and the one Silo manages, as last resolved.
 fn live_mods_folders() -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = modsroot::game_reads().into_iter().collect();
     v.extend(modsroot::active().map(|a| a.layout.mods));
+    // The folder FS25 reads on the current folder's own FS25 profile (#387).
+    v.extend(gameprofile::published().and_then(|p| p.reads));
     v
 }
 
@@ -3653,7 +3923,8 @@ fn fences(
     layout: &organize::Layout,
     app_data: Option<&std::path::Path>,
 ) -> Result<Fences, String> {
-    let user_dir = fsgame::locate().map(|l| l.user_dir);
+    // The main default mods folder (`gameprofile::Place::DefaultModsFolder`) is always fenced off.
+    let user_dir = gameprofile::user_dir(gameprofile::Place::DefaultModsFolder);
     let mut extra: Vec<PathBuf> = user_dir.iter().map(|u| u.join("mods")).collect();
     extra.extend(live_mods_folders());
     fences_with(conn, layout, &extra, user_dir.as_deref(), app_data)
@@ -4846,10 +5117,24 @@ async fn launch_game() -> Result<(), error::AppError> {
             "Silo is moving your library archive. Pause the move to play.",
         ));
     }
-    tauri::async_runtime::spawn_blocking(gamelaunch::launch)
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(error::AppError::from)
+    tauri::async_runtime::spawn_blocking(|| {
+        // The mods folder's FS25 profile, when it's on (#387): FS25 then starts on that folder.
+        // Read and launched under the resolution lock, so no folder switch publishes in between:
+        // the profile started is the one published with the current folder, never a mix.
+        let _resolving = MODS_ROOT_RESOLVE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Before the mods folder is first resolved it isn't known yet, and the main profile
+        // would start with the wrong mods.
+        if !modsroot::resolved() {
+            return Err(STILL_LOADING.to_string());
+        }
+        let game_profile = gameprofile::active();
+        gamelaunch::launch(game_profile.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(error::AppError::from)
 }
 
 /// Write text to a user-chosen path (used by the diagnostics report export). Confined to a
@@ -4924,7 +5209,11 @@ async fn clear_scan_cache(app: tauri::AppHandle) -> Result<(), String> {
 /// The FS25 user data dir (parent of mods/, savegameN/, game.xml).
 #[tauri::command]
 async fn user_dir_path() -> Result<Option<String>, String> {
-    off_main(|| Ok(fsgame::user_dir().map(|p| p.to_string_lossy().into_owned()))).await
+    off_main(|| {
+        Ok(gameprofile::user_dir(gameprofile::Place::GameConfig)
+            .map(|p| p.to_string_lossy().into_owned()))
+    })
+    .await
 }
 
 /// Generate a filltype-compatibility bridge companion mod into the library root.
@@ -6197,10 +6486,16 @@ fn silo_folder_keys(
 
 /// Parse the FS25 log.txt and report which mods are throwing errors/warnings, whether
 /// the last run crashed, and the culprit ranking. Read-only; touches nothing.
+///
+/// `path`: the log a `log_status` named, so the report is of that log even if the mods folder's
+/// FS25 profile changed since (#387); `None` reads the current one. Only a log Silo reads is
+/// accepted (`log_target`).
 #[tauri::command]
-async fn scan_log(app: tauri::AppHandle) -> Result<logscan::LogReport, error::AppError> {
-    let path = fsgame::user_dir()
-        .map(|d| d.join("log.txt"))
+async fn scan_log(
+    app: tauri::AppHandle,
+    path: Option<String>,
+) -> Result<logscan::LogReport, error::AppError> {
+    let path = log_target(path.as_deref(), fsgame::user_dir(), gameprofile::published())?
         .ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
     let db = db_path(&app).ok();
     tauri::async_runtime::spawn_blocking(move || -> Result<logscan::LogReport, error::AppError> {
@@ -6235,14 +6530,24 @@ async fn scan_log(app: tauri::AppHandle) -> Result<logscan::LogReport, error::Ap
 async fn log_status(app: tauri::AppHandle) -> Result<logscan::LogStatus, String> {
     let db = db_path(&app)?;
     off_main(move || {
-        let path = fsgame::user_dir().map(|d| d.join("log.txt"));
+        // One read of the profile: the path, its change time and its last-seen marker all
+        // describe the same log.
+        let main = fsgame::user_dir();
+        let path =
+            gameprofile::resolve(gameprofile::Place::Log, main.clone(), gameprofile::active())
+                .map(|d| d.join("log.txt"));
         let modified_ms = path.as_deref().and_then(logscan::modified_ms);
         let conn = db::open(&db)?;
-        let last_seen_ms =
-            logscan::parse_last_seen(db::get_app_setting(&conn, logscan::LAST_SEEN_KEY).as_deref());
+        let key = log_seen_key_for(path.as_deref(), main.as_deref());
+        let last_seen_ms = logscan::parse_last_seen(db::get_app_setting(&conn, &key).as_deref());
         Ok(logscan::LogStatus {
             path: path.map(|p| p.to_string_lossy().into_owned()),
             modified_ms,
+            // Any FS25 process counts, whichever profile it runs on (#387). A game on another
+            // profile only delays the look until it exits. Telling profiles apart by command line
+            // isn't reliable (the launcher starts `x64\FarmingSimulator2025Game.exe`, and whether
+            // that keeps `-profile` is unverified), and a wrong "not running" would read a
+            // running game's log, which has no exit marker yet, as a crash.
             game_running: gamelaunch::fs25_running(),
             last_seen_ms,
         })
@@ -6251,25 +6556,64 @@ async fn log_status(app: tauri::AppHandle) -> Result<logscan::LogStatus, String>
 }
 
 /// Remember that Silo looked at the log as of `modified_ms`, so the same run isn't announced
-/// again (on the next focus or the next start).
+/// again (on the next focus or the next start). `path`: the log a `log_status` named, so the
+/// time lands on that log's marker, never another profile's (#387); `None`: the current log.
 #[tauri::command]
-async fn mark_log_seen(app: tauri::AppHandle, modified_ms: i64) -> Result<(), String> {
+async fn mark_log_seen(
+    app: tauri::AppHandle,
+    modified_ms: i64,
+    path: Option<String>,
+) -> Result<(), String> {
     let db = db_path(&app)?;
     off_main(move || {
+        let main = fsgame::user_dir();
+        let log = log_target(path.as_deref(), main.clone(), gameprofile::published())?;
         let conn = db::open(&db)?;
-        db::set_app_setting(
-            &conn,
-            logscan::LAST_SEEN_KEY,
-            Some(&modified_ms.to_string()),
-        )
+        let key = log_seen_key_for(log.as_deref(), main.as_deref());
+        db::set_app_setting(&conn, &key, Some(&modified_ms.to_string()))
     })
     .await
+}
+
+/// The log a command works on: `requested` (a `log_status` path) when it's `log.txt` in the main
+/// FS25 user folder `main` or in the current folder's FS25 profile (`profile`, launch on or off);
+/// anything else is refused. `None` requested: the current log (the profile's when its launch is
+/// on, `gameprofile::Place::Log`). `Ok(None)`: no user folder is known.
+fn log_target(
+    requested: Option<&str>,
+    main: Option<PathBuf>,
+    profile: Option<gameprofile::Published>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(req) = requested else {
+        let active = profile.filter(|p| p.launch).map(|p| p.dir);
+        return Ok(
+            gameprofile::resolve(gameprofile::Place::Log, main, active).map(|d| d.join("log.txt"))
+        );
+    };
+    let req = std::path::Path::new(req);
+    main.into_iter()
+        .chain(profile.map(|p| p.dir))
+        .map(|d| d.join("log.txt"))
+        .find(|l| modsroot::same_folder(l, req))
+        .map(Some)
+        .ok_or_else(|| "That isn't a Farming Simulator 25 log Silo reads.".to_string())
+}
+
+/// Where the log change time Silo last looked at is kept, for the log at `log`: per FS25
+/// profile, so a profile's old crash isn't compared with the main log's time (#387). The main
+/// user folder `main` keeps the original key (an upgrade doesn't re-announce an old crash).
+fn log_seen_key_for(log: Option<&std::path::Path>, main: Option<&std::path::Path>) -> String {
+    let profile = log
+        .and_then(std::path::Path::parent)
+        .filter(|d| !main.is_some_and(|m| modsroot::same_folder(m, d)))
+        .map(modsroot::canonical_key);
+    gameprofile::log_seen_key(logscan::LAST_SEEN_KEY, profile.as_deref())
 }
 
 /// Parse inputBinding.xml into a per-device binding map (read-only).
 #[tauri::command]
 async fn scan_bindings() -> Result<bindings::BindingReport, error::AppError> {
-    let path = fsgame::user_dir()
+    let path = gameprofile::user_dir(gameprofile::Place::Bindings)
         .map(|d| d.join("inputBinding.xml"))
         .ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
     tauri::async_runtime::spawn_blocking(
@@ -6347,7 +6691,7 @@ async fn get_config(
     paths: Vec<String>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
     off_main(move || {
-        let user = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
+        let user = gameprofile::user_dir(gameprofile::Place::GameConfig).ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let xml = crate::paths::guarded_xml_read(&[user], std::path::Path::new(&path))?;
         Ok(xmlconfig::get_values(&xml, &paths))
     })
@@ -6360,8 +6704,11 @@ async fn get_config(
 #[tauri::command]
 async fn set_config(path: String, edits: Vec<xmlconfig::Edit>) -> Result<(), String> {
     off_main(move || {
-        config_write_refusal(gamelaunch::fs25_running())?;
-        let user = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
+        let _profile = game_files_guard();
+        // Checked under the guard, which a launch holds while it starts the game: a write never
+        // lands just after a launch it waited behind (#387).
+        config_write_refusal(gamelaunch::fs25_running() || gamelaunch::profile_launch_pending())?;
+        let user = gameprofile::user_dir(gameprofile::Place::GameConfig).ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let roots = [user];
         let p = std::path::Path::new(&path);
         let xml = paths::guarded_xml_read(&roots, p)?;
@@ -6376,7 +6723,7 @@ async fn set_config(path: String, edits: Vec<xmlconfig::Edit>) -> Result<(), Str
 #[tauri::command]
 async fn mods_with_settings() -> Result<Vec<String>, String> {
     off_main(|| {
-        Ok(fsgame::user_dir()
+        Ok(gameprofile::user_dir(gameprofile::Place::ModSettings)
             .map(|d| settings_form::mods_with_settings(&d))
             .unwrap_or_default())
     })
@@ -6386,7 +6733,7 @@ async fn mods_with_settings() -> Result<Vec<String>, String> {
 #[tauri::command]
 async fn get_mod_settings(mod_name: String) -> Result<Vec<settings_form::SettingsFile>, String> {
     off_main(move || {
-        let dir = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
+        let dir = gameprofile::user_dir(gameprofile::Place::ModSettings).ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let mut files = Vec::new();
         for path in settings_form::find_files(&dir, &mod_name) {
             files.push(settings_form::load_file(&path)?);
@@ -6399,8 +6746,11 @@ async fn get_mod_settings(mod_name: String) -> Result<Vec<settings_form::Setting
 #[tauri::command]
 async fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Result<(), String> {
     off_main(move || {
-        config_write_refusal(gamelaunch::fs25_running())?;
-        let user = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
+        let _profile = game_files_guard();
+        // Checked under the guard, which a launch holds while it starts the game: a write never
+        // lands just after a launch it waited behind (#387).
+        config_write_refusal(gamelaunch::fs25_running() || gamelaunch::profile_launch_pending())?;
+        let user = gameprofile::user_dir(gameprofile::Place::ModSettings).ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let roots = [user];
         let p = std::path::Path::new(&path);
         let raw = paths::guarded_xml_read(&roots, p)?;
@@ -6415,8 +6765,11 @@ async fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Res
 async fn save_mod_settings_raw(path: String, content: String) -> Result<(), String> {
     off_main(move || {
         ensure_well_formed(&content)?;
-        config_write_refusal(gamelaunch::fs25_running())?;
-        let user = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
+        let _profile = game_files_guard();
+        // Checked under the guard, which a launch holds while it starts the game: a write never
+        // lands just after a launch it waited behind (#387).
+        config_write_refusal(gamelaunch::fs25_running() || gamelaunch::profile_launch_pending())?;
+        let user = gameprofile::user_dir(gameprofile::Place::ModSettings).ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let p = std::path::Path::new(&path);
         ensure_override_kept(&user, p, None, &content)?;
         paths::guarded_xml_write(&[user], p, &content)
@@ -6527,7 +6880,7 @@ fn ensure_well_formed(xml: &str) -> Result<(), String> {
 #[tauri::command]
 async fn get_savegames() -> Result<Vec<savegame::Savegame>, String> {
     off_main(|| {
-        Ok(fsgame::user_dir()
+        Ok(gameprofile::user_dir(gameprofile::Place::Savegames)
             .map(|dir| savegame::list_savegames(&dir))
             .unwrap_or_default())
     })
@@ -6535,9 +6888,14 @@ async fn get_savegames() -> Result<Vec<savegame::Savegame>, String> {
 }
 
 #[tauri::command]
-async fn backup_savegame(folder: String) -> Result<String, String> {
+async fn backup_savegame(folder: String, user_dir: Option<String>) -> Result<String, String> {
     off_main(move || {
-        let dir = fsgame::user_dir().ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
+        let dir = gameprofile::user_dir(gameprofile::Place::Savegames).ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
+        // `user_dir`: the folder the save was listed from. A save named in one FS25 profile is
+        // never backed up from another one's same-named folder (#387).
+        if user_dir.is_some_and(|u| !modsroot::same_folder(std::path::Path::new(&u), &dir)) {
+            return Err(SAVES_CHANGED.into());
+        }
         savegame::backup(&dir, &folder)
     })
     .await
@@ -6715,6 +7073,7 @@ pub fn run() {
         set_mods_root,
         clear_mods_root,
         point_game_at_mods_root,
+        set_game_profile,
         create_mods_folder,
         folder_looks_empty,
         pick_folder,
@@ -7427,8 +7786,8 @@ mod tests {
         )
         .unwrap();
         // FS25 reads a category folder of that archive.
-        let b =
-            super::resolve_layout(&conn, &lib.join("Maps"), Some(&mods), None, false).unwrap_err();
+        let b = super::resolve_layout(&conn, &lib.join("Maps"), Some(&mods), None, None, false)
+            .unwrap_err();
         assert_eq!(b.reason, super::OVERLAPS_AN_ARCHIVE);
         assert_eq!(b.cause, crate::modsroot::BlockCause::Overlap);
         assert_eq!(b.conflict, Some(lib.clone()));
@@ -7449,7 +7808,7 @@ mod tests {
         // The default layout of a clear folder resolves.
         let clear = base.join("clear");
         std::fs::create_dir_all(&clear).unwrap();
-        let a = super::resolve_layout(&conn, &clear, Some(&mods), None, false).unwrap();
+        let a = super::resolve_layout(&conn, &clear, Some(&mods), None, None, false).unwrap();
         assert_eq!(a.layout, Layout::default_for(&clear));
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
@@ -7463,7 +7822,7 @@ mod tests {
         std::fs::create_dir_all(&chosen).unwrap();
         let conn = crate::db::open(&base.join("silo.db")).unwrap();
         // The user chose a folder inside O's archive; FS25's setting points at O.
-        let b = super::resolve_layout(&conn, &chosen, None, Some(&o), true).unwrap_err();
+        let b = super::resolve_layout(&conn, &chosen, None, Some(&o), None, true).unwrap_err();
         assert_eq!(b.cause, crate::modsroot::BlockCause::GameSetting);
         assert!(
             b.reason.starts_with(&format!(
@@ -7476,10 +7835,10 @@ mod tests {
         // "Point FS25 here" targets the chosen folder, though nothing is published.
         assert_eq!(super::game_point_target(None, Some(&b)), Ok(chosen.clone()));
         // Once FS25 reads the chosen folder, it resolves.
-        assert!(super::resolve_layout(&conn, &chosen, None, Some(&chosen), true).is_ok());
+        assert!(super::resolve_layout(&conn, &chosen, None, Some(&chosen), None, true).is_ok());
         // Not the user's choice (FS25's override itself picked it): a plain overlap, and
         // "Point FS25 here" has nothing to point at.
-        let b = super::resolve_layout(&conn, &chosen, None, Some(&o), false).unwrap_err();
+        let b = super::resolve_layout(&conn, &chosen, None, Some(&o), None, false).unwrap_err();
         assert_eq!(b.cause, crate::modsroot::BlockCause::Overlap);
         assert_eq!(
             super::game_point_target(None, Some(&b)),
@@ -9047,6 +9406,258 @@ mod tests {
              directory=\"{dir}\"/>\n    <defaultMultiplayerPort>{port}</defaultMultiplayerPort>\n\
              </gameSettings>\n"
         )
+    }
+
+    #[test]
+    fn a_profile_folder_is_detected_and_its_choice_is_kept_per_folder() {
+        let base = temp_base("gameprofile");
+        let prof = base.join("FS25 Profile");
+        let mods = prof.join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let main = base.join("main");
+
+        // A bare folder named `mods` can be a profile's, but isn't detected yet: off.
+        let st = super::game_profile_for(&conn, &mods, Some(&main)).unwrap();
+        assert_eq!(PathBuf::from(&st.dir), prof);
+        assert!(!st.detected && !st.enabled && !st.chosen);
+
+        // FS25 has used it (gameSettings.xml): on by itself where supported.
+        std::fs::write(
+            prof.join("gameSettings.xml"),
+            game_settings("false", "", "1"),
+        )
+        .unwrap();
+        let st = super::game_profile_for(&conn, &mods, Some(&main)).unwrap();
+        assert!(st.detected && !st.chosen);
+        assert_eq!(st.enabled, crate::gameprofile::SUPPORTED);
+
+        // Turned off for this folder: stays off though it's detected.
+        let key = crate::gameprofile::setting_key(&crate::modsroot::canonical_key(&mods));
+        crate::db::set_app_setting(&conn, &key, Some(crate::gameprofile::OFF)).unwrap();
+        let st = super::game_profile_for(&conn, &mods, Some(&main)).unwrap();
+        assert!(st.detected && st.chosen && !st.enabled);
+
+        // The main user folder's own mods folder is never a profile's.
+        assert_eq!(super::game_profile_for(&conn, &mods, Some(&prof)), None);
+        // Nor a folder not named `mods`.
+        let other = prof.join("more mods");
+        std::fs::create_dir_all(&other).unwrap();
+        assert_eq!(super::game_profile_for(&conn, &other, Some(&main)), None);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_profile_reads_its_own_mods_folder_unless_its_setting_points_elsewhere() {
+        let base = temp_base("gameprofile_reads");
+        let prof = base.join("prof");
+        std::fs::create_dir_all(prof.join("mods")).unwrap();
+        // No settings yet, or the override is off: `<profile>/mods`.
+        assert_eq!(super::profile_game_reads(&prof), Ok(prof.join("mods")));
+        let elsewhere = base.join("elsewhere");
+        let dir = elsewhere.to_string_lossy().replace('\\', "/");
+        std::fs::write(
+            prof.join("gameSettings.xml"),
+            game_settings("false", &dir, "1"),
+        )
+        .unwrap();
+        assert_eq!(super::profile_game_reads(&prof), Ok(prof.join("mods")));
+        // The profile's own override is on: that folder.
+        std::fs::write(
+            prof.join("gameSettings.xml"),
+            game_settings("true", &dir, "1"),
+        )
+        .unwrap();
+        assert!(crate::modsroot::same_folder(
+            &super::profile_game_reads(&prof).unwrap(),
+            &elsewhere
+        ));
+        // An override that isn't a full path can't be placed: unknown.
+        for odd in ["", "mods", "../other", "C:mods"] {
+            std::fs::write(
+                prof.join("gameSettings.xml"),
+                game_settings("true", odd, "1"),
+            )
+            .unwrap();
+            assert!(super::profile_game_reads(&prof).is_err(), "{odd:?}");
+        }
+        // Turned on without naming a folder: unknown too. Off without one: the default.
+        let half = |active: &str| {
+            format!("<gameSettings><modsDirectoryOverride active=\"{active}\"/></gameSettings>")
+        };
+        std::fs::write(prof.join("gameSettings.xml"), half("true")).unwrap();
+        assert!(super::profile_game_reads(&prof).is_err());
+        std::fs::write(prof.join("gameSettings.xml"), half("false")).unwrap();
+        assert_eq!(super::profile_game_reads(&prof), Ok(prof.join("mods")));
+        // Settings that are there but can't be read: unknown, not "its own mods folder".
+        std::fs::remove_file(prof.join("gameSettings.xml")).unwrap();
+        std::fs::create_dir_all(prof.join("gameSettings.xml")).unwrap();
+        assert!(super::profile_game_reads(&prof).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_profile_whose_settings_cant_be_read_blocks_the_folder() {
+        // Where FS25 reads can't be told, so it can't be fenced off: nothing is written there.
+        let base = temp_base("gameprofile_unreadable");
+        let prof = base.join("prof");
+        let mods = prof.join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::write(prof.join("game.xml"), "<game/>").unwrap();
+        std::fs::create_dir_all(prof.join("gameSettings.xml")).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let path = mods.to_string_lossy().into_owned();
+        crate::db::set_app_setting(&conn, crate::modsroot::CHOICE_KEY, Some(&path)).unwrap();
+        // Described only (no publish): reads the main user folder, writes nothing there.
+        let st = super::resolve_mods_root(&conn, false);
+        // Only judged where Silo launches profiles; elsewhere the folder is managed as before.
+        let want = crate::gameprofile::SUPPORTED.then_some(crate::modsroot::BlockCause::ReadError);
+        assert_eq!(st.layout_problem_cause, want);
+        // Still a profile's folder everywhere: the main game setting is left alone.
+        assert!(!st.can_write_game_setting);
+        assert!(st.game_profile.is_some_and(|g| g.detected));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_fresh_profile_turned_on_then_off_keeps_the_main_settings_protected() {
+        // What `set_game_profile` stores: on (remembered as a profile), later off.
+        let base = temp_base("gameprofile_fresh");
+        let mods = base.join("prof").join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&mods);
+        crate::db::set_app_setting(&conn, &crate::gameprofile::seen_key(&key), Some("on")).unwrap();
+        crate::db::set_app_setting(&conn, &crate::gameprofile::setting_key(&key), Some("off"))
+            .unwrap();
+        let st = super::game_profile_for(&conn, &mods, Some(&base.join("main"))).unwrap();
+        assert!(!st.enabled && st.chosen);
+        assert!(crate::gameprofile::belongs(&st));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_profile_on_an_unplugged_drive_stays_a_profile() {
+        let base = temp_base("gameprofile_unplugged");
+        let prof = base.join("prof");
+        let mods = prof.join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::write(
+            prof.join("gameSettings.xml"),
+            game_settings("false", "", "1"),
+        )
+        .unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let main = base.join("main");
+        assert!(super::game_profile_for(&conn, &mods, Some(&main)).is_some_and(|g| g.detected));
+        // The drive goes away: still the profile (Play refuses, nothing falls back to main).
+        std::fs::remove_dir_all(&prof).unwrap();
+        let st = super::game_profile_for(&conn, &mods, Some(&main)).unwrap();
+        assert!(st.detected);
+        assert_eq!(st.enabled, crate::gameprofile::SUPPORTED);
+        // Back, but its settings files are gone (or can't be seen right now): still a profile.
+        std::fs::create_dir_all(&mods).unwrap();
+        assert!(super::game_profile_for(&conn, &mods, Some(&main)).is_some_and(|g| g.detected));
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn marker_folders_named_like_the_settings_files_dont_make_a_profile() {
+        let base = temp_base("gameprofile_dirs");
+        let prof = base.join("prof");
+        std::fs::create_dir_all(prof.join("mods")).unwrap();
+        std::fs::create_dir_all(prof.join("game.xml")).unwrap();
+        std::fs::create_dir_all(prof.join("gameSettings.xml")).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let st =
+            super::game_profile_for(&conn, &prof.join("mods"), Some(&base.join("main"))).unwrap();
+        assert!(!st.detected && !st.enabled);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_profile_overriding_into_another_folders_archive_blocks_the_layout() {
+        // The folder FS25 reads on the profile counts as a mods folder for the overlap checks.
+        let base = temp_base("gameprofile_overlap");
+        let mods = base.join("prof").join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let into_archive = mods.join("archive");
+        assert!(super::resolve_layout(&conn, &mods, None, None, None, true).is_ok());
+        // The usual case: the profile reads this very folder.
+        assert!(super::resolve_layout(&conn, &mods, None, None, Some(&mods), true).is_ok());
+        let b =
+            super::resolve_layout(&conn, &mods, None, None, Some(&into_archive), true).unwrap_err();
+        assert_eq!(b.cause, crate::modsroot::BlockCause::Overlap);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_log_request_names_the_main_log_or_the_profiles_and_nothing_else() {
+        let main = PathBuf::from("/docs/FarmingSimulator2025");
+        let prof = |launch| crate::gameprofile::Published {
+            dir: PathBuf::from("/f/prof"),
+            launch,
+            reads: None,
+        };
+        let t = |req: Option<&str>, p: Option<crate::gameprofile::Published>| {
+            super::log_target(req, Some(main.clone()), p)
+        };
+        // Current log: the profile's while its launch is on, else the main one.
+        assert_eq!(
+            t(None, Some(prof(true))),
+            Ok(Some(PathBuf::from("/f/prof/log.txt")))
+        );
+        assert_eq!(t(None, Some(prof(false))), Ok(Some(main.join("log.txt"))));
+        assert_eq!(t(None, None), Ok(Some(main.join("log.txt"))));
+        assert_eq!(super::log_target(None, None, None), Ok(None));
+        // A named log is kept as named, even after the profile changed.
+        let main_log = main.join("log.txt");
+        let main_log = main_log.to_string_lossy();
+        assert_eq!(
+            t(Some(&main_log), Some(prof(true))),
+            Ok(Some(main.join("log.txt")))
+        );
+        assert_eq!(
+            t(Some("/f/prof/log.txt"), Some(prof(false))),
+            Ok(Some(PathBuf::from("/f/prof/log.txt")))
+        );
+        // Anything else is refused.
+        assert!(t(Some("/f/prof/gameSettings.xml"), Some(prof(true))).is_err());
+        assert!(t(Some("/other/log.txt"), Some(prof(true))).is_err());
+        assert!(t(Some("/f/prof/log.txt"), None).is_err());
+    }
+
+    #[test]
+    fn each_log_has_its_own_last_seen_marker() {
+        let main = std::path::Path::new("/docs/FarmingSimulator2025");
+        assert_eq!(
+            super::log_seen_key_for(Some(&main.join("log.txt")), Some(main)),
+            crate::logscan::LAST_SEEN_KEY
+        );
+        assert_eq!(
+            super::log_seen_key_for(None, Some(main)),
+            crate::logscan::LAST_SEEN_KEY
+        );
+        let prof =
+            super::log_seen_key_for(Some(std::path::Path::new("/f/prof/log.txt")), Some(main));
+        assert_ne!(prof, crate::logscan::LAST_SEEN_KEY);
+        assert!(prof.starts_with(crate::logscan::LAST_SEEN_KEY));
+    }
+
+    #[test]
+    fn pointing_fs25_at_a_folder_is_refused_while_a_profile_is_in_use() {
+        assert_eq!(
+            super::main_settings_refusal(Some(std::path::Path::new("/f/prof"))),
+            Err(super::PROFILE_KEEPS_MAIN_SETTINGS.to_string())
+        );
+        assert_eq!(super::main_settings_refusal(None), Ok(()));
     }
 
     #[test]

@@ -110,6 +110,7 @@ describe("folderVariant", () => {
     layoutProblem: null,
     layoutProblemCause: null,
     layoutConflict: null,
+    gameProfile: null,
     ...over,
   });
 

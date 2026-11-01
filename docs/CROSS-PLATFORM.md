@@ -48,6 +48,16 @@ unverified (?)), else an FS25-named bundle in `/Applications` or `~/Applications
 `com.giants-software.fs25`). Steam installs launch via `steam://rungameid/2300320`;
 the others launch with `open -a <bundle>`.
 
+**FS25 profiles (`-profile <dir>`, #387).** When the mods folder is `<profile>/mods` and its
+"Launch FS25 with this folder's profile" setting is on, Play starts the game executable directly
+with `-profile "<dir>"` (each argument quoted by the Windows command-line rules, no shell), and
+the log, savegames, `modSettings/`, `inputBinding.xml` and config editors read `<dir>` instead of
+the user data dir above (`gameprofile::Place`). If the executable can't be started, the fallback is
+`steam://run/2300320//<percent-encoded args>/`, opened without a shell; Steam asks the user to
+confirm launch arguments. **Windows only:** on Linux the game runs through Proton (the `.exe`
+can't be started directly and the path would need the prefix's drive map), and the macOS build's
+`-profile` support is unverified, so there the setting is hidden, with a note, and always off.
+
 When the game sits in a Steam library on a removable drive, macOS asks once whether Silo may
 access that drive (seen on Tahoe, #322); after the user allows it, Silo works normally. Silo
 should handle a refusal gracefully, the same as any unreadable folder.

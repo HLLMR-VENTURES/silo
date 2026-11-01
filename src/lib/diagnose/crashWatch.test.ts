@@ -67,8 +67,78 @@ describe("check (window focus)", () => {
     const { deps, watch } = setup();
     await watch.check();
     expect(deps.scan).toHaveBeenCalledTimes(1);
-    expect(deps.markSeen).toHaveBeenCalledWith(NOW - 1000);
+    expect(deps.markSeen).toHaveBeenCalledWith(NOW - 1000, "C:/fs25/log.txt");
     expect(deps.onRun).toHaveBeenCalledWith({ report: report(true), modifiedMs: NOW - 1000 });
+  });
+
+  it("reads and marks the very log the status named, and tells two profiles' logs apart (#387)", async () => {
+    let st = status({ path: "F:/prof/log.txt" });
+    const { deps, watch } = setup({}, () => st);
+    await watch.check();
+    expect(deps.scan).toHaveBeenCalledWith("F:/prof/log.txt");
+    expect(deps.markSeen).toHaveBeenCalledWith(NOW - 1000, "F:/prof/log.txt");
+    // Another profile's log with the same change time is still news.
+    st = status({ path: "C:/fs25/log.txt" });
+    await watch.check();
+    expect(deps.scan).toHaveBeenCalledTimes(2);
+    expect(deps.scan).toHaveBeenLastCalledWith("C:/fs25/log.txt");
+  });
+
+  it("a look of the old log announces nothing once the log changed, and the next look runs anew (#387)", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let st = status({ path: "C:/fs25/log.txt" });
+    const scan = vi.fn(async (p: string | null) => {
+      if (p === "C:/fs25/log.txt") await gate;
+      return report(true);
+    });
+    const { deps, watch } = setup({ scan }, () => st);
+    const old = watch.check();
+    await Promise.resolve();
+    // The profile changes while the old log is being read.
+    watch.logChanged();
+    st = status({ path: "F:/prof/log.txt" });
+    const fresh = watch.check();
+    release();
+    await old;
+    await fresh;
+    expect(scan).toHaveBeenCalledWith("C:/fs25/log.txt");
+    expect(scan).toHaveBeenLastCalledWith("F:/prof/log.txt");
+    // Only the new profile's run is announced.
+    expect(deps.onRun).toHaveBeenCalledTimes(1);
+    // The old log's run isn't remembered either: back on that log, it's still news.
+    expect(deps.markSeen).not.toHaveBeenCalledWith(NOW - 1000, "C:/fs25/log.txt");
+    watch.logChanged();
+    st = status({ path: "C:/fs25/log.txt" });
+    await watch.check();
+    expect(deps.onRun).toHaveBeenCalledTimes(2);
+  });
+
+  it("looks nothing up while a mods-folder switch runs, and looks again after (#387)", async () => {
+    const { deps, watch } = setup();
+    watch.pause();
+    await watch.check();
+    expect(deps.status).not.toHaveBeenCalled();
+    expect(deps.markSeen).not.toHaveBeenCalled();
+    watch.resume();
+    await watch.check();
+    expect(deps.onRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("a run being remembered when the log changes was already announced (#387)", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const markSeen = vi.fn(async (_ms: number, _p: string | null) => gate);
+    const { deps, watch } = setup({ markSeen });
+    const look = watch.check();
+    // Let the scan land; the marker write is pending.
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    watch.logChanged();
+    release();
+    await look;
+    // Never "remembered but not announced".
+    expect(markSeen).toHaveBeenCalledTimes(1);
+    expect(deps.onRun).toHaveBeenCalledTimes(1);
   });
 
   it("does nothing while the game runs", async () => {
@@ -90,7 +160,7 @@ describe("check (window focus)", () => {
     const { deps, watch } = setup({ quiet: () => true });
     await watch.check();
     expect(deps.scan).not.toHaveBeenCalled();
-    expect(deps.markSeen).toHaveBeenCalledWith(NOW - 1000);
+    expect(deps.markSeen).toHaveBeenCalledWith(NOW - 1000, "C:/fs25/log.txt");
     expect(deps.onRun).not.toHaveBeenCalled();
   });
 
@@ -110,7 +180,7 @@ describe("check (window focus)", () => {
   it("markCurrentSeen remembers the current log without reading or announcing it", async () => {
     const { deps, watch } = setup();
     await watch.markCurrentSeen();
-    expect(deps.markSeen).toHaveBeenCalledWith(NOW - 1000);
+    expect(deps.markSeen).toHaveBeenCalledWith(NOW - 1000, "C:/fs25/log.txt");
     expect(deps.scan).not.toHaveBeenCalled();
     expect(deps.onRun).not.toHaveBeenCalled();
   });

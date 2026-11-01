@@ -2,8 +2,10 @@
   // Settings → Mods folder: the folder Silo manages (and FS25 loads), other folders Silo knows,
   // and where the game is installed.
   //   <ModsFolderSettings {roots} {modsStatus} {gameInfo} {lockReason} {scanning} {moveUnfinished}
-  //     {onChangeModsFolder} {onUseGameFolder} {onSwitchModsFolder} />
+  //     {onChangeModsFolder} {onUseGameFolder} {onSwitchModsFolder} {onSetGameProfile} />
+  // A folder that is `<profile>/mods` also gets "Launch FS25 with this folder's profile" (#387).
   import Button from "../../ui/Button.svelte";
+  import Switch from "../../ui/Switch.svelte";
   import type { ModsRootStatus } from "../../api";
   import type { GameInfo } from "../../types";
   import SettingsCard from "./SettingsCard.svelte";
@@ -24,6 +26,8 @@
     onChangeModsFolder: () => void;
     onUseGameFolder: () => void;
     onSwitchModsFolder: (path: string) => void;
+    /** Turn "Launch FS25 with this folder's profile" on or off. */
+    onSetGameProfile?: (on: boolean) => void;
   }
 
   let {
@@ -36,7 +40,10 @@
     onChangeModsFolder,
     onUseGameFolder,
     onSwitchModsFolder,
+    onSetGameProfile,
   }: Props = $props();
+
+  const profile = $derived(modsStatus?.gameProfile ?? null);
 
   const lock = $derived(settingsLock({ lockReason, scanning, moveUnfinished }));
   const others = $derived((modsStatus?.known ?? []).filter((k) => !k.current));
@@ -75,6 +82,35 @@
     <p class="hint">
       Farming Simulator 25 is set to load mods from <span class="tnum">{modsStatus.unresolvedOverride}</span>,
       which Silo can't find on this computer. Choose the folder with Change….
+    </p>
+  {/if}
+  {#if profile && profile.supported}
+    <div class="row">
+      <span class="label">Launch FS25 with this folder's profile</span>
+      <Switch
+        checked={profile.enabled}
+        controlled
+        disabled={lock.locked}
+        ariaLabel="Launch FS25 with this folder's profile"
+        onchange={(on) => onSetGameProfile?.(on)}
+      />
+    </div>
+    <p class="hint">
+      {#if profile.enabled}
+        Play starts Farming Simulator 25 with the profile in <span class="tnum">{profile.dir}</span>.
+        Diagnose, savegames and game settings use that profile's files.
+      {:else if profile.detected}
+        This folder is in a separate FS25 profile (<span class="tnum">{profile.dir}</span>). Turn this
+        on so Play starts the game with it. Otherwise the game loads your main profile's mods.
+      {:else}
+        Turn this on if <span class="tnum">{profile.dir}</span> is a separate FS25 profile, so Play
+        starts the game with it.
+      {/if}
+    </p>
+  {:else if profile?.detected}
+    <p class="hint">
+      This folder is in a separate FS25 profile (<span class="tnum">{profile.dir}</span>). Starting
+      the game with it from Silo works on Windows only for now, so Play starts your main profile.
     </p>
   {/if}
   {#if modsStatus?.gameSettingProblem}

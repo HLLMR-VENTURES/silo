@@ -65,7 +65,7 @@ Backend: **SiloAPI** (separate repo `HLLMR-VENTURES/silo-api`, live at `https://
 
 Rust core modules (`src-tauri/src/`): `scan` `moddesc` `category` `icons` `db` `store`
 `fsgame` `modsroot` (mods-folder resolution) `organize` `relocate` (archive move job) `savegame` `conflicts` `settings_form`
-`xmlconfig` `gamelaunch` `github` `siloapi` (catalog client) · `logscan` (crash triage) ·
+`xmlconfig` `gamelaunch` `gameprofile` (FS25 `-profile` folders, #387) `github` `siloapi` (catalog client) · `logscan` (crash triage) ·
 `bisect` (guided bisection) · `bindings` (input map) · `mpsync` (MP manifest) · `bridge`
 (filltype companion generator) · `provenance` (integrity/manifest hashing) · `collection`
 (shareable mod sets) · `net` (outbound-URL SSRF guard) · `paths` `secrets` `xmltext` (safety/util). Each is

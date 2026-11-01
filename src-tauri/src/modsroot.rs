@@ -229,6 +229,15 @@ fn override_paths() -> [String; 2] {
     [OV_ACTIVE.to_string(), OV_DIR.to_string()]
 }
 
+/// True when the override is turned on but names no folder (`active="true"` without a
+/// `directory`): `read_override` can't tell that from no override at all.
+pub fn override_on_without_folder(xml: &str) -> bool {
+    let v = xmlconfig::get_values(xml, &override_paths());
+    !v.contains_key(OV_DIR)
+        && v.get(OV_ACTIVE)
+            .is_some_and(|a| a.eq_ignore_ascii_case("true"))
+}
+
 /// Read the override, or `None` when `gameSettings.xml` has no such element.
 pub fn read_override(xml: &str) -> Option<Override> {
     let v = xmlconfig::get_values(xml, &override_paths());
