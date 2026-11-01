@@ -450,11 +450,9 @@ fn repoint(
     let link = env.mods.join(&row.file_name);
     let Ok(meta) = link.symlink_metadata() else {
         organize::make_link(dst, &link, &row.kind, policy).map_err(|e| format!("relink: {e}"))?;
-        if let Err(e) = reaches_the_copy(&link, &row.kind) {
-            // Nothing was there before: take back only the dangling link just made.
-            remove_dangling_link(&link);
-            return Err(e);
-        }
+        // A link that reaches nothing is left as it is (removing it could race whatever
+        // replaces it); the retry checks it again before the old copy may go.
+        reaches_the_copy(&link, &row.kind)?;
         env.note_projection(row, &link);
         return Ok(());
     };
@@ -500,15 +498,9 @@ fn repoint(
             }
             return Err(format!("relink: {e}"));
         }
-        if let Err(e) = reaches_the_copy(&link, &row.kind) {
-            // The link just made reaches nothing: put the working one back while the old copy
-            // is still there (only ever replacing that dangling link).
-            if src.exists() && remove_dangling_link(&link) {
-                let _ = organize::make_link(src, &link, &row.kind, policy);
-            }
-            return Err(e);
-        }
-        return Ok(());
+        // A link that reaches nothing is left as it is (removing it could race whatever
+        // replaces it); the step stops before the old copy goes, and the retry checks again.
+        return reaches_the_copy(&link, &row.kind);
     }
     replace_zip_link(env, row, &link, dst, policy)
 }
@@ -619,7 +611,7 @@ fn replace_zip_link(
 /// again right before deleting the old one.
 fn reaches_the_copy(link: &Path, kind: &str) -> Result<(), String> {
     match std::fs::metadata(link) {
-        Ok(m) if m.is_dir() == (kind == "dir") => Ok(()),
+        Ok(m) if right_kind(&m, kind) => Ok(()),
         _ => Err(format!(
             "relink: Silo couldn't open the mod through its new link at {}. Check the new archive folder, then resume.",
             link.display()
@@ -627,24 +619,23 @@ fn reaches_the_copy(link: &Path, kind: &str) -> Result<(), String> {
     }
 }
 
-/// Remove `link` only if it is a symlink that reaches nothing (one `repoint` just made). True
-/// when it's gone. Never removes a file, a folder, or a link that works.
-fn remove_dangling_link(link: &Path) -> bool {
-    let is_link = link
-        .symlink_metadata()
-        .is_ok_and(|m| m.file_type().is_symlink());
-    if !is_link || std::fs::metadata(link).is_ok() {
-        return false;
+/// A file for a zip, a folder for a folder mod.
+fn right_kind(m: &std::fs::Metadata, kind: &str) -> bool {
+    if kind == "dir" {
+        m.is_dir()
+    } else {
+        m.is_file()
     }
-    std::fs::remove_file(link)
-        .or_else(|_| std::fs::remove_dir(link))
-        .is_ok()
 }
 
-/// The new copy is still in place right before its old copy is deleted. A copy that vanished
-/// after it was verified (a sync client, say) stops the step with the old copy kept.
-fn still_there(new: &Path) -> Result<(), StepErr> {
-    if exists(new) {
+/// The new copy is still in place right before its old copy is deleted: itself (not a link) and
+/// of the mod's kind. A copy that vanished or was swapped for a link after it was verified (a
+/// sync client, say) stops the step with the old copy kept. An observation, not a lock.
+fn still_there(new: &Path, kind: &str) -> Result<(), StepErr> {
+    let real = new
+        .symlink_metadata()
+        .is_ok_and(|m| !m.file_type().is_symlink() && right_kind(&m, kind));
+    if real {
         Ok(())
     } else {
         Err(StepErr::Failed(format!(
@@ -779,7 +770,7 @@ fn forward_one(
     if abort() {
         return Err(StepErr::Interrupted);
     }
-    still_there(&dst)?;
+    still_there(&dst, &row.kind)?;
     delete_source(&src).map_err(StepErr::Failed)?;
     Ok(Step::Moved)
 }
@@ -823,7 +814,7 @@ fn back_one(
     if abort() {
         return Err(StepErr::Interrupted);
     }
-    still_there(&home)?;
+    still_there(&home, &row.kind)?;
     delete_source(&src).map_err(StepErr::Failed)?;
     env.unrecord(marker, &row.tech_name)?;
     Ok(Step::Moved)
@@ -2665,8 +2656,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
-    /// `reaches_the_copy` wants the right kind of thing behind the link; `remove_dangling_link`
-    /// only ever removes a symlink that reaches nothing (#188).
+    /// `reaches_the_copy` wants the right kind of thing behind the link: a file for a zip, a
+    /// folder for a folder mod (#188).
     #[test]
     fn a_new_link_must_reach_the_right_kind_of_copy() {
         let f = fx("reaches");
@@ -2675,36 +2666,50 @@ mod tests {
         assert_eq!(reaches_the_copy(&file, "zip"), Ok(()));
         assert!(reaches_the_copy(&file, "dir").is_err());
         assert_eq!(reaches_the_copy(&f.old, "dir"), Ok(()));
+        assert!(
+            reaches_the_copy(&f.old, "zip").is_err(),
+            "a folder isn't a zip"
+        );
         let e = reaches_the_copy(&f.mods.join("FS25_Gone.zip"), "zip").unwrap_err();
         assert!(
             e.contains("Silo couldn't open the mod through its new link"),
             "{e}"
         );
-        assert!(!remove_dangling_link(&file), "a real file is never removed");
-        assert!(file.exists());
-        assert!(!remove_dangling_link(&f.old), "a folder is never removed");
-        let dangling = f.mods.join("FS25_B.zip");
-        if organize::symlink_file(&f.base.join("gone.zip"), &dangling).is_ok() {
-            assert!(reaches_the_copy(&dangling, "zip").is_err());
-            assert!(remove_dangling_link(&dangling));
-            assert!(dangling.symlink_metadata().is_err());
-            // A working link is never removed.
-            organize::symlink_file(&file, &dangling).unwrap();
-            assert!(!remove_dangling_link(&dangling));
-            assert!(dangling.symlink_metadata().is_ok());
-        }
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
-    /// The new copy vanished after it was verified: the step stops and the original is kept.
+    /// Right before the old copy goes, the new one must be itself and of the mod's kind: gone,
+    /// the wrong kind, or swapped for a link all stop the step, and `forward_one` then keeps
+    /// the original (#188).
     #[test]
-    fn a_vanished_new_copy_keeps_the_original() {
+    fn a_vanished_or_swapped_new_copy_keeps_the_original() {
         let f = fx("stillthere");
-        assert!(still_there(&f.new).is_ok());
-        let gone = zip_at(&f.new, "FS25_A");
-        match still_there(&gone) {
+        let r = add_zip(&f, "FS25_A", false);
+        let src = zip_at(&f.old, "FS25_A");
+        let dst = zip_at(&f.new, "FS25_A");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::copy(&src, &dst).unwrap();
+        assert!(still_there(&dst, "zip").is_ok());
+        assert!(still_there(&dst, "dir").is_err());
+        assert!(still_there(&f.new, "zip").is_err());
+        let gone = zip_at(&f.new, "FS25_Gone");
+        match still_there(&gone, "zip") {
             Err(StepErr::Failed(e)) => assert!(e.contains("so Silo kept the original"), "{e}"),
             other => panic!("{other:?}"),
+        }
+        // Swapped for a link back to the original: refused, and a step keeps the original.
+        std::fs::remove_file(&dst).unwrap();
+        if organize::symlink_file(&src, &dst).is_ok() {
+            assert!(still_there(&dst, "zip").is_err());
+            let mut m = marker(&f);
+            env(&f).record(&mut m, "FS25_A").unwrap();
+            let layout = dest(&f);
+            let mut pol = LinkPolicy::copy_only_for_tests(&layout);
+            assert!(matches!(
+                forward_one(&env(&f), &r, &mut m, &mut pol, &|| false),
+                Err(StepErr::Failed(_))
+            ));
+            assert_eq!(std::fs::read(&src).unwrap(), b"PK\x03\x04 FS25_A");
         }
         let _ = std::fs::remove_dir_all(&f.base);
     }
