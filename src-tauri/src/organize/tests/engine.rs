@@ -802,6 +802,119 @@ fn flatten_lists_only_archive_files_no_kept_mod_owns() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A zip mod's archive entry is the zip alone: when a folder took its place (the wrong kind, so
+/// the copy is kept), files inside that folder are still listed as unrecognized (#410).
+#[test]
+fn flatten_lists_files_in_a_folder_where_a_kept_zip_should_be() {
+    let base = temp_dir_for("flatten_kept_zip_dir");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = zip_copy_fixture(&base, &conn);
+    std::fs::remove_file(&src).unwrap();
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("unrelated.txt"), b"mine").unwrap();
+
+    let rep = flatten(&conn, &Layout::default_for(&base));
+
+    assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+    assert_eq!(rep.errors.len(), 2, "{:?}", rep.errors);
+    assert!(rep.errors[0].contains(KEPT_UNPROVEN), "{:?}", rep.errors);
+    assert_eq!(
+        rep.errors[1],
+        format!("{UNRECOGNIZED} unrelated.txt. Nothing was deleted.")
+    );
+    assert!(flat.is_file() && src.join("unrelated.txt").is_file());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A dead link at a mod's archive path leaves no archived copy, so flatten keeps the mods-folder
+/// zip and says so; the dead link is that mod's, not unrecognized, while an orphan beside it
+/// still is (#410).
+#[test]
+fn flatten_doesnt_list_a_dead_link_at_a_kept_mods_archive_path() {
+    let base = temp_dir_for("flatten_kept_dead_link");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = zip_copy_fixture(&base, &conn);
+    std::fs::remove_file(&src).unwrap();
+    if symlink_file(&base.join("gone.zip"), &src).is_err() {
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+        return; // no file symlinks here (Windows without Developer Mode)
+    }
+    let orphan = src.with_file_name("orphan.zip");
+    std::fs::write(&orphan, b"PK").unwrap();
+
+    let rep = flatten(&conn, &Layout::default_for(&base));
+
+    assert_eq!(
+        rep.errors,
+        [
+            "FS25_Foo: there's no copy in your library archive, so Silo kept the file in your mods folder.".to_string(),
+            format!("{UNRECOGNIZED} orphan.zip. Nothing was deleted."),
+        ]
+    );
+    assert!(flat.is_file() && orphan.is_file());
+    drop(conn);
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// On Windows the archived zip is found under any casing of its folder and name, so a kept mod's
+/// zip renamed to other casing is still that mod's, not unrecognized (#410).
+#[cfg(windows)]
+#[test]
+fn flatten_doesnt_list_a_kept_mods_zip_under_other_casing() {
+    let base = temp_dir_for("flatten_kept_casing");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = zip_copy_fixture(&base, &conn);
+    let cat = src.parent().unwrap();
+    let lower_cat = cat.with_file_name("vehicles");
+    std::fs::rename(&src, cat.join("fs25_foo.zip")).unwrap();
+    std::fs::rename(cat, &lower_cat).unwrap();
+    std::fs::write(lower_cat.join("fs25_foo.zip"), b"PK\x03\x04 the arch").unwrap();
+
+    let rep = flatten(&conn, &Layout::default_for(&base));
+
+    assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+    assert_eq!(rep.errors.len(), 1, "{:?}", rep.errors);
+    assert!(rep.errors[0].contains(KEPT_UNPROVEN), "{:?}", rep.errors);
+    assert!(flat.is_file() && lower_cat.join("fs25_foo.zip").is_file());
+    drop(conn);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// What counts as inside a mod's archive entry: the entry itself; a folder mod's files below it;
+/// nothing below a zip mod's entry; never a name that only starts the same. Casing is ignored on
+/// Windows only.
+#[test]
+fn in_archive_entry_matches_the_entry_and_a_folder_mods_files() {
+    let a = Path::new("archive");
+    let zip = a.join("Vehicles").join("FS25_Foo.zip");
+    let dir = a.join("Misc").join("FS25_Dir");
+    assert!(in_archive_entry(&zip, &zip, false));
+    assert!(!in_archive_entry(&zip.join("x.txt"), &zip, false));
+    assert!(in_archive_entry(&dir, &dir, true));
+    assert!(in_archive_entry(&dir.join("sub").join("a.dds"), &dir, true));
+    assert!(!in_archive_entry(
+        &a.join("Vehicles").join("FS25_Foo.zip.bak"),
+        &zip,
+        false
+    ));
+    assert!(!in_archive_entry(
+        &a.join("Misc").join("FS25_Dir.zip"),
+        &dir,
+        true
+    ));
+    assert!(!in_archive_entry(&a.join("Misc"), &dir, true));
+    assert!(!in_archive_entry(
+        &a.join("Tools").join("FS25_Foo.zip"),
+        &zip,
+        false
+    ));
+    let other_case = a.join("vehicles").join("fs25_foo.zip");
+    assert_eq!(in_archive_entry(&other_case, &zip, false), cfg!(windows));
+}
+
 /// A file in Silo's own archive that no organized mod owns is still listed as unrecognized,
 /// and kept.
 #[test]

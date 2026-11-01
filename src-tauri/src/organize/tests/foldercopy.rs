@@ -553,6 +553,32 @@ fn flatten_doesnt_list_a_kept_folder_mods_archived_files() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A dead junction at a folder mod's archive path leaves no archived copy, so flatten keeps the
+/// mods-folder folder and says so; the junction is that mod's, not unrecognized (#410).
+#[cfg(windows)]
+#[test]
+fn flatten_doesnt_list_a_dead_junction_at_a_kept_mods_archive_path() {
+    let base = temp_dir_for("flatten_kept_dead_junction");
+    let conn = db::open(&base.join("silo.db")).unwrap();
+    let (src, flat) = folder_copy_fixture(&base, &conn);
+    let gone = base.join("gone");
+    std::fs::rename(&src, &gone).unwrap();
+    junction_to(&gone, &src).unwrap();
+    std::fs::remove_dir_all(&gone).unwrap();
+    assert!(!src.exists() && src.symlink_metadata().is_ok());
+
+    let rep = flatten(&conn, &Layout::default_for(&base));
+
+    assert_eq!(
+        rep.errors,
+        ["FS25_Dir: there's no copy in your library archive, so Silo kept the file in your mods folder."]
+    );
+    assert!(flat.join("a.lua").is_file());
+    drop(conn);
+    let _ = std::fs::remove_dir(&src);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// No archived copy at all, or a file where the archived folder should be (the wrong kind):
 /// nothing proves the copy's files are anywhere else, so it's kept.
 #[test]
