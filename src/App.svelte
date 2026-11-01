@@ -1690,8 +1690,8 @@
         }
         await archiveMove.refresh();
         await adoptArchiveStatus(await modsRootStatus().catch(() => modsStatus));
+        await runScan(false); // still held: the scan reads the folder just adopted
       });
-      await runScan(false);
       return { path };
     } catch (e) {
       return { problem: inlineError(e, "Switching to the new library archive") };
@@ -1712,11 +1712,10 @@
       }
       await archiveMove.refresh();
       await adoptArchiveStatus(await modsRootStatus().catch(() => modsStatus));
+      await runScan(false); // still held: the scan reads the folder just adopted
       return null;
     });
-    if (problem) return problem;
-    await runScan(false);
-    return null;
+    return problem;
   }
 
   /** The setup flow's dry run, kept for filing (so failures can name their files). */
@@ -2819,8 +2818,10 @@
   }
 
   let statusGen = 0;
-  /** Adopt a new status; if the live folder changed, reload everything folder-specific. */
-  async function applyModsStatus(st: ModsRootStatus) {
+  /** Adopt a new status; if the live folder changed, reload everything folder-specific.
+   *  `refreshArchive: false` when an archive operation calls (it has just read the archive
+   *  status itself, and may be the archive move that refresh would ask about). */
+  async function applyModsStatus(st: ModsRootStatus, { refreshArchive = true } = {}) {
     // A newer status adopted while this one waits for the archive takes over: this one doesn't
     // put its folder back. Once its folder is set, it finishes the reload (a newer status for
     // the same folder leaves that to it).
@@ -2832,7 +2833,7 @@
     const profileChanged = profileInUse(st) !== shownProfile;
     // Before any await: nothing from the other profile's folder stays up meanwhile (#387).
     if (profileChanged) forgetGameFiles();
-    await archiveMove.refresh(); // the archive belongs to the mods folder
+    if (refreshArchive) await archiveMove.refresh(); // the archive belongs to the mods folder
     if (gen !== statusGen) return;
     roots = rootsFor(st);
     if ((roots[0] ?? null) === prev) {
@@ -2931,17 +2932,14 @@
     }
   }
 
-  /** Adopt a status read after an archive operation (not `applyModsStatus`, which refreshes
-   *  the archive move that may be calling): when its FS25 profile isn't the one whose files
-   *  are shown, the old crash notice and files are dropped and the new ones read (#387). */
+  /** Adopt a status read after an archive move, re-point or recovery the same way as a folder
+   *  switch: FS25's own setting may have moved Silo to another folder or FS25 profile meanwhile
+   *  (#387), so roots, the library (reset and rescan), game files and the crash notice all
+   *  follow, as `applyModsStatus` does. Run as a switch (`whileSwitchingFolder`), without its
+   *  archive refresh (the caller just read it). */
   async function adoptArchiveStatus(st: ModsRootStatus | null) {
     if (!st) return; // nothing read yet, and the refresh failed: keep what is shown
-    const changed = profileInUse(st) !== shownProfile;
-    modsStatus = st;
-    if (changed) {
-      forgetGameFiles();
-      await loadGameFiles(true);
-    }
+    await whileSwitchingFolder(() => applyModsStatus(st, { refreshArchive: false }));
   }
 
   let profileToggling = false;
@@ -3236,8 +3234,8 @@
         }
         await archiveMove.refresh();
         await adoptArchiveStatus(await modsRootStatus().catch(() => modsStatus));
+        await runScan(); // still held: the scan reads the folder just adopted
       });
-      await runScan();
     } catch (e) {
       reportError(e, "Switching to the new library archive");
     }

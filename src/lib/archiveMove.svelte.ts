@@ -113,6 +113,7 @@ export class ArchiveMove {
       const st = await archiveStatus();
       if (seq !== this.#seq) return false;
       this.archive = st;
+      this.#follow(st);
       this.loadFailed = false;
       if (st.moving?.direction === "back") this.#sawTurnAround = true;
       if (st.moving && !st.running) this.pauseRequested = false;
@@ -129,7 +130,10 @@ export class ArchiveMove {
       const seq = ++this.#seq;
       try {
         const st = await archiveStatus();
-        if (seq === this.#seq) this.archive = st;
+        if (seq === this.#seq) {
+          this.archive = st;
+          this.#follow(st); // startup recovery: a move still running from before
+        }
         this.loadFailed = false;
         return;
       } catch (e) {
@@ -182,7 +186,28 @@ export class ArchiveMove {
       }
     } finally {
       this.#settling = false;
+      this.#endFollow();
     }
+  }
+
+  /** Releases the crash-look hold taken while following a move this window didn't start. */
+  #followRelease: (() => void) | null = null;
+
+  /** A move is running that this window isn't driving (after a webview reload, or found at
+   *  startup): hold crash-log looks from now until it has settled and its result is adopted,
+   *  since it may republish another FS25 profile when it ends (#387). */
+  #follow(st: ArchiveStatus): void {
+    if (st.running && this.#inFlight === 0 && !this.#followRelease) {
+      this.#followRelease = this.#deps.holdCrashLooks?.() ?? null;
+    }
+  }
+
+  /** The followed move has settled (and isn't running again): let crash-log looks run. */
+  #endFollow(): void {
+    if (this.archive?.running || !this.#followRelease) return;
+    const release = this.#followRelease;
+    this.#followRelease = null;
+    release();
   }
 
   /** One settle pass. Returns the messages it showed, for the next pass to carry. */
