@@ -537,11 +537,16 @@ fn build_gh_scope(write: bool, gist: bool) -> String {
     scopes.join(" ")
 }
 
+/// Disconnect vs. a device-flow poll that's still out (see `github::SignOutGate`).
+static GH_SIGN_OUTS: github::SignOutGate = github::SignOutGate::new();
+
 #[tauri::command]
 async fn gh_device_poll(
     app: tauri::AppHandle,
     device_code: String,
 ) -> Result<github::PollResult, String> {
+    // Taken as the request arrives, before any waiting: a Disconnect after this point wins.
+    let ticket = GH_SIGN_OUTS.ticket();
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<github::PollResult, String> {
         let conn = db::open(&db)?;
@@ -551,11 +556,29 @@ async fn gh_device_poll(
         if res.status == "ok" {
             if let Some(tok) = &res.token {
                 let user = github::whoami(tok).unwrap_or_default();
-                secrets::set(&conn, "gh_token", Some(tok))?;
-                db::set_app_setting(&conn, "gh_user", Some(&user))?;
-                // Store the scopes GitHub actually granted — capability is derived from
-                // these, not from what we asked for. Accumulates across re-auth.
-                db::set_app_setting(&conn, "gh_scopes", Some(res.scope.as_deref().unwrap_or("")))?;
+                let stored = GH_SIGN_OUTS.store_if_current(ticket, || -> Result<(), String> {
+                    secrets::set(&conn, "gh_token", Some(tok))?;
+                    db::set_app_setting(&conn, "gh_user", Some(&user))?;
+                    // Store the scopes GitHub actually granted — capability is derived from
+                    // these, not from what we asked for. Accumulates across re-auth.
+                    db::set_app_setting(
+                        &conn,
+                        "gh_scopes",
+                        Some(res.scope.as_deref().unwrap_or("")),
+                    )
+                });
+                match stored {
+                    Some(r) => r?,
+                    // Disconnected while this poll was out: the sign-in is dropped.
+                    None => {
+                        return Ok(github::PollResult {
+                            status: "expired".into(),
+                            token: None,
+                            scope: None,
+                            error: None,
+                        })
+                    }
+                }
             }
         }
         // Never expose the raw token to the frontend.
@@ -1416,15 +1439,17 @@ async fn gh_logout(app: tauri::AppHandle) -> Result<(), String> {
     let db = db_path(&app)?;
     off_main(move || {
         let conn = db::open(&db)?;
-        // When the keychain keeps the token, say so and stay "Connected as …": every later
-        // GitHub call would still use it, so showing the account as disconnected would be wrong.
-        secrets::set(&conn, "gh_token", None)?;
-        db::set_app_setting(&conn, "gh_user", None)?;
-        db::set_app_setting(&conn, "gh_scopes", None)?;
-        // Legacy flags from before scope capture — clear them too so nothing lingers.
-        db::set_app_setting(&conn, "gh_write", None)?;
-        db::set_app_setting(&conn, "gh_gist", None)?;
-        Ok(())
+        GH_SIGN_OUTS.sign_out(|| {
+            // When the keychain keeps the token, say so and stay "Connected as …": every later
+            // GitHub call would still use it, so showing it as disconnected would be wrong.
+            secrets::set(&conn, "gh_token", None)?;
+            db::set_app_setting(&conn, "gh_user", None)?;
+            db::set_app_setting(&conn, "gh_scopes", None)?;
+            // Legacy flags from before scope capture — clear them too so nothing lingers.
+            db::set_app_setting(&conn, "gh_write", None)?;
+            db::set_app_setting(&conn, "gh_gist", None)?;
+            Ok(())
+        })
     })
     .await
 }

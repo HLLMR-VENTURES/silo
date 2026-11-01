@@ -111,12 +111,13 @@ fn set_with(
             match e.set_password(v) {
                 // Ensure it isn't also left behind in SQLite from a prior build.
                 Ok(()) => clear_fallback(conn, key),
-                Err(err) if store_unusable(&err) && !probe() => {
+                Err(err) if no_keychain_service(&err) && !probe() => {
                     // No usable keychain (e.g. a Linux box without Secret Service): keep the
                     // feature working via SQLite; the keychain_available warning covers this.
-                    // An older token still readable in the keychain must go first, or a later
-                    // read could pick it up for an account the user no longer has connected.
-                    if e.delete_credential().is_err() && keychain_copy(e) == KeychainCopy::Present {
+                    // A locked or access-denied store isn't this case: that's an error above.
+                    // An older token still in the keychain must go first, or a later read
+                    // could pick it up for an account the user no longer has connected.
+                    if e.delete_credential().is_err() && keychain_copy(e) == KeychainCopy::Unknown {
                         log::warn!("{key}: no usable keychain, and its old copy wouldn't delete");
                         return Err(STALE_COPY.into());
                     }
@@ -137,11 +138,11 @@ fn set_with(
                     Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
                     Err(err) => {
                         let copy = keychain_copy(e);
-                        // The token lived in SQLite because there's no usable keychain, and
-                        // nothing in the keychain can be read: there's no copy there to remove.
+                        // The token lived in SQLite because there's no keychain service at all
+                        // (not merely a locked one): there's no copy there to remove.
                         let no_keychain = had_row
-                            && store_unusable(&err)
-                            && copy == KeychainCopy::Unreachable
+                            && no_keychain_service(&err)
+                            && copy == KeychainCopy::NoService
                             && !probe();
                         if copy == KeychainCopy::Gone || no_keychain {
                             Ok(())
@@ -159,31 +160,30 @@ fn set_with(
     }
 }
 
-/// A keychain error about the store itself (missing service, locked, access denied), rather
-/// than about this one entry (too long, ambiguous, bad encoding).
-fn store_unusable(err: &keyring::Error) -> bool {
-    matches!(
-        err,
-        keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_)
-    )
+/// A keychain error saying the platform's store itself failed (in keyring 3.6: no Secret
+/// Service on D-Bus, or another backend error). `NoStorageAccess` is not this: it means a store
+/// exists but is locked or refused access, so the user can fix it and Silo must not fall back.
+/// The other variants are about this one entry (too long, ambiguous, bad encoding).
+fn no_keychain_service(err: &keyring::Error) -> bool {
+    matches!(err, keyring::Error::PlatformFailure(_))
 }
 
 #[derive(Debug, PartialEq)]
 enum KeychainCopy {
     /// No entry.
     Gone,
-    /// The store can't be read right now.
-    Unreachable,
-    /// An entry exists (readable, or there but unreadable as text).
-    Present,
+    /// The store's service itself fails, so it can't hold one Silo could read.
+    NoService,
+    /// There may be one: it's readable, or the store is locked or the entry malformed.
+    Unknown,
 }
 
-/// Whether the keychain still holds a copy of this entry.
+/// Whether the keychain may still hold a copy of this entry.
 fn keychain_copy(e: &keyring::Entry) -> KeychainCopy {
     match e.get_password() {
         Err(keyring::Error::NoEntry) => KeychainCopy::Gone,
-        Err(err) if store_unusable(&err) => KeychainCopy::Unreachable,
-        _ => KeychainCopy::Present,
+        Err(err) if no_keychain_service(&err) => KeychainCopy::NoService,
+        _ => KeychainCopy::Unknown,
     }
 }
 
@@ -386,11 +386,26 @@ mod tests {
     }
 
     #[test]
+    fn a_locked_keychain_is_an_error_never_a_fallback() {
+        // Locked: every call fails with NoStorageAccess, the probe too. The user can unlock it,
+        // so the token must not go to SQLite.
+        let conn = mem_db();
+        let k = FakeKeychain::with(|s| {
+            s.set_fails = Some(Fail::NoAccess);
+            s.get_fails = Some(Fail::NoAccess);
+            s.delete_fails = Some(Fail::NoAccess);
+        });
+        let e = set_with(&conn, KEY, Some("new"), Some(&k.entry()), NO_KEYCHAIN);
+        assert_eq!(e, Err(SAVE_FAILED.to_string()));
+        assert_eq!(row(&conn), None);
+    }
+
+    #[test]
     fn the_fallback_removes_an_older_keychain_copy_first() {
         let conn = mem_db();
         let k = FakeKeychain::with(|s| {
             s.stored = Some("other-account".into());
-            s.set_fails = Some(Fail::NoAccess);
+            s.set_fails = Some(Fail::Platform);
         });
         set_with(&conn, KEY, Some("new"), Some(&k.entry()), NO_KEYCHAIN).unwrap();
         assert_eq!(k.stored(), None);
@@ -458,6 +473,19 @@ mod tests {
             s.get_fails = Some(Fail::NoAccess);
         });
         let e = set_with(&conn, KEY, None, Some(&k.entry()), NO_KEYCHAIN);
+        assert_eq!(e, Err(REMOVE_FAILED.to_string()));
+        // A SQLite row beside it doesn't make a locked store count as "no keychain".
+        db::set_app_setting(&conn, KEY, Some("row")).unwrap();
+        let e = set_with(&conn, KEY, None, Some(&k.entry()), NO_KEYCHAIN);
+        assert_eq!(e, Err(REMOVE_FAILED.to_string()));
+        // Nor does a failing service when the probe says the keychain works.
+        db::set_app_setting(&conn, KEY, Some("row")).unwrap();
+        let k = FakeKeychain::with(|s| {
+            s.stored = Some("tok".into());
+            s.delete_fails = Some(Fail::Platform);
+            s.get_fails = Some(Fail::Platform);
+        });
+        let e = set_with(&conn, KEY, None, Some(&k.entry()), KEYCHAIN_WORKS);
         assert_eq!(e, Err(REMOVE_FAILED.to_string()));
     }
 

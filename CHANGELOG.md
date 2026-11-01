@@ -26,12 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Connecting GitHub** no longer quietly saves your token in Silo's database when your system's
-  credential store refuses it. Silo now says the store couldn't save it, and only uses the
-  database on systems that have no credential store at all. (#349)
+  credential store refuses it (for example while it's locked). Silo now says the store couldn't
+  save it, and only uses the database on systems that have no credential store at all. (#349)
 - **Disconnecting GitHub** now tells you when your system's credential store kept the token,
   instead of showing you as disconnected while Silo still used it. (#349)
 - **Disconnect** now also cancels a GitHub sign-in that's still waiting for its code, so
-  approving it later can't reconnect the account. (#349)
+  approving it later, or just before, can't reconnect the account. (#349)
 - **Update checks** now treat a prerelease such as `1.2.3-rc.1` as older than `1.2.3`, and ignore
   build tags such as `+build.5`. (#349)
 - A repository set to **Ignore** on GitHub no longer shows as watched. (#349)

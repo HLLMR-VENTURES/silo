@@ -147,9 +147,10 @@ pub fn latest_release(owner: &str, repo: &str, token: Option<&str>) -> Result<Re
 }
 
 /// Compare a release tag against the installed version, tolerating a leading `v`
-/// and `.`/`_` separators. Semver-style suffixes count the way semver says: `+build`
-/// metadata is ignored, and a `-prerelease` sorts before the same version without one
-/// (`1.2.3-rc.1` < `1.2.3`). Dotted-numeric modDesc versions (`1.0.0.0`) compare part by part.
+/// and `.`/`-`/`_` separators. Semver-style suffixes count the way semver says: `+build`
+/// metadata is ignored, and a `-prerelease` with a word in it sorts before the same version
+/// without one (`1.2.3-rc.1` < `1.2.3`). All-numeric versions (`1.0.0.0`, `1-2-4`) compare
+/// part by part, as they always have.
 pub fn is_newer(latest_tag: &str, current: &str) -> bool {
     let (a_core, a_pre) = split_version(latest_tag);
     let (b_core, b_pre) = split_version(current);
@@ -168,19 +169,27 @@ pub fn is_newer(latest_tag: &str, current: &str) -> bool {
 }
 
 /// A version's numeric parts and its `-prerelease` suffix, with any `+build` metadata dropped.
-/// Parts that aren't numbers are skipped, as they always were.
+/// A suffix of numbers only (`1.0.0-2`) is more version parts, not a prerelease. Parts that
+/// aren't numbers are skipped, as they always were.
 fn split_version(s: &str) -> (Vec<u64>, Option<&str>) {
     let s = s.trim().trim_start_matches(['v', 'V']);
     let s = s.split_once('+').map_or(s, |(v, _build)| v);
     let (core, pre) = match s.split_once('-') {
-        Some((core, pre)) => (core, Some(pre)),
-        None => (s, None),
+        Some((core, pre)) if pre.split(['.', '-', '_']).any(|id| !is_digits(id)) => {
+            (core, Some(pre))
+        }
+        _ => (s, None),
     };
     let nums = core
-        .split(['.', '_'])
+        .split(['.', '-', '_'])
         .filter_map(|p| p.parse::<u64>().ok())
         .collect();
     (nums, pre)
+}
+
+/// A non-empty run of ASCII digits (of any length).
+fn is_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Semver prerelease order: dot-separated identifiers left to right, numbers numerically and
@@ -195,11 +204,16 @@ fn prerelease_cmp(a: &str, b: &str) -> std::cmp::Ordering {
             (None, Some(_)) => return Ordering::Less,
             (Some(_), None) => return Ordering::Greater,
             (Some(x), Some(y)) => {
-                let o = match (x.parse::<u64>(), y.parse::<u64>()) {
-                    (Ok(m), Ok(n)) => m.cmp(&n),
-                    (Ok(_), Err(_)) => Ordering::Less,
-                    (Err(_), Ok(_)) => Ordering::Greater,
-                    (Err(_), Err(_)) => x.cmp(y),
+                let o = match (is_digits(x), is_digits(y)) {
+                    // Numerically without parsing, so no number is too big: fewer digits
+                    // (leading zeros aside) is smaller, then digit by digit.
+                    (true, true) => {
+                        let (x, y) = (x.trim_start_matches('0'), y.trim_start_matches('0'));
+                        x.len().cmp(&y.len()).then_with(|| x.cmp(y))
+                    }
+                    (true, false) => Ordering::Less,
+                    (false, true) => Ordering::Greater,
+                    (false, false) => x.cmp(y),
                 };
                 if o != Ordering::Equal {
                     return o;
@@ -245,6 +259,46 @@ pub struct PollResult {
     /// The scopes GitHub actually granted (space-separated), from the token response.
     pub scope: Option<String>,
     pub error: Option<String>,
+}
+
+/// Orders device-flow sign-ins against Disconnect. A poll takes a ticket when it starts and may
+/// store its token only while no sign-out has happened since; both run under one lock, so a
+/// sign-in the user approved just before clicking Disconnect can't land after it.
+pub struct SignOutGate(std::sync::Mutex<u64>);
+
+impl SignOutGate {
+    pub const fn new() -> Self {
+        Self(std::sync::Mutex::new(0))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, u64> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Note when a sign-in starts.
+    pub fn ticket(&self) -> u64 {
+        *self.lock()
+    }
+
+    /// Run `store` only if no sign-out happened since `ticket`; None (and nothing ran) when one
+    /// did.
+    pub fn store_if_current<T>(&self, ticket: u64, store: impl FnOnce() -> T) -> Option<T> {
+        let g = self.lock();
+        (*g == ticket).then(store)
+    }
+
+    /// Sign out: every sign-in already started loses its right to store, then `clear` runs.
+    pub fn sign_out<T>(&self, clear: impl FnOnce() -> T) -> T {
+        let mut g = self.lock();
+        *g += 1;
+        clear()
+    }
+}
+
+impl Default for SignOutGate {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Step 1: request a device + user code for the given OAuth App client id.
@@ -1258,6 +1312,11 @@ mod tests {
         assert!(is_newer("1.10.0.0", "1.9.0.0")); // numerically, not as text
         assert!(is_newer("V1.0.0.1", "1.0.0.0"));
         assert!(is_newer("1_0_1", "1.0.0")); // `_` still separates
+                                             // All-numeric hyphen suffixes are still more version parts, not prereleases.
+        assert!(is_newer("v1-2-4", "1.2.3"));
+        assert!(is_newer("1.0.0-2", "1.0.0-1"));
+        assert!(is_newer("1.0.0-1", "1.0.0"));
+        assert!(!is_newer("1.0.0", "1.0.0-0"));
         assert!(!is_newer("", "1.0.0.0"));
         assert!(is_newer("1.0.0.0", ""));
     }
@@ -1275,8 +1334,15 @@ mod tests {
         assert!(is_newer("1.2.3-rc.10", "1.2.3-rc.9"));
         assert!(is_newer("1.2.3-rc", "1.2.3-beta"));
         assert!(is_newer("1.2.3-alpha.1", "1.2.3-alpha"));
-        assert!(is_newer("1.2.3-alpha", "1.2.3-1"));
+        assert!(is_newer("1.2.3-alpha.2", "1.2.3-alpha.1"));
+        assert!(!is_newer("1.2.3-rc.10", "1.2.3-rc.010"));
         assert!(!is_newer("1.2.3-rc.1", "1.2.3-rc.1"));
+        // Numeric identifiers bigger than any integer type still sort below words, and by value.
+        let huge = "1.2.3-rc.18446744073709551616";
+        assert!(is_newer("1.2.3-rc.a", huge));
+        assert!(is_newer("1.2.3-rc.18446744073709551617", huge));
+        assert!(!is_newer(huge, "1.2.3-rc.18446744073709551617"));
+        assert!(is_newer(huge, "1.2.3-rc.9"));
         // Build metadata is ignored.
         assert!(!is_newer("1.2.3+build.7", "1.2.3"));
         assert!(!is_newer("1.2.3", "1.2.3+build.7"));
@@ -1284,6 +1350,18 @@ mod tests {
         assert!(is_newer("1.2.4+b1", "1.2.3+b9"));
         assert!(is_newer("1.2.3", "1.2.3-rc.1+b5"));
         assert!(!is_newer("v1.2.3-rc.1+b5", "1.2.3"));
+    }
+
+    #[test]
+    fn a_sign_out_beats_a_sign_in_that_started_before_it() {
+        let gate = SignOutGate::new();
+        let before = gate.ticket();
+        assert_eq!(gate.store_if_current(before, || "stored"), Some("stored"));
+        gate.sign_out(|| ());
+        assert_eq!(gate.store_if_current(before, || "stored"), None);
+        // A sign-in started after the sign-out stores normally.
+        let after = gate.ticket();
+        assert_eq!(gate.store_if_current(after, || "stored"), Some("stored"));
     }
 
     #[test]
