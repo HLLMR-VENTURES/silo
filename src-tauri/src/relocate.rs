@@ -550,21 +550,52 @@ fn flushed(env: &Env, placed: &Path, left: &Path) -> Result<(), StepErr> {
     })
 }
 
+/// An active mod's mods-folder entry is a link that reaches `src` (however it's spelled):
+/// asked right before `src` is renamed, while it still resolves.
+fn links_to(env: &Env, row: &OrganizedRow, src: &Path) -> bool {
+    let link = env.mods.join(&row.file_name);
+    row.active
+        && link
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        && resolves_to(&link, src)
+}
+
+/// `link` and `p` resolve to the same place.
+fn resolves_to(link: &Path, p: &Path) -> bool {
+    matches!(
+        (std::fs::canonicalize(link), std::fs::canonicalize(p)),
+        (Ok(a), Ok(b)) if a == b
+    )
+}
+
 /// Right after `src` was renamed to `dst`: re-point the mod's mods-folder entry at once (no
 /// pause in between, so a boundary never leaves a link to the old place), then flush the rename
-/// (`Env::flush`). If the re-point fails, the mod is renamed back and its entry re-pointed back
-/// at `src` (whatever the failed re-point left: a missing entry is made again), then flushed:
-/// `Err((_, true))`, nothing changed. If any of that fails it stays where it ended up and the
-/// marker keeps it, so Resume or Cancel mends it: `Err((_, false))`. A failed flush after a
-/// good re-point is also `Err((_, false))`.
+/// (`Env::flush`). `linked` (`links_to`, asked before the rename): the entry was a link reaching
+/// `src`, so it must reach a copy of the mod now; a re-point that left it dangling fails. If the re-point fails, the
+/// mod is renamed back and its entry re-pointed back at `src` (whatever the failed re-point
+/// left: a missing entry is made again), then flushed: `Err((_, true))`, nothing changed. If any
+/// of that fails it stays where it ended up and the marker keeps it, so Resume or Cancel mends
+/// it: `Err((_, false))`. A failed flush after a good re-point is also `Err((_, false))`.
 fn relink_renamed(
     env: &Env,
     row: &OrganizedRow,
     src: &Path,
     dst: &Path,
+    linked: bool,
     policy: &mut LinkPolicy,
 ) -> Result<(), (StepErr, bool)> {
-    if let Err(e) = repoint(env, row, src, dst, policy) {
+    let link = env.mods.join(&row.file_name);
+    let relinked = repoint(env, row, src, dst, policy).and_then(|()| {
+        if linked && reaches_the_copy(&link, &row.kind).is_err() {
+            return Err(StepErr::Failed(format!(
+                "relink: Silo couldn't re-point the link at {}. Check it, then retry.",
+                link.display()
+            )));
+        }
+        Ok(())
+    });
+    if let Err(e) = relinked {
         let restored = (env.rename)(dst, src).is_ok() && {
             crate::fslog::moved("rename-back", dst, src);
             repoint(env, row, dst, src, policy).is_ok() && flushed(env, src, dst).is_ok()
@@ -820,23 +851,32 @@ fn stale_symlink(link: &Path, src: &Path) -> std::io::Result<bool> {
         ))
 }
 
+/// The most links `chain_end` follows: more than any system resolves in one path (Linux 40,
+/// Windows 63).
+const MAX_CHAIN: usize = 64;
+
 /// Where the chain of links that starts at `link` ends, followed one link at a time (at most
-/// 32) so an end that's gone still has a path. `None` for a loop or an unreadable link.
+/// `MAX_CHAIN`) so an end that's gone still has a path. `None` for a longer chain (a loop) or an
+/// unreadable link.
 fn chain_end(link: &Path) -> Option<PathBuf> {
     let mut p = link.to_path_buf();
-    for _ in 0..32 {
-        match p.symlink_metadata() {
-            Ok(m) if m.file_type().is_symlink() => {
-                let t = std::fs::read_link(&p).ok()?;
-                p = match p.parent() {
-                    Some(d) if t.is_relative() => d.join(t),
-                    _ => t,
-                };
-            }
-            _ => return Some(p),
+    for _ in 0..MAX_CHAIN {
+        if !p
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return Some(p);
         }
+        let t = std::fs::read_link(&p).ok()?;
+        p = match p.parent() {
+            Some(d) if t.is_relative() => d.join(t),
+            _ => t,
+        };
     }
-    None
+    // The last link's target, if it's not a link itself.
+    (!p.symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink()))
+    .then_some(p)
 }
 
 /// What a move's re-links could cost in space, by case (`repoint`). Bytes, from the archived
@@ -1161,10 +1201,11 @@ fn forward_one(
                 }
             }
             env.record(marker, tech)?;
+            let linked = links_to(env, row, &src);
             match rename_or_copy(env, &src, &dst, &row.kind, abort) {
                 Ok(Placed::Copied) => {}
                 Ok(Placed::Renamed) => {
-                    return match relink_renamed(env, row, &src, &dst, policy) {
+                    return match relink_renamed(env, row, &src, &dst, linked, policy) {
                         Ok(()) => Ok(Step::Moved),
                         Err((e, restored)) => {
                             if restored {
@@ -1233,10 +1274,11 @@ fn back_one(
             }
         }
         (true, false) => {
+            let linked = links_to(env, row, &src);
             if rename_or_copy(env, &src, &home, &row.kind, abort)? == Placed::Renamed {
                 // Renamed back: still recorded until its link is home too (a put-back leaves it
                 // in `to`, recorded, for the retry).
-                relink_renamed(env, row, &src, &home, policy).map_err(|(e, _)| e)?;
+                relink_renamed(env, row, &src, &home, linked, policy).map_err(|(e, _)| e)?;
                 env.unrecord(marker, &row.tech_name)?;
                 return Ok(Step::Moved);
             }
@@ -1895,6 +1937,9 @@ fn run_locked(
     marker.errors.clear();
     save_marker(env.conn, env.mods_key, &marker)?;
     if env.same_volume {
+        // Relink temps an earlier run left are cleared first (only those proven redundant), so
+        // the space a finished one holds is free before the mend may need it.
+        scratch::sweep_where(&env.journal(), &|e| e.role == scratch::Role::RelinkTmp);
         let unmended = mend_renamed_links(&env, &marker);
         if !unmended.is_empty() {
             marker.errors.extend(unmended);
@@ -5061,6 +5106,17 @@ mod tests {
         }
     }
 
+    /// `n` links in a row ending at `end` (`<dir>/<name>-1` is the first); `None` where file
+    /// symlinks can't be made (Windows without Developer Mode).
+    fn link_chain(dir: &Path, name: &str, n: usize, end: &Path) -> Option<PathBuf> {
+        let hop = |i: usize| dir.join(format!("{name}-{i}"));
+        organize::symlink_file(end, &hop(n)).ok()?;
+        for i in (1..n).rev() {
+            organize::symlink_file(&hop(i + 1), &hop(i)).unwrap();
+        }
+        Some(hop(1))
+    }
+
     #[test]
     fn a_link_chain_is_followed_to_its_end_and_a_loop_gives_up() {
         let f = fx("chain");
@@ -5071,11 +5127,110 @@ mod tests {
             return;
         }
         organize::symlink_file(Path::new("two"), &one).unwrap();
-        assert_eq!(chain_end(&one), Some(end));
+        assert_eq!(chain_end(&one), Some(end.clone()));
+        for n in [31, 32, 33, MAX_CHAIN] {
+            let first = link_chain(&f.base, &format!("c{n}"), n, &end).unwrap();
+            assert_eq!(chain_end(&first), Some(end.clone()), "{n} links");
+        }
+        let first = link_chain(&f.base, "long", MAX_CHAIN + 1, &end).unwrap();
+        assert_eq!(chain_end(&first), None);
         let (x, y) = (f.base.join("x"), f.base.join("y"));
         organize::symlink_file(&y, &x).unwrap();
         organize::symlink_file(&x, &y).unwrap();
         assert_eq!(chain_end(&x), None);
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// An active zip linked through a chain of 33 links (more than the 32 an earlier version
+    /// followed): re-pointed after the rename, and mended after a crash mid-rename.
+    #[test]
+    fn a_long_link_chain_is_relinked_after_a_rename_and_after_a_crash() {
+        for (tag, crash) in [("renamechain1", false), ("renamechain2", true)] {
+            let f = fx(tag);
+            add_zip(&f, "FS25_A", true);
+            let (src, dst) = (zip_at(&f.old, "FS25_A"), zip_at(&f.new, "FS25_A"));
+            let link = f.mods.join("FS25_A.zip");
+            let Some(first) = link_chain(&f.base, "hop", 32, &src) else {
+                let _ = std::fs::remove_dir_all(&f.base);
+                return;
+            };
+            organize::symlink_file(&first, &link).unwrap();
+            if crash {
+                let mut m = marker(&f);
+                env(&f).record(&mut m, "FS25_A").unwrap();
+                std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+                crate::paths::rename_no_replace(&src, &dst).unwrap();
+                m.paused = true;
+                save_marker(&f.conn, &f.key, &m).unwrap();
+                let req = AtomicU8::new(PAUSE);
+                let paused = run_on_one_drive(&f, Op::Resume, &req, &mut |_| {})
+                    .unwrap()
+                    .unwrap();
+                assert!(paused.errors.is_empty(), "{tag}: {:?}", paused.errors);
+            } else {
+                assert!(one_drive_run(&f, Op::Start).unwrap().is_none(), "{tag}");
+            }
+            assert!(same_file(&link, &dst), "{tag}");
+            let _ = std::fs::remove_dir_all(&f.base);
+        }
+    }
+
+    /// A link that reached the mod before its rename but that Silo can't recognize afterwards
+    /// (its target goes through the mod's own name, then `..`) isn't left dangling as a
+    /// success: the step fails and the mod is renamed back, its link working again.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_silo_cant_follow_after_the_rename_puts_the_mod_back() {
+        let f = fx("renameguard");
+        let r = add_dir(&f, "FS25_D", true);
+        let src = f.old.join("Tools/FS25_D");
+        let link = f.mods.join("FS25_D");
+        std::os::unix::fs::symlink(src.join("..").join("FS25_D"), &link).unwrap();
+        let layout = dest(&f);
+        let mut m = marker(&f);
+        let e = Env {
+            same_volume: true,
+            ..env(&f)
+        };
+        let out = forward_one(&e, &r, &mut m, &mut LinkPolicy::new(&layout), &|| false);
+        assert!(
+            matches!(&out, Err(StepErr::Failed(s)) if s.contains("couldn't re-point")),
+            "{out:?}"
+        );
+        assert!(src.join("modDesc.xml").is_file() && !f.new.join("Tools/FS25_D").exists());
+        assert!(link.join("modDesc.xml").is_file(), "the link works again");
+        assert!(m.moved.is_empty());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// A recorded relink temp an earlier run finished is swept before the mend, even when the
+    /// mend then pauses the move: its space is free for the retry.
+    #[test]
+    fn a_finished_relink_temp_is_swept_before_the_mend() {
+        let f = fx("renamesweep");
+        let (_, dst, link, _) = crashed_after_rename(&f);
+        organize::remove_link(&link)
+            .or_else(|_| std::fs::remove_dir(&link))
+            .unwrap();
+        let tmp = scratch::begin(
+            &env(&f).journal(),
+            scratch::Role::RelinkTmp,
+            &link,
+            RELINK_SUFFIX,
+            &dst,
+            &link,
+            "dir",
+        )
+        .unwrap();
+        organize::make_link(&dst, &tmp, "dir", &mut LinkPolicy::new(&dest(&f))).unwrap();
+        REPOINT_FAULT.with(|c| c.set(Some(|_: &Path| {})));
+        let paused = one_drive_run(&f, Op::Resume).unwrap().unwrap();
+        assert_eq!(
+            paused.errors,
+            vec!["FS25_D: relink: injected failure".to_string()]
+        );
+        assert!(tmp.symlink_metadata().is_err(), "the temp is swept");
+        assert!(env(&f).journal().entries().is_empty());
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
