@@ -705,6 +705,40 @@ pub(crate) fn replace_zip_link(
     Ok(())
 }
 
+/// `replace_zip_link`, but only for a real link: a hardlink to `dst`, else a symlink where
+/// `policy` allows one — never a copy. `Ok(false)` when neither could be made: `link` is left
+/// exactly as it was (for a move, the mod's hardlink then stays as its standalone copy instead
+/// of being traded for a second full copy). Never replaces anything at the temp name's target
+/// but `link` itself.
+pub(crate) fn replace_zip_link_if_linkable(
+    link: &Path,
+    dst: &Path,
+    policy: &mut LinkPolicy,
+) -> std::io::Result<bool> {
+    use std::io::ErrorKind::AlreadyExists;
+    std::fs::metadata(dst)?;
+    let tmp = relink_tmp(link);
+    let _ = remove_path(&tmp);
+    let linked = match std::fs::hard_link(dst, &tmp) {
+        Ok(()) => true,
+        Err(e) if e.kind() == AlreadyExists => return Err(e),
+        Err(_) if policy.allow_symlink() => match symlink_file(dst, &tmp) {
+            Ok(()) => true,
+            Err(e) if e.kind() == AlreadyExists => return Err(e),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    };
+    if !linked {
+        return Ok(false);
+    }
+    std::fs::rename(&tmp, link).inspect_err(|_| {
+        let _ = remove_path(&tmp);
+    })?;
+    crate::fslog::moved("link", dst, link);
+    Ok(true)
+}
+
 /// A zip's mods-folder entry `link` was just (re)made by Silo: refresh its projection record so
 /// later deactivates prove it's Silo's without hashing. A symlink is identified structurally and
 /// keeps none.
@@ -1291,6 +1325,23 @@ pub(crate) fn symlinks_usable(layout: &Layout) -> bool {
     !in_mac_app_container(&layout.mods) && supports_symlinks(layout)
 }
 
+/// A folder mod's link from the mods folder into this archive might end up a full copy
+/// (`make_link`'s dir branch): always inside a Mac App Store container; otherwise when symlinks
+/// don't work there, except on Windows with a local archive, where an NTFS junction needs no
+/// privilege. Probes a symlink (`symlinks_usable`).
+pub(crate) fn dir_link_may_copy(layout: &Layout) -> bool {
+    if in_mac_app_container(&layout.mods) {
+        return true;
+    }
+    if symlinks_usable(layout) {
+        return false;
+    }
+    let network = std::fs::canonicalize(&layout.archive)
+        .map(|c| is_network_path(&c.to_string_lossy()))
+        .unwrap_or(true);
+    !cfg!(windows) || network
+}
+
 /// The Mac App Store FS25 is sandboxed: it can't follow a link out of its container. Compared
 /// case-insensitively (APFS is case-insensitive by default).
 pub(crate) fn in_mac_app_container(mods: &Path) -> bool {
@@ -1649,15 +1700,53 @@ fn mount_in(disks: &sysinfo::Disks, p: &Path) -> Option<(PathBuf, u64)> {
     let c = std::fs::canonicalize(p).ok()?;
     let windows = cfg!(windows);
     let key = crate::modsroot::normalize_key(&c.to_string_lossy(), windows);
-    disks
-        .list()
+    let list = disks.list();
+    let mounts: Vec<(PathBuf, Option<u64>)> = list
         .iter()
-        .filter(|d| {
+        .map(|d| {
             let mount = crate::modsroot::normalize_key(&d.mount_point().to_string_lossy(), windows);
-            Path::new(&key).starts_with(Path::new(&mount))
+            (PathBuf::from(mount), device_of(d.mount_point()))
         })
-        .max_by_key(|d| d.mount_point().components().count())
-        .map(|d| (d.mount_point().to_path_buf(), d.available_space()))
+        .collect();
+    let i = pick_mount(Path::new(&key), device_of(&c), &mounts)?;
+    let d = &list[i];
+    Some((d.mount_point().to_path_buf(), d.available_space()))
+}
+
+/// The filesystem's device id for `p` (Unix); `None` elsewhere or when it can't be read.
+fn device_of(p: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(p).ok().map(|m| m.dev())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = p;
+        None
+    }
+}
+
+/// Pure: which of `mounts` (normalized mount point, device id) holds the path `key` (normalized,
+/// device id `dev`). The longest mount point that contains it — when the device ids agree, or
+/// can't be compared (Windows). When they differ, the path is on a filesystem the longest
+/// match doesn't hold: a listed mount with the path's device id (macOS keeps `/Users` on the
+/// data volume, listed at `/System/Volumes/Data`, not at `/`), else none — an unlisted mount
+/// below a listed one (a network share at `/mnt/share` under `/`) is unknown, never its parent.
+fn pick_mount(key: &Path, dev: Option<u64>, mounts: &[(PathBuf, Option<u64>)]) -> Option<usize> {
+    let longest = mounts
+        .iter()
+        .enumerate()
+        .filter(|(_, (m, _))| key.starts_with(m))
+        .max_by_key(|(_, (m, _))| m.components().count())
+        .map(|(i, _)| i);
+    let Some(dev) = dev else {
+        return longest;
+    };
+    match longest {
+        Some(i) if !matches!(mounts[i].1, Some(d) if d != dev) => Some(i),
+        _ => mounts.iter().position(|(_, d)| *d == Some(dev)),
+    }
 }
 
 /// Mount point holding `p`, for same-drive checks and free space (one disk enumeration).
@@ -4129,6 +4218,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// The longest listed mount point holds a path only when it is the same filesystem: an
+    /// unlisted share mounted below `/` is unknown, a path on a filesystem listed elsewhere
+    /// (macOS's data volume) is that one, and without device ids (Windows) the longest wins
+    /// (#188).
+    #[test]
+    fn pick_mount_checks_the_device_not_just_the_prefix() {
+        let m = |p: &str, d: Option<u64>| (PathBuf::from(p), d);
+        let mounts = vec![
+            m("/", Some(1)),
+            m("/home", Some(2)),
+            m("/System/Volumes/Data", Some(3)),
+        ];
+        let pick = |k: &str, d| pick_mount(Path::new(k), d, &mounts);
+        assert_eq!(pick("/home/me/mods", Some(2)), Some(1));
+        assert_eq!(pick("/opt/x", Some(1)), Some(0));
+        assert_eq!(pick("/mnt/share/archive", Some(9)), None, "unlisted share");
+        assert_eq!(
+            pick("/Users/me/mods", Some(3)),
+            Some(2),
+            "firmlinked data volume"
+        );
+        assert_eq!(
+            pick("/home/me", None),
+            Some(1),
+            "no device ids: longest prefix"
+        );
+        // Windows lists no device ids: drive letters decide.
+        let no_dev = vec![m("/c", None), m("/d", None)];
+        assert_eq!(pick_mount(Path::new("/d/mods"), None, &no_dev), Some(1));
+        assert_eq!(pick_mount(Path::new("/e/mods"), None, &no_dev), None);
+    }
+
     #[test]
     fn known_same_mount_needs_both_mounts_known_and_equal() {
         let c = Some((PathBuf::from("C:\\"), 1));
@@ -4212,9 +4333,8 @@ mod tests {
             archive: base.join("mods").join("archive"),
         };
         std::fs::create_dir_all(&layout.archive).unwrap();
-        if hardlinks_between(&layout.mods, &layout.archive) == Some(true) {
-            assert!(!LinkPolicy::new(&layout).can_only_copy());
-        }
+        assert_eq!(hardlinks_between(&layout.mods, &layout.archive), Some(true));
+        assert!(!LinkPolicy::new(&layout).can_only_copy());
         let left: Vec<_> = std::fs::read_dir(&layout.mods)
             .unwrap()
             .flatten()

@@ -170,9 +170,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drive. Before, such a move could run out of space part-way and pause. (#188)
 - Silo no longer lets you point a mods folder's archive at a folder another mods folder already
   uses as its archive, when Silo only ever reached that other mods folder through Farming
-  Simulator 25's own mods folder setting. Two mods folders sharing an archive would shuffle each
-  other's parked mods. If Silo can't read its list of archives, it now says so and stops instead
-  of skipping the check. (#188)
+  Simulator 25's own mods folder setting. That includes the other folder's default `archive`
+  folder, which also can't be chosen as a mods folder any more. Two mods folders sharing an
+  archive would shuffle each other's parked mods. If Silo can't read its list of archives, it
+  now says so and stops instead of skipping the check. (#188)
+- Moving your archive no longer replaces a link of your own in your mods folder that points at a
+  file that isn't there right now (on an unplugged drive, say). Silo only remakes links that
+  point at its own archived copy. (#188)
+- On Linux and macOS, an archive on a network share mounted inside another drive's folders is no
+  longer mistaken for that drive. The free-space check now asks for room for the whole library
+  there, and Optimize links checks whether links work instead of assuming they do. (#188)
 - Mod downloads, updates and catalog images now check every redirect, not just the first
   address: Silo won't follow one to plain `http` or to an address on your own network, and it
   refuses a web address whose name points at your own network. GitHub downloads work as

@@ -3059,16 +3059,24 @@ fn fences_with(
 
 /// Why a folder can't be checked as a mods folder: Silo couldn't read what it knows of the
 /// other mods folders and their archives.
+/// The detail goes to the log; the message stays in plain words.
 fn folder_check_unreadable(e: &str) -> String {
-    format!("Silo couldn't check this folder against your other mods folders ({e}). Try again.")
+    log::warn!("couldn't check a mods folder against the other layouts: {e}");
+    FOLDER_CHECK_UNREADABLE.into()
 }
 
+const FOLDER_CHECK_UNREADABLE: &str =
+    "Silo couldn't check this folder against your other mods folders. Try again.";
+
 /// Why a folder can't be checked as an archive: Silo couldn't read the archives it knows.
+/// The detail goes to the log; the message stays in plain words.
 fn archive_list_unreadable(e: &str) -> String {
-    format!(
-        "Silo couldn't read its list of archives ({e}), so it can't check this folder. Try again."
-    )
+    log::warn!("couldn't read the stored archives: {e}");
+    ARCHIVE_LIST_UNREADABLE.into()
 }
+
+const ARCHIVE_LIST_UNREADABLE: &str =
+    "Silo couldn't read its list of archives, so it can't check this folder. Try again.";
 
 /// Pure: `a` and `b` (identity keys) are the same folder, or one is inside the other.
 fn overlaps(a: &std::path::Path, b: &std::path::Path) -> bool {
@@ -3094,9 +3102,12 @@ fn managed_archive(conn: &rusqlite::Connection, mods: &std::path::Path) -> Optio
 }
 
 /// Every archive Silo knows of except `mods`' own: each stored archive choice
-/// (`archive_root:*`, whichever mods folder it belongs to) and each other known mods folder's
-/// `managed_archive`. One entry per folder (by identity key), spelled as stored. An unreadable
-/// setting list is an error: the check must never pass because it couldn't look.
+/// (`archive_root:*`, whichever mods folder it belongs to), and the `managed_archive` of each
+/// other known mods folder and of each other folder Silo has organized mods for (one it only
+/// followed through FS25's override never joins the known list, and its default `<X>/archive`
+/// has no stored setting). One entry per folder (by identity key), spelled as stored. An
+/// unreadable setting or library list is an error: the check must never pass because it
+/// couldn't look.
 fn other_archives(
     conn: &rusqlite::Connection,
     mods: &std::path::Path,
@@ -3113,6 +3124,11 @@ fn other_archives(
     for k in known {
         if modsroot::canonical_key(k) != mine {
             v.extend(managed_archive(conn, k));
+        }
+    }
+    for root in db::organized_roots(conn)? {
+        if root != mine {
+            v.extend(managed_archive(conn, std::path::Path::new(&root)));
         }
     }
     let mut seen = HashSet::new();
@@ -3289,9 +3305,14 @@ struct Space {
     largest: u64,
     /// Free on the new archive's drive (unknown never blocks).
     free: Option<u64>,
-    /// What re-linking active mods costs (`relocate::relink_cost`): zero unless a new link into
-    /// the new archive can only be a copy (`LinkPolicy::can_only_copy`).
-    relink: relocate::RelinkCost,
+    /// Active zips whose hardlink a move keeps as their standalone copy, because a new link
+    /// into the new archive might be a copy (`LinkPolicy::can_only_copy`): on one drive their
+    /// old bytes stay used. From `relocate::relink_cost`.
+    relink_kept: u64,
+    /// Active mods whose mods-folder entry a move makes again as a full copy there (zips where
+    /// only a copy is possible, folders where a folder link may not work). From
+    /// `relocate::relink_cost`.
+    relink_copied: u64,
     /// The mods folder is on the new archive's drive (known mounts only).
     mods_same_drive: bool,
     /// Free on the mods folder's drive (unknown never blocks).
@@ -3326,12 +3347,12 @@ fn missing_mods_problem(n: usize) -> String {
 /// mod's hardlink is re-linked to the new copy first, so the delete really frees it — so only the
 /// largest mod needs room at a time; across drives the whole archive must fit.
 ///
-/// Where a new link into the new archive can only be a copy (`s.relink`, see
-/// `relocate::relink_cost`): an active mod's hardlink is kept as its standalone copy, so on one
-/// drive its old bytes stay used (`kept`); and an active mod whose link is missing or points
-/// into the old archive gets a full copy in the mods folder (`copied`), counted on the new
-/// archive's drive when the mods folder shares it, else as its own check on the mods folder's
-/// drive. Otherwise the mods folder's drive needs nothing extra.
+/// Where a new link into the new archive might be a copy (see `relocate::relink_cost`): an
+/// active mod's hardlink is kept as its standalone copy, so on one drive its old bytes stay used
+/// (`relink_kept`); and an active mod whose entry is missing or links into the old archive gets
+/// a full copy in the mods folder (`relink_copied`), counted on the new archive's drive when the
+/// mods folder shares it, else as its own check on the mods folder's drive. Otherwise the mods
+/// folder's drive needs nothing extra.
 fn move_problems(f: MoveFacts) -> Vec<String> {
     let mut v = f.target;
     v.extend(f.unknown);
@@ -3341,15 +3362,15 @@ fn move_problems(f: MoveFacts) -> Vec<String> {
     v.extend(f.collisions);
     let s = f.space;
     let mut needed = if s.archive_same_drive {
-        s.largest + s.relink.kept
+        s.largest + s.relink_kept
     } else {
         s.bytes
     };
     let mods_needed = if s.mods_same_drive {
-        needed += s.relink.copied;
+        needed += s.relink_copied;
         0
     } else {
-        s.relink.copied
+        s.relink_copied
     };
     if needed > 0 {
         v.extend(relocate::space_problem(needed, s.free));
@@ -3394,17 +3415,22 @@ fn check_move(
     let archive_same_drive =
         organize::known_same_mount(&organize::mount_of(&layout.archive), &new_mount);
     let mods_mount = organize::mount_of(&layout.mods);
-    // Re-links only cost space where a new link can only be a copy. Asking runs the link
-    // probes in the new folder, so only once it is cleared (`target` empty) and only when an
-    // active mod would be re-linked at all.
-    let mut relink = relocate::relink_cost(&layout.mods, &layout.archive, &rows);
-    if relink != relocate::RelinkCost::default() {
+    // Re-links only cost space where a new link might be a copy. Asking runs the link probes
+    // in the new folder, so only once it is cleared (`target` empty) and only when an active
+    // mod would be re-linked at all.
+    let cost = relocate::relink_cost(&layout.mods, &layout.archive, &rows);
+    let (mut relink_kept, mut relink_copied) = (0, 0);
+    if target.is_empty() && cost != relocate::RelinkCost::default() {
         let to = organize::Layout {
             mods: layout.mods.clone(),
             archive: new.to_path_buf(),
         };
-        if !target.is_empty() || !organize::LinkPolicy::new(&to).can_only_copy() {
-            relink = relocate::RelinkCost::default();
+        if cost.kept + cost.copied_zips > 0 && organize::LinkPolicy::new(&to).can_only_copy() {
+            relink_kept = cost.kept;
+            relink_copied = cost.copied_zips;
+        }
+        if cost.copied_dirs > 0 && organize::dir_link_may_copy(&to) {
+            relink_copied += cost.copied_dirs;
         }
     }
     // An archive folder Silo can't list may hold unrecorded mods the move would leave behind.
@@ -3427,7 +3453,8 @@ fn check_move(
             bytes,
             largest: sizes.iter().copied().max().unwrap_or(0),
             free,
-            relink,
+            relink_kept,
+            relink_copied,
             mods_same_drive: organize::known_same_mount(&mods_mount, &new_mount),
             mods_free: mods_mount.as_ref().map(|(_, f)| *f),
         },
@@ -6610,10 +6637,14 @@ mod tests {
         conn.execute_batch("DROP TABLE app_setting").unwrap();
         let e = super::apply_mods_root_choice(&conn, &a.to_string_lossy(), true, None, &[])
             .unwrap_err();
-        assert!(
-            e.starts_with("Silo couldn't check this folder against your other mods folders (")
-                && e.ends_with("Try again."),
-            "{e}"
+        assert_eq!(
+            e,
+            "Silo couldn't check this folder against your other mods folders. Try again."
+        );
+        assert_eq!(
+            crate::db::get_app_setting(&conn, crate::modsroot::CHOICE_KEY),
+            None,
+            "nothing stored"
         );
         drop(conn);
         let _ = std::fs::remove_dir_all(&base);
@@ -7176,6 +7207,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// The other half of the #188 re-point: X was followed only through FS25's override and
+    /// organized into its default `X/archive` (no stored setting, never known). Once Silo
+    /// follows D again, D's archive may not be re-pointed at `X/archive`, and `X/archive` (or a
+    /// category in it) can't be chosen as a mods folder either: X's organized rows name it.
+    #[test]
+    fn an_override_only_folders_default_archive_is_fenced() {
+        let base = temp_base("fences_override_default");
+        let d = base.join("d-mods");
+        let x = base.join("x-mods");
+        let x_archive = crate::organize::Layout::default_for(&x).archive;
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::create_dir_all(x_archive.join("Tools")).unwrap();
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let row = crate::db::OrganizedRow {
+            tech_name: "FS25_A".into(),
+            file_name: "FS25_A.zip".into(),
+            kind: "zip".into(),
+            category: "Tools".into(),
+            subcategory: None,
+            active: false,
+        };
+        crate::db::upsert_organized(&conn, &crate::modsroot::canonical_key(&x), &row).unwrap();
+        let layout = Layout::default_for(&d);
+        let f = super::fences_with(&conn, &layout, &[], None, None).unwrap();
+        assert_eq!(f.other_archives, vec![super::key_path(&x_archive)]);
+        let problems = fence_problems(&layout, &x_archive, &f);
+        assert!(
+            has(&problems, "Another mods folder already uses that archive."),
+            "{problems:?}"
+        );
+        assert_eq!(
+            super::apply_mods_root_choice(
+                &conn,
+                &x_archive.join("Tools").to_string_lossy(),
+                true,
+                None,
+                &[]
+            ),
+            Err(super::OVERLAPS_AN_ARCHIVE.to_string())
+        );
+        assert_eq!(
+            crate::db::get_app_setting(&conn, crate::modsroot::CHOICE_KEY),
+            None
+        );
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// The stored archives can't be read: the fences refuse in plain words instead of passing,
     /// and so does every check built on them (a move, a re-point, a found-again archive).
     #[test]
@@ -7191,9 +7270,9 @@ mod tests {
         let e = super::fences_with(&conn, &layout, &[], None, None)
             .err()
             .expect("an unreadable list is never a pass");
-        assert!(
-            e.starts_with("Silo couldn't read its list of archives") && e.ends_with("Try again."),
-            "{e}"
+        assert_eq!(
+            e,
+            "Silo couldn't read its list of archives, so it can't check this folder. Try again."
         );
         let problems = super::target_problems(&conn, &layout, &new, None);
         assert!(
@@ -7356,7 +7435,8 @@ mod tests {
             bytes: 10 << 30,
             largest: 2 << 30,
             free,
-            relink: crate::relocate::RelinkCost::default(),
+            relink_kept: 0,
+            relink_copied: 0,
             mods_same_drive: true,
             mods_free: free,
         }
@@ -7423,7 +7503,8 @@ mod tests {
     fn move_problems_count_re_link_copies_where_links_cant_be_made() {
         let gb = |n: u64| n << 30;
         let with = |kept: u64, copied: u64, mods_same_drive: bool, free, mods_free| Space {
-            relink: crate::relocate::RelinkCost { kept, copied },
+            relink_kept: kept,
+            relink_copied: copied,
             mods_same_drive,
             mods_free,
             ..space(true, free)
