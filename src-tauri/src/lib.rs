@@ -2949,9 +2949,13 @@ fn target_problems(
     let mut v = fence_problems(layout, new, &f);
     // Mods filed in `<new>/<subfolder>/` that Silo doesn't know would mix with the library.
     // (Loose mods at the top level are fine — that's adopt.)
-    let foreign = relocate::unknown_mods(new, &[]).len();
-    if foreign > 0 {
-        v.push(foreign_mods_problem(foreign));
+    match relocate::unknown_mods(new, &[]) {
+        Ok(foreign) if !foreign.is_empty() => v.push(foreign_mods_problem(foreign.len())),
+        Ok(_) => {}
+        Err(e) => v.push(relocate::unreadable_archive_message(
+            &e,
+            "or choose another folder.",
+        )),
     }
     v
 }
@@ -3049,15 +3053,19 @@ fn check_move(
     // For space, an unknown mount is another drive: the whole archive must fit.
     let archive_same_drive =
         organize::known_same_mount(&organize::mount_of(&layout.archive), &new_mount);
-    let unknown = relocate::unknown_mods(&layout.archive, &rows);
-    let problems = move_problems(MoveFacts {
-        target,
-        unknown: relocate::unknown_messages(
+    // An archive folder Silo can't list may hold unrecorded mods the move would leave behind.
+    let unknown = match relocate::unknown_mods(&layout.archive, &rows) {
+        Ok(unknown) => relocate::unknown_messages(
             &unknown,
             &rows,
             "then try again.",
             "rescan, then try again.",
         ),
+        Err(e) => vec![relocate::unreadable_archive_message(&e, "then try again.")],
+    };
+    let problems = move_problems(MoveFacts {
+        target,
+        unknown,
         missing,
         collisions: relocate::collisions(new, &rows),
         space: Space {
