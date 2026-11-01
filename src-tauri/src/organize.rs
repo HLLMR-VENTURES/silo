@@ -1009,13 +1009,11 @@ fn copy_then_remove(from: &Path, to: &Path) -> std::io::Result<()> {
         let _ = remove_path(&tmp);
         return Err(e);
     }
-    if let Some(parent) = to.parent() {
-        sync_dir(parent);
-    }
     let undo = |e: std::io::Error| {
         let _ = remove_path(to);
         e
     };
+    sync_placement(to).map_err(undo)?;
     if !is_dir {
         return std::fs::remove_file(from).map_err(undo);
     }
@@ -1214,7 +1212,7 @@ fn copy_new(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
     let tmp = tmp_sibling(dst);
     remove_path(&tmp)?; // a stale temp from a copy that was cut off
-    if let Err(e) = copy_file_synced(src, &tmp).and_then(|()| place_new(&tmp, dst)) {
+    if let Err(e) = stream_new_synced(src, &tmp).and_then(|()| place_new(&tmp, dst)) {
         let _ = remove_path(&tmp);
         return Err(e);
     }
@@ -1222,21 +1220,72 @@ fn copy_new(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Copy one file to a **new** file `dst` (never replacing one) and flush it to disk. Keeps the
-/// source's modified time, so a moved mod's scan cache stays valid. Opens `src` first, so a
-/// missing source creates nothing.
-fn copy_file_synced(src: &Path, dst: &Path) -> std::io::Result<()> {
+/// Stream `src`'s bytes into a new file `dst` and flush it. Only the bytes: a projection never
+/// takes the archived file's read-only attribute, which would stop Silo removing it later.
+/// Opens `src` first, so a missing source creates nothing.
+fn stream_new_synced(src: &Path, dst: &Path) -> std::io::Result<()> {
     let mut from = std::fs::File::open(src)?;
-    let modified = from.metadata().and_then(|m| m.modified()).ok();
     let mut to = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(dst)?;
     std::io::copy(&mut from, &mut to)?;
-    if let Some(t) = modified {
-        let _ = to.set_modified(t);
-    }
     to.sync_all()
+}
+
+/// Copy one file to a **new** name `dst` (never replacing a file there) and flush it to disk.
+/// `std::fs::copy` keeps what it always kept (permissions; on Windows the modified time,
+/// attributes and alternate streams). A missing source creates nothing; a copy that fails
+/// part-way can leave a partial `dst`, which the callers (always writing to a Silo temp) remove.
+fn copy_file_synced(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::metadata(src)?;
+    if dst.symlink_metadata().is_ok() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
+    std::fs::copy(src, dst)?;
+    flush_file(dst)
+}
+
+/// Flush a file's data and metadata to disk. Unix flushes through a read handle. Windows needs a
+/// write handle, so a read-only file (`std::fs::copy` keeps the attribute) is made writable
+/// for the moment and set back.
+fn flush_file(p: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(p)?.sync_all()
+    }
+    #[cfg(windows)]
+    {
+        let flush = || std::fs::OpenOptions::new().write(true).open(p)?.sync_all();
+        let perms = std::fs::metadata(p)?.permissions();
+        if !perms.readonly() {
+            return flush();
+        }
+        let mut writable = perms.clone();
+        #[allow(clippy::permissions_set_readonly_false)] // Windows: only clears the attribute
+        writable.set_readonly(false);
+        std::fs::set_permissions(p, writable)?;
+        let flushed = flush();
+        let restored = std::fs::set_permissions(p, perms);
+        flushed.and(restored)
+    }
+}
+
+/// Make a cross-drive move's placement at `to` durable before its source is deleted. The
+/// placed file is flushed again (on Windows that commits NTFS's metadata for it, the new name
+/// included), and on Unix the folder holding it and the one above are flushed too
+/// (`move_path_as` may just have created the folder, e.g. a new archive category).
+fn sync_placement(to: &Path) -> std::io::Result<()> {
+    if to.symlink_metadata()?.is_dir() {
+        sync_dir(to)?;
+    } else {
+        flush_file(to)?;
+    }
+    let parent = to.parent();
+    for dir in parent.into_iter().chain(parent.and_then(Path::parent)) {
+        sync_dir(dir)?;
+    }
+    Ok(())
 }
 
 /// Put the finished temp `tmp` at `dst` without replacing anything there. A file is hardlinked
@@ -1275,16 +1324,32 @@ fn place_new(tmp: &Path, dst: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Flush a folder's entries (names just created or renamed in it) to disk, best effort. Unix
-/// only: there a file's own flush doesn't cover its name. NTFS logs metadata changes in order,
-/// so a later delete can't reach the disk before an earlier rename.
-fn sync_dir(dir: &Path) {
+/// Flush a folder's entries (names just created or renamed in it) to disk. On Unix a file's
+/// own flush doesn't cover its name; a filesystem that can't flush a folder (`EINVAL`,
+/// unsupported) is let through, any other failure is returned. On Windows it's best effort:
+/// the folder is flushed through a backup-semantics handle where NTFS allows it.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
-    if let Ok(d) = std::fs::File::open(dir) {
-        let _ = d.sync_all();
+    {
+        use std::io::ErrorKind::{InvalidInput, Unsupported};
+        match std::fs::File::open(dir)?.sync_all() {
+            Err(e) if matches!(e.kind(), InvalidInput | Unsupported) => Ok(()),
+            other => other,
+        }
     }
-    #[cfg(not(unix))]
-    let _ = dir;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        if let Ok(d) = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
+        {
+            let _ = d.sync_all();
+        }
+        Ok(())
+    }
 }
 
 /// Remove the Silo temp a copy into `link` left when it was cut off (Silo closed or crashed
@@ -1631,14 +1696,11 @@ fn build_dir_copy(src: &Path, tmp: &Path) -> std::io::Result<()> {
         files: listing_of(tmp)?,
     };
     let json = serde_json::to_vec(&listing).map_err(std::io::Error::other)?;
-    let mut marker = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(tmp.join(SILO_MARKER))?;
+    // Replaces a marker that came with `src` (a copy that was filed back into the archive).
+    let mut marker = std::fs::File::create(tmp.join(SILO_MARKER))?;
     std::io::Write::write_all(&mut marker, &json)?;
     marker.sync_all()?;
-    sync_dir(tmp);
-    Ok(())
+    sync_dir(tmp)
 }
 
 /// The v2 listing in `dir`'s marker; `None` for a legacy (`silo\n`) or unreadable marker.
@@ -1965,8 +2027,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
             copy_file_synced(&entry.path(), &to)?;
         }
     }
-    sync_dir(dst);
-    Ok(())
+    sync_dir(dst)
 }
 
 #[cfg(test)]
@@ -3218,13 +3279,6 @@ mod tests {
         let base = temp_dir_for("zipcopy_place");
         let src = base.join("FS25_A.zip");
         std::fs::write(&src, b"PK\x03\x04 whole").unwrap();
-        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
-        std::fs::File::options()
-            .write(true)
-            .open(&src)
-            .unwrap()
-            .set_modified(old)
-            .unwrap();
         let dst = base.join("mods").join("FS25_A.zip");
         std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
         // A temp a cut-off copy left behind is replaced, never placed.
@@ -3232,7 +3286,6 @@ mod tests {
 
         copy_new(&src, &dst).unwrap();
         assert_eq!(std::fs::read(&dst).unwrap(), b"PK\x03\x04 whole");
-        assert_eq!(std::fs::metadata(&dst).unwrap().modified().unwrap(), old);
         assert!(tmp_sibling(&dst).symlink_metadata().is_err());
 
         // The name is taken: refused, the entry untouched, no temp left.
@@ -3254,6 +3307,45 @@ mod tests {
         std::fs::create_dir_all(&empty).unwrap();
         assert!(place_new(&tmp_dir, &empty).is_err());
         assert!(std::fs::read_dir(&empty).unwrap().next().is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Set or clear a file's read-only flag.
+    fn set_readonly(p: &Path, on: bool) {
+        let mut perms = std::fs::metadata(p).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)] // a test file in a temp folder
+        perms.set_readonly(on);
+        std::fs::set_permissions(p, perms).unwrap();
+    }
+
+    #[test]
+    fn a_read_only_file_still_copies_and_flushes_and_keeps_its_flag() {
+        let base = temp_dir_for("copy_readonly");
+        let src = base.join("modDesc.xml");
+        std::fs::write(&src, b"<modDesc/>").unwrap();
+        set_readonly(&src, true);
+        let dst = base.join("copy.xml");
+        copy_file_synced(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"<modDesc/>");
+        assert!(std::fs::metadata(&dst).unwrap().permissions().readonly());
+        // Never over an existing file.
+        assert!(copy_file_synced(&src, &dst).is_err());
+        set_readonly(&src, false);
+        set_readonly(&dst, false);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_folder_filed_back_with_silos_marker_still_projects() {
+        let base = temp_dir_for("dircopy_marker");
+        let src = base.join("archived").join("FS25_Dir");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::write(src.join(SILO_MARKER), b"silo\n").unwrap();
+        let dst = base.join("FS25_Dir");
+        copy_dir_projection(&src, &dst).unwrap();
+        assert!(marker_listing(&dst).unwrap().is_some(), "a fresh v2 marker");
+        assert!(copy_unchanged(&dst, &src).unwrap());
         let _ = std::fs::remove_dir_all(&base);
     }
 
