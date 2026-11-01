@@ -200,7 +200,7 @@
   import ActiveFilters from "./lib/components/library/ActiveFilters.svelte";
   import { Selection } from "./lib/state/selection.svelte";
   import { createSwitchUndo, switchMessage } from "./lib/state/switchUndo";
-  import { switchOutcome } from "./lib/state/switchOutcome";
+  import { setSwitchOutcome, switchOutcome } from "./lib/state/switchOutcome";
   import { getVerdict } from "./lib/provenanceCache.svelte";
   import FilterBar from "./lib/components/FilterBar.svelte";
   import ModSettings from "./lib/components/ModSettings.svelte";
@@ -983,12 +983,11 @@
     // the old active set back on screen, and the next toggle would re-apply that (#347). Wait for
     // it, then plan from what it found.
     if (!(await settleScanOrRefuse())) return null;
-    /** The active mods just before filing, once it runs. */
-    let beforeFiling: Set<string> | null = null;
-    /** The switch stopped short: null when nothing was filed or filing left the active mods as
-     *  they were; false when filing changed them (a mod it couldn't link back is parked now), so
-     *  the caller keeps its snapshot and Undo can put that mod back. */
-    const stopped = () => (beforeFiling === null || sameMods(beforeFiling, activeSet) ? null : false);
+    /** The active mods before any filing (taken again after the dialog's scan wait, so a change
+     *  that scan found isn't counted as the switch's). Stopping short with the active mods still
+     *  these, nothing happened: the caller records nothing. Changed (a mod filing couldn't link
+     *  back is parked now), the caller keeps its snapshot and Undo can put it back. */
+    let baseline = activeSet;
     const { loose } = parkPlan(mods, activeSet, target);
     if (loose.length > 0) {
       const one = loose.length === 1 ? loose[0] : null;
@@ -998,12 +997,12 @@
       // filing: landing after it, it would still show these mods as loose and the switch below
       // would keep them on. Wait for it, then file the explained mods that are still loose.
       if (!(await settleScanOrRefuse())) return null;
+      baseline = activeSet;
       const explained = new Set(loose.map((m) => m.techName));
       const toFile = parkPlan(mods, activeSet, target).loose.filter((m) => explained.has(m.techName));
       if (toFile.length > 0) {
         // Filed and kept active (linked back): the switch below parks them through set_active,
         // so if it's refused they're simply still on, as before. Filing ends with a rescan.
-        beforeFiling = activeSet;
         const filed = await applyLoose(
           toFile.map(looseInput),
           toFile.map((m) => m.techName),
@@ -1024,7 +1023,9 @@
     const result = await setActiveSetTo([...target, ...stay.map((m) => m.techName)], label);
     if (result !== null && fixed.length > 0)
       toast({ message: fixedOnText(fixed.map((m) => m.title ?? m.techName)), tone: "warn" });
-    return result === null ? stopped() : result && stay.length === 0;
+    // Short of the target with the active mods as they were (only a folder mod was to be parked,
+    // say, or the apply was refused): nothing to record.
+    return setSwitchOutcome(result, stay.length === 0, baseline, activeSet);
   }
 
   /**
