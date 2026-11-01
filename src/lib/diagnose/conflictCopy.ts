@@ -83,6 +83,23 @@ export function fillTypeCapNote(cap: number, dropped: string[]): { title: string
   };
 }
 
+/**
+ * The Last run line for Silo's own folders the game tried to open as mods (#385).
+ * @param folders the folders as the log spells them, e.g. ".../mods/archive"
+ * @return one plain-words line, or "" when there are none
+ */
+export function siloFoldersNote(folders: string[]): string {
+  const names = [
+    ...new Set(folders.map((f) => f.split(/[\\/]/).filter(Boolean).pop() ?? f)),
+  ];
+  if (names.length === 0) return "";
+  const list =
+    names.length === 1
+      ? names[0]
+      : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  return `Harmless: Farming Simulator 25 looks inside every folder in mods for a mod, so it logged that it couldn't open the ${list} ${plural(names.length, { one: "folder", other: "folders" })}. Those are Silo's own folders, not broken mods.`;
+}
+
 /** A conflict that a "Park one…" menu can fix: two or more named mods, and not the maps note. */
 export function canParkOne(c: Pick<Conflict, "kind" | "techNames">): boolean {
   return c.kind !== "map" && c.techNames.length >= 2;

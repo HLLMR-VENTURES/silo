@@ -86,6 +86,38 @@ pub struct LogReport {
     /// The log was too big to read whole: only its start and its last [`LOG_TAIL_BYTES`] were
     /// read, so findings from the middle are missing (#351).
     pub truncated: bool,
+    /// Silo's own folders in the mods folder (its archive and `backups`) that the game tried to
+    /// open as mods, as the log spells them. Harmless, so not counted as findings (#385).
+    pub silo_folders: Vec<String>,
+}
+
+/// How Silo compares a folder from the log with one of its own: `/` separators, no trailing
+/// separator, lower case (FS25 runs on Windows and macOS, whose default file systems ignore
+/// case). Pure.
+pub fn folder_key(path: &str) -> String {
+    path.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
+/// The folder in "Error: Failed to open xml file '<mods>/archive/modDesc.xml'." when it's one of
+/// Silo's own (`silo`, as [`folder_key`]s), as the log spells it. The game looks inside every
+/// folder in mods for a `modDesc.xml`, so Silo's archive and backups folders there get this line
+/// on every start (#385). Pure.
+fn silo_folder(line: &str, silo: &[String]) -> Option<String> {
+    // The whole line is that message: the same words inside another error (a Lua one, say) are
+    // that error's business.
+    let rest = line
+        .strip_prefix("Error: Failed to open xml file '")?
+        .trim_end();
+    // The last quote closes it: a folder name may hold one ("D:/O'Brien/mods").
+    let path = rest
+        .strip_suffix("'.")
+        .or_else(|| rest.strip_suffix('\''))?;
+    let (dir, file) = path.rsplit_once(['/', '\\'])?;
+    if !file.eq_ignore_ascii_case("modDesc.xml") {
+        return None;
+    }
+    let key = folder_key(dir);
+    silo.contains(&key).then(|| dir.to_string())
 }
 
 /// What a DLC names when it turns itself off for lack of ground-pile slots: "PnH: unable to
@@ -243,12 +275,23 @@ const SCAN_ATTEMPTS: usize = 3;
 /// number. A log that changes size while it's read (the game starting over, say) is read again,
 /// a few times at most; a rewrite to exactly the same size can't be told apart.
 pub fn scan<R: std::io::Read + std::io::Seek>(
-    mut r: R,
+    r: R,
     head: u64,
     tail: u64,
 ) -> std::io::Result<LogReport> {
+    scan_with(r, head, tail, &[])
+}
+
+/// [`scan`], recognising the "can't open modDesc.xml" lines for Silo's own folders (`silo`, as
+/// [`folder_key`]s) as harmless.
+pub fn scan_with<R: std::io::Read + std::io::Seek>(
+    mut r: R,
+    head: u64,
+    tail: u64,
+    silo: &[String],
+) -> std::io::Result<LogReport> {
     for _ in 0..SCAN_ATTEMPTS {
-        if let Some(report) = scan_once(&mut r, head, tail)? {
+        if let Some(report) = scan_once(&mut r, head, tail, silo)? {
             return Ok(report);
         }
     }
@@ -262,6 +305,7 @@ fn scan_once<R: std::io::Read + std::io::Seek>(
     mut r: R,
     head: u64,
     tail: u64,
+    silo: &[String],
 ) -> std::io::Result<Option<LogReport>> {
     use std::io::{Read, SeekFrom};
     let limit = head.saturating_add(tail);
@@ -277,7 +321,7 @@ fn scan_once<R: std::io::Read + std::io::Seek>(
         if bytes.len() as u64 != len || r.seek(SeekFrom::End(0))? != len {
             return Ok(None);
         }
-        return Ok(Some(parse(&String::from_utf8_lossy(&bytes))));
+        return Ok(Some(parse_with(&String::from_utf8_lossy(&bytes), silo)));
     }
     let mut head_bytes = Vec::new();
     r.by_ref().take(head).read_to_end(&mut head_bytes)?;
@@ -316,7 +360,7 @@ fn scan_once<R: std::io::Read + std::io::Seek>(
                 .enumerate()
                 .map(|(i, l)| (head_lines + 2 + i, l)),
         );
-    let mut report = parse_lines(lines, head_lines);
+    let mut report = parse_lines(lines, head_lines, silo);
     report.truncated = true;
     Ok(Some(report))
 }
@@ -328,7 +372,16 @@ fn into_text(bytes: Vec<u8>) -> String {
 
 /// Parse a full `log.txt` into a triage report.
 pub fn parse(log: &str) -> LogReport {
-    parse_lines(log.lines().enumerate().map(|(i, l)| (i + 1, l)), usize::MAX)
+    parse_with(log, &[])
+}
+
+/// [`parse`], recognising Silo's own folders (`silo`, as [`folder_key`]s); see [`scan_with`].
+pub fn parse_with(log: &str, silo: &[String]) -> LogReport {
+    parse_lines(
+        log.lines().enumerate().map(|(i, l)| (i + 1, l)),
+        usize::MAX,
+        silo,
+    )
 }
 
 /// Add `item` to a name list kept in first-seen order, unless it's there already or the list
@@ -356,6 +409,7 @@ fn finding_key(mod_name: Option<&str>, severity: Severity, block: &str) -> u64 {
 fn parse_lines<'a>(
     lines: impl Iterator<Item = (usize, &'a str)>,
     numbered_through: usize,
+    silo: &[String],
 ) -> LogReport {
     use std::collections::{BTreeMap, HashSet};
     let mut engine_version: Option<String> = None;
@@ -365,6 +419,7 @@ fn parse_lines<'a>(
     let mut fill_cap: Option<u32> = None;
     let (mut dropped, mut dropped_seen) = (Vec::new(), HashSet::new());
     let (mut disabled, mut disabled_seen) = (Vec::new(), HashSet::new());
+    let (mut silo_folders, mut silo_seen) = (Vec::new(), HashSet::new());
 
     // Dedup findings: the engine writes a scan pass AND a load pass, repeating the same
     // warnings. Key on (mod, severity, message) so a mod that logs one thing twice per
@@ -408,6 +463,11 @@ fn parse_lines<'a>(
         let Some(severity) = severity_of(s) else {
             continue;
         };
+        // Silo's own folder, not a broken mod: noted once, never a finding (#385).
+        if let Some(dir) = silo_folder(s, silo) {
+            push_name(&mut silo_folders, &mut silo_seen, dir);
+            continue;
+        }
 
         // Fold continuation lines (bounded) into one block, so a Lua error and its stack
         // frames are attributed and reported together. A line that doesn't continue it stays
@@ -496,6 +556,7 @@ fn parse_lines<'a>(
         fill_type_cap: fill_cap,
         dropped_fill_types: dropped,
         truncated: false,
+        silo_folders,
     }
 }
 
@@ -534,6 +595,92 @@ pub fn parse_last_seen(v: Option<&str>) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #385: with the library archive in the mods folder (the default), every start logs these
+    /// for Silo's archive and backups folders. They're Silo's, not broken mods.
+    #[test]
+    fn silos_own_folders_are_harmless() {
+        let log = "\
+GIANTS Engine Runtime 10.0.0.0
+Error: Failed to open xml file 'C:/Users/me/Documents/My Games/FarmingSimulator2025/mods/archive/modDesc.xml'.
+Error: Failed to open xml file 'C:/Users/me/Documents/My Games/FarmingSimulator2025/mods/backups/modDesc.xml'.
+Error: Failed to open xml file 'C:/Users/me/Documents/My Games/FarmingSimulator2025/mods/oldstuff/modDesc.xml'.
+Available mod: (Hash: abc) (Version: 1.0.0.0) FS25_A
+Error: Failed to open xml file 'C:/Users/me/Documents/My Games/FarmingSimulator2025/mods/archive/modDesc.xml'.
+Application quit
+";
+        let mods = "C:\\Users\\Me\\Documents\\My Games\\FarmingSimulator2025\\mods\\";
+        let silo = vec![
+            folder_key(&format!("{mods}archive")),
+            folder_key(&format!("{mods}backups\\")),
+        ];
+        let r = parse_with(log, &silo);
+        assert_eq!(
+            r.silo_folders,
+            [
+                "C:/Users/me/Documents/My Games/FarmingSimulator2025/mods/archive",
+                "C:/Users/me/Documents/My Games/FarmingSimulator2025/mods/backups",
+            ]
+        );
+        // Only the folder that isn't Silo's is a finding.
+        assert_eq!((r.total_findings, r.unattributed), (1, 1));
+        assert!(r.mods.is_empty());
+
+        // Without knowing Silo's folders, nothing changes.
+        let plain = parse(log);
+        assert!(plain.silo_folders.is_empty());
+        assert_eq!(plain.total_findings, 3);
+
+        // The same through the reader, and a big log's tail.
+        let read = scan_with(std::io::Cursor::new(log), 1 << 20, 1 << 20, &silo).unwrap();
+        assert_eq!(read.silo_folders.len(), 2);
+        let cut = scan_with(std::io::Cursor::new(log), 40, 200, &silo).unwrap();
+        assert!(cut.truncated);
+        assert_eq!(cut.total_findings, 0, "{cut:?}");
+    }
+
+    #[test]
+    fn a_silo_folder_line_needs_its_moddesc_and_folder() {
+        let silo = vec![folder_key("D:/Mods/archive")];
+        assert_eq!(
+            silo_folder(
+                "Error: Failed to open xml file 'D:/Mods/archive/modDesc.xml'.",
+                &silo
+            )
+            .as_deref(),
+            Some("D:/Mods/archive")
+        );
+        assert_eq!(
+            silo_folder(
+                "Error: Failed to open xml file 'd:\\mods\\ARCHIVE\\moddesc.xml'.",
+                &silo
+            )
+            .as_deref(),
+            Some("d:\\mods\\ARCHIVE")
+        );
+        let quoted = vec![folder_key("D:/O'Brien/mods/backups")];
+        assert_eq!(
+            silo_folder(
+                "Error: Failed to open xml file 'D:/O'Brien/mods/backups/modDesc.xml'.",
+                &quoted
+            )
+            .as_deref(),
+            Some("D:/O'Brien/mods/backups")
+        );
+        // Another file in it, a folder inside it, no closing quote, or the words inside another
+        // message: not this line.
+        for line in [
+            "Error: Failed to open xml file 'D:/Mods/archive/other.xml'.",
+            "Error: Failed to open xml file 'D:/Mods/archive/FS25_A/modDesc.xml'.",
+            "Error: Failed to open xml file 'D:/Mods/archive/modDesc.xml",
+            "Error: Failed to load 'D:/Mods/archive/modDesc.xml'.",
+            "Error: Running LUA method 'loadMap': Failed to open xml file 'D:/Mods/archive/modDesc.xml'.",
+            "Fatal: Failed to open xml file 'D:/Mods/archive/modDesc.xml'.",
+            "Error: Failed to open xml file 'D:/Mods/archive/modDesc.xml'. Retrying 'x'",
+        ] {
+            assert_eq!(silo_folder(line, &silo), None, "{line}");
+        }
+    }
 
     #[test]
     fn modified_ms_reads_mtime_and_none_when_missing() {
@@ -881,13 +1028,13 @@ Application quit
     #[test]
     fn a_gap_ends_a_block() {
         let lines = [(1, "Error: boom"), (3, "  mods/FS25_B/x.lua(1)")];
-        let r = parse_lines(lines.into_iter(), usize::MAX);
+        let r = parse_lines(lines.into_iter(), usize::MAX, &[]);
         assert_eq!((r.unattributed, r.total_findings), (1, 1));
         let lines = [(1, "Error: boom"), (2, "  mods/FS25_B/x.lua(1)")];
-        let r = parse_lines(lines.into_iter(), usize::MAX);
+        let r = parse_lines(lines.into_iter(), usize::MAX, &[]);
         assert_eq!(r.mods[0].mod_name, "FS25_B");
         // Past `numbered_through`, a line's number isn't known.
-        let r = parse_lines([(5, "Error: x in mod 'FS25_C'")].into_iter(), 4);
+        let r = parse_lines([(5, "Error: x in mod 'FS25_C'")].into_iter(), 4, &[]);
         assert_eq!(r.mods[0].sample_line, None);
     }
 

@@ -17,14 +17,16 @@
 //!   save, so they're an estimate;
 //! * mods: their modDesc `<fillTypes filename>`, exact; other `*fillTypes*.xml` lists they ship
 //!   (RealisticLivestock, MoreRealistic, Corn Production Pack and others load theirs from a
-//!   script) are an estimate.
+//!   script) are an estimate. A list under `mod_support/<dir>/` counts only with the map `<dir>`
+//!   names (Realistic Livestock ships one per map it supports, #385; see
+//!   [`heighttypes::support_dir`](crate::heighttypes::support_dir)).
 //!
 //! A fill type that already exists is updated in place, never added again
 //! (`FillTypeManager:loadFillTypes`), so each name counts once.
 
 use crate::heighttypes::{
-    dlc_names, foliage_names, installed_dlc, map_own_file, named_list, push_new, severity_rank,
-    MAX_LIST_FILES, MAX_LIST_NAMES,
+    absorb_scoped, dlc_names, foliage_names, for_map, installed_dlc, map_own_file, named_list,
+    read_estimates, severity_rank, Loads, Scoped, MAX_LIST_NAMES,
 };
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
@@ -194,16 +196,24 @@ pub struct ModFills {
     pub exact: Vec<String>,
     /// From other `*fillTypes*.xml` lists it ships: a script may load them.
     pub estimate: Vec<String>,
+    /// Lists under `mod_support/<dir>/`: estimates only where `<dir>` loads (#385).
+    pub scoped: Scoped,
 }
 
 impl ModFills {
     fn all(&self) -> impl Iterator<Item = &str> {
         self.exact.iter().chain(&self.estimate).map(String::as_str)
     }
+
+    /// Count the map-specific lists that load per `loads` (a map, or the active mods) as
+    /// estimates from now on.
+    pub fn absorb_scoped(&mut self, loads: Loads) {
+        absorb_scoped(&self.exact, &mut self.estimate, &mut self.scoped, loads);
+    }
 }
 
 /// Read a mod's fill types: the modDesc-declared file exactly, plus (for non-maps) any other
-/// `*fillTypes*.xml` it ships as an estimate. `candidates` lists the members that pass
+/// `*fillTypes*.xml` it ships as an estimate, map-specific under `mod_support/<dir>/`. `candidates` lists the members that pass
 /// [`is_candidate`].
 pub fn mod_fills(
     label: &str,
@@ -217,26 +227,17 @@ pub fn mod_fills(
         .and_then(read)
         .map(|b| fill_type_names(&b))
         .unwrap_or_default();
-    let mut estimate: Vec<String> = Vec::new();
-    if !md.is_map && exact.len() < MAX_LIST_NAMES {
-        // Seeded with the exact names, so an estimate never repeats one.
-        let mut seen: HashSet<String> = exact.iter().cloned().collect();
-        for m in candidates().into_iter().take(MAX_LIST_FILES) {
-            if seen.len() >= MAX_LIST_NAMES {
-                break;
-            }
-            if Some(m.as_str()) == declared {
-                continue;
-            }
-            let names = read(&m).map(|b| fill_type_names(&b)).unwrap_or_default();
-            push_new(&mut estimate, &mut seen, names);
-        }
-    }
-    (!exact.is_empty() || !estimate.is_empty()).then(|| ModFills {
+    let (estimate, scoped) = if !md.is_map && exact.len() < MAX_LIST_NAMES {
+        read_estimates(&exact, declared, candidates(), read, fill_type_names)
+    } else {
+        Default::default()
+    };
+    (!exact.is_empty() || !estimate.is_empty() || !scoped.is_empty()).then(|| ModFills {
         label: label.into(),
         tech_name: tech_name.into(),
         exact,
         estimate,
+        scoped,
     })
 }
 
@@ -244,6 +245,9 @@ pub fn mod_fills(
 #[derive(Debug, Clone)]
 pub struct MapFills {
     pub label: String,
+    /// The map's [`map_keys`](crate::heighttypes::map_keys): which `mod_support/<dir>/` lists
+    /// load with it.
+    pub keys: Vec<String>,
     pub types: Vec<String>,
 }
 
@@ -266,7 +270,8 @@ pub struct Budget {
     pub mods: Vec<(String, String, usize, bool)>,
 }
 
-/// Count one map's fill types. Pure.
+/// Count one map's fill types. Mods' map-specific lists (`scoped`) don't count here: [`worst`]
+/// adds the ones for each map. Pure.
 pub fn evaluate(game: &GameData, map: Option<&MapFills>, mods: &[ModFills]) -> Budget {
     let mut exact: BTreeSet<&str> = game.base.iter().map(String::as_str).collect();
     if let Some(m) = map {
@@ -311,10 +316,14 @@ pub fn evaluate(game: &GameData, map: Option<&MapFills>, mods: &[ModFills]) -> B
 }
 
 /// The worst budget across the maps the save might use: the base-game maps and each active mod
-/// map. Most serious first, then fullest. Pure.
+/// map. Mods' lists for a map count only with that map; the base-game maps match none. Most
+/// serious first, then fullest. Pure.
 pub fn worst(game: &GameData, maps: &[MapFills], mods: &[ModFills]) -> Budget {
     std::iter::once(evaluate(game, None, mods))
-        .chain(maps.iter().map(|m| evaluate(game, Some(m), mods)))
+        .chain(maps.iter().map(|m| {
+            let on_map = for_map(mods, &m.keys, ModFills::absorb_scoped, |f| &f.scoped);
+            evaluate(game, Some(m), &on_map)
+        }))
         .max_by_key(|b| (severity_rank(severity(b)), b.total))
         .expect("the base-game maps are always a candidate")
 }
@@ -412,6 +421,7 @@ mod tests {
             tech_name: format!("FS25_{label}"),
             exact: types,
             estimate: vec![],
+            scoped: vec![],
         }
     }
 
@@ -521,13 +531,16 @@ mod tests {
                 .to_vec();
         let read = |name: &str| match name {
             "fillTypes.xml" => Some(declared_xml.clone()),
-            "mod_support/v2/fillTypes.xml" => Some(shipped.clone()),
+            "xml/v2/fillTypes.xml" | "mod_support/FS25_Valley/v2/fillTypes.xml" => {
+                Some(shipped.clone())
+            }
             _ => None,
         };
         let candidates = || {
             vec![
                 "fillTypes.xml".to_string(),
-                "mod_support/v2/fillTypes.xml".to_string(),
+                "xml/v2/fillTypes.xml".to_string(),
+                "mod_support/FS25_Valley/v2/fillTypes.xml".to_string(),
             ]
         };
         let md = crate::moddesc::ModDesc {
@@ -539,8 +552,20 @@ mod tests {
             (f.exact, f.estimate),
             (vec!["A".to_string()], vec!["B".to_string()])
         );
+        // A `mod_support/<map>/` list is set aside for that map (#385), without the exact names.
+        assert_eq!(
+            f.scoped,
+            [("FS25_Valley".to_string(), vec!["B".to_string()])]
+        );
         let script = mod_fills("M", "FS25_M", &Default::default(), &read, &candidates).unwrap();
         assert_eq!(script.estimate, ["A", "B"]);
+        assert_eq!(
+            script.scoped,
+            [(
+                "FS25_Valley".to_string(),
+                vec!["A".to_string(), "B".to_string()]
+            )]
+        );
         let map = crate::moddesc::ModDesc {
             is_map: true,
             ..Default::default()
@@ -636,6 +661,45 @@ mod tests {
         );
     }
 
+    /// #385: Realistic Livestock ships `mod_support/<map>/fillTypes.xml` for maps it supports and
+    /// loads one only with that map. They count on that map alone, never on the base-game maps.
+    #[test]
+    fn map_specific_lists_count_only_on_their_map() {
+        let g = game(178, 0, 0);
+        let mut livestock = m("Livestock", vec![]);
+        livestock.estimate = many("RL", 10);
+        livestock.scoped = vec![
+            ("FS25_HofBergmann".into(), many("HOF", 70)),
+            ("FS25_The_Mechet".into(), many("MECHET", 2)),
+        ];
+        let mods = [livestock];
+        // The base-game maps match no folder: 178 + 10.
+        let base = evaluate(&g, None, &mods);
+        assert_eq!((base.total, severity(&base)), (188, None));
+        assert_eq!(worst(&g, &[], &mods).total, 188);
+
+        let map = |label: &str, tech: &str| MapFills {
+            label: label.into(),
+            keys: crate::heighttypes::map_keys(tech, label),
+            types: vec![],
+        };
+        // Matched by tech name: 178 + 10 + 70 = 258, an estimate, so a warning.
+        let hof = worst(&g, &[map("Hof Bergmann", "FS25_HofBergmann")], &mods);
+        assert_eq!(hof.map.as_deref(), Some("Hof Bergmann"));
+        assert_eq!((hof.exact_total, hof.total), (178, 258));
+        assert_eq!(severity(&hof), Some("warning"));
+        assert_eq!(
+            hof.mods,
+            [("Livestock".into(), "FS25_Livestock".into(), 80, false)]
+        );
+        // Matched by title when the tech name differs; only that map's own list counts.
+        let mechet = worst(&g, &[map("The Mechet", "FS25_Mechet_v2")], &mods);
+        assert_eq!(mechet.total, 190);
+        // Another map loads none of them.
+        let other = worst(&g, &[map("Big Valley", "FS25_BigValley")], &mods);
+        assert_eq!(other.total, 188);
+    }
+
     #[test]
     fn nearly_full_is_a_note() {
         let g = game(178, 4, 48);
@@ -677,6 +741,7 @@ mod tests {
         let g = game(178, 4, 0);
         let map = MapFills {
             label: "Big Valley".into(),
+            keys: vec![],
             types: vec!["BASE0".into(), "VALLEY_ROCK".into()],
         };
         let b = evaluate(&g, Some(&map), &[]);

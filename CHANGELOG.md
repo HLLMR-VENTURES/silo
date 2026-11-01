@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When you switch mods folders, **Point Farming Simulator 25 at this folder too?** now has
+  **Only in Silo** selected, so pressing Enter changes nothing outside Silo. (#385)
+- The ground-pile and material-type checks no longer count lists a mod ships for one particular
+  map (Realistic Livestock has them for Hof Bergmann, The Mechet and Witcombe) unless that map is
+  active. Before, those lists could push a set into Review on their own. (#385)
+- **Last run** no longer lists "Failed to open xml file" for Silo's own archive and backups
+  folders as errors. It now says in one line that the game looks inside every folder in mods,
+  and that these are Silo's folders, not broken mods. (#385)
+- After you switch mods folders, the screen-reader status no longer reports the old folder's
+  scan. "Other folders Silo knows" now counts unpacked folder mods too, the way the Library does.
+  The game folder in Settings shows one kind of slash. (#385)
 - An unpacked (folder) mod you edit in place now shows its new title, version, dependencies and
   map flag after the next scan, and its new icon. Before, Silo kept showing what it read the
   first time until you cleared the scan cache. (#353)

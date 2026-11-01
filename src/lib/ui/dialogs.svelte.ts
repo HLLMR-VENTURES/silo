@@ -30,6 +30,11 @@ export interface ConfirmOptions {
   cancel?: string;
   /** "danger": red confirm button and initial focus on Cancel. Default "neutral". */
   tone?: "neutral" | "danger";
+  /**
+   * Which button has focus when the dialog opens (what Enter answers). Default: "cancel" for a
+   * danger tone, "confirm" otherwise. Use "cancel" when the verb changes something outside Silo.
+   */
+  focus?: "confirm" | "cancel";
   /** A checkbox under the body ("Don't explain this again"). Only `askWithOption()` reports it. */
   checkbox?: { label: string; checked?: boolean };
 }

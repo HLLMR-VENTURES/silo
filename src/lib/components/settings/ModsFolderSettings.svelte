@@ -10,6 +10,7 @@
   import { nMods } from "../../firstRun/firstRun";
   import { folderOpener } from "./folders.svelte";
   import { settingsLock } from "./lock";
+  import { displayPath } from "../../format";
 
   interface Props {
     roots: string[];
@@ -125,7 +126,7 @@
   {/snippet}
   {#if folders.error?.which === "gameInstall"}<p class="hint">{folders.error.msg}</p>{/if}
   {#if gameInfo}
-    <p class="path">{gameInfo.installDir}</p>
+    <p class="path">{displayPath(gameInfo.installDir)}</p>
   {:else}
     <p class="path muted">Farming Simulator 25 install not found. The Play button is hidden.</p>
   {/if}

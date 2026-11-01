@@ -2309,19 +2309,19 @@ fn path_map(loc: &fsgame::GameLocation) -> modsroot::PathMap {
     }
 }
 
-fn loose_zip_count(dir: &std::path::Path) -> i64 {
-    std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .map(|x| x.eq_ignore_ascii_case("zip"))
-                        .unwrap_or(false)
-                })
-                .count() as i64
-        })
-        .unwrap_or(0)
+/// How many mods a known mods folder's library holds, counted the way a scan lists them: each
+/// organized mod once, plus each zip or unpacked folder mod in the folder that isn't an
+/// organized mod's projection (#385). Pure.
+fn known_mod_count(organized: &[db::OrganizedRow], root_names: &[String]) -> i64 {
+    let projected: HashSet<String> = organized
+        .iter()
+        .map(|r| r.file_name.to_lowercase())
+        .collect();
+    let loose = root_names
+        .iter()
+        .filter(|n| !projected.contains(&n.to_lowercase()))
+        .count();
+    (organized.len() + loose) as i64
 }
 
 /// The layout to publish for the resolved mods folder `mods`, whatever chose it (the user,
@@ -2602,7 +2602,10 @@ fn resolve_mods_root(conn: &rusqlite::Connection, publish: bool) -> ModsRootStat
             let key = modsroot::canonical_key(p);
             KnownRoot {
                 path: p.to_string_lossy().into_owned(),
-                mod_count: db::count_organized(conn, &key) + loose_zip_count(p),
+                mod_count: known_mod_count(
+                    &db::load_organized(conn, &key),
+                    &scan::root_mod_names(p),
+                ),
                 current: current_key.as_deref() == Some(key.as_str()),
             }
         })
@@ -5313,13 +5316,61 @@ fn verdict_against_pin(zip: &std::path::Path, pinned: Option<&str>) -> String {
     }
 }
 
+/// Silo's own folders inside the mods folders the game may read, as `logscan::folder_key`s:
+/// each one's `backups/`, and its archive when that's the default `<mods>/archive` (a custom
+/// archive can't be inside the mods folder). The game looks inside every folder in mods for a
+/// `modDesc.xml`, so it logs a failure for these on every start (#385). Without `conn`, only
+/// the folders in use right now, with their published or default archive.
+fn silo_folders_in_mods(conn: Option<&rusqlite::Connection>) -> Vec<String> {
+    let active = modsroot::active();
+    let mut folders = live_mods_folders();
+    if let Some(c) = conn {
+        folders.extend(known_mods_folders(c, &[]));
+    }
+    silo_folder_keys(&folders, |mods| match &active {
+        Some(a) if modsroot::same_folder(&a.layout.mods, mods) => a.layout.archive.clone(),
+        _ => conn.map_or_else(
+            || organize::Layout::default_for(mods).archive,
+            |c| archive_of(c, mods),
+        ),
+    })
+}
+
+/// Pure but for comparing folders: [`silo_folders_in_mods`] over these mods folders, each with
+/// the archive `archive_of` gives it. One key per folder.
+fn silo_folder_keys(
+    folders: &[PathBuf],
+    archive_of: impl Fn(&std::path::Path) -> PathBuf,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |p: PathBuf| {
+        let k = logscan::folder_key(&p.to_string_lossy());
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    };
+    for mods in folders {
+        let layout = organize::Layout {
+            mods: mods.clone(),
+            archive: archive_of(mods),
+        };
+        if layout.archive_is_default() {
+            // Spelled from the mods folder, the way the game's log spells it.
+            push(organize::Layout::default_for(mods).archive);
+        }
+        push(mods.join("backups"));
+    }
+    out
+}
+
 /// Parse the FS25 log.txt and report which mods are throwing errors/warnings, whether
 /// the last run crashed, and the culprit ranking. Read-only; touches nothing.
 #[tauri::command]
-async fn scan_log() -> Result<logscan::LogReport, error::AppError> {
+async fn scan_log(app: tauri::AppHandle) -> Result<logscan::LogReport, error::AppError> {
     let path = fsgame::user_dir()
         .map(|d| d.join("log.txt"))
         .ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
+    let db = db_path(&app).ok();
     tauri::async_runtime::spawn_blocking(move || -> Result<logscan::LogReport, error::AppError> {
         if !path.exists() {
             // The game hasn't been played yet: an empty state, not a failure.
@@ -5331,10 +5382,14 @@ async fn scan_log() -> Result<logscan::LogReport, error::AppError> {
         // Logs are read as lossy UTF-8; FS writes mostly ASCII but paths can carry stray bytes.
         // A runaway log is read as its start and end only, so it can't exhaust memory (#351).
         let file = std::fs::File::open(&path)?;
-        Ok(logscan::scan(
+        // Best effort: without the database, the folders in use right now still count.
+        let conn = db.and_then(|d| db::open(&d).ok());
+        let silo = silo_folders_in_mods(conn.as_ref());
+        Ok(logscan::scan_with(
             file,
             logscan::LOG_HEAD_BYTES,
             logscan::LOG_TAIL_BYTES,
+            &silo,
         )?)
     })
     .await
@@ -8295,5 +8350,68 @@ mod collection_reporting_tests {
         assert!(msg.contains("https://github.com/me/silo-pack"));
         assert!(msg.contains("Try again"));
         assert!(msg.contains("timed out"));
+    }
+}
+
+/// Silo's own folders in the log, and known folders' mod counts (#385).
+#[cfg(test)]
+mod silo_folder_tests {
+    use super::{known_mod_count, silo_folder_keys};
+
+    /// Zips and folder mods both count, and an organized mod's projection counts once.
+    #[test]
+    fn known_folder_counts_folder_mods_and_projections_once() {
+        let dir = std::env::temp_dir().join(format!("silo_known_count_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("FS25_Folder")).unwrap();
+        std::fs::write(dir.join("FS25_Folder/modDesc.xml"), "<modDesc/>").unwrap();
+        std::fs::create_dir_all(dir.join("NotAMod")).unwrap();
+        std::fs::create_dir_all(dir.join("archive/Tools")).unwrap();
+        std::fs::create_dir_all(dir.join("backups")).unwrap();
+        for z in ["FS25_A.zip", "FS25_B.zip", "FS25_Parked.zip"] {
+            std::fs::write(dir.join(z), b"PK").unwrap();
+        }
+        std::fs::write(dir.join("readme.txt"), b"x").unwrap();
+        let names = crate::scan::root_mod_names(&dir);
+        let row = |file: &str| crate::db::OrganizedRow {
+            tech_name: file.trim_end_matches(".zip").into(),
+            file_name: file.into(),
+            kind: "zip".into(),
+            category: "Tools".into(),
+            subcategory: None,
+            active: false,
+        };
+        // FS25_A is organized and active (its projection is in the folder); FS25_C is parked.
+        let organized = [row("FS25_a.zip"), row("FS25_C.zip")];
+        let n = known_mod_count(&organized, &names);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(names.len(), 4, "{names:?}");
+        // A (organized), C (parked), B, Parked and the folder mod.
+        assert_eq!(n, 5);
+    }
+    use crate::logscan::folder_key;
+    use std::path::PathBuf;
+
+    #[test]
+    fn backups_always_and_the_archive_only_when_it_is_the_default() {
+        let base = std::env::temp_dir().join(format!("silo_folder_keys_{}", std::process::id()));
+        let (a, b) = (base.join("A"), base.join("B"));
+        let custom = base.join("Elsewhere");
+        let keys = silo_folder_keys(&[a.clone(), b.clone(), a.clone()], |m| {
+            if m == a.as_path() {
+                m.join("archive")
+            } else {
+                custom.clone()
+            }
+        });
+        let key = |p: PathBuf| folder_key(&p.to_string_lossy());
+        assert_eq!(
+            keys,
+            [
+                key(a.join("archive")),
+                key(a.join("backups")),
+                key(b.join("backups"))
+            ]
+        );
     }
 }
