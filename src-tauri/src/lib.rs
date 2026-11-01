@@ -1493,21 +1493,19 @@ async fn install_remote_mod(
                 );
             },
         )?;
-        // What this install records about the file's catalog entry (#386), worked out before the
-        // lock: an alias for a differently named file, or, for a file named after its entry,
-        // dropping an alias an earlier install left for the same name and bytes.
+        // What this install records about the file's catalog entry (#386): an alias for a
+        // differently named file, or, for a file named after its entry, dropping an alias an
+        // earlier install left for the same name and bytes. Recorded before the file is placed,
+        // so a placed file never has a missing or stale link; put back as it was if the file
+        // then isn't placed. A download the catalog has a hash for was already checked against it.
         let db = db_path(&app)?;
         let stem = catalogalias::zip_tech_name(&dest);
-        let stale = match stem.as_deref() {
-            Some(t) if !alias => catalogalias::has_any(&db::open(&db)?, t)?,
-            _ => false,
+        let hash_part = || match &resolved.expected_sha256 {
+            Some(h) => Ok(h.clone()),
+            None => provenance::sha256_file(part.path()),
         };
-        let note = if alias || stale {
-            // A download the catalog has a hash for was already checked against it.
-            let sha = match &resolved.expected_sha256 {
-                Some(h) => h.clone(),
-                None => provenance::sha256_file(part.path())?,
-            };
+        // The alias's hash and size are taken before the lock.
+        let alias = if alias {
             let size = std::fs::metadata(part.path())
                 .map_err(|e| e.to_string())?
                 .len();
@@ -1516,20 +1514,22 @@ async fn install_remote_mod(
                 catalog_tech_name: resolved.tech_name.clone(),
                 download_url: Some(resolved.url.clone()),
             };
-            Some((alias.then_some(link), sha, size))
+            Some((link, hash_part()?, size))
         } else {
             None
         };
         // A finished download waits out a busy spell instead of being thrown away.
         let _write = library_write_within(PLACE_WAIT)?;
         install_recheck(&root, &dest)?;
-        // Noted before the file is placed, so a placed file never has a missing or stale link.
-        // If the file then isn't placed, the record is put back as it was.
-        let undo = match (&note, stem.as_deref()) {
-            (Some((Some(link), sha, size)), _) => {
+        let undo = match (&alias, stem.as_deref()) {
+            (Some((link, sha, size)), _) => {
                 Some(remember_catalog_alias(&db, &dest, sha, *size, link)?)
             }
-            (Some((None, sha, _)), Some(stem)) => Some(forget_catalog_alias(&db, stem, sha)?),
+            // Asked under the lock, so an install placing the same name meanwhile is seen. The
+            // hash is only taken (under the lock) in that rare case.
+            (None, Some(stem)) if catalogalias::has_any(&db::open(&db)?, stem)? => {
+                Some(forget_catalog_alias(&db, stem, &hash_part()?)?)
+            }
             _ => None,
         };
         if let Err(e) = place_part(part.path(), &dest) {
@@ -1975,19 +1975,16 @@ fn linked_entry(
     }
 }
 
-/// Whether a source's version is the record's latest: the same once a leading `v` and case are
-/// set aside. A side that doesn't say counts as the same.
+/// Whether a source's version is the record's latest: both given, and the same once a leading
+/// `v` and case are set aside. A version that isn't given is unknown, never the same.
 fn same_version(source: Option<&str>, latest: Option<&str>) -> bool {
     let norm = |v: &str| {
         let v = v.trim();
         v.strip_prefix(['v', 'V']).unwrap_or(v).to_ascii_lowercase()
     };
-    match (
-        source.filter(|v| !v.trim().is_empty()),
-        latest.filter(|v| !v.trim().is_empty()),
-    ) {
-        (Some(a), Some(b)) => norm(a) == norm(b),
-        _ => true,
+    match (source, latest) {
+        (Some(a), Some(b)) if !a.trim().is_empty() => norm(a) == norm(b),
+        _ => false,
     }
 }
 
@@ -1997,15 +1994,18 @@ fn catalog_not_found(e: &str) -> bool {
     e.contains("(error 404)")
 }
 
-/// A full catalog record in the shape the lookup returns: its best direct download is its
-/// first installable source (sources are listed best-first), and only when that source is of
-/// the record's latest version, so an update check never offers an older build as the latest.
+/// A full catalog record in the shape the lookup returns: its direct download is the first
+/// installable source (sources are listed best-first) that says it is the record's latest
+/// version, so an update check never offers another build as the latest. With none, the page.
 fn lookup_from_detail(d: siloapi::BrowseMod) -> siloapi::LookupResult {
     let download = d
         .sources
         .iter()
-        .find(|s| s.installable && s.download_url.is_some())
-        .filter(|s| same_version(s.version.as_deref(), d.latest_version.as_deref()))
+        .find(|s| {
+            s.installable
+                && s.download_url.is_some()
+                && same_version(s.version.as_deref(), d.latest_version.as_deref())
+        })
         .and_then(|s| {
             Some(siloapi::Download {
                 source: s.source.clone(),
@@ -4940,7 +4940,13 @@ fn build_collection_entries(
                 let file = std::path::Path::new(&m.path);
                 catalogalias::link_for_hash(c, &m.tech_name, file, sha)
             }
-            _ => Ok(None),
+            // Not fingerprinted: it may be a linked file, unless no alias has its name.
+            (Some(c), None) => match catalogalias::has_any(c, &m.tech_name) {
+                Ok(false) => Ok(None),
+                Ok(true) => Err("its file couldn't be read to check its catalog link".to_string()),
+                Err(e) => Err(e),
+            },
+            (None, _) => Ok(None),
         })
         .collect();
     let asked: Vec<(String, Option<catalogalias::Link>)> = zips
@@ -8730,8 +8736,28 @@ mod tests {
         assert!(row.download.is_none(), "the page, not the 1.0 download");
         assert_eq!(row.page_url.as_deref(), Some("https://modhub.example/x"));
         assert!(super::same_version(Some("v1.2.0"), Some("1.2.0")));
-        assert!(super::same_version(None, Some("1.2.0")));
+        assert!(
+            !super::same_version(None, Some("1.2.0")),
+            "unknown isn't the latest"
+        );
+        assert!(!super::same_version(Some(""), Some("")));
         assert!(!super::same_version(Some("1.0"), Some("2.0")));
+
+        // An older first source and a current second one: the current one.
+        let detail: crate::siloapi::BrowseMod = serde_json::from_value(serde_json::json!({
+            "id": "x", "title": "X", "latestVersion": "2.0",
+            "sources": [
+                {"source": "github", "sourceUrl": "https://github.com/k/a", "version": "1.0",
+                 "installable": true, "downloadUrl": "https://github.com/k/a/releases/download/1.0/X.zip"},
+                {"source": "github", "sourceUrl": "https://github.com/k/a", "installable": true,
+                 "downloadUrl": "https://github.com/k/a/releases/download/unknown/X.zip"},
+                {"source": "github", "sourceUrl": "https://github.com/k/b", "version": "v2.0",
+                 "installable": true, "downloadUrl": "https://github.com/k/b/releases/download/2.0/X.zip"}
+            ]
+        }))
+        .unwrap();
+        let dl = super::lookup_from_detail(detail).download.unwrap();
+        assert!(dl.url.contains("/k/b/"), "{}", dl.url);
     }
 
     #[test]
@@ -8755,7 +8781,7 @@ mod tests {
             "sources": [
                 {"source": "modhub", "sourceUrl": "https://modhub.example/x", "installable": false},
                 {"source": "github", "sourceUrl": "https://github.com/k/FS25_ToDo",
-                 "installable": true,
+                 "installable": true, "version": "v0.2",
                  "downloadUrl": "https://github.com/k/FS25_ToDo/releases/download/v0.2/FS25_FieldToDoList.zip"}
             ]
         }))
