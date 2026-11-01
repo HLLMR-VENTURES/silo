@@ -110,31 +110,28 @@ fn fingerprint(value: &str) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Whether `row` is the value a disconnect revoked. A marker Silo can't read counts as a match,
-/// so a database read error never brings a revoked token back.
-fn row_revoked(conn: &Connection, key: &str, row: &str) -> bool {
-    match setting(conn, &revoked_key(key)) {
-        Ok(None) => false,
-        Ok(Some(f)) => f == fingerprint(row),
-        Err(_) => true,
-    }
+/// Whether `row` is the value a disconnect revoked: Ok(true) or Ok(false), or Err when the
+/// marker can't be read (then the row may be neither used nor deleted).
+fn row_revoked(conn: &Connection, key: &str, row: &str) -> Result<bool, String> {
+    Ok(setting(conn, &revoked_key(key))?.is_some_and(|f| f == fingerprint(row)))
 }
 
 /// Revoke `row` (`Some`) or lift the revocation (`None`). Lifting one that isn't set writes
-/// nothing.
+/// nothing; one Silo can't read is deleted.
 fn set_revoked(conn: &Connection, key: &str, row: Option<&str>) -> Result<(), String> {
     match row {
         Some(r) => db::set_app_setting(conn, &revoked_key(key), Some(&fingerprint(r))),
-        None if db::get_app_setting(conn, &revoked_key(key)).is_none() => Ok(()),
+        None if setting(conn, &revoked_key(key)) == Ok(None) => Ok(()),
         None => db::set_app_setting(conn, &revoked_key(key), None),
     }
 }
 
 /// Store `v` in the SQLite fallback. A revocation naming this very value (the user reconnects
-/// with the token a failed disconnect left behind) is lifted, or the save fails.
+/// with the token a failed disconnect left behind), or one Silo can't read, is lifted, or the
+/// save fails.
 fn write_fallback(conn: &Connection, key: &str, v: &str) -> Result<(), SaveError> {
     db::set_app_setting(conn, key, Some(v)).map_err(SaveError::unchanged)?;
-    if row_revoked(conn, key, v) {
+    if row_revoked(conn, key, v) != Ok(false) {
         set_revoked(conn, key, None).map_err(SaveError::changed)?;
     }
     Ok(())
@@ -172,22 +169,28 @@ pub fn get(conn: &Connection, key: &str) -> Option<String> {
 fn get_with(conn: &Connection, key: &str, keychain: Option<&keyring::Entry>) -> Option<String> {
     let _held = store_lock();
     if let Some(row) = db::get_app_setting(conn, key) {
-        if row_revoked(conn, key, &row) {
+        match row_revoked(conn, key, &row) {
+            // Can't tell whether this row is the current token or a revoked one: use nothing,
+            // delete nothing, and don't fall back to an older keychain copy either.
+            Err(_) => return None,
             // A disconnect couldn't delete this row. Never use it; remove it once the database
             // allows, and go on to the keychain (whose copy, if any, is newer, or distrusted).
-            let _ = clear_fallback(conn, key);
-        } else {
-            // Best-effort promotion into the keychain, then drop the plaintext copy AND VACUUM
-            // so the token isn't left carve-able in the DB's free pages (SQLite doesn't zero
-            // deletes). The marker goes first: a row dropped while it stayed would make the
-            // next read delete the keychain copy just written.
-            if let Some(e) = keychain {
-                if e.set_password(&row).is_ok() && set_distrust(conn, key, false).is_ok() {
-                    let _ = db::set_app_setting(conn, key, None);
-                    db::vacuum(conn);
-                }
+            Ok(true) => {
+                let _ = clear_fallback(conn, key);
             }
-            return Some(row);
+            Ok(false) => {
+                // Best-effort promotion into the keychain, then drop the plaintext copy AND VACUUM
+                // so the token isn't left carve-able in the DB's free pages (SQLite doesn't zero
+                // deletes). The marker goes first: a row dropped while it stayed would make the
+                // next read delete the keychain copy just written.
+                if let Some(e) = keychain {
+                    if e.set_password(&row).is_ok() && set_distrust(conn, key, false).is_ok() {
+                        let _ = db::set_app_setting(conn, key, None);
+                        db::vacuum(conn);
+                    }
+                }
+                return Some(row);
+            }
         }
     }
     let e = keychain?;
@@ -1243,16 +1246,39 @@ mod tests {
     fn an_unreadable_revocation_counts_as_revoked() {
         let conn = mem_db();
         db::set_app_setting(&conn, KEY, Some("tok")).unwrap();
-        assert!(!row_revoked(&conn, KEY, "tok"));
+        assert_eq!(row_revoked(&conn, KEY, "tok"), Ok(false));
         set_revoked(&conn, KEY, Some("tok")).unwrap();
-        assert!(row_revoked(&conn, KEY, "tok"));
-        assert!(!row_revoked(&conn, KEY, "other"));
+        assert_eq!(row_revoked(&conn, KEY, "tok"), Ok(true));
+        assert_eq!(row_revoked(&conn, KEY, "other"), Ok(false));
         // The marker holds a fingerprint, never the token.
         let marker = db::get_app_setting(&conn, &revoked_key(KEY)).unwrap();
         assert!(!marker.contains("tok"));
-        // A database Silo can't read the marker from: the row isn't trusted.
+        // A database Silo can't read the marker from: unknown, not "not revoked".
         let broken = Connection::open_in_memory().unwrap();
-        assert!(row_revoked(&broken, KEY, "tok"));
+        assert!(row_revoked(&broken, KEY, "tok").is_err());
+    }
+
+    #[test]
+    fn an_unreadable_revocation_neither_uses_nor_deletes_the_row() {
+        // Account A's token in the keychain, B's (newer) in the SQLite fallback. The revocation
+        // marker holds something that can't be read as text.
+        let conn = mem_db();
+        db::set_app_setting(&conn, KEY, Some("account-b")).unwrap();
+        conn.execute(
+            "INSERT INTO app_setting(key, value) VALUES (?1, x'00ff')",
+            [revoked_key(KEY)],
+        )
+        .unwrap();
+        let k = FakeKeychain::with(|s| s.stored = Some("account-a".into()));
+        assert_eq!(get_with(&conn, KEY, Some(&k.entry())), None, "never A");
+        assert_eq!(row(&conn).as_deref(), Some("account-b"), "B isn't deleted");
+        assert_eq!(k.stored().as_deref(), Some("account-a"));
+        // Without a keychain too.
+        assert_eq!(get_with(&conn, KEY, None), None);
+        assert_eq!(row(&conn).as_deref(), Some("account-b"));
+        // Connecting again through the fallback lifts it (replacing the unreadable value).
+        set_with(&conn, KEY, Some("account-b"), None, NO_KEYCHAIN).unwrap();
+        assert_eq!(get_with(&conn, KEY, None).as_deref(), Some("account-b"));
     }
 
     #[test]

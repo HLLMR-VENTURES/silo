@@ -25,6 +25,7 @@ vi.mock("../api", async (importOriginal) => ({
   ghDeviceStart: vi.fn(),
   ghDevicePoll: vi.fn(),
   ghDeviceCancel: vi.fn(() => Promise.resolve(true)),
+  ghSignInBegin: vi.fn(() => Promise.resolve(1)),
   catalogImage: vi.fn(() => Promise.resolve("")),
   logFrontendError: vi.fn(() => Promise.resolve()),
 }));

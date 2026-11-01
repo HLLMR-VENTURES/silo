@@ -536,6 +536,7 @@ async fn gh_device_start(
     app: tauri::AppHandle,
     write: Option<bool>,
     gist: Option<bool>,
+    attempt: u64,
 ) -> Result<github::DeviceCode, String> {
     let db = db_path(&app)?;
     // Ask only for what the user is enabling — a plain sign-in for update-checks stays
@@ -543,8 +544,8 @@ async fn gh_device_start(
     // sharing. GitHub accumulates scopes across authorizations, so the caller requests
     // the union of what it already holds plus the new capability.
     let scope = build_gh_scope(write.unwrap_or(false), gist.unwrap_or(false));
-    // A new sign-in attempt: every older one (a flow, a PAT save) can no longer store a token.
-    let attempt = GH_SESSION.begin();
+    // `attempt` is from `gh_sign_in_begin`: if anything newer (a sign-in, a cancel, a
+    // Disconnect) came since, the flow is refused below.
     tauri::async_runtime::spawn_blocking(move || -> Result<github::DeviceCode, String> {
         let conn = db::open(&db)?;
         let cid = effective_client_id(&conn)
@@ -672,6 +673,14 @@ async fn gh_device_poll(
     .map_err(|e| e.to_string())?
 }
 
+/// Start a sign-in attempt (a device flow or a PAT save), before its own command: every older
+/// attempt can no longer store a token. The frontend calls this in order with Disconnect, so
+/// the two are ordered as the user clicked them however the commands themselves are scheduled.
+#[tauri::command]
+async fn gh_sign_in_begin() -> Result<u64, String> {
+    off_main(|| Ok(GH_SESSION.begin())).await
+}
+
 /// Cancel a device flow (the user clicked Cancel, or a start answered after it was cancelled):
 /// its polls can't store a token afterwards. True when it was the newest sign-in and is now
 /// cancelled; false when it was already over (it may have just stored its token), so the
@@ -689,10 +698,9 @@ async fn gh_device_cancel(device_code: String) -> Result<bool, String> {
 /// record the `"*"` sentinel ("assume capable", since the user minted it deliberately) and
 /// let a 403 surface a reconnect hint if a specific permission is missing.
 #[tauri::command]
-async fn gh_set_pat(app: tauri::AppHandle, pat: String) -> Result<String, String> {
-    // A sign-in attempt like a device flow: a newer sign-in or a Disconnect while GitHub checks
-    // the token wins.
-    let attempt = GH_SESSION.begin();
+async fn gh_set_pat(app: tauri::AppHandle, pat: String, attempt: u64) -> Result<String, String> {
+    // `attempt` is from `gh_sign_in_begin`, like a device flow's: a newer sign-in or a
+    // Disconnect while GitHub checks the token wins.
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let pat = github::clean_pat(&pat)?;
@@ -6078,6 +6086,7 @@ pub fn run() {
         gh_device_start,
         gh_device_poll,
         gh_device_cancel,
+        gh_sign_in_begin,
         gh_set_pat,
         gh_repo_stats,
         gh_star,

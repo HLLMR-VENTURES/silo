@@ -9,11 +9,21 @@
 // One timer at a time: each flow has a generation number, and a poll result (or the start call's
 // result) that comes back for an older generation is dropped, so nothing re-arms after a cancel.
 // The backend keeps its own order (newest sign-in wins), and a cancel tells it which flow ended.
-// Account changes (starting a sign-in, saving a token, Disconnect) reach it one at a time, in
-// the order the user asked, so a Disconnect can't overtake a token save clicked before it.
+// Account changes reach it in the order the user asked: a sign-in first registers an attempt
+// (quick, no network), and those registrations and Disconnects are sent one at a time, so a
+// Disconnect can't overtake a token save clicked before it, nor wait for its network check.
 // When the flow finishes while no GitHubAuth view is mounted, a toast says how it went.
 
-import { ghDeviceCancel, ghDevicePoll, ghDeviceStart, ghLogout, ghSetPat, ghStatus, openExternal } from "../api";
+import {
+  ghDeviceCancel,
+  ghDevicePoll,
+  ghDeviceStart,
+  ghLogout,
+  ghSetPat,
+  ghSignInBegin,
+  ghStatus,
+  openExternal,
+} from "../api";
 import type { GhStatus } from "../types";
 import { toast } from "../ui/toasts.svelte";
 import { inlineError, reportError, success } from "./notify.svelte";
@@ -51,12 +61,13 @@ let generation = 0;
 let views = 0;
 /** The device code of the flow on screen, so a cancel can name it to the backend. */
 let activeCode: string | null = null;
-/** The account change still on its way to the backend, if any (see `inOrder`). */
+/** The account change (an attempt registration or a Disconnect) still on its way, if any. */
 let accountTail: Promise<void> | null = null;
 
 /**
  * Send an account change after the one before it has answered, so the backend sees them in the
  * order the user asked (it can't tell that order itself). Runs at once when nothing is pending.
+ * Only quick steps go through here: registering a sign-in attempt, and Disconnect.
  */
 function inOrder<T>(op: () => Promise<T>): Promise<T> {
   const run = accountTail
@@ -216,8 +227,9 @@ export async function startDeviceFlow(write = false, gist = false): Promise<void
   githubAuth.message = null;
   try {
     // Waiting behind another account change and cancelled meanwhile: don't start at all.
-    const dc = await inOrder(() => (gen === generation ? ghDeviceStart(write, gist) : Promise.resolve(null)));
-    if (dc === null) return;
+    const attempt = await inOrder(() => (gen === generation ? ghSignInBegin() : Promise.resolve(null)));
+    if (attempt === null || gen !== generation) return;
+    const dc = await ghDeviceStart(write, gist, attempt);
     if (gen !== generation) {
       // Cancelled or restarted meanwhile: make sure the backend forgets this flow too.
       cancelOnBackend(dc.deviceCode, false);
@@ -265,8 +277,9 @@ export async function disconnectGithub(): Promise<void> {
  * Sign in with a pasted personal access token, in order with the other account changes.
  * @return the GitHub login it belongs to
  */
-export function saveGithubPat(pat: string): Promise<string> {
-  return inOrder(() => ghSetPat(pat));
+export async function saveGithubPat(pat: string): Promise<string> {
+  const attempt = await inOrder(() => ghSignInBegin());
+  return ghSetPat(pat, attempt);
 }
 
 /** Test helper: back to the initial state with no timer and no views. */

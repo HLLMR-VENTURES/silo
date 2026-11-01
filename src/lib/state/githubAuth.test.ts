@@ -10,10 +10,20 @@ vi.mock("../api", async (importOriginal) => ({
   ghDeviceCancel: vi.fn(),
   ghLogout: vi.fn(),
   ghSetPat: vi.fn(),
+  ghSignInBegin: vi.fn(),
   openExternal: vi.fn(() => Promise.resolve()),
   logFrontendError: vi.fn(() => Promise.resolve()),
 }));
-import { ghDeviceCancel, ghDevicePoll, ghDeviceStart, ghLogout, ghSetPat, ghStatus, openExternal } from "../api";
+import {
+  ghDeviceCancel,
+  ghDevicePoll,
+  ghDeviceStart,
+  ghLogout,
+  ghSetPat,
+  ghSignInBegin,
+  ghStatus,
+  openExternal,
+} from "../api";
 import type { PollResult } from "../types";
 import { dismissToast, toasts } from "../ui/toasts.svelte";
 import { activity, clearActivity } from "./activity.svelte";
@@ -41,6 +51,8 @@ beforeEach(() => {
   vi.mocked(ghDeviceStart).mockResolvedValue(device);
   vi.mocked(ghStatus).mockResolvedValue(connected);
   vi.mocked(ghDeviceCancel).mockResolvedValue(true);
+  let attempts = 0;
+  vi.mocked(ghSignInBegin).mockImplementation(async () => ++attempts);
 });
 
 afterEach(() => {
@@ -170,6 +182,7 @@ describe("githubAuth device flow", () => {
     let resolveStart!: (d: typeof device) => void;
     vi.mocked(ghDeviceStart).mockImplementation(() => new Promise((r) => (resolveStart = r)));
     const p = startDeviceFlow();
+    await flush(); // the start is out
     cancelDeviceFlow();
     expect(ghDeviceCancel).not.toHaveBeenCalled(); // no code yet
     resolveStart(device);
@@ -231,6 +244,7 @@ describe("githubAuth device flow", () => {
     let resolveStart!: (d: typeof device) => void;
     vi.mocked(ghDeviceStart).mockImplementation(() => new Promise((r) => (resolveStart = r)));
     const p = startDeviceFlow();
+    await flush(); // the start is out
     cancelDeviceFlow();
     resolveStart(device);
     await p;
@@ -315,25 +329,28 @@ describe("disconnecting GitHub", () => {
     expect(toasts.some((t) => /Connected to GitHub/.test(t.message))).toBe(false);
   });
 
-  it("a Disconnect clicked while a token is being saved reaches the backend after it", async () => {
+  it("a Disconnect clicked while a token is being saved goes out after the save registered, without waiting for it", async () => {
     const order: string[] = [];
-    let answerPat!: (login: string) => void;
-    vi.mocked(ghSetPat).mockImplementation(() => {
-      order.push("pat");
-      return new Promise((r) => (answerPat = r));
+    let answerBegin!: (n: number) => void;
+    vi.mocked(ghSignInBegin).mockImplementationOnce(() => {
+      order.push("begin");
+      return new Promise((r) => (answerBegin = r));
+    });
+    vi.mocked(ghSetPat).mockImplementation((_pat, attempt) => {
+      order.push(`pat#${attempt}`);
+      return new Promise(() => {}); // GitHub is slow to check it
     });
     vi.mocked(ghLogout).mockImplementation(async () => {
       order.push("logout");
     });
     vi.mocked(ghStatus).mockResolvedValue(disconnected);
-    const saving = saveGithubPat("ghp_x");
+    void saveGithubPat("ghp_x");
     const disconnecting = disconnectGithub();
     await flush();
-    expect(order).toEqual(["pat"]); // Disconnect waits its turn
-    answerPat("octocat");
-    await saving;
+    expect(order).toEqual(["begin"]); // Disconnect waits for the registration only
+    answerBegin(7);
     await disconnecting;
-    expect(order).toEqual(["pat", "logout"]);
+    expect(order).toEqual(["begin", "pat#7", "logout"]);
     expect(githubAuth.status.user).toBeNull();
   });
 
@@ -345,6 +362,7 @@ describe("disconnecting GitHub", () => {
     const disconnecting = disconnectGithub();
     const starting = startDeviceFlow();
     await flush();
+    expect(ghSignInBegin).not.toHaveBeenCalled();
     expect(ghDeviceStart).not.toHaveBeenCalled();
     answerLogout();
     await disconnecting;

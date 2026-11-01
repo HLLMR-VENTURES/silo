@@ -224,11 +224,21 @@ impl Session {
     /// Keep the signed-out state in the file at `path` (beside the database). Call once at
     /// startup: a marker left by an earlier run means that run's Disconnect (or a failed
     /// sign-in) couldn't clean up storage, so the stored token isn't used.
+    /// A marker Silo can't check for counts as there.
     pub fn use_marker(&self, path: PathBuf) {
         let mut g = self.lock();
-        if path.exists() {
-            log::warn!("GitHub: an earlier Disconnect didn't finish; staying signed out");
-            g.signed_out = true;
+        match path.try_exists() {
+            Ok(false) => {}
+            Ok(true) => {
+                log::warn!("GitHub: an earlier Disconnect didn't finish; staying signed out");
+                g.signed_out = true;
+            }
+            Err(e) => {
+                log::warn!(
+                    "GitHub: couldn't check the signed-out marker ({e}); staying signed out"
+                );
+                g.signed_out = true;
+            }
         }
         g.marker = Some(path);
     }
@@ -260,8 +270,11 @@ impl Session {
         }
     }
 
+    /// Whether the marker is there; one Silo can't check for counts as there.
     fn marker_exists(g: &State) -> bool {
-        g.marker.as_ref().is_some_and(|p| p.exists())
+        g.marker
+            .as_ref()
+            .is_some_and(|p| p.try_exists().unwrap_or(true))
     }
 
     fn end_sign_out(g: &mut State) {
@@ -320,8 +333,9 @@ impl Session {
     }
 
     /// Start a sign-in attempt (a device flow or a PAT save). Every older attempt loses its
-    /// right to store a token or send requests. Call it first thing in the command, so attempts
-    /// and Disconnects are ordered as the user clicked them.
+    /// right to store a token or send requests. The frontend asks for it (`gh_sign_in_begin`)
+    /// in order with Disconnects, before the sign-in's own command, so attempts and Disconnects
+    /// are ordered as the user clicked them.
     pub fn begin(&self) -> u64 {
         let mut g = self.lock();
         g.attempt += 1;
