@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counting mods that load their materials from a script too, and names the mods adding the most.
   **Last run** lists the materials the game skipped. (#341)
 
+### Fixed
+
+- Folder mods can no longer make Silo read files outside the mod's own folder.
+
 ## [1.0.3] - 2026-10-29
 
 The library database moves to version 3 (one added column, for the per-mod update switch). Silo

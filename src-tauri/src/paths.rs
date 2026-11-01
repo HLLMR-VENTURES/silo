@@ -93,6 +93,64 @@ pub fn no_traversal(path: &Path) -> Result<(), String> {
     }
 }
 
+/// The parts of a path a mod names for one of its own files, or `None` when it could lead
+/// outside the mod: empty, absolute, a leading `//`, a drive or network prefix, a `..`, a `:`
+/// anywhere (a drive-relative `C:x`, a stream name) or a reserved device name. Both slash kinds
+/// separate, on every OS; `.` parts are dropped.
+fn member_parts(member: &str) -> Option<Vec<String>> {
+    let member = member.replace('\\', "/");
+    if member.starts_with('/') || member.contains([':', '\0']) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for c in Path::new(&member).components() {
+        match c {
+            Component::Normal(part) => {
+                let part = part.to_str()?;
+                if is_device_name(part) {
+                    return None;
+                }
+                parts.push(part.to_string());
+            }
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!parts.is_empty()).then_some(parts)
+}
+
+/// Join a path a mod names for one of its own files (a modDesc `storeItem` or `iconFilename`, a
+/// map's fill-type list) onto the mod's unpacked folder. `None` when the path could land outside
+/// that folder (see [`member_parts`]). Pure: it doesn't look at the disk; [`open_inside`] does.
+pub fn join_inside(root: &Path, member: &str) -> Option<PathBuf> {
+    let mut out = root.to_path_buf();
+    out.extend(member_parts(member)?);
+    Some(out)
+}
+
+/// Open a mod's own file by the path it names (checked by [`join_inside`]), only when it is a
+/// regular file reached without passing through a link: a symlink or junction inside the folder
+/// could lead anywhere. `None` when refused or missing.
+pub fn open_inside(root: &Path, member: &str) -> Option<std::fs::File> {
+    let path = join_inside(root, member)?;
+    let parts: Vec<_> = path.strip_prefix(root).ok()?.components().collect();
+    let last = parts.len().checked_sub(1)?;
+    let mut at = root.to_path_buf();
+    for (i, part) in parts.iter().enumerate() {
+        at.push(part);
+        let kind = std::fs::symlink_metadata(&at).ok()?.file_type();
+        let expected = if i == last {
+            kind.is_file()
+        } else {
+            kind.is_dir()
+        };
+        if kind.is_symlink() || !expected {
+            return None;
+        }
+    }
+    std::fs::File::open(path).ok()
+}
+
 /// Guard a destination we're about to WRITE: its parent directory must resolve inside one
 /// of `allowed_roots`. Prevents a hostile path from redirecting a write outside the mod
 /// folder(s). Returns Ok(()) when the parent is under an allowed root.
@@ -600,5 +658,103 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn member_paths_inside_the_mod_folder_are_joined() {
+        let root = Path::new("mods").join("FS25_A");
+        let nested = root.join("xml").join("store").join("tractor.xml");
+        assert_eq!(join_inside(&root, "icon.dds"), Some(root.join("icon.dds")));
+        assert_eq!(
+            join_inside(&root, "xml/store/tractor.xml"),
+            Some(nested.clone())
+        );
+        assert_eq!(
+            join_inside(&root, r"xml\store\tractor.xml"),
+            Some(nested.clone())
+        );
+        assert_eq!(
+            join_inside(&root, "./xml/./store/tractor.xml"),
+            Some(nested)
+        );
+        assert_eq!(
+            join_inside(&root, "maps/my map/map.xml"),
+            Some(root.join("maps").join("my map").join("map.xml"))
+        );
+    }
+
+    #[test]
+    fn member_paths_outside_the_mod_folder_are_refused() {
+        let root = Path::new("mods").join("FS25_A");
+        for bad in [
+            "",
+            ".",
+            "./",
+            "/x.xml",
+            r"\x.xml",
+            "//server/share/x.xml",
+            r"\\server\share\x.xml",
+            r"\\?\C:\x.xml",
+            r"\\.\x",
+            "C:/x.xml",
+            r"C:\x.xml",
+            "C:x.xml",
+            "c:",
+            "../x.xml",
+            r"..\x.xml",
+            "xml/../../x.xml",
+            "xml/..",
+            "icon.dds:x",
+            "nul",
+            "xml/con.xml",
+            "a\0b.xml",
+        ] {
+            assert_eq!(join_inside(&root, bad), None, "{bad:?}");
+            assert!(open_inside(&root, bad).is_none(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn only_regular_files_inside_the_mod_folder_are_opened() {
+        let base = std::env::temp_dir().join(format!("silo_member_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("FS25_A");
+        std::fs::create_dir_all(root.join("xml")).unwrap();
+        std::fs::write(root.join("xml").join("store.xml"), "<x/>").unwrap();
+        std::fs::write(base.join("outside.xml"), "<y/>").unwrap();
+
+        assert!(open_inside(&root, "xml/store.xml").is_some());
+        assert!(open_inside(&root, r"xml\store.xml").is_some());
+        assert!(open_inside(&root, "../outside.xml").is_none());
+        let absolute = base.join("outside.xml");
+        assert!(open_inside(&root, absolute.to_str().unwrap()).is_none());
+        assert!(open_inside(&root, "xml").is_none(), "a folder");
+        assert!(open_inside(&root, "missing.xml").is_none());
+        assert!(open_inside(&root, "xml/store.xml/x").is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A link inside the mod folder isn't followed, to a file or through a folder.
+    #[test]
+    fn a_linked_member_is_not_opened() {
+        let base = std::env::temp_dir().join(format!("silo_member_link_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("FS25_A");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(base.join("outside.xml"), "<y/>").unwrap();
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(base.join("outside.xml"), root.join("file.xml"))
+            .and_then(|_| std::os::unix::fs::symlink(&base, root.join("up")));
+        #[cfg(windows)]
+        let linked =
+            std::os::windows::fs::symlink_file(base.join("outside.xml"), root.join("file.xml"))
+                .and_then(|_| std::os::windows::fs::symlink_dir(&base, root.join("up")));
+        // Windows needs Developer Mode or admin to make links; nothing to check without them.
+        if linked.is_ok() {
+            assert!(open_inside(&root, "file.xml").is_none());
+            assert!(open_inside(&root, "up/outside.xml").is_none());
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
