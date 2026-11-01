@@ -215,7 +215,7 @@ impl Loads<'_> {
         match self {
             Loads::Map(keys) => {
                 let k = match_key(dir);
-                keys.iter().any(|m| *m == k)
+                keys.contains(&k)
             }
             Loads::Mods(techs) => techs.iter().any(|t| t.eq_ignore_ascii_case(dir)),
         }
