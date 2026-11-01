@@ -108,6 +108,44 @@ pub fn check_name(name: &[u8]) -> Result<(), String> {
     }
 }
 
+/// Check an `<?xml ...?>` declaration's content (`xml version="1.0" ...`, as a `Decl`
+/// event holds it): `version` first, then optionally `encoding`, then `standalone`, each
+/// quoted once, with the values XML allows.
+pub fn check_decl(content: &[u8]) -> Result<(), String> {
+    let start = BytesStart::from_content(String::from_utf8_lossy(content), 3);
+    let mut attrs = start.attributes();
+    attrs.with_checks(true);
+    let mut seen: Vec<String> = Vec::new();
+    for a in attrs {
+        let a = a.map_err(|err| format!("in the <?xml ...?> declaration: {err}"))?;
+        let key = String::from_utf8_lossy(a.key.as_ref()).into_owned();
+        let v = String::from_utf8_lossy(&a.value);
+        let ok = match (seen.len(), key.as_str()) {
+            (0, "version") => v
+                .strip_prefix("1.")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
+            (1, "encoding") => {
+                v.starts_with(|c: char| c.is_ascii_alphabetic())
+                    && v.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            }
+            // A second `standalone` is a duplicate, which `with_checks` already refuses.
+            (1 | 2, "standalone") => v == "yes" || v == "no",
+            _ => false,
+        };
+        if !ok {
+            return Err(format!(
+                "the <?xml ...?> declaration's {key}=\"{v}\" isn't allowed there"
+            ));
+        }
+        seen.push(key);
+    }
+    if seen.is_empty() {
+        return Err("the <?xml ...?> declaration has no version".into());
+    }
+    Ok(())
+}
+
 /// Check one reference's name (what sits between `&` and `;`): it must be one of the five
 /// predefined entities or a character reference to a character XML allows. Settings files
 /// have no DTD, so any other entity is undeclared and the game's parser rejects the file.
@@ -311,6 +349,31 @@ mod tests {
             "#x110000",
         ] {
             assert!(super::check_reference(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn only_well_formed_declarations_pass() {
+        for ok in [
+            r#"xml version="1.0""#,
+            r#"xml version='1.0' encoding="utf-8""#,
+            r#"xml version="1.0" encoding="utf-8" standalone="no""#,
+            r#"xml version="1.1" standalone="yes""#,
+        ] {
+            assert!(super::check_decl(ok.as_bytes()).is_ok(), "{ok}");
+        }
+        for bad in [
+            "xml",
+            "xml version=1.0",
+            r#"xml version="1.0" version="1.0""#,
+            r#"xml encoding="utf-8" version="1.0""#,
+            r#"xml version="1.0" standalone="no" encoding="utf-8""#,
+            r#"xml version="2.0""#,
+            r#"xml version="1.0" standalone="maybe""#,
+            r#"xml version="1.0" encoding="8bit""#,
+            r#"xml version="1.0" foo="bar""#,
+        ] {
+            assert!(super::check_decl(bad.as_bytes()).is_err(), "{bad}");
         }
     }
 

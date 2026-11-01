@@ -4967,6 +4967,7 @@ fn ensure_well_formed(xml: &str) -> Result<(), String> {
         return refuse(why);
     }
     let mut reader = quick_xml::Reader::from_str(xml);
+    reader.config_mut().check_comments = true; // no `--` inside a comment
     let mut depth = 0usize;
     let mut roots = 0usize;
     let mut first = true;
@@ -4988,6 +4989,20 @@ fn ensure_well_formed(xml: &str) -> Result<(), String> {
             Ok(Event::Eof) => break,
             Ok(Event::Decl(_)) if !at_start => {
                 return refuse("the <?xml ...?> declaration must come first".into());
+            }
+            Ok(Event::Decl(d)) => {
+                if let Err(why) = xmltext::check_decl(&d) {
+                    return refuse(why);
+                }
+            }
+            Ok(Event::PI(p)) => {
+                let target = p.target();
+                if let Err(why) = xmltext::check_name(target) {
+                    return refuse(format!("before byte {}: {why}", reader.buffer_position()));
+                }
+                if target.eq_ignore_ascii_case(b"xml") {
+                    return refuse("the <?xml ...?> declaration must come first".into());
+                }
             }
             Ok(Event::DocType(_)) if doctype || depth > 0 || roots > 0 => {
                 return refuse("a <!DOCTYPE> can only come once, before the root element".into());
@@ -5483,6 +5498,7 @@ mod tests {
             "  <settings>\n  <x>a &amp; b</x>\n</settings>  ",
             r#"<settings><a v='say "hi"' w="&lt;&#10;&#x9;&quot;"/>&apos;&#233;</settings>"#,
             "\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<!DOCTYPE settings>\n<settings xsi:x=\"1\"><x-y.z/></settings>\n",
+            "<settings><?app-hint keep this?><!-- a - b --></settings>",
         ] {
             assert!(super::ensure_well_formed(good).is_ok(), "{good}");
         }
@@ -5514,8 +5530,16 @@ mod tests {
             "<!-- c --><?xml version=\"1.0\"?><settings/>",
             "<settings><!DOCTYPE settings></settings>",
             "<!DOCTYPE a><!DOCTYPE b><settings/>",
+            "<?xml version=1.0?><settings/>",
+            r#"<?xml version="1.0" version="1.0"?><settings/>"#,
+            "<settings><!-- a--b --></settings>",
+            "<settings><!-- a---></settings>",
+            "<settings><?1bad data?></settings>",
+            "<settings><?XML data?></settings>",
         ] {
-            let e = super::ensure_well_formed(bad).unwrap_err();
+            let Err(e) = super::ensure_well_formed(bad) else {
+                panic!("accepted {bad:?}");
+            };
             assert!(e.contains("didn't save it"), "{bad}: {e}");
         }
     }
