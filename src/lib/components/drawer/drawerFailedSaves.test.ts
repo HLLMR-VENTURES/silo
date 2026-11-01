@@ -6,7 +6,7 @@ import { fireEvent, render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { tick } from "svelte";
 import ProvenanceCheck from "../ProvenanceCheck.svelte";
-import ModCuration from "../ModCuration.svelte";
+import CurationHarness from "./__tests__/CurationHarness.svelte";
 import { setVerdict } from "../../provenanceCache.svelte";
 import { setCuration, verifyMod } from "../../api";
 import type { CurationRow, ModEntry, VerifyResult } from "../../types";
@@ -72,6 +72,24 @@ describe("a failed integrity Re-check", () => {
     expect(screen.getByText(/catalog didn't answer/)).toBeInTheDocument();
   });
 
+  it("a Re-check that fails while the drawer shows another mod is still reported on the way back", async () => {
+    const m = entry(5);
+    setVerdict(m, { status: "unverified", how: null, added: [], removed: [], changed: [], matchedVersion: null, note: null });
+    let fail!: (e: unknown) => void;
+    vi.mocked(verifyMod).mockImplementationOnce(() => new Promise((_, r) => (fail = r)));
+    const user = userEvent.setup();
+    const { rerender } = render(ProvenanceCheck, { mod: m });
+    await user.click(screen.getByRole("button", { name: "Re-check" }));
+    await rerender({ mod: entry(6) });
+    await settle();
+    fail("The catalog didn't answer.");
+    await settle();
+    expect(screen.queryByText(/catalog didn't answer/)).toBeNull(); // not on the other mod
+    await rerender({ mod: m });
+    await settle();
+    expect(screen.getByText(/catalog didn't answer/)).toBeInTheDocument();
+  });
+
   it("a Try again that works shows the new verdict", async () => {
     const m = entry(3);
     setVerdict(m, { status: "unverified", how: null, added: [], removed: [], changed: [], matchedVersion: null, note: null });
@@ -90,45 +108,56 @@ describe("a failed integrity Re-check", () => {
 });
 
 describe("a failed curation save in the drawer", () => {
-  const base = { tags: [], onTagsChange: vi.fn(), onFilterTag: vi.fn() };
-
-  it("hands the row back to be put back (a rating)", async () => {
-    vi.mocked(setCuration).mockRejectedValueOnce("database is locked");
-    const onCurationChange = vi.fn();
-    const onCurationFailed = vi.fn();
-    const before = row("A");
-    render(ModCuration, { ...base, onCurationChange, onCurationFailed, techName: "A", curation: before });
-    await userEvent.setup().click(screen.getByRole("button", { name: "3 stars" }));
+  it("puts the stored row back (a rating), even after two failures in a row", async () => {
+    vi.mocked(setCuration).mockRejectedValueOnce("database is locked").mockRejectedValueOnce("database is locked");
+    const h = render(CurationHarness, { techName: "A", stored: row("A", { rating: 1 }) });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "3 stars" }));
+    await user.click(screen.getByRole("button", { name: "4 stars" }));
     await settle();
-    const sent = onCurationChange.mock.calls[0][0] as CurationRow;
-    expect(sent.rating).toBe(3);
-    expect(onCurationFailed).toHaveBeenCalledWith(sent, before);
+    expect(setCuration).toHaveBeenCalledTimes(2);
+    expect((h.component as unknown as { shown(): CurationRow }).shown().rating).toBe(1);
   });
 
   it("a note that didn't save stays in the field, and leaving it tries again", async () => {
     let fail!: (e: unknown) => void;
     vi.mocked(setCuration).mockImplementationOnce(() => new Promise((_, r) => (fail = r)));
-    const before = row("B", { note: "old" });
-    const onCurationChange = vi.fn();
-    const onCurationFailed = vi.fn();
-    const props = { ...base, onCurationChange, onCurationFailed, techName: "B" };
-    const { rerender } = render(ModCuration, { ...props, curation: before });
+    const h = render(CurationHarness, { techName: "B", stored: row("B", { note: "old" }) });
     const notes = screen.getByLabelText("Notes") as HTMLTextAreaElement;
     await fireEvent.input(notes, { target: { value: "new note" } });
     await fireEvent.blur(notes);
-    // App shows the new note at once…
-    const sent = onCurationChange.mock.calls[0][0] as CurationRow;
-    await rerender({ ...props, curation: sent });
     await settle();
-    // …then the save fails and App puts the saved row back.
     fail("database is locked");
     await settle();
-    expect(onCurationFailed).toHaveBeenCalledWith(sent, before);
-    await rerender({ ...props, curation: before });
-    await settle();
-    expect((screen.getByLabelText("Notes") as HTMLTextAreaElement).value).toBe("new note");
-    await fireEvent.blur(screen.getByLabelText("Notes"));
+    expect((h.component as unknown as { shown(): CurationRow }).shown().note).toBe("old");
+    expect(notes.value).toBe("new note");
+    await fireEvent.blur(notes);
     expect(setCuration).toHaveBeenCalledTimes(2);
     expect(setCuration).toHaveBeenLastCalledWith(expect.objectContaining({ techName: "B", note: "new note" }));
+  });
+
+  it("text typed while a note save is out survives that save failing", async () => {
+    let fail!: (e: unknown) => void;
+    vi.mocked(setCuration).mockImplementationOnce(() => new Promise((_, r) => (fail = r)));
+    render(CurationHarness, { techName: "C", stored: row("C", { note: "old" }) });
+    const notes = screen.getByLabelText("Notes") as HTMLTextAreaElement;
+    await fireEvent.input(notes, { target: { value: "first draft" } });
+    await fireEvent.blur(notes);
+    await settle();
+    await fireEvent.input(notes, { target: { value: "second draft" } });
+    fail("database is locked");
+    await settle();
+    expect(notes.value).toBe("second draft");
+  });
+
+  it("a flag set elsewhere while typing doesn't wipe the note being typed", async () => {
+    const h = render(CurationHarness, { techName: "D", stored: row("D", { note: "old" }) });
+    const notes = screen.getByLabelText("Notes") as HTMLTextAreaElement;
+    await fireEvent.input(notes, { target: { value: "typing…" } });
+    (h.component as unknown as { replace(r: CurationRow): void }).replace(row("D", { note: "old", hidden: true }));
+    await settle();
+    expect(notes.value).toBe("typing…");
+    await fireEvent.blur(notes);
+    expect(setCuration).toHaveBeenLastCalledWith(expect.objectContaining({ techName: "D", note: "typing…", hidden: true }));
   });
 });

@@ -1,6 +1,7 @@
-// Optimistic edits put back after a failed save, but never over a newer edit (#358).
+// Optimistic edits put back after a failed save, to what the store holds, and never over a newer
+// edit (#358).
 import { describe, expect, it, vi } from "vitest";
-import { revertEntry } from "./optimistic";
+import { SaveLedger, withEntry } from "./optimistic";
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tauri-apps/api/core")>()),
@@ -10,36 +11,74 @@ import { invoke as rawInvoke } from "@tauri-apps/api/core";
 import { setOverride } from "../api";
 
 type Cat = { category: string; subcategory: string | null };
+const cat = (category: string): Cat => ({ category, subcategory: null });
 
-describe("revertEntry", () => {
-  const tools: Cat = { category: "Tools", subcategory: null };
-  const trucks: Cat = { category: "Trucks", subcategory: null };
-
-  it("puts the old value back when the entry is still the failed edit's", () => {
-    const map = { A: trucks, B: tools };
-    expect(revertEntry(map, "A", trucks, tools)).toEqual({ A: tools, B: tools });
-    expect(map.A).toBe(trucks); // a new map; the old one is untouched
+describe("SaveLedger", () => {
+  it("a failed save goes back to what the store holds", () => {
+    const l = new SaveLedger<Cat>();
+    l.load([["A", cat("Tools")]]);
+    const t = l.begin("A");
+    expect(l.failed("A", t)).toEqual({ value: cat("Tools") });
   });
 
-  it("removes the entry when there was none before the edit", () => {
-    expect(revertEntry({ A: trucks }, "A", trucks, undefined)).toEqual({});
+  it("a key the store doesn't hold goes back to no entry", () => {
+    const l = new SaveLedger<Cat>();
+    const t = l.begin("A");
+    expect(l.failed("A", t)).toEqual({ value: undefined });
   });
 
-  it("leaves a newer edit alone, even one with the same values", () => {
-    const newer: Cat = { category: "Trucks", subcategory: null };
-    expect(revertEntry({ A: newer }, "A", trucks, tools)).toBeNull();
+  it("leaves a newer edit alone: the older edit's failure changes nothing", () => {
+    const l = new SaveLedger<Cat>();
+    l.load([["A", cat("Tools")]]);
+    const older = l.begin("A");
+    l.begin("A");
+    expect(l.failed("A", older)).toBeNull();
   });
 
-  it("a failed removal (Use Silo's category) brings the override back", () => {
-    expect(revertEntry({}, "A", undefined, tools)).toEqual({ A: tools });
+  it("two failed saves in a row end on the stored value, not on the first failed one", () => {
+    const l = new SaveLedger<Cat>();
+    l.load([["A", cat("Tools")]]);
+    const b = l.begin("A"); // pick Trucks
+    const c = l.begin("A"); // pick Cars before it lands
+    expect(l.failed("A", b)).toBeNull();
+    expect(l.failed("A", c)).toEqual({ value: cat("Tools") });
   });
 
-  it("a failed removal leaves a category picked since alone", () => {
-    expect(revertEntry({ A: trucks }, "A", undefined, tools)).toBeNull();
+  it("a save that worked is what a later failure goes back to", () => {
+    const l = new SaveLedger<Cat>();
+    l.load([["A", cat("Tools")]]);
+    l.begin("A");
+    l.saved("A", cat("Trucks"));
+    const c = l.begin("A");
+    expect(l.failed("A", c)).toEqual({ value: cat("Trucks") });
   });
 
-  it("doesn't read inherited keys as entries", () => {
-    expect(revertEntry({}, "toString", undefined, tools)).toEqual({ toString: tools });
+  it("tells two removals apart: reset, pick, reset with the first reset failing", () => {
+    const l = new SaveLedger<Cat>();
+    l.load([["A", cat("Tools")]]);
+    const reset1 = l.begin("A");
+    l.begin("A"); // pick Trucks
+    const reset2 = l.begin("A");
+    expect(l.failed("A", reset1)).toBeNull(); // the newer reset stays on screen
+    l.saved("A", cat("Trucks"));
+    l.saved("A", undefined); // the second reset worked
+    expect(l.failed("A", reset2)).toEqual({ value: undefined }); // (had it failed: no override)
+  });
+
+  it("keys don't affect each other", () => {
+    const l = new SaveLedger<Cat>();
+    const a = l.begin("A");
+    l.begin("B");
+    expect(l.failed("A", a)).toEqual({ value: undefined });
+  });
+});
+
+describe("withEntry", () => {
+  it("sets or removes one entry in a copy", () => {
+    const map = { A: cat("Tools"), B: cat("Trucks") };
+    expect(withEntry(map, "A", cat("Cars"))).toEqual({ A: cat("Cars"), B: cat("Trucks") });
+    expect(withEntry(map, "A", undefined)).toEqual({ B: cat("Trucks") });
+    expect(map.A).toEqual(cat("Tools"));
   });
 });
 

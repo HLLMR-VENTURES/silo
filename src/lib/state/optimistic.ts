@@ -1,29 +1,64 @@
-// Optimistic edits to a keyed map (#358). The UI shows a change before its save returns; when the
-// save fails, the change is put back, but only when the entry still holds the value this edit set.
-// A newer edit made while the save was out is kept (it has its own save, and its own failure path).
-//   const prev = map[key];
-//   map = { ...map, [key]: next };
-//   try { await save(next); } catch (e) { map = revertEntry(map, key, next, prev) ?? map; throw e; }
-// Entries are compared by identity, so the map must hold plain objects ($state.raw, not $state).
+// Optimistic edits to a keyed map (#358). The UI shows a change before its save returns. When the
+// save fails, the entry goes back to what the store holds, but only when no newer edit to that
+// key was made meanwhile (that edit has its own save, and its own failure). Writes to one key are
+// queued (serial), so when the newest edit's save settles, every earlier one has too, and the
+// ledger's stored value is the truth: two failed saves in a row end on the saved value, not on
+// the first failed one.
+//   const ledger = new SaveLedger<Row>();
+//   ledger.load(rowsFromDb);
+//   const t = ledger.begin(key); map = withEntry(map, key, next);
+//   try { await save(next); ledger.saved(key, next); }
+//   catch { const back = ledger.failed(key, t); if (back) map = withEntry(map, key, back.value); }
 
-/**
- * Undo one optimistic edit after its save failed.
- * @param map the map as it is now
- * @param key the entry the edit touched
- * @param mine what the edit set (`undefined`: the edit removed the entry)
- * @param prev what the entry held before the edit (`undefined`: it had none)
- * @returns the map with `prev` put back, or null when a newer edit has replaced `mine` (leave it)
- */
-export function revertEntry<T>(
-  map: Readonly<Record<string, T>>,
-  key: string,
-  mine: T | undefined,
-  prev: T | undefined,
-): Record<string, T> | null {
-  const now = Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined;
-  if (now !== mine) return null;
+/** What each key's store holds, and which edit of it is the newest. */
+export class SaveLedger<T> {
+  #stored = new Map<string, T>();
+  #latest = new Map<string, number>();
+  #seq = 0;
+
+  /**
+   * What the store holds, as read from it (a key that isn't there has no entry).
+   * @param entries key and value of every stored entry
+   */
+  load(entries: Iterable<readonly [string, T]>): void {
+    this.#stored = new Map(entries);
+  }
+
+  /**
+   * An edit to `key` is shown now and its save is about to start.
+   * @returns the edit's token, for `failed`
+   */
+  begin(key: string): number {
+    const token = ++this.#seq;
+    this.#latest.set(key, token);
+    return token;
+  }
+
+  /**
+   * An edit's save worked: the store holds `value` now.
+   * @param value what was written (`undefined`: the entry was removed)
+   */
+  saved(key: string, value: T | undefined): void {
+    if (value === undefined) this.#stored.delete(key);
+    else this.#stored.set(key, value);
+  }
+
+  /**
+   * An edit's save failed.
+   * @param token what `begin` returned for it
+   * @returns what to show for `key` now (`value` undefined: no entry), or null when a newer edit
+   *   was made meanwhile (leave it: it settles on its own)
+   */
+  failed(key: string, token: number): { value: T | undefined } | null {
+    if (this.#latest.get(key) !== token) return null;
+    return { value: this.#stored.get(key) };
+  }
+}
+
+/** A copy of `map` with `key` set to `value`, or without `key` when `value` is undefined. */
+export function withEntry<T>(map: Readonly<Record<string, T>>, key: string, value: T | undefined): Record<string, T> {
   const next = { ...map };
-  if (prev === undefined) delete next[key];
-  else next[key] = prev;
+  if (value === undefined) delete next[key];
+  else next[key] = value;
   return next;
 }

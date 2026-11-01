@@ -183,17 +183,17 @@ describe("drawer Check for updates switch (#333)", () => {
     expect(screen.getByText(/leaves this mod out of update checks and Update all/)).toBeInTheDocument();
   });
 
-  it("a switch that didn't save hands the row back to be put back (#358)", async () => {
-    vi.mocked(setCuration).mockRejectedValueOnce("database is locked");
-    const mod = entry(2);
-    const onCurationFailed = vi.fn();
-    const p = props(mod, { onCurationFailed });
+  it("goes through App's saveCuration when given, which puts the row back on a failure (#358)", async () => {
+    const saveCuration = vi.fn(() => Promise.reject(new Error("database is locked")));
+    const p = props(entry(2), { saveCuration });
+    vi.mocked(setCuration).mockClear();
     render(ModDetail, p);
     await settle();
     await userEvent.setup().click(screen.getByRole("switch", { name: "Check for updates" }));
     await settle();
-    const sent = vi.mocked(p.onCurationChange).mock.calls[0][0];
-    expect(onCurationFailed).toHaveBeenCalledWith(sent, p.curation);
+    expect(saveCuration).toHaveBeenCalledWith(expect.objectContaining({ skipUpdates: true }));
+    expect(p.onCurationChange).not.toHaveBeenCalled();
+    expect(setCuration).not.toHaveBeenCalled();
   });
 });
 

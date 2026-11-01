@@ -202,7 +202,7 @@
   import { Selection } from "./lib/state/selection.svelte";
   import { createSwitchUndo, switchMessage } from "./lib/state/switchUndo";
   import { setSwitchOutcome, switchOutcome } from "./lib/state/switchOutcome";
-  import { revertEntry } from "./lib/state/optimistic";
+  import { SaveLedger, withEntry } from "./lib/state/optimistic";
   import { getVerdict } from "./lib/provenanceCache.svelte";
   import FilterBar from "./lib/components/FilterBar.svelte";
   import ModSettings from "./lib/components/ModSettings.svelte";
@@ -342,12 +342,13 @@
   // ("" = all). Replaces the old category rail + `selected`.
   let libCat = $state("");
   let libSub = $state("");
-  // Raw (only ever replaced, never mutated in place), so a failed save can tell whether the entry
-  // is still the one it set (revertEntry compares by identity; a deep $state would hand back proxies).
-  let curationMap = $state.raw<Record<string, CurationRow>>({});
-  let overrideMap = $state.raw<
+  let curationMap = $state<Record<string, CurationRow>>({});
+  let overrideMap = $state<
     Record<string, { category: string; subcategory: string | null }>
   >({});
+  // What the database holds for each map, so a failed save goes back to it (#358).
+  const curationSaved = new SaveLedger<CurationRow>();
+  const overrideSaved = new SaveLedger<{ category: string; subcategory: string | null }>();
   // The Library's filters (lib/components/library/filters): the All / Active / Parked segment
   // (remembered), the Favorites / Needs attention chips and the Filters popover. Category and
   // search are libCat/libSub and `query`.
@@ -1337,6 +1338,11 @@
   // Returns true when it worked; false when it was refused (another write) or failed, so the
   // drawer stays open.
   async function resolveForeign(fileName: string, action: "adopt" | "restore"): Promise<boolean> {
+    // The file was found in the folder shown; mid-switch, Silo may already use the next one (#358).
+    if (folderSwitches > 0) {
+      refuse(FOLDER_SWITCH_WAIT);
+      return false;
+    }
     const op = beginWrite(action === "adopt" ? "Using the version in your mods folder" : "Putting Silo's version back");
     if (!op) return false;
     let done = false;
@@ -1881,31 +1887,43 @@
     category: string,
     subcategory: string | null = null,
   ) {
-    const prev = overrideMap[techName];
-    const mine = { category, subcategory };
-    overrideMap = { ...overrideMap, [techName]: mine };
     editing = null;
     try {
-      await setOverride({ techName, category, subcategory });
+      await saveOverride(techName, { category, subcategory });
     } catch (e) {
-      // Not saved: put the old category back (unless a newer pick replaced it), so Organize
-      // never files the mod under a category that isn't stored (#358).
-      overrideMap = revertEntry(overrideMap, techName, mine, prev) ?? overrideMap;
       reportError(e, "Saving the category");
     }
   }
 
   async function resetCategory(techName: string) {
-    const prev = overrideMap[techName];
-    const next = { ...overrideMap };
-    delete next[techName];
-    overrideMap = next;
     editing = null;
     try {
-      await setOverride({ techName, category: "", subcategory: null });
+      await saveOverride(techName, undefined);
     } catch (e) {
-      overrideMap = revertEntry(overrideMap, techName, undefined, prev) ?? overrideMap;
       reportError(e, "Resetting the category");
+    }
+  }
+
+  /**
+   * Show a mod's category change at once and save it. A failed save puts back the category the
+   * database holds (unless a newer pick was made meanwhile), so Organize never files the mod under
+   * a category that isn't stored (#358).
+   * @param value the category, or undefined for Silo's own
+   * @throws the save's error, after putting the category back
+   */
+  async function saveOverride(
+    techName: string,
+    value: { category: string; subcategory: string | null } | undefined,
+  ): Promise<void> {
+    const token = overrideSaved.begin(techName);
+    overrideMap = withEntry(overrideMap, techName, value);
+    try {
+      await setOverride({ techName, category: value?.category ?? "", subcategory: value?.subcategory ?? null });
+      overrideSaved.saved(techName, value);
+    } catch (e) {
+      const back = overrideSaved.failed(techName, token);
+      if (back) overrideMap = withEntry(overrideMap, techName, back.value);
+      throw e;
     }
   }
 
@@ -2271,24 +2289,24 @@
   }
 
   /**
-   * Show a mod's new flags / note / rating at once and save them; a failed save puts the row back
-   * (unless a newer edit replaced it meanwhile), so nothing unsaved is shown as current (#358).
+   * Show a mod's new flags / note / rating at once and save them. A failed save puts back the row
+   * the database holds (unless a newer edit was made meanwhile), so nothing unsaved is shown as
+   * current (#358). Every curation write goes through here, the drawer's too.
    * @param next the whole row to save
    * @throws the save's error, after putting the row back
    */
   async function saveCurationRow(next: CurationRow): Promise<void> {
-    const prev = curationMap[next.techName];
-    curationMap = { ...curationMap, [next.techName]: next };
+    const t = next.techName;
+    const token = curationSaved.begin(t);
+    curationMap = withEntry(curationMap, t, next);
     try {
       await setCuration(next);
+      curationSaved.saved(t, next);
     } catch (e) {
-      revertCuration(next, prev);
+      const back = curationSaved.failed(t, token);
+      if (back) curationMap = withEntry(curationMap, t, back.value);
       throw e;
     }
-  }
-  /** Put a mod's row back to `prev` after the save of `mine` failed, unless a newer edit replaced it. */
-  function revertCuration(mine: CurationRow, prev: CurationRow | undefined) {
-    curationMap = revertEntry(curationMap, mine.techName, mine, prev) ?? curationMap;
   }
 
   const q = $derived(query.trim().toLowerCase());
@@ -2797,8 +2815,10 @@
     await loadSavegames();
   }
 
-  /** Mods-folder switches under way (the picker, its dialogs, the rescan): no focus rescan. */
+  /** Mods-folder switches under way (the picker, its dialogs, the rescan): no focus rescan, and
+   *  no acting on a foreign file found in the folder being left. */
   let folderSwitches = 0;
+  const FOLDER_SWITCH_WAIT = "Wait for the mods folder switch to finish.";
   async function whileSwitchingFolder<T>(fn: () => Promise<T>): Promise<T> {
     folderSwitches++;
     try {
@@ -3333,11 +3353,12 @@
       moveUnlisten = await archiveMove.listen();
       try {
         const rows = await getCuration();
+        curationSaved.load(rows.map((r) => [r.techName, r] as const));
         curationMap = Object.fromEntries(rows.map((r) => [r.techName, r]));
         const ovs = await getOverrides();
-        overrideMap = Object.fromEntries(
-          ovs.map((o) => [o.techName, { category: o.category, subcategory: o.subcategory }]),
-        );
+        const ovRows = ovs.map((o) => [o.techName, { category: o.category, subcategory: o.subcategory }] as const);
+        overrideSaved.load(ovRows);
+        overrideMap = Object.fromEntries(ovRows);
         await loadTags();
         await loadRepos();
         await loadSources();
@@ -3778,7 +3799,7 @@
           (settingsMod = { techName: dm.techName, title: dm.title ?? dm.techName })}
         onFindInBrowse={() => openInBrowse(dm)}
         onCurationChange={(row) => (curationMap = { ...curationMap, [row.techName]: row })}
-        onCurationFailed={revertCuration}
+        saveCuration={saveCurationRow}
         onTagsChange={(t) => (tagMap = { ...tagMap, [dm.techName]: t })}
         onFilterTag={(t) => {
           libFilters = { ...libFilters, tag: t };

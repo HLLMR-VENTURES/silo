@@ -178,6 +178,30 @@ describe("ModSettings", () => {
     expect(screen.getByLabelText("Beta")).toHaveValue(20);
     expect(saveB).toBeEnabled();
   });
+
+  it("keeps a file's Save and Raw XML off until the file is read back after its save (#358)", async () => {
+    const one = (v: string) => [
+      { path: "C:/ms/a.xml", name: "a.xml", raw: "<a/>", fields: [{ id: 0, label: "Alpha", kind: "int", value: v }] },
+    ];
+    let readBack!: (f: ReturnType<typeof one>) => void;
+    api.getModSettings
+      .mockReset()
+      .mockResolvedValueOnce(one("1"))
+      .mockImplementationOnce(() => new Promise((r) => (readBack = r)));
+    render(ModSettings, { modName: "FS25_X", title: "X", onClose: vi.fn() });
+    await fireEvent.input(await screen.findByLabelText("Alpha"), { target: { value: "5" } });
+    const save = screen.getByRole("button", { name: "Save changes" });
+    const user = userEvent.setup();
+    await user.click(save);
+    await waitFor(() => expect(api.getModSettings).toHaveBeenCalledTimes(2));
+    expect(save).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Raw XML" })).toBeDisabled();
+    await user.click(save);
+    expect(api.saveModSettings).toHaveBeenCalledTimes(1);
+    readBack(one("5"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Raw XML" })).toBeEnabled());
+    expect(save).toBeDisabled(); // saved: nothing left to save
+  });
 });
 
 describe("isNumberText", () => {

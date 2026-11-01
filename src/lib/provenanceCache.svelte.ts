@@ -38,3 +38,22 @@ export function setVerifying(m: ModEntry, on: boolean): void {
   if (on) verifying.add(provKey(m));
   else verifying.delete(provKey(m));
 }
+
+/** The last check of a file that failed, and why (by provKey): shown until it's checked again,
+ *  even after the drawer showed other mods meanwhile (#358). */
+const failures = new SvelteMap<string, string>();
+
+/** Why this file's last check failed, or undefined. Reactive. */
+export function getFailure(m: ModEntry): string | undefined {
+  return failures.get(provKey(m));
+}
+
+/**
+ * Record (or, with null, clear) why this file's check failed.
+ * @param m the mod that was hashed
+ * @param msg what to show, or null when a new check starts
+ */
+export function setFailure(m: ModEntry, msg: string | null): void {
+  if (msg === null) failures.delete(provKey(m));
+  else failures.set(provKey(m), msg);
+}

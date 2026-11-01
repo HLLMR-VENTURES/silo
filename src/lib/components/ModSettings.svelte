@@ -67,6 +67,8 @@
   /**
    * Write one file, then read it again: only that file's drafts take the new reading, so unsaved
    * edits in the mod's other files (and edits made here while the write was out) stay (#358).
+   * Its Save and Raw XML stay off until the reading is in, so the same edits can't be sent twice
+   * and the form can't be edited while a raw save may renumber its fields.
    * @returns true when it was written
    */
   async function saveFile(file: SettingsFile, write: () => Promise<void>): Promise<boolean> {
@@ -75,20 +77,24 @@
     savingPaths[path] = true;
     error = null;
     try {
-      await write();
-    } catch (e) {
-      error = inlineError(e, "Saving the mod's settings");
-      return false;
+      try {
+        await write();
+      } catch (e) {
+        error = inlineError(e, "Saving the mod's settings");
+        return false;
+      }
+      flashSaved(path);
+      try {
+        const fresh = await getModSettings(modName);
+        // The state as it is now (other files' saves may have landed meanwhile), not as it was.
+        ({ files, values, rawText } = afterSave({ files, values, rawText }, fresh, path, sent));
+      } catch (e) {
+        error = inlineError(e, "Reading the mod's settings");
+      }
+      return true;
     } finally {
       savingPaths[path] = false;
     }
-    flashSaved(path);
-    try {
-      ({ files, values, rawText } = afterSave({ files, values, rawText }, await getModSettings(modName), path, sent));
-    } catch (e) {
-      error = inlineError(e, "Reading the mod's settings");
-    }
-    return true;
   }
 
   function flashSaved(path: string) {
@@ -130,6 +136,7 @@
             variant="link"
             size="sm"
             aria-pressed={rawMode[file.path] ? "true" : "false"}
+            disabled={!!savingPaths[file.path]}
             onclick={() => (rawMode[file.path] = !rawMode[file.path])}
           >
             Raw XML
