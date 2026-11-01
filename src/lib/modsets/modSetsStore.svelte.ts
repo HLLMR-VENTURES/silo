@@ -256,6 +256,8 @@ export function createModSets(deps: ModSetsDeps): ModSets {
             await reload();
           } catch (e) {
             reportError(e, "Undoing the change to the set");
+            // The set may be gone (deleted, or pruned): show the list as it is now.
+            await reload();
           }
         },
       },
@@ -295,6 +297,8 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       }
     } catch (e) {
       reportError(e, "Saving the set");
+      // The set may be gone (deleted, or pruned): show the list as it is now.
+      await reload();
     }
   }
 
@@ -328,6 +332,8 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       offerReplaceUndo(prev, current);
     } catch (e) {
       reportError(e, "Saving the set");
+      // The set may be gone (deleted, or pruned): show the list as it is now.
+      await reload();
     }
   }
 

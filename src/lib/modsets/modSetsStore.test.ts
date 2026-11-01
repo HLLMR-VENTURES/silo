@@ -269,6 +269,23 @@ describe("updateFromCurrent and remove", () => {
     expect(saveLoadout).toHaveBeenCalledWith(null, "Forestry weekend", ["C", "D", "Z"]);
   });
 
+  it("a set deleted since the list loaded: says nothing was saved and drops it from the list (#357)", async () => {
+    const t = setup(["A", "B", "C"]);
+    await t.store.load();
+    vi.mocked(saveLoadout).mockRejectedValueOnce({
+      code: "UNKNOWN",
+      message: "That mod set no longer exists, so nothing was saved to it.",
+    });
+    vi.mocked(getLoadouts).mockResolvedValue([forestry]);
+    await t.store.updateFromCurrent(harvest);
+    expect(saveLoadout).toHaveBeenCalledWith(1, "Harvest 2026", ["A", "B", "C"]);
+    expect(toast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ message: "Saved your current mods to Harvest 2026." }),
+    );
+    expect(t.store.sets.map((s) => s.id)).toEqual([2]);
+    expect(t.store.lastApplied?.id).not.toBe(1);
+  });
+
   it("never writes your edits into an automatic set", async () => {
     const t = setup();
     await t.store.updateFromCurrent({ id: 9, name: "Before X", mods: [], kind: "auto", createdAt: 1 });
