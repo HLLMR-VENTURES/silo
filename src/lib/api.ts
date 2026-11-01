@@ -524,19 +524,30 @@ export function ghStatus(): Promise<GhStatus> {
 export function ghSetClientId(clientId: string): Promise<void> {
   return invoke("gh_set_client_id", { clientId });
 }
-export function ghDeviceStart(write = false, gist = false): Promise<DeviceCode> {
-  return invoke<DeviceCode>("gh_device_start", { write, gist });
+/** Start a sign-in attempt; pass the number to `ghDeviceStart` / `ghSetPat`. */
+export function ghSignInBegin(): Promise<number> {
+  return invoke<number>("gh_sign_in_begin");
+}
+export function ghDeviceStart(write: boolean, gist: boolean, attempt: number): Promise<DeviceCode> {
+  return invoke<DeviceCode>("gh_device_start", { write, gist, attempt });
 }
 // Poll takes no intent — capability is read from the scopes GitHub grants on the token.
 export function ghDevicePoll(deviceCode: string): Promise<PollResult> {
   return invoke<PollResult>("gh_device_poll", { deviceCode });
 }
+/**
+ * Cancel a device flow so its polls can't store a token. False when it was already over (it may
+ * have just connected), so the caller re-reads the status.
+ */
+export function ghDeviceCancel(deviceCode: string): Promise<boolean> {
+  return invoke<boolean>("gh_device_cancel", { deviceCode });
+}
 export function ghLogout(): Promise<void> {
   return invoke("gh_logout");
 }
 /** PAT fallback: store + verify a personal access token. Returns the login name. */
-export function ghSetPat(pat: string): Promise<string> {
-  return invoke<string>("gh_set_pat", { pat });
+export function ghSetPat(pat: string, attempt: number): Promise<string> {
+  return invoke<string>("gh_set_pat", { pat, attempt });
 }
 
 // ── GitHub source card (live reads + user-owned actions) ──

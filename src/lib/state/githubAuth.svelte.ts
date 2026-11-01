@@ -2,14 +2,28 @@
 // started in Settings keeps polling when the user goes to another page.
 //   await refreshGithub();                 // githubAuth.status
 //   void startDeviceFlow(write, gist);     // githubAuth.flow shows the code while it waits
-//   cancelDeviceFlow();                    // stops polling; an answer already on its way is ignored
+//   cancelDeviceFlow();                    // stops polling and tells the backend; a late answer is ignored
 //   await disconnectGithub();              // cancels any sign-in, then forgets the token
+//   await saveGithubPat(pat);              // signs in with a pasted token; returns the login
 //   $effect(() => attachGithubView());     // GitHubAuth.svelte while mounted
 // One timer at a time: each flow has a generation number, and a poll result (or the start call's
 // result) that comes back for an older generation is dropped, so nothing re-arms after a cancel.
+// The backend keeps its own order (newest sign-in wins), and a cancel tells it which flow ended.
+// Account changes reach it in the order the user asked: a sign-in first registers an attempt
+// (quick, no network), and those registrations and Disconnects are sent one at a time, so a
+// Disconnect can't overtake a token save clicked before it, nor wait for its network check.
 // When the flow finishes while no GitHubAuth view is mounted, a toast says how it went.
 
-import { ghDevicePoll, ghDeviceStart, ghLogout, ghStatus, openExternal } from "../api";
+import {
+  ghDeviceCancel,
+  ghDevicePoll,
+  ghDeviceStart,
+  ghLogout,
+  ghSetPat,
+  ghSignInBegin,
+  ghStatus,
+  openExternal,
+} from "../api";
 import type { GhStatus } from "../types";
 import { toast } from "../ui/toasts.svelte";
 import { inlineError, reportError, success } from "./notify.svelte";
@@ -45,6 +59,36 @@ let timer: ReturnType<typeof setTimeout> | undefined;
 let generation = 0;
 /** GitHubAuth views mounted right now. */
 let views = 0;
+/** The device code of the flow on screen, so a cancel can name it to the backend. */
+let activeCode: string | null = null;
+/** The account change (an attempt registration or a Disconnect) still on its way, if any. */
+let accountTail: Promise<void> | null = null;
+
+/**
+ * Send an account change after the one before it has answered, so the backend sees them in the
+ * order the user asked (it can't tell that order itself). Runs at once when nothing is pending.
+ * Only quick steps go through here: registering a sign-in attempt, and Disconnect.
+ */
+function inOrder<T>(op: () => Promise<T>): Promise<T> {
+  const run = accountTail
+    ? accountTail.then(op)
+    : (() => {
+        try {
+          return op();
+        } catch (e) {
+          return Promise.reject(e);
+        }
+      })();
+  const settled = run.then(
+    () => {},
+    () => {},
+  );
+  accountTail = settled;
+  void settled.then(() => {
+    if (accountTail === settled) accountTail = null;
+  });
+  return run;
+}
 
 /**
  * A GitHubAuth view mounted (it shows the flow and its messages itself).
@@ -87,10 +131,25 @@ function stopTimer(): void {
   timer = undefined;
 }
 
+/**
+ * Tell the backend a flow is over, so a poll already on its way there can't store its token.
+ * When it says the flow had already finished (the sign-in may have just landed), re-read the
+ * status so the screen shows what's really connected.
+ */
+function cancelOnBackend(code: string, refreshIfOver: boolean): void {
+  Promise.resolve()
+    .then(() => ghDeviceCancel(code))
+    .then((cancelled) => {
+      if (!cancelled && refreshIfOver) return refreshGithub();
+    })
+    .catch(() => {});
+}
+
 /** End the flow on a problem: say it beside the controls, or as a toast when none are on screen. */
 function fail(gen: number, message: string): void {
   if (gen !== generation) return;
   stopTimer();
+  activeCode = null;
   githubAuth.flow = null;
   githubAuth.message = message;
   if (views === 0 && message) toast({ message, tone: "warn" });
@@ -109,14 +168,22 @@ async function poll(gen: number, deviceCode: string, seconds: number): Promise<v
   try {
     r = await ghDevicePoll(deviceCode);
   } catch (e) {
+    // Saving the sign-in can fail halfway, and then the backend signs out: show what's true,
+    // even for a flow that was cancelled or replaced meanwhile.
+    void refreshGithub();
     if (gen === generation) fail(gen, inlineError(e, "Waiting for GitHub to confirm"));
     return;
   }
-  // Cancelled (or restarted) while the poll was out: drop its answer.
-  if (gen !== generation) return;
+  // Cancelled (or restarted) while the poll was out: drop its answer. If it connected anyway
+  // (the backend stored it before the cancel or the newer sign-in reached it), show that.
+  if (gen !== generation) {
+    if (r.status === "ok") void refreshGithub();
+    return;
+  }
   switch (r.status) {
     case "ok": {
       const done = ++generation; // done: nothing of this flow may run again
+      activeCode = null;
       githubAuth.flow = null;
       githubAuth.message = null;
       await refreshGithub();
@@ -136,6 +203,12 @@ async function poll(gen: number, deviceCode: string, seconds: number): Promise<v
       // Copy details has it.
       reportError(`GitHub sign-in error: ${r.error ?? "unknown"}`, "Connecting GitHub", { quiet: true });
       return fail(gen, "GitHub sign-in didn't finish. Try connecting again.");
+    case "cancelled":
+      // A newer sign-in (e.g. a pasted token) ended this flow; that one reports for itself.
+      stopTimer();
+      activeCode = null;
+      githubAuth.flow = null;
+      return;
     case "slow_down":
       return arm(gen, deviceCode, seconds + SLOW_DOWN_SECONDS);
     default:
@@ -153,24 +226,41 @@ async function poll(gen: number, deviceCode: string, seconds: number): Promise<v
 export async function startDeviceFlow(write = false, gist = false): Promise<void> {
   const gen = ++generation;
   stopTimer();
+  activeCode = null; // the backend drops the old flow when this one starts
   githubAuth.flow = null;
   githubAuth.message = null;
   try {
-    const dc = await ghDeviceStart(write, gist);
-    if (gen !== generation) return; // cancelled or restarted meanwhile
+    // Waiting behind another account change and cancelled meanwhile: don't start at all.
+    const attempt = await inOrder(() => (gen === generation ? ghSignInBegin() : Promise.resolve(null)));
+    if (attempt === null || gen !== generation) return;
+    const dc = await ghDeviceStart(write, gist, attempt);
+    if (gen !== generation) {
+      // Cancelled or restarted meanwhile: make sure the backend forgets this flow too.
+      cancelOnBackend(dc.deviceCode, false);
+      return;
+    }
+    activeCode = dc.deviceCode;
     githubAuth.flow = { userCode: dc.userCode, verificationUri: dc.verificationUri };
     openExternal(dc.verificationUri).catch(() => {});
     arm(gen, dc.deviceCode, Math.max(dc.interval, MIN_POLL_SECONDS));
   } catch (e) {
     fail(gen, inlineError(e, "Starting GitHub sign-in"));
+    // A flow this one replaced may have connected meanwhile: show what's connected now.
+    if (gen === generation) void refreshGithub();
   }
 }
 
-/** Stop waiting for the user. A poll already on its way is ignored when it answers. */
+/**
+ * Stop waiting for the user. A poll already on its way is ignored when it answers, and the
+ * backend is told, so that poll can't store its token either.
+ */
 export function cancelDeviceFlow(): void {
   generation++;
   stopTimer();
   githubAuth.flow = null;
+  const code = activeCode;
+  activeCode = null;
+  if (code !== null) cancelOnBackend(code, true);
 }
 
 /**
@@ -182,15 +272,26 @@ export async function disconnectGithub(): Promise<void> {
   cancelDeviceFlow();
   githubAuth.message = null;
   try {
-    await ghLogout();
+    await inOrder(() => ghLogout());
   } catch (e) {
     githubAuth.message = inlineError(e, "Disconnecting GitHub");
   }
   await refreshGithub();
 }
 
+/**
+ * Sign in with a pasted personal access token, in order with the other account changes.
+ * @return the GitHub login it belongs to
+ */
+export async function saveGithubPat(pat: string): Promise<string> {
+  const attempt = await inOrder(() => ghSignInBegin());
+  return ghSetPat(pat, attempt);
+}
+
 /** Test helper: back to the initial state with no timer and no views. */
 export function resetGithubAuth(): void {
+  activeCode = null; // tests: no backend call
+  accountTail = null;
   cancelDeviceFlow();
   views = 0;
   githubAuth.status = emptyStatus();

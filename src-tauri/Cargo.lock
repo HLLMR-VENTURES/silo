@@ -4103,6 +4103,8 @@ name = "silo"
 version = "1.0.3"
 dependencies = [
  "base64 0.22.1",
+ "dbus",
+ "dbus-secret-service",
  "dirs 5.0.1",
  "image",
  "image_dds",

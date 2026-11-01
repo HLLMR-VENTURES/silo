@@ -94,6 +94,13 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Tell "there's no Secret Service" from "the Secret Service refused" (secrets::service_absent):
+# keyring reports both as PlatformFailure, wrapping these crates' errors. Already in the tree
+# via keyring, same versions.
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service = "4.1"
+dbus = "0.9"
+
 [profile.dev]
 # Faster incremental dev builds; the heavy work is I/O-bound anyway.
 incremental = true

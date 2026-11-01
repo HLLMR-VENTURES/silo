@@ -7,11 +7,23 @@ vi.mock("../api", async (importOriginal) => ({
   ghStatus: vi.fn(),
   ghDeviceStart: vi.fn(),
   ghDevicePoll: vi.fn(),
+  ghDeviceCancel: vi.fn(),
   ghLogout: vi.fn(),
+  ghSetPat: vi.fn(),
+  ghSignInBegin: vi.fn(),
   openExternal: vi.fn(() => Promise.resolve()),
   logFrontendError: vi.fn(() => Promise.resolve()),
 }));
-import { ghDevicePoll, ghDeviceStart, ghLogout, ghStatus, openExternal } from "../api";
+import {
+  ghDeviceCancel,
+  ghDevicePoll,
+  ghDeviceStart,
+  ghLogout,
+  ghSetPat,
+  ghSignInBegin,
+  ghStatus,
+  openExternal,
+} from "../api";
 import type { PollResult } from "../types";
 import { dismissToast, toasts } from "../ui/toasts.svelte";
 import { activity, clearActivity } from "./activity.svelte";
@@ -22,6 +34,7 @@ import {
   githubAuth,
   pollArmed,
   resetGithubAuth,
+  saveGithubPat,
   startDeviceFlow,
 } from "./githubAuth.svelte";
 
@@ -37,6 +50,9 @@ beforeEach(() => {
   resetGithubAuth();
   vi.mocked(ghDeviceStart).mockResolvedValue(device);
   vi.mocked(ghStatus).mockResolvedValue(connected);
+  vi.mocked(ghDeviceCancel).mockResolvedValue(true);
+  let attempts = 0;
+  vi.mocked(ghSignInBegin).mockImplementation(async () => ++attempts);
 });
 
 afterEach(() => {
@@ -134,16 +150,106 @@ describe("githubAuth device flow", () => {
     expect(ghDevicePoll).toHaveBeenCalledTimes(1);
   });
 
-  it("a late success after cancel changes nothing", async () => {
+  it("cancel tells the backend which flow ended, so a poll already there can't store", async () => {
+    vi.mocked(ghDevicePoll).mockResolvedValue(answer("pending"));
+    await startDeviceFlow();
+    cancelDeviceFlow();
+    await flush();
+    expect(vi.mocked(ghDeviceCancel).mock.calls).toEqual([["dev-1"]]);
+    expect(ghStatus).not.toHaveBeenCalled(); // the backend cancelled it: nothing changed
+    // Nothing on screen: a second cancel has no flow to name.
+    cancelDeviceFlow();
+    await flush();
+    expect(ghDeviceCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("a cancel that arrives after the sign-in landed re-reads the status", async () => {
+    // The poll stored the token on the backend just before the cancel got there.
     let resolvePoll!: (r: PollResult) => void;
     vi.mocked(ghDevicePoll).mockImplementation(() => new Promise((r) => (resolvePoll = r)));
+    vi.mocked(ghDeviceCancel).mockResolvedValue(false);
     await startDeviceFlow();
     await vi.advanceTimersByTimeAsync(5_000);
     cancelDeviceFlow();
     resolvePoll(answer("ok"));
     await flush();
-    expect(ghStatus).not.toHaveBeenCalled();
+    expect(ghStatus).toHaveBeenCalled(); // for the cancel's answer, and for the late "ok"
+    expect(githubAuth.status.user).toBe("octocat");
     expect(toasts).toHaveLength(0);
+  });
+
+  it("a start that answers after a cancel is cancelled on the backend too", async () => {
+    let resolveStart!: (d: typeof device) => void;
+    vi.mocked(ghDeviceStart).mockImplementation(() => new Promise((r) => (resolveStart = r)));
+    const p = startDeviceFlow();
+    await flush(); // the start is out
+    cancelDeviceFlow();
+    expect(ghDeviceCancel).not.toHaveBeenCalled(); // no code yet
+    resolveStart(device);
+    await p;
+    await flush();
+    expect(vi.mocked(ghDeviceCancel).mock.calls).toEqual([["dev-1"]]);
+    expect(ghStatus).not.toHaveBeenCalled();
+  });
+
+  it("a flow the backend ended (a newer sign-in) stops quietly", async () => {
+    vi.mocked(ghDevicePoll).mockResolvedValue(answer("cancelled"));
+    await startDeviceFlow();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(githubAuth.flow).toBeNull();
+    expect(githubAuth.message).toBeNull();
+    expect(pollArmed()).toBe(false);
+    expect(toasts).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(ghDevicePoll).toHaveBeenCalledTimes(1);
+  });
+
+  it("a sign-in that fails while saving re-reads the status (the backend may have signed out)", async () => {
+    const detach = attachGithubView();
+    vi.mocked(ghDevicePoll).mockRejectedValue("database is locked");
+    vi.mocked(ghStatus).mockResolvedValue({ ...connected, user: null });
+    await startDeviceFlow();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(githubAuth.flow).toBeNull();
+    expect(githubAuth.message).toContain("database is locked");
+    expect(ghStatus).toHaveBeenCalledTimes(1);
+    expect(githubAuth.status.user).toBeNull();
+    detach();
+  });
+
+  it("a late success after cancel restarts nothing and shows no toast, but shows the account it connected", async () => {
+    let resolvePoll!: (r: PollResult) => void;
+    vi.mocked(ghDevicePoll).mockImplementation(() => new Promise((r) => (resolvePoll = r)));
+    await startDeviceFlow();
+    await vi.advanceTimersByTimeAsync(5_000);
+    cancelDeviceFlow();
+    resolvePoll(answer("ok")); // the backend stored it before the cancel got there
+    await flush();
+    expect(ghStatus).toHaveBeenCalledTimes(1);
+    expect(githubAuth.status.user).toBe("octocat");
+    expect(githubAuth.flow).toBeNull();
+    expect(pollArmed()).toBe(false);
+    expect(toasts).toHaveLength(0);
+  });
+
+  it("a replaced flow that connected anyway, then a failed new start, still shows the real account", async () => {
+    // Flow A's poll is out; the user starts again (B). A lands first; B's start then fails.
+    let resolvePoll!: (r: PollResult) => void;
+    vi.mocked(ghDevicePoll).mockImplementation(() => new Promise((r) => (resolvePoll = r)));
+    await startDeviceFlow();
+    await vi.advanceTimersByTimeAsync(5_000);
+    let failStart!: (e: unknown) => void;
+    vi.mocked(ghDeviceStart).mockImplementationOnce(() => new Promise((_, rej) => (failStart = rej)));
+    const restart = startDeviceFlow();
+    await flush();
+    resolvePoll(answer("ok"));
+    await flush();
+    expect(ghStatus).toHaveBeenCalledTimes(1);
+    failStart("network down");
+    await restart;
+    await flush();
+    expect(ghStatus).toHaveBeenCalledTimes(2);
+    expect(githubAuth.status.user).toBe("octocat");
   });
 
   it("starting again replaces the running flow: one timer, polling the new code", async () => {
@@ -161,6 +267,7 @@ describe("githubAuth device flow", () => {
     let resolveStart!: (d: typeof device) => void;
     vi.mocked(ghDeviceStart).mockImplementation(() => new Promise((r) => (resolveStart = r)));
     const p = startDeviceFlow();
+    await flush(); // the start is out
     cancelDeviceFlow();
     resolveStart(device);
     await p;
@@ -220,11 +327,11 @@ describe("disconnecting GitHub", () => {
     expect(ghDevicePoll).toHaveBeenCalledTimes(1);
     vi.mocked(ghStatus).mockResolvedValue(disconnected);
     await disconnectGithub();
-    vi.mocked(ghStatus).mockClear();
     answerPoll(answer("ok"));
     await flush();
-    expect(ghStatus).not.toHaveBeenCalled();
+    // Re-read, and the backend (which ordered the Disconnect after it) says disconnected.
     expect(githubAuth.status.user).toBeNull();
+    expect(toasts.some((t) => /Connected to GitHub/.test(t.message))).toBe(false);
   });
 
   it("a status read that started before Disconnect can't bring the account back, nor toast", async () => {
@@ -243,6 +350,54 @@ describe("disconnecting GitHub", () => {
     await flush();
     expect(githubAuth.status.user).toBeNull();
     expect(toasts.some((t) => /Connected to GitHub/.test(t.message))).toBe(false);
+  });
+
+  it("a Disconnect clicked while a token is being saved goes out after the save registered, without waiting for it", async () => {
+    const order: string[] = [];
+    let answerBegin!: (n: number) => void;
+    vi.mocked(ghSignInBegin).mockImplementationOnce(() => {
+      order.push("begin");
+      return new Promise((r) => (answerBegin = r));
+    });
+    vi.mocked(ghSetPat).mockImplementation((_pat, attempt) => {
+      order.push(`pat#${attempt}`);
+      return new Promise(() => {}); // GitHub is slow to check it
+    });
+    vi.mocked(ghLogout).mockImplementation(async () => {
+      order.push("logout");
+    });
+    vi.mocked(ghStatus).mockResolvedValue(disconnected);
+    void saveGithubPat("ghp_x");
+    const disconnecting = disconnectGithub();
+    await flush();
+    expect(order).toEqual(["begin"]); // Disconnect waits for the registration only
+    answerBegin(7);
+    await disconnecting;
+    expect(order).toEqual(["begin", "pat#7", "logout"]);
+    expect(githubAuth.status.user).toBeNull();
+  });
+
+  it("a sign-in clicked after Disconnect starts only once Disconnect answered, and a failed one doesn't block the next", async () => {
+    let answerLogout!: () => void;
+    vi.mocked(ghLogout).mockReturnValueOnce(new Promise((r) => (answerLogout = () => r())));
+    vi.mocked(ghStatus).mockResolvedValue(disconnected);
+    vi.mocked(ghDevicePoll).mockResolvedValue(answer("pending"));
+    const disconnecting = disconnectGithub();
+    const starting = startDeviceFlow();
+    await flush();
+    expect(ghSignInBegin).not.toHaveBeenCalled();
+    expect(ghDeviceStart).not.toHaveBeenCalled();
+    answerLogout();
+    await disconnecting;
+    await starting;
+    expect(ghDeviceStart).toHaveBeenCalledTimes(1);
+    expect(githubAuth.flow).not.toBeNull();
+    // A save that fails still lets the next change through.
+    vi.mocked(ghSetPat).mockRejectedValueOnce("bad token");
+    await expect(saveGithubPat("x")).rejects.toBe("bad token");
+    vi.mocked(ghLogout).mockResolvedValue();
+    await disconnectGithub();
+    expect(ghLogout).toHaveBeenCalledTimes(2);
   });
 
   it("shows the backend's reason when the credential store kept the token", async () => {

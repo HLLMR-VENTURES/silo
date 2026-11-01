@@ -3,7 +3,7 @@
   // and its polling live there, so leaving Settings mid-sign-in doesn't stop it.
   import Icon from "../ui/Icon.svelte";
   import { inlineError } from "../state/notify.svelte";
-  import { ghSetClientId, ghSetPat, openExternal } from "../api";
+  import { ghSetClientId, openExternal } from "../api";
   import { GITHUB_NEW_OAUTH_APP_URL, GITHUB_NEW_PAT_URL } from "../links";
   import {
     attachGithubView,
@@ -11,6 +11,7 @@
     disconnectGithub,
     githubAuth,
     refreshGithub,
+    saveGithubPat,
     startDeviceFlow,
   } from "../state/githubAuth.svelte";
 
@@ -47,12 +48,14 @@
   async function savePat() {
     githubAuth.message = null;
     try {
-      await ghSetPat(patInput.trim());
+      await saveGithubPat(patInput.trim());
       patInput = "";
       showPat = false;
       await refresh();
     } catch (e) {
       githubAuth.message = inlineError(e, "Saving your GitHub token");
+      // A save that fails halfway signs the account out: show what's connected now.
+      await refresh();
     }
   }
 

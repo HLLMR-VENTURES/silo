@@ -267,7 +267,8 @@ export interface DeviceCode {
 }
 
 export interface PollResult {
-  status: "ok" | "pending" | "slow_down" | "expired" | "denied" | "error";
+  /** "cancelled": a newer sign-in, a cancel or a Disconnect ended the flow; nothing was stored. */
+  status: "ok" | "pending" | "slow_down" | "expired" | "denied" | "error" | "cancelled";
   error: string | null;
 }
 
