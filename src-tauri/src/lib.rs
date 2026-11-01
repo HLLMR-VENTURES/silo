@@ -5022,6 +5022,10 @@ fn ensure_well_formed(xml: &str) -> Result<(), String> {
             Ok(Event::GeneralRef(_) | Event::CData(_)) if depth == 0 => {
                 return refuse("text outside the root element".into());
             }
+            // Only a CDATA section may end with `]]>`; in text it must be `]]&gt;`.
+            Ok(Event::Text(t)) if t.windows(3).any(|w| w == b"]]>") => {
+                return refuse("text contains ]]> outside a CDATA section".into());
+            }
             Ok(Event::GeneralRef(r)) => {
                 if let Err(why) = xmltext::check_reference(&String::from_utf8_lossy(&r)) {
                     return refuse(format!("before byte {}: {why}", reader.buffer_position()));
@@ -5499,6 +5503,7 @@ mod tests {
             r#"<settings><a v='say "hi"' w="&lt;&#10;&#x9;&quot;"/>&apos;&#233;</settings>"#,
             "\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<!DOCTYPE settings>\n<settings xsi:x=\"1\"><x-y.z/></settings>\n",
             "<settings><?app-hint keep this?><!-- a - b --></settings>",
+            "<settings><v>hello]]&gt;</v><v><![CDATA[hello]]></v><v>a]]b ]> ]]</v></settings>",
         ] {
             assert!(super::ensure_well_formed(good).is_ok(), "{good}");
         }
@@ -5536,6 +5541,7 @@ mod tests {
             "<settings><!-- a---></settings>",
             "<settings><?1bad data?></settings>",
             "<settings><?XML data?></settings>",
+            "<settings><value>hello]]></value></settings>",
         ] {
             let Err(e) = super::ensure_well_formed(bad) else {
                 panic!("accepted {bad:?}");
