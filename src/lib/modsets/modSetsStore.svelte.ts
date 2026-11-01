@@ -506,6 +506,9 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       });
     };
     const undo = async () => {
+      // A running scan first (it may change the active mods, and saving sets can go on meanwhile):
+      // every check below must still hold when the write starts.
+      if (switched !== null && !(await deps.settle())) return offer();
       const stale = before.find((b) => {
         const now = sets.find((l) => l.id === b.id);
         return !now || !sameMods(now.mods, written.get(b.id) ?? []);
@@ -516,8 +519,6 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       }
       if (deps.editRefused()) return;
       if (switched !== null) {
-        // A scan landing after the check could bring other active mods than the save left.
-        if (!(await deps.settle())) return offer();
         const why = deps.activeUndoBlocked(expected);
         if (why) {
           toast({ message: why, tone: "warn" });

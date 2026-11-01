@@ -983,11 +983,12 @@
     // the old active set back on screen, and the next toggle would re-apply that (#347). Wait for
     // it, then plan from what it found.
     if (!(await settleScanOrRefuse())) return null;
-    const start = activeSet;
-    /** The switch stopped short: null when the active mods are still the ones it started from;
-     *  false when filing already changed them (a mod it couldn't link back is parked now), so the
-     *  caller keeps its snapshot and Undo can put that mod back. */
-    const stopped = () => (sameMods(start, activeSet) ? null : false);
+    /** The active mods just before filing, once it runs. */
+    let beforeFiling: Set<string> | null = null;
+    /** The switch stopped short: null when nothing was filed or filing left the active mods as
+     *  they were; false when filing changed them (a mod it couldn't link back is parked now), so
+     *  the caller keeps its snapshot and Undo can put that mod back. */
+    const stopped = () => (beforeFiling === null || sameMods(beforeFiling, activeSet) ? null : false);
     const { loose } = parkPlan(mods, activeSet, target);
     if (loose.length > 0) {
       const one = loose.length === 1 ? loose[0] : null;
@@ -1002,6 +1003,7 @@
       if (toFile.length > 0) {
         // Filed and kept active (linked back): the switch below parks them through set_active,
         // so if it's refused they're simply still on, as before. Filing ends with a rescan.
+        beforeFiling = activeSet;
         const filed = await applyLoose(
           toFile.map(looseInput),
           toFile.map((m) => m.techName),

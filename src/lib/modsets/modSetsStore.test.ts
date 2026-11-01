@@ -543,6 +543,25 @@ describe("applyMembership (the Library's Mod sets… dialog, #323)", () => {
     expect(t.activeUndoBlocked).toHaveBeenCalledWith(["A"]);
   });
 
+  it("Undo checks the sets after waiting for a scan, so a set saved meanwhile stops it (#347)", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    await t.store.applyMembership(["B"], editsFor(t, ["B"], [[1, "none"]]));
+    const undo = lastToast().action!;
+    t.setActiveSetTo.mockClear();
+    vi.mocked(replaceLoadoutMods).mockClear();
+    // While Undo waits for the scan, Harvest is saved again (Update from current mods).
+    t.settle.mockImplementationOnce(async () => {
+      db[0].mods = ["A", "Q"];
+      await t.store.load();
+      return true;
+    });
+    await undo.run();
+    expect(lastToast()).toMatchObject({ message: "Can't undo: Harvest 2026 changed since.", tone: "warn" });
+    expect(t.setActiveSetTo).not.toHaveBeenCalled();
+    expect(replaceLoadoutMods).not.toHaveBeenCalled();
+  });
+
   it("Undo refuses once a set changed since", async () => {
     const t = setup(["A", "B"]);
     await t.store.load();
