@@ -36,6 +36,9 @@ export interface ArchiveMoveDeps {
   runScan: () => Promise<void>;
   /** A move ended cleanly: offer to file in loose mods found in the archive folder. */
   offerAdopt: () => Promise<void>;
+  /** Hold crash-log looks from before a move's backend call until its result is adopted (the
+   *  move can republish another FS25 profile, #387). Returns the release. */
+  holdCrashLooks?: () => () => void;
 }
 
 const isStillLoading = (e: unknown) => errorCode(e) === "STILL_LOADING";
@@ -147,7 +150,14 @@ export class ArchiveMove {
     const wasRunning = !!this.archive?.running;
     if (!(await this.refresh())) return;
     // A move this window isn't waiting on (e.g. after a webview reload) stopped: settle it here.
-    if (pollShouldSettle(wasRunning, this.archive, this.#inFlight)) await this.#settle(null);
+    if (pollShouldSettle(wasRunning, this.archive, this.#inFlight)) {
+      const release = this.#deps.holdCrashLooks?.();
+      try {
+        await this.#settle(null);
+      } finally {
+        release?.();
+      }
+    }
   }
 
   /** After a move stops (finished, paused, or back home): refresh everything that depends on
@@ -221,8 +231,18 @@ export class ArchiveMove {
     return this.lastLostCancel;
   }
 
-  /** Run a move-ish invoke (pending until the move finishes or pauses), then settle. */
+  /** Run a move-ish invoke (pending until the move finishes or pauses), then settle. Crash-log
+   *  looks are held from before the call until the settle adopted the result (#387). */
   async drive(call: () => Promise<unknown>, isCancel = false): Promise<void> {
+    const release = this.#deps.holdCrashLooks?.();
+    try {
+      await this.#driveNow(call, isCancel);
+    } finally {
+      release?.();
+    }
+  }
+
+  async #driveNow(call: () => Promise<unknown>, isCancel: boolean): Promise<void> {
     this.#inFlight++;
     let problem: string | null = null;
     try {

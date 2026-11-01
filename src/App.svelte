@@ -1680,13 +1680,17 @@
         };
       const op = beginWrite("Switching to the new library archive");
       if (!op) return { problem: blocked("library-write").reason || "Silo is busy. Try again in a moment." };
-      try {
-        await archiveRepoint(path);
-      } finally {
-        op.end();
-      }
-      await archiveMove.refresh();
-      modsStatus = await modsRootStatus().catch(() => modsStatus);
+      // A re-point republishes the folder (maybe another FS25 profile, #387): crash looks wait
+      // from before it until its status is adopted.
+      await withCrashLooksHeld(async () => {
+        try {
+          await archiveRepoint(path);
+        } finally {
+          op.end();
+        }
+        await archiveMove.refresh();
+        await adoptArchiveStatus(await modsRootStatus().catch(() => modsStatus));
+      });
       await runScan(false);
       return { path };
     } catch (e) {
@@ -1698,14 +1702,19 @@
   async function useDefaultArchiveFirstRun(): Promise<string | null> {
     const op = beginWrite("Switching to the new library archive");
     if (!op) return blocked("library-write").reason || "Silo is busy. Try again in a moment.";
-    try {
-      await archiveRepoint(null);
-    } catch (e) {
-      return inlineError(e, "Switching to the new library archive");
-    } finally {
-      op.end();
-    }
-    await archiveMove.refresh();
+    const problem = await withCrashLooksHeld(async () => {
+      try {
+        await archiveRepoint(null);
+      } catch (e) {
+        return inlineError(e, "Switching to the new library archive");
+      } finally {
+        op.end();
+      }
+      await archiveMove.refresh();
+      await adoptArchiveStatus(await modsRootStatus().catch(() => modsStatus));
+      return null;
+    });
+    if (problem) return problem;
     await runScan(false);
     return null;
   }
@@ -2910,6 +2919,31 @@
     }
   }
 
+  /** Run `fn` with crash-log looks held (they may resume nested): for an operation that can
+   *  publish another FS25 profile before its result is adopted (#387). Looks again after. */
+  async function withCrashLooksHeld<T>(fn: () => Promise<T>): Promise<T> {
+    crashWatch.pause();
+    try {
+      return await fn();
+    } finally {
+      crashWatch.resume();
+      void crashWatch.check();
+    }
+  }
+
+  /** Adopt a status read after an archive operation (not `applyModsStatus`, which refreshes
+   *  the archive move that may be calling): when its FS25 profile isn't the one whose files
+   *  are shown, the old crash notice and files are dropped and the new ones read (#387). */
+  async function adoptArchiveStatus(st: ModsRootStatus | null) {
+    if (!st) return; // nothing read yet, and the refresh failed: keep what is shown
+    const changed = profileInUse(st) !== shownProfile;
+    modsStatus = st;
+    if (changed) {
+      forgetGameFiles();
+      await loadGameFiles(true);
+    }
+  }
+
   let profileToggling = false;
   async function setGameProfileOn(on: boolean) {
     if (profileToggling) return;
@@ -3050,11 +3084,16 @@
   }
 
   async function makeModsFolder() {
-    try {
-      await whileSwitchingFolder(async () => applyModsStatus(await createModsFolder()));
-    } catch (e) {
-      reportError(e, "Creating the mods folder");
-    }
+    await whileSwitchingFolder(async () => {
+      try {
+        await applyModsStatus(await createModsFolder());
+      } catch (e) {
+        reportError(e, "Creating the mods folder");
+        // A refusal may come after the backend republished the folder in use (another one, or
+        // its FS25 profile, #387): adopt that before crash looks resume and Play is pressed.
+        await applyModsStatus(await modsRootStatus()).catch(() => {});
+      }
+    });
   }
 
   // ── Library archive location (#166) ──────────────────────────────────────────
@@ -3066,23 +3105,17 @@
       isOnlyLostCancel(msg, archiveMove.lastLostCancel)
         ? info(msg, { duration: 12_000 })
         : reportError(msg, "Moving your library"),
-    refreshModsStatus: async () => {
-      // This refresh may publish another FS25 profile (#387): crash looks pause around it,
-      // and a changed profile's files are dropped and read again (not `applyModsStatus`, which
-      // refreshes the archive move that is calling here).
+    refreshModsStatus: () =>
+      withCrashLooksHeld(async () =>
+        adoptArchiveStatus(await modsRootStatus().catch(() => modsStatus)),
+      ),
+    // The whole move, from before its backend call until its result is adopted (#387).
+    holdCrashLooks: () => {
       crashWatch.pause();
-      try {
-        const st = await modsRootStatus().catch(() => modsStatus);
-        const changed = profileInUse(st) !== shownProfile;
-        modsStatus = st;
-        if (changed) {
-          forgetGameFiles();
-          await loadGameFiles(true);
-        }
-      } finally {
+      return () => {
         crashWatch.resume();
         void crashWatch.check();
-      }
+      };
     },
     runScan: () => runScan(),
     // One adopt offer at a time (a second settle pass mustn't replace an open preview).
@@ -3193,13 +3226,17 @@
     try {
       const op = beginWrite("Switching to the new library archive");
       if (!op) return;
-      try {
-        await archiveRepoint(path);
-      } finally {
-        op.end();
-      }
-      await archiveMove.refresh();
-      modsStatus = await modsRootStatus().catch(() => modsStatus);
+      // A re-point republishes the folder (maybe another FS25 profile, #387): crash looks wait
+      // from before it until its status is adopted, as for a move.
+      await withCrashLooksHeld(async () => {
+        try {
+          await archiveRepoint(path);
+        } finally {
+          op.end();
+        }
+        await archiveMove.refresh();
+        await adoptArchiveStatus(await modsRootStatus().catch(() => modsStatus));
+      });
       await runScan();
     } catch (e) {
       reportError(e, "Switching to the new library archive");
