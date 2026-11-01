@@ -69,8 +69,9 @@ pub(crate) struct Entry {
 /// later file there is still Silo's own. The file's number on its volume (Windows: volume serial
 /// and file index; Unix: device and inode) and its birth time where the system keeps one: a file
 /// made, moved or copied there later is another file. Size and last change tell whether it was
-/// changed since.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// changed since; an update backup also keeps its SHA-256 ([`Made::with_sha256`]), so its bytes
+/// are checked too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Made {
     pub volume: u64,
@@ -82,6 +83,9 @@ pub(crate) struct Made {
     /// Last change, ns since 1970.
     #[serde(default)]
     pub modified: Option<u64>,
+    /// The bytes' SHA-256 (an update backup's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 fn nanos(t: std::io::Result<std::time::SystemTime>) -> Option<u64> {
@@ -103,6 +107,19 @@ impl Made {
             created: nanos(m.created()),
             size: m.len(),
             modified: nanos(m.modified()),
+            sha256: None,
+        })
+    }
+
+    /// [`Made::of`] plus the bytes' SHA-256, read back after (`None` if the file changed while
+    /// it was read).
+    pub(crate) fn with_sha256(p: &Path) -> Option<Made> {
+        let before = Made::of(p)?;
+        let sha = crate::provenance::sha256_file(p).ok()?;
+        let after = Made::of(p)?;
+        before.unchanged(&after).then_some(Made {
+            sha256: Some(sha),
+            ..before
         })
     }
 
@@ -122,6 +139,16 @@ impl Made {
     /// The same file, unchanged since (same size, same last change).
     pub(crate) fn unchanged(&self, other: &Made) -> bool {
         self.same_file(other) && self.size == other.size && self.modified == other.modified
+    }
+
+    /// The file at `p` is this one, unchanged, holding the recorded bytes (when a SHA-256 was
+    /// recorded; without one, never).
+    pub(crate) fn holds_same_bytes(&self, p: &Path) -> bool {
+        let Some(want) = &self.sha256 else {
+            return false;
+        };
+        Made::with_sha256(p)
+            .is_some_and(|now| self.unchanged(&now) && now.sha256.as_ref() == Some(want))
     }
 }
 

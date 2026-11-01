@@ -1818,7 +1818,7 @@ impl PartClaim {
             log::warn!("couldn't read which file {} is", self.path.display());
             return Ok(f);
         };
-        let _ = self.made.set(made);
+        let _ = self.made.set(made.clone());
         if let Some(db) = &self.db {
             let noted = db::open(db).and_then(|conn| {
                 scratch::Journal::record(
@@ -2085,7 +2085,8 @@ const DOWNLOAD_GONE: &str = "The download disappeared before Silo could add it. 
 /// Hardlink then drop the part (the link fails if `dest` exists). Only when the link fails
 /// because the filesystem can't hardlink (`no_hardlink_support`, e.g. a cloud-synced folder)
 /// does it fall back to `paths::rename_no_replace`, a rename that fails rather than replace
-/// `dest`. A taken `dest` removes the part and refuses.
+/// `dest`. A taken `dest` refuses, and leaves the part to its claim (`PartClaim`), which removes
+/// it only while it's still the file the download made (#400).
 ///
 /// Call under the library lock, which keeps Silo's own writes out.
 fn place_part(part: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
@@ -2099,10 +2100,7 @@ fn place_part_with(
     dest: &std::path::Path,
     link: impl Fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
 ) -> Result<(), String> {
-    let refuse = || {
-        let _ = std::fs::remove_file(part);
-        Err(already_in_library(dest))
-    };
+    let refuse = || Err(already_in_library(dest));
     let io_err = |e: std::io::Error| {
         if e.kind() == std::io::ErrorKind::NotFound {
             DOWNLOAD_GONE.to_string()
@@ -9448,12 +9446,13 @@ mod tests {
         super::place_part_with(&part, &dest, no_links).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"a");
         assert!(!part.exists());
-        // No hardlinks, destination taken: refused, theirs untouched, the part removed.
+        // No hardlinks, destination taken: refused, theirs untouched, the part left to its
+        // claim (#400).
         std::fs::write(&part, b"b").unwrap();
         let err = super::place_part_with(&part, &dest, no_links).unwrap_err();
         assert_eq!(err, "FS25_A.zip is already in your library");
         assert_eq!(std::fs::read(&dest).unwrap(), b"a");
-        assert!(!part.exists());
+        assert_eq!(std::fs::read(&part).unwrap(), b"b");
         // A real link failure is reported, never papered over with a rename.
         let free = mods.join("FS25_B.zip");
         let part = free.with_extension("zip.part");
@@ -9484,7 +9483,11 @@ mod tests {
         let err = super::place_part_with(&part, &dest, racer).unwrap_err();
         assert_eq!(err, "FS25_Race.zip is already in your library");
         assert_eq!(std::fs::read(&dest).unwrap(), b"user's only copy");
-        assert!(!part.exists());
+        assert_eq!(
+            std::fs::read(&part).unwrap(),
+            b"download",
+            "left to its claim"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -9858,15 +9861,39 @@ mod tests {
         super::place_part(&part, &dest).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"new");
         assert!(!part.exists());
-        // Destination taken: refused, the existing file untouched, the part removed.
+        // Destination taken: refused, the existing file untouched. The claim then removes the
+        // part it made.
         let taken = mods.join("FS25_Have.zip");
         std::fs::write(&taken, b"mine").unwrap();
-        let part = taken.with_extension("zip.part");
-        std::fs::write(&part, b"theirs").unwrap();
+        let claim = super::claim_part(&taken, None).unwrap();
+        std::io::Write::write_all(&mut claim.create().unwrap(), b"theirs").unwrap();
+        let part = claim.path().to_path_buf();
         let err = super::place_part(&part, &taken).unwrap_err();
         assert_eq!(err, "FS25_Have.zip is already in your library");
         assert_eq!(std::fs::read(&taken).unwrap(), b"mine");
+        drop(claim);
         assert!(!part.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_refused_placement_never_removes_a_file_put_at_the_parts_name() {
+        // #400: the part was moved aside and a user's file put at its name; the destination
+        // is taken, so placing is refused. Neither the refusal nor the claim removes it.
+        let base = temp_base("place_refused_replaced");
+        let mods = base.join("mods");
+        let taken = mods.join("FS25_Have.zip");
+        std::fs::write(&taken, b"mine").unwrap();
+        let claim = super::claim_part(&taken, None).unwrap();
+        std::io::Write::write_all(&mut claim.create().unwrap(), b"download").unwrap();
+        let part = claim.path().to_path_buf();
+        std::fs::rename(&part, base.join("aside")).unwrap();
+        std::fs::write(&part, b"user's file").unwrap();
+        assert!(super::place_part(&part, &taken).is_err());
+        assert_eq!(std::fs::read(&part).unwrap(), b"user's file");
+        drop(claim);
+        assert_eq!(std::fs::read(&part).unwrap(), b"user's file");
+        assert_eq!(std::fs::read(&taken).unwrap(), b"mine");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -10034,12 +10061,8 @@ mod tests {
             tmp.symlink_metadata().is_err(),
             "the next recovery sweeps it"
         );
-        let left: Vec<_> = journal.entries().into_iter().map(|e| e.role).collect();
-        assert_eq!(
-            left,
-            vec![Role::UpdateBak],
-            "only the backup it made stays recorded"
-        );
+        // (Recovery's backup isn't recorded either: its old version was known only by name.)
+        assert!(journal.entries().is_empty(), "{:?}", journal.entries());
         assert_eq!(std::fs::read(&flat).unwrap(), b"PK new version");
         assert_eq!(std::fs::read(&dest).unwrap(), b"PK new version");
         assert_eq!(std::fs::read(&lookalike).unwrap(), b"not recorded");

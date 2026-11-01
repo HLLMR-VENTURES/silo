@@ -245,8 +245,9 @@ fn swap_with(
         }
         out.relinked = Some(flat);
     }
-    // e. Keep the previous version in backups.
-    match keep_backup(&old, dest, mods_root, &name, policy) {
+    // e. Keep the previous version in backups. This swap set `old` aside itself (it refuses
+    //    while one is there), so it's provably Silo's: recorded, and pruned later.
+    match keep_backup(&old, dest, mods_root, &name, policy, true) {
         Ok(b) => out.backup = Some(b),
         Err(e) => out.problems.push(format!(
             "{name} was updated, but {}",
@@ -289,29 +290,33 @@ fn undo_swap(dest: &Path, part: &Path, old: &Path, name: &str, e: &std::io::Erro
     }
 }
 
-/// Move the set-aside `old` (a previous version of `dest`) into `<mods_root>/backups/`, record
-/// it in the policy's journal ([`Role::UpdateBak`], with which file it is and how it was:
-/// `scratch::Made`), and prune that mod's older recorded backups. A backup that couldn't be
-/// recorded is kept for good (never pruned).
+/// Move the set-aside `old` (a previous version of `dest`) into `<mods_root>/backups/` and prune
+/// that mod's older recorded backups. With `record` (the swap that set `old` aside just now, so
+/// it's provably Silo's), the backup is recorded in the policy's journal ([`Role::UpdateBak`],
+/// with which file it is, how it was and its SHA-256: `scratch::Made`), so a later prune may
+/// remove it. Recovery passes `false`: a `….silo-update-old` found on disk is known only by its
+/// name (it may be the user's file), so its backup is kept for good, as is one that couldn't be
+/// recorded.
 fn keep_backup(
     old: &Path,
     dest: &Path,
     mods_root: &Path,
     name: &str,
     policy: &LinkPolicy,
+    record: bool,
 ) -> std::io::Result<PathBuf> {
     let bak = organize::update_backup_path(mods_root, name)?;
     // A cross-drive move is a full copy: asked for room first, like every copy a move makes.
     organize::move_path_checked(old, &bak, "backup", policy.room_check())?;
     let journal = policy.journal();
-    if let Some(j) = journal {
+    if let Some(j) = journal.filter(|_| record) {
         let e = scratch::Entry {
             path: bak.clone(),
             role: Role::UpdateBak,
             from: old.to_path_buf(),
             to: dest.to_path_buf(),
             kind: "zip".into(),
-            made: scratch::Made::of(&bak),
+            made: scratch::Made::with_sha256(&bak),
         };
         if let Err(e) = j.record(&e) {
             log::warn!(
@@ -457,7 +462,7 @@ fn finish_or_roll_back(
             if !take_turn(old, attempt) {
                 return;
             }
-            match keep_backup(old, dest, mods_root, name, policy) {
+            match keep_backup(old, dest, mods_root, name, policy, false) {
                 Ok(b) => {
                     turn_done(old);
                     out.notices.push(format!(
@@ -504,7 +509,7 @@ fn finish_or_roll_back(
             return;
         }
     }
-    match keep_backup(old, dest, mods_root, name, policy) {
+    match keep_backup(old, dest, mods_root, name, policy, false) {
         Ok(b) => {
             turn_done(old);
             out.notices.push(format!(
@@ -613,8 +618,9 @@ pub(crate) fn layout_dirs(layout: &organize::Layout) -> Vec<PathBuf> {
 /// Keep the `keep` newest update backups of `file_name` in `backups` that Silo recorded making
 /// ([`Role::UpdateBak`] in `journal`, in the order it made them); remove older ones (#400).
 /// One is removed only while it's still what Silo recorded: the same file (number and birth
-/// time, read without following a link), unchanged since (same size and last change). One that
-/// isn't any more is logged and left, and its record dropped (it no longer counts). A backup-like name nothing records (`<file_name>.<secs>[-n].update.bak` from an
+/// time, read without following a link), unchanged since (same size and last change), holding
+/// the same bytes (SHA-256). One that isn't any more is logged and left, and its record dropped
+/// (it no longer counts). A backup-like name nothing records (`<file_name>.<secs>[-n].update.bak` from an
 /// earlier version, or the user's own file) is logged and left in place, as is a half-copied
 /// `.<file_name>.….silo-tmp` a stopped cross-drive move left (#394). Never touches anything
 /// else there, including the `.bak` files adopt/restore keep. Returns the unrecorded
@@ -650,7 +656,7 @@ pub(crate) fn prune_backups(
             .and_then(backup_order)
             .is_some()
     });
-    let mut proven: Vec<PathBuf> = Vec::new();
+    let mut proven: Vec<scratch::Entry> = Vec::new();
     for e in journal.entries() {
         let mine = e.role == Role::UpdateBak
             && e.path.parent() == Some(backups)
@@ -658,12 +664,16 @@ pub(crate) fn prune_backups(
         if !mine {
             continue;
         }
-        let now = scratch::Made::of(&e.path);
-        match e.path.symlink_metadata() {
-            Ok(_) if now.is_some_and(|now| e.made.is_some_and(|m| m.unchanged(&now))) => {
-                proven.push(e.path)
-            }
-            Ok(_) => {
+        let exists = e.path.symlink_metadata().is_ok();
+        // Only the ones past the newest few are hashed: proven here cheaply (same file,
+        // unchanged), their bytes checked right before removal below.
+        let unchanged = || {
+            scratch::Made::of(&e.path)
+                .is_some_and(|now| e.made.as_ref().is_some_and(|m| m.unchanged(&now)))
+        };
+        match exists {
+            true if unchanged() => proven.push(e),
+            true => {
                 log::warn!(
                     "left {} in place: it's no longer the backup Silo made there",
                     e.path.display()
@@ -672,16 +682,25 @@ pub(crate) fn prune_backups(
             }
             // Gone (the user removed it): it no longer counts. Kept recorded while its folder
             // can't be reached.
-            Err(_) if backups.symlink_metadata().is_ok() => journal.forget(&e.path),
-            Err(_) => {}
+            false if backups.symlink_metadata().is_ok() => journal.forget(&e.path),
+            false => {}
         }
     }
     let surplus = proven.len().saturating_sub(keep);
-    for p in proven.into_iter().take(surplus) {
-        match std::fs::remove_file(&p) {
+    for e in proven.into_iter().take(surplus) {
+        let p = &e.path;
+        if !e.made.as_ref().is_some_and(|m| m.holds_same_bytes(p)) {
+            log::warn!(
+                "left {} in place: it no longer holds the backup Silo made there",
+                p.display()
+            );
+            journal.forget(p);
+            continue;
+        }
+        match std::fs::remove_file(p) {
             Ok(()) => {
-                journal.forget(&p);
-                crate::fslog::changed("prune", &p);
+                journal.forget(p);
+                crate::fslog::changed("prune", p);
             }
             Err(e) => log::warn!("couldn't remove the old backup {}: {e}", p.display()),
         }
@@ -1312,7 +1331,7 @@ mod tests {
         scratch::sweep_where(&journal, &|_| true);
         assert_eq!(journal.entries().len(), 1);
         std::io::Write::write_all(&mut claim.create().unwrap(), b"downloading").unwrap();
-        let made = journal.entries()[0].made;
+        let made = journal.entries()[0].made.clone();
         assert!(made.is_some(), "which file it made is recorded");
         scratch::sweep_where(&journal, &|_| true);
 
@@ -1549,7 +1568,8 @@ mod tests {
     #[test]
     fn a_same_size_file_at_a_recorded_backup_is_left() {
         // #400: size alone proves nothing. Another file of the same length put at the oldest
-        // backup's name, or that backup rewritten in place at the same length, is kept.
+        // backup's name, or that backup rewritten in place at the same length (its last-change
+        // time put back, even), is kept.
         for in_place in [false, true] {
             let mods = fresh(if in_place {
                 "prune_rewritten"
@@ -1563,11 +1583,15 @@ mod tests {
             let len = std::fs::metadata(&first).unwrap().len() as usize;
             let other = vec![b'u'; len];
             if in_place {
-                std::fs::OpenOptions::new()
+                let was = std::fs::metadata(&first).unwrap().modified().unwrap();
+                let mut f = std::fs::OpenOptions::new()
                     .write(true)
                     .open(&first)
-                    .and_then(|mut f| std::io::Write::write_all(&mut f, &other))
                     .unwrap();
+                std::io::Write::write_all(&mut f, &other).unwrap();
+                f.set_modified(was).unwrap();
+                drop(f);
+                assert_eq!(std::fs::metadata(&first).unwrap().modified().unwrap(), was);
             } else {
                 std::fs::remove_file(&first).unwrap();
                 std::fs::write(&first, &other).unwrap();
@@ -1584,6 +1608,37 @@ mod tests {
             assert!(!journal.entries().iter().any(|e| e.path == first));
             let _ = std::fs::remove_dir_all(&mods);
         }
+    }
+
+    #[test]
+    fn a_backup_recovery_makes_from_an_unrecorded_old_version_is_never_pruned() {
+        // #400: a `….silo-update-old` found on disk is known only by its name (here the user's
+        // own file). Recovery still files it in backups, but never records it, so no later
+        // prune removes it.
+        let mods = fresh("prune_recovered");
+        let layout = Layout::default_for(&mods);
+        let journal = scratch::tests::MemJournal::default();
+        let dest = mods.join("FS25_A.zip");
+        make_mod_zip(&dest, "A", "1.0.0.0");
+        std::fs::write(old_path(&dest), b"the user's file, by that name").unwrap();
+        let r = settle_with(&mods, &layout, &journal);
+        assert_eq!(r.notices.len(), 1, "{r:?}");
+        let filed = backups_of(&mods);
+        assert_eq!(filed.len(), 1);
+        assert!(journal.entries().is_empty(), "not recorded");
+        for v in 2..=6 {
+            update_to(&dest, &mods, &format!("{v}.0.0.0"), &journal);
+        }
+        assert_eq!(
+            std::fs::read(&filed[0]).unwrap(),
+            b"the user's file, by that name"
+        );
+        assert_eq!(
+            backups_of(&mods).len(),
+            4,
+            "the user's file and the newest three"
+        );
+        let _ = std::fs::remove_dir_all(&mods);
     }
 
     #[test]
