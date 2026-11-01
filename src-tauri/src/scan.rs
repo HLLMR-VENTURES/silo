@@ -820,29 +820,37 @@ fn plan_jobs<'a>(
         copies.entry(slot(c)).or_default().push(c);
     }
 
-    // The archived mods that have a row, by slot and by case-folded name (see `archived_slot`).
+    // The archived mods that have a row, by slot, and the zips among them by techName in archive
+    // order (see `archived_slots`).
     let visible: HashSet<Slot> = archive_cands.iter().map(slot).collect();
-    let mut folded: HashMap<(usize, String), Slot> = HashMap::new();
-    for s in &visible {
-        folded
-            .entry((s.0, s.1.to_string_lossy().to_lowercase()))
-            .or_insert(*s);
+    let mut zips: HashMap<(usize, &str), Vec<Slot>> = HashMap::new();
+    for c in archive_cands.iter().filter(|c| c.kind == "zip") {
+        let spellings = zips.entry((c.layout, c.tech_name.as_str())).or_default();
+        if !spellings.contains(&slot(c)) {
+            spellings.push(slot(c));
+        }
     }
     let listed: HashSet<Slot> = root_cands.iter().map(slot).collect();
 
-    // Mods-folder entries at archived mods' names: checked in parallel (a few stats each).
+    // Mods-folder entries at archived mods' names: checked in parallel (a few stats each). The
+    // entry sits at the first of its slots it is Silo's projection for, else the first slot.
     let verdicts: Vec<Option<(Slot, bool)>> = root_cands
         .par_iter()
         .map(|r| {
-            let at = archived_slot(r, &visible, &folded, &listed)?;
-            let record = records
-                .get(at.0)
-                .and_then(|m| m.get(at.1.to_string_lossy().as_ref()))
-                .copied();
-            let ours = copies
-                .get(&at)
-                .is_some_and(|c| c.iter().any(|a| looks_like_projection(r, a, record)));
-            Some((at, ours))
+            let slots = archived_slots(r, &visible, &zips, &listed);
+            let ours = |at: &Slot| {
+                let record = records
+                    .get(at.0)
+                    .and_then(|m| m.get(at.1.to_string_lossy().as_ref()))
+                    .copied();
+                copies
+                    .get(at)
+                    .is_some_and(|c| c.iter().any(|a| looks_like_projection(r, a, record)))
+            };
+            match slots.iter().find(|at| ours(at)) {
+                Some(at) => Some((*at, true)),
+                None => slots.first().map(|at| (*at, false)),
+            }
         })
         .collect();
 
@@ -893,32 +901,41 @@ fn plan_jobs<'a>(
     jobs
 }
 
-/// The slot of an archived mod with a row that mods-folder entry `r` sits at, if any: its own
-/// file name, or on a case-insensitive volume the archived spelling of it (`FS25_A.ZIP` for an
-/// archived `FS25_A.zip`), when no entry is listed under that spelling and the folder still
-/// resolves it to this very entry, as `organize` would when it opens the archived name there.
+/// The slots of archived mods with a row that mods-folder entry `r` may sit at. Its own file
+/// name first. Failing that, for a zip, the archived spellings of the same techName whose
+/// extension is spelled differently (`FS25_A.ZIP` for an archived `FS25_A.zip`), as the old
+/// techName match allowed: only those no entry is listed under and that the folder resolves to
+/// this very entry, i.e. on a case-insensitive volume, where `organize` opening the archived
+/// name there reaches it. The techName itself is never case-folded (it is the mod's identity).
 /// An entry matching only a later archive's copy has no row to stand in for, so it gets none.
-fn archived_slot<'a>(
+fn archived_slots<'a>(
     r: &'a Candidate,
     visible: &HashSet<Slot<'a>>,
-    folded: &HashMap<(usize, String), Slot<'a>>,
+    zips: &HashMap<(usize, &'a str), Vec<Slot<'a>>>,
     listed: &HashSet<Slot<'a>>,
-) -> Option<Slot<'a>> {
+) -> Vec<Slot<'a>> {
     let own = slot(r);
     if visible.contains(&own) {
-        return Some(own);
+        return vec![own];
     }
-    let at = *folded.get(&(own.0, own.1.to_string_lossy().to_lowercase()))?;
-    if listed.contains(&at) {
-        return None;
+    if r.kind != "zip" {
+        return Vec::new();
     }
-    let same = |p: &Path| {
+    let Some(spellings) = zips.get(&(r.layout, r.tech_name.as_str())) else {
+        return Vec::new();
+    };
+    let stamp = |p: &Path| {
         fs::symlink_metadata(p)
             .ok()
             .map(|m| (m.file_type().is_dir(), m.len(), m.modified().ok()))
     };
-    let alias = same(&r.path.with_file_name(at.1));
-    (alias.is_some() && alias == same(&r.path)).then_some(at)
+    let mine = stamp(&r.path);
+    spellings
+        .iter()
+        .filter(|at| !listed.contains(at))
+        .filter(|at| mine.is_some() && stamp(&r.path.with_file_name(at.1)) == mine)
+        .copied()
+        .collect()
 }
 
 /// Convenience wrapper with no cache — used by the example harness and tests.
@@ -1677,6 +1694,39 @@ mod layout_tests {
             .expect("listed");
         assert!(shown.active && !shown.organized);
         assert_eq!(out.result.mods.len(), 2);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Two categories hold the same techName spelled `.zip` and `.ZIP`, and the mods folder holds
+    /// a hardlink to the second, spelled `.Zip`. Where the volume ignores case it is a projection
+    /// of the copy it links, whatever the order the slots are tried in; where case matters it is
+    /// its own loose row. Either way nothing stands in.
+    #[test]
+    fn mixed_extension_spellings_match_the_copy_actually_linked() {
+        let base = fresh("ext_mixed");
+        let mods = base.join("mods");
+        let arch = base.join("arch");
+        for d in [&mods, &arch.join("Tools"), &arch.join("Misc")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        moddesc_zip(&arch.join("Tools/FS25_A.zip"), "One");
+        moddesc_zip(&arch.join("Misc/FS25_A.ZIP"), "Two, a longer title");
+        std::fs::hard_link(arch.join("Misc/FS25_A.ZIP"), mods.join("FS25_A.Zip")).unwrap();
+        let ignores_case = mods.join("FS25_A.zip").exists();
+
+        for _ in 0..4 {
+            let out = scan_one(&mods, &arch);
+            assert!(out.stand_ins.is_empty());
+            let loose = out.result.mods.iter().filter(|m| !m.organized).count();
+            assert_eq!(loose, usize::from(!ignores_case));
+            let two = out
+                .result
+                .mods
+                .iter()
+                .find(|m| m.organized && m.title.as_deref() == Some("Two, a longer title"))
+                .unwrap();
+            assert_eq!(two.active, ignores_case);
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 
