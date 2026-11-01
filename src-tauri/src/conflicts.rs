@@ -4,16 +4,17 @@
 //!
 //! * `<uniqueType>` — GIANTS' own primitive: only one mod of a type loads (critical)
 //! * input actions, brands and shop categories registered under the same name (critical)
-//! * `<extraSourceFiles>` global Lua with the same basename — they can overwrite
-//!   each other (warning)
+//! * `<extraSourceFiles>` with the same basename (info only: the game loads each mod's
+//!   scripts by full path into that mod's own environment, so names don't collide)
 //! * more than one active map (info only: FS25 loads just the savegame's map)
 //! * more ground-pile (height) types than the map has slots for (#339, see `heighttypes`)
 //! * more fill types than the game's 255 (#341, see `filltypes`)
 //!
 //! Signal refinement: a clash among mods by the **same author** is usually
-//! intentional (shared packs/utilities), and two mods shipping the **byte-identical
-//! script** aren't really fighting — both are down-ranked (critical→warning,
-//! warning→info) with a note, so the critical list stays trustworthy.
+//! intentional (shared packs/utilities), so it's down-ranked (critical→warning,
+//! warning→info) with a note, so the critical list stays trustworthy. And because only the
+//! savegame's map loads, the active maps count as **one participant** in every collision
+//! (#352): two maps never clash with each other, only with a non-map mod.
 //!
 //! Not flagged: the six specialization / type surfaces (`<specializations>`, `<vehicleTypes>`
 //! and their placeable / hand-tool twins). The game registers a mod's types as
@@ -29,9 +30,7 @@ use crate::moddesc;
 use crate::scan;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -176,34 +175,6 @@ fn read_member(path: &str, kind: &str, member: &str) -> Option<Vec<u8>> {
     }
 }
 
-fn hash_bytes(b: &[u8]) -> u64 {
-    let mut h = DefaultHasher::new();
-    b.hash(&mut h);
-    h.finish()
-}
-
-/// True if every involved mod ships a byte-identical file for `basename`.
-fn identical_script(parsed: &[Parsed], idxs: &[usize], basename: &str) -> bool {
-    let mut prev: Option<u64> = None;
-    for &i in idxs {
-        let p = &parsed[i];
-        let full =
-            p.md.scripts
-                .iter()
-                .find(|s| s.rsplit('/').next().unwrap_or(s.as_str()) == basename);
-        let Some(full) = full else { return false };
-        let Some(bytes) = read_member(&p.path, &p.kind, full) else {
-            return false;
-        };
-        let h = hash_bytes(&bytes);
-        match prev {
-            Some(prev) if prev != h => return false,
-            _ => prev = Some(h),
-        }
-    }
-    prev.is_some()
-}
-
 /// The involved mods, deduplicated by tech name (two different mods may share a title).
 fn labels(parsed: &[Parsed], idxs: &[usize]) -> Involved {
     let mut out: Vec<String> = Vec::new();
@@ -215,6 +186,32 @@ fn labels(parsed: &[Parsed], idxs: &[usize]) -> Involved {
         }
     }
     (out, techs)
+}
+
+/// How many mods take part in a collision once it loads: distinct non-map mods, plus one for
+/// the maps. FS25 loads only the savegame's map (in-game test 2026-10-18), so two maps never
+/// load together and can't clash with each other, only with a non-map mod (#352). Below 2,
+/// there's no collision to report.
+fn participants(parsed: &[Parsed], idxs: &[usize]) -> usize {
+    let mut maps: Vec<&str> = Vec::new();
+    let mut others: Vec<&str> = Vec::new();
+    for &i in idxs {
+        let Some(p) = parsed.get(i) else { continue };
+        let list = if p.md.is_map { &mut maps } else { &mut others };
+        if !list.contains(&p.tech_name.as_str()) {
+            list.push(&p.tech_name);
+        }
+    }
+    others.len() + usize::from(!maps.is_empty())
+}
+
+/// "the other" for two participants, "the others" for more.
+fn the_others(n: usize) -> &'static str {
+    if n == 2 {
+        "the other"
+    } else {
+        "the others"
+    }
 }
 
 /// Note when more than one map is active. FS25 loads only the map the savegame uses and lists
@@ -487,10 +484,11 @@ pub fn detect_with(inputs: &[ConflictInput], game: Option<GameLists>) -> Vec<Con
     let note_same_author = " These mods share an author, so this is likely intentional.";
 
     for (ut, idxs) in unique_types {
-        let involved = labels(&parsed, &idxs);
-        if involved.0.len() < 2 {
+        let n = participants(&parsed, &idxs);
+        if n < 2 {
             continue;
         }
+        let involved = labels(&parsed, &idxs);
         let sa = same_author(&parsed, &idxs);
         out.push(conflict(
             if sa { "warning" } else { "critical" },
@@ -498,7 +496,7 @@ pub fn detect_with(inputs: &[ConflictInput], game: Option<GameLists>) -> Vec<Con
             &ut,
             format!(
                 "These mods use the same exclusive slot (\"{ut}\"). The game loads only one mod per slot, so {} won't take effect.{}",
-                if involved.0.len() == 2 { "the other" } else { "the others" },
+                the_others(n),
                 if sa { note_same_author } else { "" }
             ),
             involved,
@@ -506,10 +504,11 @@ pub fn detect_with(inputs: &[ConflictInput], game: Option<GameLists>) -> Vec<Con
     }
 
     for ((kind, name), idxs) in registrations {
-        let involved = labels(&parsed, &idxs);
-        if involved.0.len() < 2 {
+        let n = participants(&parsed, &idxs);
+        if n < 2 {
             continue;
         }
+        let involved = labels(&parsed, &idxs);
         let sa = same_author(&parsed, &idxs);
         let kl = kind_label(&kind).to_string();
         out.push(conflict(
@@ -518,38 +517,28 @@ pub fn detect_with(inputs: &[ConflictInput], game: Option<GameLists>) -> Vec<Con
             &name,
             format!(
                 "These mods each add the {kl} \"{name}\". Only one of them takes effect when the game loads, so {} may not work as intended.{}",
-                if involved.0.len() == 2 { "the other" } else { "the others" },
+                the_others(n),
                 if sa { note_same_author } else { "" }
             ),
             involved,
         ));
     }
 
+    // Same script file name: a note at most (#352). The game loads each mod's scripts by full
+    // path into that mod's own environment, and other mods reach its classes through
+    // `_G['<modName>']`, so two `main.lua` files don't replace each other.
     for (base, idxs) in scripts {
-        let involved = labels(&parsed, &idxs);
-        if involved.0.len() < 2 {
+        if participants(&parsed, &idxs) < 2 {
             continue;
         }
-        let identical = identical_script(&parsed, &idxs, &base);
-        let sa = same_author(&parsed, &idxs);
-        let (severity, extra) = if identical {
-            (
-                "info",
-                " The file is the same in each, so it's shared code, not a real clash.",
-            )
-        } else if sa {
-            ("info", note_same_author)
-        } else {
-            ("warning", "")
-        };
         out.push(conflict(
-            severity,
+            "info",
             "script",
             &base,
             format!(
-                "These mods each load a script file named \"{base}\". Depending on which loads last, one may replace the other.{extra}"
+                "These mods each load a script file named \"{base}\". The game keeps each mod's scripts apart, so the shared name alone doesn't make them clash."
             ),
-            involved,
+            labels(&parsed, &idxs),
         ));
     }
 
@@ -580,10 +569,11 @@ pub fn detect_with(inputs: &[ConflictInput], game: Option<GameLists>) -> Vec<Con
         }
     }
     for (name, idxs) in fill_types {
-        let involved = labels(&parsed, &idxs);
-        if involved.0.len() < 2 {
+        let n = participants(&parsed, &idxs);
+        if n < 2 {
             continue;
         }
+        let involved = labels(&parsed, &idxs);
         let sa = same_author(&parsed, &idxs);
         out.push(conflict(
             if sa { "info" } else { "warning" },
@@ -591,7 +581,7 @@ pub fn detect_with(inputs: &[ConflictInput], game: Option<GameLists>) -> Vec<Con
             &name,
             format!(
                 "These mods each define the fill type \"{name}\". The game keeps only one definition: whichever loads last replaces {} settings (capacity, price and so on), so one mod may misbehave.{}",
-                if involved.0.len() == 2 { "the other's" } else { "the others'" },
+                if n == 2 { "the other's" } else { "the others'" },
                 if sa { " They share an author, so this is likely coordinated." } else { "" }
             ),
             involved,
@@ -714,6 +704,9 @@ mod tests {
         assert!(kinds.contains(&"uniqueType"), "{kinds:?}");
         assert!(kinds.contains(&"action"), "{kinds:?}");
         assert!(kinds.contains(&"script"), "{kinds:?}");
+        // #352: a shared script name is only a note (each mod's scripts load apart).
+        let script = found.iter().find(|c| c.kind == "script").unwrap();
+        assert_eq!(script.severity, "info");
         for c in &found {
             for jargon in [
                 "uniqueType",
@@ -849,6 +842,148 @@ mod tests {
             .find(|c| c.kind == "heightTypes")
             .expect("piles");
         assert_eq!(piles.severity, "warning");
+    }
+
+    fn parsed_map(label: &str, tech: &str) -> Parsed {
+        let mut p = parsed(label, tech);
+        p.md.is_map = true;
+        p
+    }
+
+    /// #352: only the savegame's map loads, so the maps count as one participant.
+    #[test]
+    fn maps_count_as_one_participant() {
+        let p = vec![
+            parsed_map("Map A", "FS25_MapA"),
+            parsed_map("Map B", "FS25_MapB"),
+            parsed("Tractor", "FS25_Tractor"),
+            parsed("Seeder", "FS25_Seeder"),
+            parsed_map("Map A", "FS25_MapA"),
+        ];
+        // Maps only: they never load together.
+        assert_eq!(participants(&p, &[0, 1]), 1);
+        assert_eq!(participants(&p, &[0, 4]), 1);
+        // One map and one mod: a real clash with whichever map loads.
+        assert_eq!(participants(&p, &[0, 2]), 2);
+        // Two maps and one mod: still just two in any one game.
+        assert_eq!(participants(&p, &[0, 1, 2]), 2);
+        // Two mods (and a map): three.
+        assert_eq!(participants(&p, &[0, 2, 3]), 3);
+        assert_eq!(participants(&p, &[2, 3]), 2);
+        assert_eq!(participants(&p, &[2, 2]), 1);
+        assert_eq!(participants(&p, &[]), 0);
+    }
+
+    /// Write an unpacked mod for `detect` with `body` inside `<modDesc>`, plus a fill-type list
+    /// naming `fills` and a `scripts/main.lua` unique to the mod.
+    fn write_mod(base: &Path, tech: &str, body: &str, fills: &[&str]) -> ConflictInput {
+        let dir = base.join(tech);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("modDesc.xml"),
+            format!(
+                r#"<modDesc descVersion="92"><author>{tech}</author>{body}
+                <fillTypes filename="fills.xml"/>
+                <extraSourceFiles><sourceFile filename="scripts/main.lua"/></extraSourceFiles></modDesc>"#
+            ),
+        )
+        .unwrap();
+        let entries: String = fills
+            .iter()
+            .map(|f| format!(r#"<fillType name="{f}"/>"#))
+            .collect();
+        std::fs::write(
+            dir.join("fills.xml"),
+            format!("<map><fillTypes>{entries}</fillTypes></map>"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("scripts/main.lua"), format!("-- {tech}")).unwrap();
+        ConflictInput {
+            tech_name: tech.into(),
+            title: None,
+            path: dir.to_string_lossy().into_owned(),
+            kind: "dir".into(),
+        }
+    }
+
+    /// #352: two maps by different authors that add the same brand, shop category, action,
+    /// exclusive slot, fill type and script name never load together, so only the
+    /// "maps active" note shows. A non-map mod that adds the same things does clash, with
+    /// whichever map loads.
+    #[test]
+    fn maps_never_clash_with_each_other() {
+        let base = std::env::temp_dir().join(format!("silo_conflict_maps_{}", std::process::id()));
+        let shared = r#"<uniqueType>terrainSlot</uniqueType>
+            <brands><brand name="ACME" title="Acme"/></brands>
+            <storeCategories><storeCategory name="ACME_SHOP" title="Acme"/></storeCategories>
+            <actions><action name="MAP_TOGGLE"/></actions>"#;
+        let map = format!(r#"<maps><map id="M" configFilename="map.xml"/></maps>{shared}"#);
+        let maps = vec![
+            write_mod(&base, "FS25_MapA", &map, &["ROCKS"]),
+            write_mod(&base, "FS25_MapB", &map, &["ROCKS"]),
+        ];
+        let only_maps = detect(&maps);
+
+        let mut with_mod = maps.clone();
+        with_mod.push(write_mod(
+            &base,
+            "FS25_AcmePack",
+            r#"<brands><brand name="ACME" title="Acme"/></brands>"#,
+            &["ROCKS"],
+        ));
+        let mixed = detect(&with_mod);
+        let _ = std::fs::remove_dir_all(&base);
+
+        let kinds: Vec<&str> = only_maps.iter().map(|c| c.kind.as_str()).collect();
+        assert_eq!(kinds, ["map"], "{only_maps:?}");
+        assert_eq!(only_maps[0].name, "2 maps active");
+
+        // The pack clashes with whichever map loads: one other, not two.
+        let brand = mixed.iter().find(|c| c.kind == "brand").expect("brand");
+        assert_eq!(brand.severity, "critical");
+        assert_eq!(brand.tech_names.len(), 3);
+        assert!(
+            brand.explanation.contains("so the other may not work"),
+            "{}",
+            brand.explanation
+        );
+        let fill = mixed.iter().find(|c| c.kind == "fillType").expect("fill");
+        assert_eq!(fill.severity, "warning");
+        assert!(
+            fill.explanation.contains("replaces the other's settings"),
+            "{}",
+            fill.explanation
+        );
+        // The pack shares no shop category, action or slot with the maps.
+        for kind in ["storeCategory", "action", "uniqueType"] {
+            assert!(mixed.iter().all(|c| c.kind != kind), "{kind}: {mixed:?}");
+        }
+        let script = mixed.iter().find(|c| c.kind == "script").expect("script");
+        assert_eq!(script.severity, "info");
+        assert!(mixed.iter().any(|c| c.kind == "map"));
+    }
+
+    /// #352: the game loads each mod's scripts by full path into that mod's own environment
+    /// (other mods reach its classes through `_G['<modName>']`), so two different `main.lua`
+    /// files by different authors are a note, never something to review.
+    #[test]
+    fn same_script_name_is_only_a_note() {
+        let base = std::env::temp_dir().join(format!("silo_conflict_lua_{}", std::process::id()));
+        let inputs = vec![
+            write_mod(&base, "FS25_One", "", &[]),
+            write_mod(&base, "FS25_Two", "", &[]),
+        ];
+        let found = detect(&inputs);
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let c = &found[0];
+        assert_eq!((c.kind.as_str(), c.name.as_str()), ("script", "main.lua"));
+        assert_eq!(c.severity, "info");
+        assert!(
+            c.explanation.contains("doesn't make them clash"),
+            "{}",
+            c.explanation
+        );
     }
 
     #[test]

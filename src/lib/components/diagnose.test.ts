@@ -59,7 +59,9 @@ function conflict(over: Partial<Conflict>): Conflict {
 describe("Conflicts", () => {
   const list: Conflict[] = [
     conflict({ id: "u" }),
-    conflict({ id: "s", severity: "warning", kind: "script", name: "util.lua" }),
+    // A shared script file name is only ever a note now (#352: each mod's scripts load apart),
+    // so the Review row is a fill type.
+    conflict({ id: "s", severity: "warning", kind: "fillType", name: "ROCKS" }),
     conflict({
       id: "m",
       severity: "info",
@@ -79,7 +81,7 @@ describe("Conflicts", () => {
     expect(screen.getByText("Problem")).toBeInTheDocument();
     expect(screen.getByText("Review")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Two mods claim the same exclusive slot" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Two mods ship a script with the same file name" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Two mods define the same fill type" })).toBeInTheDocument();
     // Raw wire words never show.
     expect(screen.queryByText("critical")).toBeNull();
     expect(screen.queryByText("More than one map is active")).toBeNull();
@@ -99,7 +101,7 @@ describe("Conflicts", () => {
     render(ConflictsPanel, { conflicts: list, activeCount: 40, onOpen, onPark, showNotes: true });
     await user.click(screen.getAllByRole("button", { name: "Seeder B" })[0]);
     expect(onOpen).toHaveBeenCalledWith("FS25_SeederB");
-    // Two clashes (exclusive slot, script) get a menu; the maps note doesn't.
+    // Two clashes (exclusive slot, fill type) get a menu; the maps note doesn't.
     const menus = screen.getAllByRole("button", { name: "Park one…" });
     expect(menus).toHaveLength(2);
     await user.click(menus[0]);
