@@ -23,11 +23,13 @@ import {
 import {
   checkBlockedReason,
   installBlockedReason,
+  fileStamps,
   heldRefresh,
   holdRefresh,
   linkRefresh,
   mergeRows,
   recheckRow,
+  sameStamps,
   runUpdateCheck,
   updateAll,
   updateAllSummary,
@@ -656,6 +658,28 @@ describe("checking again when Silo links mods to the catalog (#402)", () => {
       held: null,
     });
     expect(heldRefresh(held, 2, false)).toEqual({ run: null, held: null });
+  });
+
+  it("tells when the library's files changed under a refresh", () => {
+    const m = {
+      techName: "A",
+      path: "A.zip",
+      size: 1,
+      mtimeMs: 2,
+      version: "1.0",
+    };
+    const before = fileStamps([m]);
+    expect(sameStamps(before, fileStamps([{ ...m }]))).toBe(true);
+    // An install's scan: a new version of the file.
+    expect(
+      sameStamps(before, fileStamps([{ ...m, version: "1.1", size: 3 }])),
+    ).toBe(false);
+    expect(sameStamps(before, fileStamps([{ ...m, mtimeMs: 9 }]))).toBe(false);
+    // Gone, or another mod there.
+    expect(sameStamps(before, fileStamps([]))).toBe(false);
+    expect(sameStamps(before, fileStamps([{ ...m, techName: "B" }]))).toBe(
+      false,
+    );
   });
 
   it("puts a refresh's rows in place of those mods' rows only", () => {

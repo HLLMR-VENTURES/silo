@@ -122,8 +122,10 @@
     checkBlockedReason,
     installBlockedReason,
     recheckRow,
+    fileStamps,
     heldRefresh,
     holdRefresh,
+    sameStamps,
     linkRefresh,
     mergeRows,
     runUpdateCheck,
@@ -2181,7 +2183,7 @@
       running: runningCheck,
       lastAsked: updateCheckedTechs,
       // A refresh of other linked mods running counts as busy too.
-      blocked: !!updateCheckBlocked || updateChecking,
+      blocked: !!updateCheckBlocked || updateChecking || scanning || scanGate.pending,
     });
     if (r.when === "now") void refreshLinked(r.names, updateFolderGen);
     else if (r.when === "after") {
@@ -2195,7 +2197,8 @@
     const h = heldRefresh(
       heldLinkRefresh,
       updateFolderGen,
-      updateChecking || !!updateCheckBlocked,
+      // A scan running or waiting (after an install, say) may be about to show newer files.
+      updateChecking || !!updateCheckBlocked || scanning || scanGate.pending,
     );
     if (h.held !== heldLinkRefresh) heldLinkRefresh = h.held;
     if (h.run) void refreshLinked(h.run, updateFolderGen);
@@ -2205,7 +2208,7 @@
    *  check links nothing itself. */
   async function refreshLinked(names: string[], gen: number) {
     if (gen !== updateFolderGen) return;
-    if (updateChecking || updateCheckBlocked) {
+    if (updateChecking || updateCheckBlocked || scanning || scanGate.pending) {
       heldLinkRefresh = holdRefresh(heldLinkRefresh, gen, names);
       return;
     }
@@ -2214,6 +2217,7 @@
       (m) => want.has(m.techName) && !cur(m.techName).skipUpdates,
     );
     if (subset.length === 0) return;
+    const asked = fileStamps(subset);
     updateChecking = true;
     try {
       const res = await runUpdateCheck(subset, repoMap, {
@@ -2222,6 +2226,12 @@
       });
       // Another folder's rows, or a failed request: the rows stay as they were.
       if (gen !== updateFolderGen || res.catalogError) return;
+      // The library changed under it (an install's scan, say): its answer is for older files,
+      // so it's asked again once nothing is busy, never put in.
+      if (!sameStamps(asked, fileStamps(mods.filter((m) => want.has(m.techName))))) {
+        heldLinkRefresh = holdRefresh(heldLinkRefresh, gen, names);
+        return;
+      }
       updateResults = mergeRows(updateResults, res.rows, want);
     } finally {
       updateChecking = false;

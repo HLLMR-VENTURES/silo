@@ -151,6 +151,32 @@ export function heldRefresh(
   return busy ? { run: null, held } : { run: held.names, held: null };
 }
 
+/** Which file each of `mods` is (path, size, modified time, version), by techName. */
+export function fileStamps(
+  mods: {
+    techName: string;
+    path: string;
+    size?: number;
+    mtimeMs?: number;
+    version?: string | null;
+  }[],
+): Map<string, string> {
+  return new Map(
+    mods.map((m) => [
+      m.techName,
+      JSON.stringify([m.path, m.size, m.mtimeMs, m.version ?? null]),
+    ]),
+  );
+}
+
+/** Whether two `fileStamps` name the same files. */
+export function sameStamps(
+  a: Map<string, string>,
+  b: Map<string, string>,
+): boolean {
+  return a.size === b.size && [...a].every(([k, v]) => b.get(k) === v);
+}
+
 /** The Updates rows with those of `names` replaced by `fresh` (a refresh of just those mods). */
 export function mergeRows(
   rows: UpdateRow[],
