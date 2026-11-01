@@ -1464,9 +1464,23 @@ mod tests {
         };
         // Time to spare, short database waits: only one of them may happen.
         let limits = Limits {
-            time: std::time::Duration::from_secs(5),
+            time: std::time::Duration::from_secs(10),
             db_wait: std::time::Duration::from_millis(500),
             ..Limits::default()
+        };
+        // How long one such wait takes here (SQLite sleeps in whole seconds on some builds).
+        let one_wait = {
+            let probe = db::open(&dir.join("silo.db")).unwrap();
+            let blocker = db::open(&dir.join("silo.db")).unwrap();
+            blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+            probe.busy_timeout(limits.db_wait).unwrap();
+            let t = std::time::Instant::now();
+            assert!(probe
+                .execute("DELETE FROM alias_check WHERE path = 'none'", [])
+                .is_err());
+            let took = t.elapsed();
+            blocker.execute_batch("ROLLBACK").unwrap();
+            took
         };
         let started = std::time::Instant::now();
         let out = run_with(
@@ -1478,8 +1492,9 @@ mod tests {
             limits,
         );
         let took = started.elapsed();
-        // One wait of 500 ms; a second would make it at least a second.
-        assert!(took < std::time::Duration::from_millis(950), "{took:?}");
+        // One wait; a second would make it at least twice that.
+        let most = one_wait + one_wait / 2 + std::time::Duration::from_millis(150);
+        assert!(took < most, "{took:?} (one wait: {one_wait:?})");
         let of = |i: usize| {
             out.iter()
                 .find(|(p, _)| *p == zips[i].path)
