@@ -188,11 +188,8 @@ fn labels(parsed: &[Parsed], idxs: &[usize]) -> Involved {
     (out, techs)
 }
 
-/// How many mods take part in a collision once it loads: distinct non-map mods, plus one for
-/// the maps. FS25 loads only the savegame's map (in-game test 2026-10-18), so two maps never
-/// load together and can't clash with each other, only with a non-map mod (#352). Below 2,
-/// there's no collision to report.
-fn participants(parsed: &[Parsed], idxs: &[usize]) -> usize {
+/// The distinct mods in a collision, split into (maps, non-map mods), by tech name.
+fn maps_and_others(parsed: &[Parsed], idxs: &[usize]) -> (usize, usize) {
     let mut maps: Vec<&str> = Vec::new();
     let mut others: Vec<&str> = Vec::new();
     for &i in idxs {
@@ -202,24 +199,28 @@ fn participants(parsed: &[Parsed], idxs: &[usize]) -> usize {
             list.push(&p.tech_name);
         }
     }
-    others.len() + usize::from(!maps.is_empty())
+    (maps.len(), others.len())
 }
 
-/// When maps take part in a collision, the condition it depends on: it only matters on a save
-/// that uses one of them, since no other map loads (#352). Empty when no map is involved.
+/// How many mods take part in a collision once it loads: distinct non-map mods, plus one for
+/// the maps. FS25 loads only the savegame's map (in-game test 2026-10-18), so two maps never
+/// load together and can't clash with each other, only with a non-map mod (#352). Below 2,
+/// there's no collision to report.
+fn participants(parsed: &[Parsed], idxs: &[usize]) -> usize {
+    let (maps, others) = maps_and_others(parsed, idxs);
+    others + usize::from(maps > 0)
+}
+
+/// When maps take part in a collision, when they count: only on a save on that map, since no
+/// other map loads (#352). With one non-map mod the whole clash depends on it; with more, the
+/// non-map mods clash anyway and a map only joins in. Empty when no map is involved.
 fn map_condition(parsed: &[Parsed], idxs: &[usize]) -> &'static str {
-    let mut maps: Vec<&str> = idxs
-        .iter()
-        .filter_map(|&i| parsed.get(i))
-        .filter(|p| p.md.is_map)
-        .map(|p| p.tech_name.as_str())
-        .collect();
-    maps.sort_unstable();
-    maps.dedup();
-    match maps.len() {
-        0 => "",
-        1 => " A map loads only when your savegame is on it, so this matters only when you play on that map.",
-        _ => " Only the map your savegame is on loads, so this matters only when you play on one of these maps.",
+    match maps_and_others(parsed, idxs) {
+        (0, _) => "",
+        (1, 0 | 1) => " A map loads only when your savegame is on it, so this matters only when you play on that map.",
+        (_, 0 | 1) => " Only the map your savegame is on loads, so this matters only when you play on one of these maps.",
+        (1, _) => " The map takes part only when your savegame is on it.",
+        _ => " Each map takes part only when your savegame is on it, and only one loads.",
     }
 }
 
@@ -897,6 +898,12 @@ mod tests {
         assert_eq!(map_condition(&p, &[2, 3]), "");
         assert!(map_condition(&p, &[0, 2, 4]).contains("play on that map"));
         assert!(map_condition(&p, &[0, 1, 2]).contains("one of these maps"));
+        // Two non-map mods clash on any map; a map only joins in.
+        assert_eq!(
+            map_condition(&p, &[0, 2, 3]),
+            " The map takes part only when your savegame is on it."
+        );
+        assert!(map_condition(&p, &[0, 1, 2, 3]).starts_with(" Each map takes part"));
     }
 
     /// Write an unpacked mod for `detect` with `body` inside `<modDesc>`, plus a fill-type list
@@ -957,6 +964,15 @@ mod tests {
             &["ROCKS"],
         ));
         let mixed = detect(&with_mod);
+        // A second pack: the two packs clash on any map, the maps only join in.
+        let mut two_packs = with_mod.clone();
+        two_packs.push(write_mod(
+            &base,
+            "FS25_AcmeToo",
+            r#"<brands><brand name="ACME" title="Acme"/></brands>"#,
+            &["ROCKS"],
+        ));
+        let both = detect(&two_packs);
         let _ = std::fs::remove_dir_all(&base);
 
         let kinds: Vec<&str> = only_maps.iter().map(|c| c.kind.as_str()).collect();
@@ -994,6 +1010,18 @@ mod tests {
         let script = mixed.iter().find(|c| c.kind == "script").expect("script");
         assert_eq!(script.severity, "info");
         assert!(mixed.iter().any(|c| c.kind == "map"));
+
+        for kind in ["brand", "fillType"] {
+            let c = both.iter().find(|c| c.kind == kind).expect(kind);
+            assert_eq!(c.tech_names.len(), 4);
+            assert!(c.explanation.contains("the others"), "{}", c.explanation);
+            assert!(!c.explanation.contains("matters only"), "{}", c.explanation);
+            assert!(
+                c.explanation.contains("Each map takes part only when"),
+                "{}",
+                c.explanation
+            );
+        }
     }
 
     /// #352: the game loads each mod's scripts by full path into that mod's own environment
