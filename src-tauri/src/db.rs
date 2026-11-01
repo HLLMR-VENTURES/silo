@@ -105,7 +105,7 @@ pub const AUTO_SNAPSHOTS_KEPT: i64 = 5;
 ///
 /// Keep migrations additive where possible so an older Silo can still read the file; when one
 /// can't be, the version gate in `open` is what protects the user.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 fn newer_schema(found: i64) -> String {
     format!(
@@ -165,6 +165,7 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
             1 => migrate_1_to_2(&tx)?,
             2 => migrate_2_to_3(&tx)?,
             3 => migrate_3_to_4(&tx)?,
+            4 => migrate_4_to_5(&tx)?,
             other => return Err(format!("no migration from database version {other}")),
         }
         tx.pragma_update(None, "user_version", v + 1)
@@ -288,6 +289,23 @@ fn migrate_3_to_4(tx: &Connection) -> Result<(), String> {
              download_url      TEXT,
              created_at        INTEGER NOT NULL,
              PRIMARY KEY (tech_name, archive_sha256)
+         );",
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Version 5 = `alias_check` (#402): the library zips the catalog-link backfill has already
+/// looked at, keyed by path with the size and modified time it saw (as the scan cache is), so an
+/// unchanged file is never hashed or looked up again. A changed file has another size or time and
+/// is looked at once more. Rows for files the scan no longer has are dropped with
+/// `prune_alias_checks`. Additive.
+fn migrate_4_to_5(tx: &Connection) -> Result<(), String> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS alias_check (
+             path       TEXT PRIMARY KEY,
+             size       INTEGER NOT NULL,
+             mtime_ms   INTEGER NOT NULL,
+             checked_at INTEGER NOT NULL
          );",
     )
     .map_err(|e| e.to_string())
@@ -1105,6 +1123,56 @@ pub fn forget_catalog_alias(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Whether the catalog-link backfill (#402) already looked at the file at `path` when it had
+/// this size and modified time.
+pub fn alias_checked(
+    conn: &Connection,
+    path: &str,
+    size: u64,
+    mtime_ms: u64,
+) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM alias_check WHERE path = ?1 AND size = ?2 AND mtime_ms = ?3)",
+        rusqlite::params![path, size as i64, mtime_ms as i64],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Note that the catalog-link backfill (#402) looked at the file at `path` with this size and
+/// modified time, replacing what it noted for an earlier version of the file.
+pub fn mark_alias_checked(
+    conn: &Connection,
+    path: &str,
+    size: u64,
+    mtime_ms: u64,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO alias_check(path, size, mtime_ms, checked_at) VALUES(?1, ?2, ?3, ?4)
+         ON CONFLICT(path) DO UPDATE SET
+             size = excluded.size, mtime_ms = excluded.mtime_ms, checked_at = excluded.checked_at",
+        rusqlite::params![
+            path,
+            size as i64,
+            mtime_ms as i64,
+            unix_now().as_secs() as i64
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Drop the backfill's notes for files the scan cache no longer has (removed or moved), so the
+/// table stays the size of the library.
+/// @returns how many were dropped
+pub fn prune_alias_checks(conn: &Connection) -> Result<usize, String> {
+    conn.execute(
+        "DELETE FROM alias_check WHERE path NOT IN (SELECT path FROM mod_cache)",
+        [],
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Replace all tags for a mod.
@@ -1944,11 +2012,13 @@ mod tests {
             let conn = open(&path).unwrap();
             set_source(&conn, "FS25_A", Some("https://example.com/a")).unwrap();
             // Wind it back to a v3 file, as Silo 1.0.x left it.
-            conn.execute_batch("DROP TABLE catalog_alias; PRAGMA user_version = 3;")
-                .unwrap();
+            conn.execute_batch(
+                "DROP TABLE alias_check; DROP TABLE catalog_alias; PRAGMA user_version = 3;",
+            )
+            .unwrap();
         }
         let conn = open(&path).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 4);
+        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(load_sources(&conn).len(), 1, "the library is kept");
         assert!(catalog_aliases(&conn, "FS25_FieldToDoList")
             .unwrap()
@@ -1981,6 +2051,61 @@ mod tests {
         assert!(catalog_aliases(&conn, "FS25_fieldtodolist")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn migrating_to_v5_adds_alias_checks_and_keeps_the_library() {
+        let path = temp_db("v4_to_v5");
+        {
+            let conn = open(&path).unwrap();
+            set_source(&conn, "FS25_A", Some("https://example.com/a")).unwrap();
+            record_catalog_alias(
+                &conn,
+                &CatalogAliasRow {
+                    tech_name: "FS25_FieldToDoList".into(),
+                    archive_sha256: "abcd".into(),
+                    size: 10,
+                    catalog_id: "cat-todo".into(),
+                    catalog_tech_name: Some("FS25_ToDo".into()),
+                    download_url: None,
+                },
+            )
+            .unwrap();
+            // Wind it back to a v4 file, as Silo with #388 left it.
+            conn.execute_batch("DROP TABLE alias_check; PRAGMA user_version = 4;")
+                .unwrap();
+        }
+        let conn = open(&path).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 5);
+        assert_eq!(load_sources(&conn).len(), 1, "the library is kept");
+        assert_eq!(
+            catalog_aliases(&conn, "FS25_FieldToDoList").unwrap().len(),
+            1,
+            "the links are kept"
+        );
+        assert!(!alias_checked(&conn, "m/FS25_X.zip", 10, 5).unwrap());
+    }
+
+    #[test]
+    fn an_alias_check_holds_for_one_version_of_one_file() {
+        let path = temp_db("alias_check");
+        let mut conn = open(&path).unwrap();
+        mark_alias_checked(&conn, "m/FS25_X.zip", 10, 5).unwrap();
+        assert!(alias_checked(&conn, "m/FS25_X.zip", 10, 5).unwrap());
+        // Another size, another time, or another file: not looked at yet.
+        assert!(!alias_checked(&conn, "m/FS25_X.zip", 11, 5).unwrap());
+        assert!(!alias_checked(&conn, "m/FS25_X.zip", 10, 6).unwrap());
+        assert!(!alias_checked(&conn, "m/FS25_Y.zip", 10, 5).unwrap());
+        // The newer version replaces the note for the older one.
+        mark_alias_checked(&conn, "m/FS25_X.zip", 11, 6).unwrap();
+        assert!(alias_checked(&conn, "m/FS25_X.zip", 11, 6).unwrap());
+        assert!(!alias_checked(&conn, "m/FS25_X.zip", 10, 5).unwrap());
+        // Notes for files the scan cache no longer has are dropped; the rest stay.
+        mark_alias_checked(&conn, "m/FS25_Gone.zip", 1, 1).unwrap();
+        upsert_many(&mut conn, &[("m/FS25_X.zip".into(), 6, 11, "{}".into())]).unwrap();
+        assert_eq!(prune_alias_checks(&conn).unwrap(), 1);
+        assert!(alias_checked(&conn, "m/FS25_X.zip", 11, 6).unwrap());
+        assert!(!alias_checked(&conn, "m/FS25_Gone.zip", 1, 1).unwrap());
     }
 
     #[test]

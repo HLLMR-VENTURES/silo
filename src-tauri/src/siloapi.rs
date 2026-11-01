@@ -312,6 +312,50 @@ pub fn browse(
     }
 }
 
+/// The most rows `GET /mods` returns per page.
+const LIST_PAGE: u32 = 100;
+
+/// Every catalog entry with a source of kind `source` (`github`, say), read page by page from
+/// `GET /mods?source=<source>&sort=name` (name order, tie-broken by id on the server, so pages
+/// don't overlap or skip). More than `max_pages` pages is an error rather than a partial list,
+/// as is any page that fails: a caller counting the entries that list some bytes must see them all.
+pub fn list_source(base: &str, source: &str, max_pages: u32) -> Result<Vec<BrowseMod>, String> {
+    let fetch = |offset: u32| -> Result<BrowsePage, String> {
+        let url = format!(
+            "{}/mods?source={}&sort=name&limit={LIST_PAGE}&offset={offset}",
+            base.trim_end_matches('/'),
+            urlencode(source)
+        );
+        let parsed: BrowseResponse = get(&url)?.into_json().map_err(|e| e.to_string())?;
+        Ok(BrowsePage {
+            mods: parsed.mods,
+            total: parsed.total,
+        })
+    };
+    all_pages(fetch, max_pages)
+}
+
+/// Read pages of `LIST_PAGE` rows from `fetch(offset)` until the reported total is reached or a
+/// page comes back empty; more than `max_pages` pages is an error.
+fn all_pages(
+    fetch: impl Fn(u32) -> Result<BrowsePage, String>,
+    max_pages: u32,
+) -> Result<Vec<BrowseMod>, String> {
+    let mut out: Vec<BrowseMod> = Vec::new();
+    for page in 0..max_pages {
+        let got = fetch(page * LIST_PAGE)?;
+        let done = got.mods.is_empty() || out.len() as u64 + got.mods.len() as u64 >= got.total;
+        out.extend(got.mods);
+        if done {
+            return Ok(out);
+        }
+    }
+    Err(format!(
+        "Silo's catalog listed more than {} mods; Silo stopped reading it.",
+        max_pages * LIST_PAGE
+    ))
+}
+
 /// SiloAPI's `POST /mods/lookup` accepts at most this many tech names per request.
 pub const LOOKUP_BATCH: usize = 500;
 
@@ -653,7 +697,7 @@ pub fn check_download_name(filename: &str, tech_name: &str) -> Result<(), String
 }
 
 /// Last path segment if it looks like a .zip.
-fn filename_from_url(url: &str) -> Option<String> {
+pub(crate) fn filename_from_url(url: &str) -> Option<String> {
     let clean = url.split(['?', '#']).next().unwrap_or(url);
     let name = clean.rsplit('/').next().unwrap_or("");
     if name.to_lowercase().ends_with(".zip") && name.len() > 4 {
@@ -910,6 +954,54 @@ mod tests {
             let (_, version) = pick_download(&d, Some("github")).unwrap();
             assert_eq!(version, None, "{blank:?}");
         }
+    }
+
+    /// A list page of `n` bare rows numbered from `from`, of `total` overall.
+    fn list_page(from: u32, n: u32, total: u64) -> BrowsePage {
+        BrowsePage {
+            mods: (from..from + n)
+                .map(|i| {
+                    serde_json::from_value(serde_json::json!({"id": format!("m{i}"), "title": "x"}))
+                        .unwrap()
+                })
+                .collect(),
+            total,
+        }
+    }
+
+    #[test]
+    fn a_source_listing_reads_every_page_and_no_more() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let fetch = |offset: u32| {
+            asked.borrow_mut().push(offset);
+            let n = 250u32.saturating_sub(offset).min(LIST_PAGE);
+            Ok(list_page(offset, n, 250))
+        };
+        let all = all_pages(fetch, 10).unwrap();
+        assert_eq!(all.len(), 250);
+        assert_eq!(all[249].id, "m249");
+        assert_eq!(*asked.borrow(), [0, 100, 200]);
+        // A page that comes back empty ends it (the total moved under us).
+        let short = all_pages(|o| Ok(list_page(o, if o == 0 { 100 } else { 0 }, 900)), 10);
+        assert_eq!(short.unwrap().len(), 100);
+        // Nothing at all.
+        assert!(all_pages(|o| Ok(list_page(o, 0, 0)), 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_source_listing_that_fails_or_runs_long_is_an_error_not_a_partial_list() {
+        let failing = |o: u32| {
+            if o == 0 {
+                Ok(list_page(0, 100, 300))
+            } else {
+                Err("offline".to_string())
+            }
+        };
+        assert_eq!(all_pages(failing, 10).unwrap_err(), "offline");
+        let endless = |o: u32| Ok(list_page(o, 100, 1_000_000));
+        assert!(all_pages(endless, 3).is_err());
     }
 
     #[test]

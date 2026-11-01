@@ -1,6 +1,7 @@
 //! Silo core — Tauri command surface. All heavy logic lives in sibling modules so
 //! it stays unit-testable (and reusable by a future CLI) without a running app.
 
+pub mod aliasbackfill;
 pub mod bindings;
 pub mod bisect;
 pub mod bridge;
@@ -131,10 +132,76 @@ async fn scan_mods(
         );
         result.notices = recovered.notices;
         result.problems = recovered.problems;
+        spawn_alias_backfill(app, &result.mods);
         Ok::<_, String>(result)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// How long a catalog-link backfill waits for the library lock before leaving the record for
+/// the next scan.
+const ALIAS_BACKFILL_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Set while a catalog-link backfill runs; a scan meanwhile starts none (its files wait for the
+/// next scan).
+static ALIAS_BACKFILL_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// After a scan, link the library's zips Silo installed under another name before catalog links
+/// were recorded at install (#402; see `aliasbackfill`). Runs on the blocking pool without
+/// holding up the scan's answer, one run at a time. Failures are only logged.
+fn spawn_alias_backfill(app: tauri::AppHandle, mods: &[scan::ModEntry]) {
+    use std::sync::atomic::Ordering;
+    let zips: Vec<aliasbackfill::LibraryZip> = mods
+        .iter()
+        .filter(|m| m.kind == "zip")
+        .map(|m| aliasbackfill::LibraryZip {
+            path: PathBuf::from(&m.path),
+            tech_name: m.tech_name.clone(),
+            size: m.size,
+            mtime_ms: m.mtime_ms,
+            version: m.version.clone(),
+        })
+        .collect();
+    if zips.is_empty() || ALIAS_BACKFILL_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        struct Done;
+        impl Drop for Done {
+            fn drop(&mut self) {
+                ALIAS_BACKFILL_RUNNING.store(false, Ordering::SeqCst);
+            }
+        }
+        let _done = Done;
+        let ran = (|| -> Result<(), String> {
+            let conn = db::open(&db_path(&app)?)?;
+            if let Err(e) = db::prune_alias_checks(&conn) {
+                log::warn!("[catalog] couldn't tidy the link backfill's notes: {e}");
+            }
+            let catalog = aliasbackfill::SiloApi {
+                base: siloapi_base(&app)?,
+            };
+            let out = aliasbackfill::run(&conn, &zips, &catalog, provenance::sha256_file, || {
+                library_write_within(ALIAS_BACKFILL_WAIT)
+            });
+            let linked = out
+                .iter()
+                .filter(|(_, o)| matches!(o, aliasbackfill::Outcome::Linked(_)))
+                .count();
+            if !out.is_empty() {
+                log::info!(
+                    "[catalog] link backfill looked at {} mods, linked {linked}",
+                    out.len()
+                );
+            }
+            Ok(())
+        })();
+        if let Err(e) = ran {
+            log::warn!("[catalog] link backfill skipped: {e}");
+        }
+    });
 }
 
 /// What a scan reads, and the one folder whose `organized` manifest it may rewrite.
