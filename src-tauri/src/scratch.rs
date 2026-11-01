@@ -305,6 +305,40 @@ pub(crate) fn held_by(part: &Path, whole: &Path) -> bool {
     }
 }
 
+/// `copy` (a copy Silo made in the mods folder, not a link) holds nothing its archived copy
+/// `archived` doesn't: a zip with the same bytes (or the same file under another name, a
+/// hardlink), or a marked folder copy whose every file but the marker is in `archived` with the
+/// same bytes. Both must be real copies of the same kind. What a relink temp ([`sweep_where`])
+/// and a mods-folder copy on park or flatten (#399) must be before they're removed.
+pub(crate) fn copy_held_by_archive(copy: &Path, archived: &Path) -> bool {
+    match copy.symlink_metadata() {
+        Ok(m) if m.file_type().is_symlink() => false,
+        Ok(m) if m.is_dir() => {
+            real_copy(archived, "dir")
+                && covered_by(
+                    copy,
+                    archived,
+                    Cover::Exact,
+                    Some(crate::organize::SILO_MARKER),
+                )
+        }
+        Ok(m) if m.is_file() => {
+            real_copy(archived, "zip") && (one_file(copy, archived) || same_bytes(copy, archived))
+        }
+        _ => false,
+    }
+}
+
+/// Two distinct names (`distinct`) of one file: hardlinks, so the bytes are the same without
+/// reading them.
+fn one_file(a: &Path, b: &Path) -> bool {
+    distinct(a, b)
+        && matches!(
+            (same_file::Handle::from_path(a), same_file::Handle::from_path(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
+}
+
 /// Clean up a scratch entry right after the operation that made it failed: the same proof as
 /// [`sweep_where`], so it's removed only when redundant; otherwise it's kept (and stays
 /// recorded in `journal`, when there is one, for a later sweep).
@@ -415,20 +449,13 @@ fn sweep_one(e: &Entry) -> Swept {
     let removed = match e.role {
         Role::RelinkTmp if link => Some(remove_link_entry(&e.path)),
         // A copy (where no link could be made): its archived copy still holds every byte.
-        Role::RelinkTmp if meta.is_file() => (real_copy(&e.from, "zip")
-            && same_bytes(&e.path, &e.from))
-        .then(|| std::fs::remove_file(&e.path)),
+        Role::RelinkTmp if meta.is_file() => {
+            copy_held_by_archive(&e.path, &e.from).then(|| std::fs::remove_file(&e.path))
+        }
         // A marked folder copy: every file but the marker is still in the archived copy, and
         // `remove_link` checks the marker's listing (an untouched copy).
-        Role::RelinkTmp => (meta.is_dir()
-            && real_copy(&e.from, "dir")
-            && covered_by(
-                &e.path,
-                &e.from,
-                Cover::Exact,
-                Some(crate::organize::SILO_MARKER),
-            ))
-        .then(|| crate::organize::remove_link(&e.path)),
+        Role::RelinkTmp => (meta.is_dir() && copy_held_by_archive(&e.path, &e.from))
+            .then(|| crate::organize::remove_link(&e.path)),
         // Silo never makes a link as move scratch: a link here isn't its own.
         Role::MoveTmp | Role::MoveOld if link => None,
         // A copy that may have stopped part-way: every byte it holds is still in the original

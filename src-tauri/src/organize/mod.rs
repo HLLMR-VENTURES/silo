@@ -35,7 +35,7 @@
 //!   → copy), folder links / junctions, `remove_link`.
 //! * `volumes`: link probes ([`supports_hardlinks`], [`supports_symlinks`], probe sweeping) and
 //!   mounts / same-volume checks (`mount_of`, `volume_relation`, `same_volume_for_links`).
-//! * `foldercopy`: copy-fallback folder projections: the ownership marker, `copy_unchanged`,
+//! * `foldercopy`: copy-fallback folder projections: the ownership marker, `copy_state`,
 //!   `retire_folder_copy`.
 //! * `foreign`: ownership detection: `is_silo_projection` and [`detect_foreign_projections`].
 //! * `tests/`: the unit tests, one file per module above (`tests/layout.rs` covers this file);
