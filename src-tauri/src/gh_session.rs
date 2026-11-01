@@ -2,8 +2,9 @@
 //!
 //! * **Requests.** A stored token is read as a [`Bearer`] tied to the session it was read in,
 //!   and every request asks for admission ([`Bearer::admit`]) just before it goes out. A
-//!   Disconnect or a new sign-in ends the session, so a token copied before then is never sent
-//!   afterwards. Disconnect also waits for the requests already admitted to finish.
+//!   Disconnect or a new sign-in ends the session, so a request with a token copied before then
+//!   isn't admitted afterwards. One admitted just before may still be connecting; Disconnect
+//!   waits for those to finish before it returns.
 //! * **Sign-ins.** Each device flow, PAT save and cancel starts a new sign-in attempt; only the
 //!   newest attempt may store its token ([`Session::commit`]), and its own requests (the code
 //!   exchange, `whoami`) are admitted only while it's the newest. An older sign-in that finishes
@@ -180,8 +181,9 @@ impl SignOut<'_> {
     /// slow request drains can't leave the token in storage. `clear` is told whether the marker
     /// is written (when the Disconnect started, or tried again here), and returns whether
     /// storage is now clean (the token can't be read back and the account details are gone)
-    /// along with its result; when it is, the marker is removed again. Once the session ends, a
-    /// token read before is never sent, and no stored token is used until a sign-in commits.
+    /// along with its result; when it is, the marker is removed again. Once the session ends, no
+    /// request with a token read before is admitted, and no stored token is used until a
+    /// sign-in commits.
     pub fn finish<T>(mut self, clear: impl FnOnce(bool) -> (bool, T)) -> T {
         let gate = self.gate;
         let mut g = gate.lock();

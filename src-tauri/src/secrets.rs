@@ -399,9 +399,11 @@ fn save(
         }
         Err(err) => {
             log::warn!("{key}: couldn't save to the keychain: {err}");
+            // Whether to fall back and whether the write may have landed are separate
+            // questions: any platform-level failure leaves the outcome unknown.
             Err(SaveError {
                 message: SAVE_FAILED.into(),
-                changed: no_keychain_service(&err),
+                changed: matches!(err, keyring::Error::PlatformFailure(_)),
             })
         }
     }
@@ -515,8 +517,8 @@ fn no_keychain_service(err: &keyring::Error) -> bool {
 }
 
 /// D-Bus error names that mean nobody provides the Secret Service, or there's no session bus to
-/// ask (`NoServer`, `FileNotFound`, `BadAddress`: no bus at that address; `NotSupported`: no
-/// bus to autolaunch, as on a headless box).
+/// ask (`NoServer`, `FileNotFound`, `BadAddress`: no bus at that address). Not `NotSupported`
+/// in general: a running Secret Service answers that when it rejects the session algorithm.
 #[cfg(target_os = "linux")]
 const SERVICE_ABSENT_NAMES: &[&str] = &[
     "org.freedesktop.DBus.Error.ServiceUnknown",
@@ -524,8 +526,21 @@ const SERVICE_ABSENT_NAMES: &[&str] = &[
     "org.freedesktop.DBus.Error.NoServer",
     "org.freedesktop.DBus.Error.FileNotFound",
     "org.freedesktop.DBus.Error.BadAddress",
-    "org.freedesktop.DBus.Error.NotSupported",
 ];
+
+/// Whether a D-Bus error says there's no session bus to connect to: one of the names above,
+/// or libdbus's `NotSupported` for "Unable to autolaunch a dbus-daemon" (a headless box with no
+/// session bus), which happens while connecting, before any Secret Service could answer.
+#[cfg(target_os = "linux")]
+fn dbus_says_absent(name: Option<&str>, message: Option<&str>) -> bool {
+    match name {
+        Some("org.freedesktop.DBus.Error.NotSupported") => {
+            message.is_some_and(|m| m.contains("autolaunch"))
+        }
+        Some(n) => SERVICE_ABSENT_NAMES.contains(&n),
+        None => false,
+    }
+}
 
 /// Whether the error keyring wrapped in a `PlatformFailure` says there's no Secret Service.
 fn service_absent(inner: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
@@ -536,7 +551,7 @@ fn service_absent(inner: &(dyn std::error::Error + Send + Sync + 'static)) -> bo
     #[cfg(target_os = "linux")]
     match inner.downcast_ref::<dbus_secret_service::Error>() {
         Some(dbus_secret_service::Error::Dbus(e)) => {
-            return e.name().is_some_and(|n| SERVICE_ABSENT_NAMES.contains(&n));
+            return dbus_says_absent(e.name(), e.message());
         }
         // "No D-Bus session or Secret Service provider found" (unused in 4.1, but that's
         // what it means).
@@ -1328,6 +1343,18 @@ mod tests {
         let e = store_with(&conn, KEY, "account-b", Some(&k.entry()), KEYCHAIN_WORKS);
         assert!(matches!(e, Err(SaveError { changed: true, .. })));
         assert_eq!(k.stored().as_deref(), Some("account-b"));
+        // The same with a platform failure that isn't "no service" (a lost D-Bus reply): still
+        // a possible change, never "unchanged".
+        let conn = mem_db();
+        let k = FakeKeychain::with(|s| {
+            s.stored = Some("account-a".into());
+            s.set_stores_then_fails = Some(Fail::Refused);
+        });
+        for missing in [KEYCHAIN_WORKS, NO_KEYCHAIN] {
+            let e = store_with(&conn, KEY, "account-b", Some(&k.entry()), missing);
+            assert!(matches!(e, Err(SaveError { changed: true, .. })));
+            assert_eq!(row(&conn), None, "and never in plaintext");
+        }
         // The fallback write itself refused: unchanged.
         let conn = mem_db();
         conn.execute_batch(
@@ -1470,10 +1497,23 @@ mod tests {
     #[test]
     fn linux_dbus_errors_are_classified_by_name() {
         fn dbus_err(name: &str) -> keyring::Error {
+            dbus_err_msg(name, "test")
+        }
+        fn dbus_err_msg(name: &str, message: &str) -> keyring::Error {
             keyring::Error::PlatformFailure(Box::new(dbus_secret_service::Error::Dbus(
-                dbus::Error::new_custom(name, "test"),
+                dbus::Error::new_custom(name, message),
             )))
         }
+        // NotSupported: only libdbus's "can't autolaunch a session bus", never a Secret
+        // Service rejecting the session algorithm.
+        assert!(no_keychain_service(&dbus_err_msg(
+            "org.freedesktop.DBus.Error.NotSupported",
+            "Unable to autolaunch a dbus-daemon without a $DISPLAY for X11"
+        )));
+        assert!(!no_keychain_service(&dbus_err_msg(
+            "org.freedesktop.DBus.Error.NotSupported",
+            "Algorithm dh-ietf1024-sha256-aes128-cbc-pkcs7 is not supported"
+        )));
         for name in SERVICE_ABSENT_NAMES {
             assert!(
                 no_keychain_service(&dbus_err(name)),

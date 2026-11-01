@@ -229,8 +229,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Open on ModHub** is only offered for pages on farming-simulator.com itself, not for any link
   that mentions the name. (#358)
 - **Disconnecting GitHub** while Silo was still talking to GitHub (an update check, a Star, a
-  shared set) could let that request go out with your token afterwards. Now nothing is sent with
-  it once you click Disconnect, and Disconnect finishes the requests already on their way first.
+  shared set) could let that request go out with your token afterwards. Now Silo starts no new
+  request with it once you click Disconnect, and Disconnect waits for the ones already on their
+  way.
   (#370)
 - **Connecting GitHub**: a sign-in you cancelled or replaced, for example by signing in as another
   account, could finish late and switch Silo back to the old account while the screen showed the

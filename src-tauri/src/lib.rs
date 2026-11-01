@@ -1730,8 +1730,9 @@ async fn verify_mod(
 #[tauri::command]
 async fn gh_logout(app: tauri::AppHandle) -> Result<(), String> {
     let db = db_path(&app)?;
-    // Counts from the click: nothing more is sent with the token, and no sign-in already out
-    // (or started before this ends) can store one. Requests already admitted finish first.
+    // Counts from the click: no new request with the token is admitted, and no sign-in already
+    // out (or started before this ends) can store one. Requests already admitted (they may
+    // still be connecting) finish before the Disconnect does.
     let signing_out = GH_SESSION.begin_sign_out();
     off_main(move || {
         signing_out.finish(|marked| {
