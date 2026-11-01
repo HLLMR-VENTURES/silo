@@ -450,6 +450,7 @@ fn repoint(
     let link = env.mods.join(&row.file_name);
     let Ok(meta) = link.symlink_metadata() else {
         organize::make_link(dst, &link, &row.kind, policy).map_err(|e| format!("relink: {e}"))?;
+        reaches_the_copy(&link)?;
         env.note_projection(row, &link);
         return Ok(());
     };
@@ -490,7 +491,7 @@ fn repoint(
             }
             return Err(format!("relink: {e}"));
         }
-        return Ok(());
+        return reaches_the_copy(&link);
     }
     replace_zip_link(env, row, &link, dst, policy)
 }
@@ -589,8 +590,23 @@ fn replace_zip_link(
     policy: &mut LinkPolicy,
 ) -> Result<(), String> {
     organize::replace_zip_link(link, dst, policy).map_err(|e| format!("relink: {e}"))?;
+    reaches_the_copy(link)?;
     env.note_projection(row, link);
     Ok(())
+}
+
+/// The mods-folder entry `link` that `repoint` just made reaches a real file or folder. A link
+/// to a new copy that went missing while it was made (a sync client removing it, say) would
+/// dangle: that's an error, so the step stops before the old copy is deleted.
+fn reaches_the_copy(link: &Path) -> Result<(), String> {
+    if std::fs::metadata(link).is_ok() {
+        Ok(())
+    } else {
+        Err(format!(
+            "relink: the new copy linked from {} isn't there any more, so Silo kept the old copy. Check the new archive folder, then resume.",
+            link.display()
+        ))
+    }
 }
 
 /// What a step needs from the run: the DB (to save the marker) and the mods folder.
@@ -2599,6 +2615,26 @@ mod tests {
         assert!(zip_at(&f.new, "FS25_A").exists());
         assert_eq!(same_file::Handle::from_path(&flat).unwrap(), before);
         assert_eq!(std::fs::read(&flat).unwrap(), b"PK FS25_A");
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// A link that reaches nothing stops the step (so the old copy isn't deleted); a link to a
+    /// real file passes (#188).
+    #[test]
+    fn a_link_to_a_vanished_copy_stops_the_step() {
+        let f = fx("reaches");
+        let file = f.mods.join("FS25_A.zip");
+        std::fs::write(&file, b"PK").unwrap();
+        assert_eq!(reaches_the_copy(&file), Ok(()));
+        let e = reaches_the_copy(&f.mods.join("FS25_Gone.zip")).unwrap_err();
+        assert!(
+            e.contains("isn't there any more, so Silo kept the old copy"),
+            "{e}"
+        );
+        let dangling = f.mods.join("FS25_B.zip");
+        if organize::symlink_file(&f.base.join("gone.zip"), &dangling).is_ok() {
+            assert!(reaches_the_copy(&dangling).is_err());
+        }
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
