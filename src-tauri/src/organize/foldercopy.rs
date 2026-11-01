@@ -98,17 +98,38 @@ pub(super) fn marker_listing(dir: &Path) -> std::io::Result<Option<Vec<ListedFil
     })
 }
 
-/// True only when the marked folder copy at `dir` is provably what Silo wrote. With a v2
-/// listing: the same files with the same sizes and modification times (any added, removed,
-/// resized or re-timed file counts as changed). Limit: an edit that keeps a file's size and
-/// lands within the same timestamp tick as the copy (same millisecond, or FAT's 2 s) can't be
-/// seen; in practice an edit comes much later. A legacy marker has no listing, so the copy is
-/// compared with the archived `src` by relative path, size and SHA-256.
+/// What [`copy_state`] found a marked folder copy to be.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CopyState {
+    /// Provably what Silo wrote.
+    Unchanged,
+    /// Its v2 listing shows a file added, removed, resized or re-timed: the user changed it.
+    Edited,
+    /// A legacy marker (no listing) and the copy doesn't match the archived copy, or couldn't
+    /// be compared with it: an edit and a damaged archive copy look the same (#399).
+    Unproven,
+}
+
+/// Whether the marked folder copy at `dir` is what Silo wrote. With a v2 listing: the same
+/// files with the same sizes and modification times (any added, removed, resized or re-timed
+/// file counts as changed). Limit: an edit that keeps a file's size and lands within the same
+/// timestamp tick as the copy (same millisecond, or FAT's 2 s) can't be seen; in practice an
+/// edit comes much later. A legacy marker has no listing, so the copy is compared with the
+/// archived `src` by relative path, size and SHA-256. `Err` when the marker or the copy can't
+/// be read: nothing is proven either way.
+pub(super) fn copy_state(dir: &Path, src: &Path) -> std::io::Result<CopyState> {
+    Ok(match marker_listing(dir)? {
+        Some(files) if listing_of(dir)? == files => CopyState::Unchanged,
+        Some(_) => CopyState::Edited,
+        None if same_tree_contents(dir, src).unwrap_or(false) => CopyState::Unchanged,
+        None => CopyState::Unproven,
+    })
+}
+
+/// True only when the marked folder copy at `dir` is provably what Silo wrote ([`copy_state`]).
+#[cfg(test)]
 pub(crate) fn copy_unchanged(dir: &Path, src: &Path) -> std::io::Result<bool> {
-    match marker_listing(dir)? {
-        Some(files) => Ok(listing_of(dir)? == files),
-        None => same_tree_contents(dir, src),
-    }
+    copy_state(dir, src).map(|s| s == CopyState::Unchanged)
 }
 
 /// Same relative paths, sizes and SHA-256 contents (the marker is ignored).
@@ -156,18 +177,21 @@ pub(super) fn retire_folder_copy_with(
     mods_root: &Path,
     rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> std::io::Result<Option<PathBuf>> {
-    if copy_unchanged(link, src).unwrap_or(false) {
-        if !crate::scratch::copy_held_by_archive(link, src) {
-            return Err(not_held_by_archive(link, src));
+    match copy_state(link, src) {
+        Ok(CopyState::Unchanged) => {
+            if !crate::scratch::copy_held_by_archive(link, src) {
+                return Err(not_held_by_archive(link, src));
+            }
+            std::fs::remove_dir_all(link)?;
+            crate::fslog::changed("unlink", link);
+            return Ok(None);
         }
-        std::fs::remove_dir_all(link)?;
-        crate::fslog::changed("unlink", link);
-        return Ok(None);
-    }
-    // Only a v2 listing proves an edit. A legacy marker only says the copy differs from the
-    // archived copy, which may be the archive's damage: it stays where it is (#399).
-    if !matches!(marker_listing(link), Ok(Some(_))) {
-        return Err(legacy_copy_differs(link, src));
+        Ok(CopyState::Edited) => {}
+        // Only a v2 listing that was read proves an edit; anything less stays where it is
+        // (#399). A legacy marker only says the copy differs from the archived copy, which
+        // may be the archive's damage.
+        Ok(CopyState::Unproven) => return Err(legacy_copy_differs(link, src)),
+        Err(e) => return Err(couldnt_check(link, &e)),
     }
     let name = link
         .file_name()
@@ -222,6 +246,18 @@ pub(super) fn clear_projection(
         return Err(not_held_by_archive(link, src));
     }
     remove_link(link).map(|()| None)
+}
+
+/// What the user is told when Silo couldn't read a marked copy (or its marker) to tell whether it
+/// changed: it's left where it is.
+fn couldnt_check(link: &Path, e: &std::io::Error) -> std::io::Error {
+    let name = link
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| link.display().to_string());
+    std::io::Error::other(format!(
+        "Silo couldn't check whether {name} changed since it was copied ({e}), so it left it in your mods folder."
+    ))
 }
 
 /// What the user is told when a legacy-marked copy (no listing of what Silo wrote) doesn't match

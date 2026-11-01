@@ -652,3 +652,53 @@ fn a_legacy_copy_that_doesnt_match_the_archive_stays_put() {
         let _ = std::fs::remove_dir_all(&base);
     }
 }
+
+/// A v2 copy Silo can't list (a folder in it it can't read) isn't proven changed: park and
+/// flatten leave it where it is, marker and all, instead of moving it to backups (#399).
+#[cfg(unix)]
+#[test]
+fn a_copy_that_cant_be_listed_stays_put() {
+    use std::os::unix::fs::PermissionsExt;
+    for flattening in [false, true] {
+        let base = temp_dir_for(&format!("unlisted_copy_{flattening}"));
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let (src, flat) = folder_copy_fixture(&base, &conn);
+        let marker = std::fs::read(flat.join(SILO_MARKER)).unwrap();
+        let sub = flat.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unlock = || {
+            let _ = std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755));
+        };
+        if std::fs::read_dir(&sub).is_ok() {
+            unlock(); // running as root: permissions don't stop reads
+            drop(conn);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        let layout = Layout::default_for(&base);
+        let rep = if flattening {
+            flatten(&conn, &layout)
+        } else {
+            set_active(&conn, &layout, &HashSet::new())
+        };
+        unlock();
+        assert_eq!(rep.changed, 0, "{:?}", rep.errors);
+        assert!(
+            rep.errors[0].starts_with(
+                "FS25_Dir: Silo couldn't check whether FS25_Dir changed since it was copied"
+            ),
+            "{:?}",
+            rep.errors
+        );
+        assert!(rep.notices.is_empty(), "{:?}", rep.notices);
+        assert_eq!(std::fs::read(flat.join(SILO_MARKER)).unwrap(), marker);
+        assert_eq!(std::fs::read(flat.join("a.lua")).unwrap(), b"print(1)");
+        assert!(src.join("a.lua").is_file());
+        assert!(!base.join("backups").exists());
+        let rows = db::load_organized(&conn, &crate::modsroot::canonical_key(&base));
+        assert!(rows.len() == 1 && rows[0].active);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
