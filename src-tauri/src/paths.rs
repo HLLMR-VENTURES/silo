@@ -735,25 +735,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// A link inside the mod folder isn't followed, to a file or through a folder.
-    #[test]
-    fn a_linked_member_is_not_opened() {
-        let base = std::env::temp_dir().join(format!("silo_member_link_{}", std::process::id()));
+    /// A mod folder `FS25_A` with a file `outside.xml` next to it, for the link tests.
+    fn link_fixture(name: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let root = base.join("FS25_A");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(base.join("outside.xml"), "<y/>").unwrap();
-        #[cfg(unix)]
-        let linked = std::os::unix::fs::symlink(base.join("outside.xml"), root.join("file.xml"))
-            .and_then(|_| std::os::unix::fs::symlink(&base, root.join("up")));
-        #[cfg(windows)]
-        let linked =
-            std::os::windows::fs::symlink_file(base.join("outside.xml"), root.join("file.xml"))
-                .and_then(|_| std::os::windows::fs::symlink_dir(&base, root.join("up")));
-        // Windows needs Developer Mode or admin to make links; nothing to check without them.
-        if linked.is_ok() {
-            assert!(open_inside(&root, "file.xml").is_none());
+        (base, root)
+    }
+
+    /// A link inside the mod folder isn't followed, to a file or through a folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_member_is_not_opened() {
+        let (base, root) = link_fixture("silo_member_link");
+        std::os::unix::fs::symlink(base.join("outside.xml"), root.join("file.xml")).unwrap();
+        std::os::unix::fs::symlink(&base, root.join("up")).unwrap();
+        assert!(
+            root.join("up").join("outside.xml").is_file(),
+            "the link works"
+        );
+        assert!(open_inside(&root, "file.xml").is_none());
+        assert!(open_inside(&root, "up/outside.xml").is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A junction inside the mod folder isn't followed. Making one needs no special rights.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_in_the_mod_folder_is_not_followed() {
+        let (base, root) = link_fixture("silo_member_junction");
+        let up = root.join("up");
+        let made = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&up)
+            .arg(&base)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "mklink /J failed: {made:?}");
+        assert!(up.join("outside.xml").is_file(), "the junction works");
+        assert!(open_inside(&root, "up/outside.xml").is_none());
+        std::fs::remove_dir(&up).unwrap(); // the junction only, not what it points at
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A symlink inside the mod folder isn't followed. Windows needs Developer Mode or admin
+    /// rights to make one; without them there is nothing to check.
+    #[cfg(windows)]
+    #[test]
+    fn a_linked_member_is_not_opened() {
+        const PRIVILEGE_NOT_HELD: i32 = 1314;
+        let (base, root) = link_fixture("silo_member_link");
+        let file = std::os::windows::fs::symlink_file(base.join("outside.xml"), root.join("f.xml"));
+        let dir = std::os::windows::fs::symlink_dir(&base, root.join("up"));
+        for made in [&file, &dir] {
+            if let Err(e) = made {
+                assert_eq!(e.raw_os_error(), Some(PRIVILEGE_NOT_HELD), "{e}");
+            }
+        }
+        if file.is_ok() {
+            assert!(root.join("f.xml").is_file(), "the link works");
+            assert!(open_inside(&root, "f.xml").is_none());
+        }
+        if dir.is_ok() {
             assert!(open_inside(&root, "up/outside.xml").is_none());
+            std::fs::remove_dir(root.join("up")).unwrap();
+        }
+        if file.is_err() && dir.is_err() {
+            eprintln!("skipped: making a symlink needs Developer Mode or admin rights");
         }
         let _ = std::fs::remove_dir_all(&base);
     }
