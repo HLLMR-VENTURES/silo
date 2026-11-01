@@ -62,7 +62,9 @@ pub(crate) fn build_agent(
 
 /// An agent for URLs Silo didn't choose itself, used only through [`get_guarded`]: HTTPS only,
 /// no automatic redirects, and a resolver that never hands ureq an address the guard refuses.
-/// `overall` caps the whole fetch, every redirect included.
+/// `overall` caps the whole fetch, every redirect included, from connecting to reading the
+/// body; the system's DNS lookup isn't interruptible and isn't counted (ureq's own overall
+/// timeout doesn't cover it either).
 pub struct GuardedAgent {
     agent: ureq::Agent,
     overall: Option<Duration>,
@@ -189,7 +191,7 @@ impl std::fmt::Display for FetchError {
 /// `check` runs on the first URL and on every redirect target before anything is sent there.
 /// `auth` (an `Authorization` value) is sent only to the first URL's origin, never across
 /// hosts or schemes. The agent's overall cap counts from the first request, so redirects
-/// don't extend it; it covers reading the final body too.
+/// don't extend it; it covers reading the final body too (not DNS, see [`GuardedAgent`]).
 pub(crate) fn get_guarded(
     g: &GuardedAgent,
     url: &str,
@@ -313,6 +315,19 @@ fn reject_bad_ip(ip: IpAddr, allow_localhost: bool) -> Result<(), String> {
     // An IPv4-mapped IPv6 address (`::ffff:10.0.0.1`) connects to its IPv4 address on a
     // dual-stack socket, so it's judged as that address.
     let ip = ip.to_canonical();
+    if let IpAddr::V6(v6) = ip {
+        let s = v6.segments();
+        // NAT64 (well-known 64:ff9b::/96, local-use 64:ff9b:1::/48): a translator forwards to
+        // the IPv4 address in the low 32 bits, so judge that one (a DNS64 network answers
+        // github.com this way). A local-use address in another layout can't be decoded.
+        if s[0] == 0x64 && s[1] == 0xff9b && s[2] <= 1 {
+            if s[3..6] != [0, 0, 0] {
+                return Err("refusing a NAT64 address Silo can't check".to_string());
+            }
+            let v4 = std::net::Ipv4Addr::from((u32::from(s[6]) << 16) | u32::from(s[7]));
+            return reject_bad_ip(IpAddr::V4(v4), false);
+        }
+    }
     if ip.is_loopback() {
         return if allow_localhost {
             Ok(())
@@ -378,6 +393,8 @@ mod tests {
             "https://[::1]/x",
             "https://[fc00::1]/x",
             "https://[fec0::1234]/x",
+            "https://[64:ff9b::a9fe:a9fe]/x",
+            "https://[64:ff9b:1::7f00:1]/x",
             "https://localhost/x",
             // IPv4-mapped IPv6 reaches the IPv4 address on a dual-stack socket.
             "https://[::ffff:169.254.169.254]/x",
@@ -555,6 +572,11 @@ mod tests {
             "[::1]:443",
             "[fd00::1]:443",
             "[fec0::1234]:443",
+            // NAT64 of a private address (well-known and local-use prefixes), and a local-use
+            // layout that can't be decoded.
+            "[64:ff9b::c0a8:101]:443",
+            "[64:ff9b:1::a00:1]:443",
+            "[64:ff9b:1:ab::8c52:7003]:443",
             "[::ffff:10.0.0.1]:443",
         ] {
             let res = public_addrs("evil.example.com:443", stub(vec![private]));
@@ -570,6 +592,13 @@ mod tests {
             kept,
             vec!["140.82.112.3:443".parse::<SocketAddr>().unwrap()]
         );
+        // On a DNS64 network a public site answers with NAT64 of its public address: kept.
+        for nat64 in ["[64:ff9b::8c52:7003]:443", "[64:ff9b:1::8c52:7003]:443"] {
+            assert!(
+                public_addrs("github.com:443", stub(vec![nat64])).is_ok(),
+                "{nat64}"
+            );
+        }
         // A lookup failure passes through.
         let failed = public_addrs("x:443", |_: &str| Err(io::Error::other("no such host")));
         assert!(failed.is_err());
