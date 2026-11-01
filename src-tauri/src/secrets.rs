@@ -367,6 +367,9 @@ fn save(
         // always leaves the account that's connected now intact. The SQLite row then wins over
         // any keychain copy (`get`), and a disconnect that can't confirm that copy gone
         // distrusts it.
+        // A platform-level failure doesn't say the write didn't happen (a reply lost on the
+        // way back still leaves the new secret stored), so it counts as a possible change. Only
+        // a refusal (locked, access denied, a bad entry) leaves the old token for certain.
         Err(err)
             if no_keychain_service(&err)
                 && keychain_copy(e) == KeychainCopy::NoService
@@ -378,17 +381,20 @@ fn save(
                 Ok(()) => saved_to_keychain(conn, key).map_err(SaveError::changed),
                 Err(again) if no_keychain_service(&again) => {
                     log::warn!("{key}: no usable keychain ({err}); storing it in the database");
-                    write_fallback(conn, key, v)
+                    write_fallback(conn, key, v).map_err(|e| SaveError::changed(e.message))
                 }
                 Err(again) => {
                     log::warn!("{key}: the keychain answered, but refused the write: {again}");
-                    Err(SaveError::unchanged(SAVE_FAILED))
+                    Err(SaveError::changed(SAVE_FAILED))
                 }
             }
         }
         Err(err) => {
             log::warn!("{key}: couldn't save to the keychain: {err}");
-            Err(SaveError::unchanged(SAVE_FAILED))
+            Err(SaveError {
+                message: SAVE_FAILED.into(),
+                changed: no_keychain_service(&err),
+            })
         }
     }
 }
@@ -594,6 +600,8 @@ mod tests {
         set_fails: Option<Fail>,
         get_fails: Option<Fail>,
         delete_fails: Option<Fail>,
+        /// Writes store the secret, then report this failure anyway (a reply lost on the way).
+        set_stores_then_fails: Option<Fail>,
         /// The next write says so on the first channel, then waits for the second.
         pause: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     }
@@ -614,7 +622,10 @@ mod tests {
                 return Err(err(f));
             }
             s.stored = Some(String::from_utf8(secret.to_vec()).unwrap());
-            Ok(())
+            match s.set_stores_then_fails {
+                Some(f) => Err(err(f)),
+                None => Ok(()),
+            }
         }
         fn get_secret(&self) -> keyring::Result<Vec<u8>> {
             let s = self.0.lock().unwrap();
@@ -1232,6 +1243,16 @@ mod tests {
         db::set_app_setting(&conn, KEY, Some("old-row")).unwrap();
         refuse_row_delete(&conn);
         let k = FakeKeychain::default();
+        let e = store_with(&conn, KEY, "account-b", Some(&k.entry()), KEYCHAIN_WORKS);
+        assert!(matches!(e, Err(SaveError { changed: true, .. })));
+        assert_eq!(k.stored().as_deref(), Some("account-b"));
+        // A write that reports a platform failure but stored it anyway: counted as changed, so
+        // the session signs out instead of using B under A's name.
+        let conn = mem_db();
+        let k = FakeKeychain::with(|s| {
+            s.stored = Some("account-a".into());
+            s.set_stores_then_fails = Some(Fail::Platform);
+        });
         let e = store_with(&conn, KEY, "account-b", Some(&k.entry()), KEYCHAIN_WORKS);
         assert!(matches!(e, Err(SaveError { changed: true, .. })));
         assert_eq!(k.stored().as_deref(), Some("account-b"));

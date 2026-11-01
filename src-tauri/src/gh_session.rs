@@ -64,6 +64,9 @@ struct State {
     flow: Option<Flow>,
     /// Where the signed-out marker lives (beside the database); None until the app sets it.
     marker: Option<PathBuf>,
+    /// Storage may still hold a token Silo must not use (a Disconnect or a sign-in couldn't
+    /// clean up), whether or not the marker could be written: `retry_sign_out` keeps trying.
+    cleanup_pending: bool,
 }
 
 struct Flow {
@@ -192,8 +195,9 @@ impl SignOut<'_> {
             }
         }
         self.done = true;
-        let end = End(g);
+        let mut end = End(g);
         let (clean, out) = clear(marked);
+        end.0.cleanup_pending = !clean;
         if clean {
             let _ = Session::remove_marker(&end.0);
         }
@@ -212,6 +216,7 @@ impl Session {
                 in_flight: 0,
                 flow: None,
                 marker: None,
+                cleanup_pending: false,
             }),
             idle: Condvar::new(),
         }
@@ -260,14 +265,10 @@ impl Session {
         let Some(p) = &g.marker else {
             return Ok(());
         };
-        match std::fs::remove_file(p) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => {
-                log::warn!("GitHub: couldn't remove the signed-out marker: {e}");
-                Err(e.to_string())
-            }
-        }
+        remove_durably(p).map_err(|e| {
+            log::warn!("GitHub: couldn't remove the signed-out marker: {e}");
+            e.to_string()
+        })
     }
 
     /// Whether the marker is there; one Silo can't check for counts as there.
@@ -277,19 +278,23 @@ impl Session {
             .is_some_and(|p| p.try_exists().unwrap_or(true))
     }
 
-    /// Retry a Disconnect that couldn't clean up storage: only while signed out with the marker
-    /// still there and no Disconnect running. Under the lock, so no sign-in's store runs in the
-    /// middle: whatever token storage holds is one Silo must not use. `clear` returns whether
-    /// storage is now clean (then the marker goes) and its result. None when there was nothing
-    /// to retry.
+    /// Retry a Disconnect that couldn't clean up storage: only while signed out, with cleanup
+    /// still pending in this run or the marker still there, and no Disconnect running. Under the
+    /// lock, so no sign-in's store runs in the middle: whatever token storage holds is one Silo
+    /// must not use. The marker is written first if it's missing (it may have failed before).
+    /// `clear` returns whether storage is now clean (then the marker goes) and its result. None
+    /// when there was nothing to retry.
     pub fn retry_sign_out<T>(&self, clear: impl FnOnce() -> (bool, T)) -> Option<T> {
-        let g = self.lock();
-        if !g.signed_out || g.closing > 0 || !Self::marker_exists(&g) {
+        let mut g = self.lock();
+        if !g.signed_out || g.closing > 0 || !(g.cleanup_pending || Self::marker_exists(&g)) {
             return None;
         }
+        if !Self::marker_exists(&g) {
+            let _ = Self::write_marker(&g);
+        }
         let (clean, out) = clear();
-        if clean {
-            let _ = Self::remove_marker(&g);
+        if clean && Self::remove_marker(&g).is_ok() {
+            g.cleanup_pending = false;
         }
         Some(out)
     }
@@ -474,6 +479,7 @@ impl Session {
             Ok(v) => match Self::remove_marker(&g) {
                 Ok(()) => {
                     g.signed_out = false;
+                    g.cleanup_pending = false;
                     Ok(v)
                 }
                 Err(e) => {
@@ -483,6 +489,7 @@ impl Session {
             },
             Err(e) if e.token_changed => {
                 g.signed_out = true;
+                g.cleanup_pending = true;
                 Err(e.message)
             }
             Err(e) => {
@@ -526,10 +533,28 @@ fn write_durably(p: &Path) -> std::io::Result<()> {
     let mut f = std::fs::File::create(p)?;
     f.write_all(b"signed out\n")?;
     f.sync_all()?;
+    sync_folder(p)
+}
+
+/// Remove the marker so that survives a power loss too (on Unix, the folder entry is flushed).
+/// A marker that isn't there is fine.
+fn remove_durably(p: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(p) {
+        Ok(()) => sync_folder(p),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Flush the folder holding `p`, so a file created or removed there stays that way after a
+/// power loss. Windows (NTFS) has no folder handle to flush; its metadata journal covers this.
+fn sync_folder(p: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     if let Some(dir) = p.parent() {
         std::fs::File::open(dir)?.sync_all()?;
     }
+    #[cfg(not(unix))]
+    let _ = p;
     Ok(())
 }
 
@@ -896,6 +921,42 @@ mod tests {
         gate.commit(attempt, ok).unwrap().unwrap();
         assert_eq!(gate.retry_sign_out(|| (true, "after reconnect")), None);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_disconnect_that_couldnt_even_mark_is_retried_once_storage_recovers() {
+        // The marker can't be written (its folder is missing) and storage refuses too.
+        let dir = std::env::temp_dir().join(format!("silo_gh_gone_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("marker");
+        let gate = Session::new();
+        gate.use_marker(path.clone());
+        let marked = gate.begin_sign_out().finish(|marked| (false, marked));
+        assert!(!marked);
+        // Storage recovers in this run: the next status read retries, marks first, then cleans.
+        std::fs::create_dir_all(&dir).unwrap();
+        let seen = gate.retry_sign_out(|| (true, path.exists()));
+        assert_eq!(seen, Some(true), "marked before it cleaned");
+        assert!(!path.exists());
+        assert_eq!(gate.retry_sign_out(|| (true, ())), None, "done");
+        // Still failing: kept pending (and marked now), so a restart stays signed out.
+        gate.begin_sign_out().finish(|_| (false, ()));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(gate.retry_sign_out(|| (false, ())), Some(()));
+        assert!(path.exists());
+        let next = Session::new();
+        next.use_marker(path.clone());
+        assert!(next.signed_out());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_marker_is_removed_for_good() {
+        let path = marker_path("durable");
+        std::fs::write(&path, b"x").unwrap();
+        remove_durably(&path).unwrap();
+        assert!(!path.exists());
+        remove_durably(&path).unwrap(); // already gone is fine
     }
 
     #[test]
