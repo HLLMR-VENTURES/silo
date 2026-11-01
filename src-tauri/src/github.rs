@@ -802,19 +802,34 @@ pub fn read_gist_file(id: &str, filename: &str, token: Option<&str>) -> Result<S
 
 /// Fetch a gist file's raw content (the `raw_url` GitHub returns for a truncated file).
 /// Guarded by `is_github_host` — the URL comes from GitHub's own response, but we never
-/// attach a bearer token to a non-GitHub host regardless.
+/// attach a bearer token to a non-GitHub host regardless. A redirect must stay on GitHub too,
+/// and the token goes only to the first URL's host.
 fn fetch_gist_raw(url: &str, token: Option<&str>) -> Result<String, String> {
     if !is_github_host(url) {
         return Err("Refusing to fetch gist content from a non-GitHub host".into());
     }
-    let mut req = crate::net::api().get(url);
-    if let Some(t) = token {
-        req = req.set("Authorization", &format!("Bearer {t}"));
+    let auth = token.map(|t| format!("Bearer {t}"));
+    crate::net::get_guarded(
+        crate::net::guarded_api(),
+        url,
+        &check_github_hop,
+        auth.as_deref(),
+    )
+    .map_err(|e| match e {
+        crate::net::FetchError::Http(e) => gh_err(*e),
+        crate::net::FetchError::Refused(s) => s,
+    })?
+    .into_string()
+    .map_err(|e| e.to_string())
+}
+
+/// A hop of a GitHub-only fetch: public https (see `net::public_https`) on a GitHub host.
+fn check_github_hop(u: &url::Url) -> Result<(), String> {
+    crate::net::public_https(u)?;
+    if !is_github_host(u.as_str()) {
+        return Err("it leaves GitHub".into());
     }
-    req.call()
-        .map_err(gh_err)?
-        .into_string()
-        .map_err(|e| e.to_string())
+    Ok(())
 }
 
 /// Read a file from a public repo's default branch via the Contents API. The
@@ -1180,6 +1195,20 @@ mod tests {
         assert!(!err.is_empty());
         assert!(check_update_url("http://github.com/o/r/releases/download/v1/x.zip").is_err());
         assert!(check_update_url("https://github.com/o/r/releases/download/v1/x.zip").is_ok());
+        // Where github.com redirects a release asset (checked with curl, 2026-10-31).
+        assert!(check_update_url(
+            "https://release-assets.githubusercontent.com/github-production-release-asset/1/x?sig=y"
+        )
+        .is_ok());
+        assert!(check_update_url("https://objects.githubusercontent.com/x").is_ok());
+    }
+
+    #[test]
+    fn a_gist_redirect_must_stay_on_github() {
+        let ok = |s: &str| check_github_hop(&url::Url::parse(s).unwrap());
+        assert!(ok("https://gist.githubusercontent.com/o/1/raw/f.json").is_ok());
+        assert!(ok("https://evil.example/f.json").is_err());
+        assert!(ok("http://gist.githubusercontent.com/o/1/raw/f.json").is_err());
     }
 
     #[test]

@@ -23,7 +23,8 @@
 //! (`FillTypeManager:loadFillTypes`), so each name counts once.
 
 use crate::heighttypes::{
-    dlc_names, foliage_names, installed_dlc, map_own_file, named_list, severity_rank,
+    dlc_names, foliage_names, installed_dlc, map_own_file, named_list, push_new, severity_rank,
+    MAX_LIST_FILES, MAX_LIST_NAMES,
 };
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
@@ -217,16 +218,18 @@ pub fn mod_fills(
         .map(|b| fill_type_names(&b))
         .unwrap_or_default();
     let mut estimate: Vec<String> = Vec::new();
-    if !md.is_map {
-        for m in candidates() {
+    if !md.is_map && exact.len() < MAX_LIST_NAMES {
+        // Seeded with the exact names, so an estimate never repeats one.
+        let mut seen: HashSet<String> = exact.iter().cloned().collect();
+        for m in candidates().into_iter().take(MAX_LIST_FILES) {
+            if seen.len() >= MAX_LIST_NAMES {
+                break;
+            }
             if Some(m.as_str()) == declared {
                 continue;
             }
-            for t in read(&m).map(|b| fill_type_names(&b)).unwrap_or_default() {
-                if !exact.contains(&t) && !estimate.contains(&t) {
-                    estimate.push(t);
-                }
-            }
+            let names = read(&m).map(|b| fill_type_names(&b)).unwrap_or_default();
+            push_new(&mut estimate, &mut seen, names);
         }
     }
     (!exact.is_empty() || !estimate.is_empty()).then(|| ModFills {
@@ -422,6 +425,69 @@ mod tests {
         assert_eq!(fill_type_names(xml), ["LIMESTONE", "COMPOST"]);
         assert!(fill_type_names(b"<map></map>").is_empty());
         assert!(fill_type_names(b"not xml").is_empty());
+    }
+
+    /// A list of many entries reads in linear time, keeping first-seen order; a list with more
+    /// distinct names than [`MAX_LIST_NAMES`] counts as unreadable, like a broken file (#351).
+    #[test]
+    fn huge_lists_read_fast_and_past_the_cap_count_as_unreadable() {
+        use crate::heighttypes::MAX_LIST_NAMES;
+        let list = |names: &mut dyn Iterator<Item = String>| {
+            let mut xml = String::from("<map><fillTypes>");
+            for n in names {
+                xml.push_str(&format!("<fillType name=\"{n}\"/>"));
+            }
+            xml.push_str("</fillTypes></map>");
+            xml.into_bytes()
+        };
+        // 200k entries cycling through exactly the cap's worth of names: all kept, in order.
+        let at_cap = list(&mut (0..200_000).map(|i| format!("t{}", i % MAX_LIST_NAMES)));
+        let started = std::time::Instant::now();
+        let names = fill_type_names(&at_cap);
+        assert_eq!(names.len(), MAX_LIST_NAMES);
+        assert_eq!(names[0], "T0");
+        assert_eq!(
+            names[MAX_LIST_NAMES - 1],
+            format!("T{}", MAX_LIST_NAMES - 1)
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        // One distinct name more and the list is unreadable.
+        let over = list(&mut (0..=MAX_LIST_NAMES).map(|i| format!("t{i}")));
+        assert!(fill_type_names(&over).is_empty());
+        // A mod's estimate merges its lists in linear time too, without repeating exact names.
+        let md = crate::moddesc::ModDesc {
+            fill_types_file: Some("xml/fillTypes.xml".into()),
+            ..Default::default()
+        };
+        let read = |m: &str| match m {
+            "xml/fillTypes.xml" => Some(list(&mut (0..5_000).map(|i| format!("a{i}")))),
+            _ => Some(list(&mut (0..MAX_LIST_NAMES).map(|i| format!("a{i}")))),
+        };
+        let candidates = || (0..20).map(|i| format!("x/{i}_fillTypes.xml")).collect();
+        let f = mod_fills("M", "FS25_M", &md, &read, &candidates).unwrap();
+        assert_eq!(f.exact.len(), 5_000);
+        assert_eq!(f.estimate.len(), MAX_LIST_NAMES - 5_000);
+        assert_eq!(f.estimate[0], "A5000");
+        // Names split across many lists: the estimate stops growing at the cap, and at most
+        // MAX_LIST_FILES lists are read.
+        let reads = std::cell::Cell::new(0);
+        let read = |m: &str| {
+            reads.set(reads.get() + 1);
+            let i: usize = m.split('/').nth(1)?.split('_').next()?.parse().ok()?;
+            Some(list(&mut (0..1_000).map(|k| format!("n{i}_{k}"))))
+        };
+        let plain = crate::moddesc::ModDesc::default();
+        let f = mod_fills("M", "FS25_M", &plain, &read, &candidates).unwrap();
+        assert_eq!(f.estimate.len(), MAX_LIST_NAMES);
+        assert_eq!(reads.get(), MAX_LIST_NAMES / 1_000);
+        let read_empty = |_: &str| {
+            reads.set(reads.get() + 1);
+            Some(list(&mut std::iter::empty()))
+        };
+        let many = || (0..150).map(|i| format!("x/{i}_fillTypes.xml")).collect();
+        reads.set(0);
+        assert!(mod_fills("M", "FS25_M", &plain, &read_empty, &many).is_none());
+        assert_eq!(reads.get(), crate::heighttypes::MAX_LIST_FILES);
     }
 
     /// Only `<root><fillTypes><fillType>` registers: a bale's list of fill types it accepts

@@ -234,12 +234,21 @@ struct LookupResponse {
 }
 
 fn get(url: &str) -> Result<ureq::Response, String> {
-    crate::net::api().get(url).call().map_err(|e| match e {
-        ureq::Error::Status(code, _) => format!(
-            "Silo's catalog isn't answering right now (error {code}). Try again in a few minutes."
-        ),
+    let resp = crate::net::catalog().get(url).call().map_err(catalog_err)?;
+    crate::net::refuse_redirect(resp).map_err(not_answering)
+}
+
+/// A catalog request's error as text.
+fn catalog_err(e: ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(code, _) => not_answering(code),
         other => format!("Silo can't reach its catalog right now: {other}"),
-    })
+    }
+}
+
+/// The catalog answered with `code` (an error, or a redirect Silo doesn't follow).
+fn not_answering(code: u16) -> String {
+    format!("Silo's catalog isn't answering right now (error {code}). Try again in a few minutes.")
 }
 
 /// Search/list the catalog. `query`/`category` are optional filters.
@@ -326,16 +335,12 @@ fn lookup_batches(tech_names: &[String]) -> Vec<Vec<&str>> {
 }
 
 fn lookup_one(base: &str, tech_names: &[&str]) -> Result<Vec<LookupResult>, String> {
-    let resp = crate::net::api()
+    let resp = crate::net::catalog()
         .post(&format!("{}/mods/lookup", base.trim_end_matches('/')))
         .set("Content-Type", "application/json")
         .send_json(ureq::json!({ "techNames": tech_names }))
-        .map_err(|e| match e {
-            ureq::Error::Status(code, _) => format!(
-                "Silo's catalog isn't answering right now (error {code}). Try again in a few minutes."
-            ),
-            other => format!("Silo can't reach its catalog right now: {other}"),
-        })?;
+        .map_err(catalog_err)?;
+    let resp = crate::net::refuse_redirect(resp).map_err(not_answering)?;
     let parsed: LookupResponse = resp.into_json().map_err(|e| e.to_string())?;
     Ok(parsed.results)
 }
@@ -419,13 +424,14 @@ pub struct CanonicalManifest {
 /// hashed build for that version (404) — that's an "unverified", not an error.
 pub fn manifest(base: &str, id: &str, version: &str) -> Result<Option<CanonicalManifest>, String> {
     let url = manifest_url(base, id, version)?;
-    match crate::net::api().get(url.as_str()).call() {
-        Ok(resp) => resp.into_json().map(Some).map_err(|e| e.to_string()),
+    match crate::net::catalog().get(url.as_str()).call() {
+        Ok(resp) => crate::net::refuse_redirect(resp)
+            .map_err(not_answering)?
+            .into_json()
+            .map(Some)
+            .map_err(|e| e.to_string()),
         Err(ureq::Error::Status(404, _)) => Ok(None),
-        Err(ureq::Error::Status(code, _)) => Err(format!(
-            "Silo's catalog isn't answering right now (error {code}). Try again in a few minutes."
-        )),
-        Err(other) => Err(format!("Silo can't reach its catalog right now: {other}")),
+        Err(e) => Err(catalog_err(e)),
     }
 }
 
@@ -571,12 +577,12 @@ fn fetch_and_validate(
 ) -> Result<(), String> {
     const CAP: u64 = crate::update::MAX_BYTES;
     // SSRF guard: the URL is catalog/frontend-influenced. Downloads must be public https —
-    // never a private/loopback host (no dev localhost exception for a mod download).
+    // never a private/loopback host (no dev localhost exception for a mod download). The same
+    // check runs on every redirect, and the download agent never connects to a private address.
     crate::net::validate_outbound_url(url, false)?;
-    let resp = crate::net::download()
-        .get(url)
-        .call()
-        .map_err(|e| e.to_string())?;
+    let resp =
+        crate::net::get_guarded(crate::net::download(), url, &crate::net::public_https, None)
+            .map_err(|e| e.to_string())?;
     let total: Option<u64> = resp
         .header("Content-Length")
         .and_then(|s| s.parse().ok())
@@ -672,16 +678,23 @@ pub(crate) fn is_catalog_image_host(url: &str) -> bool {
     }
 }
 
+/// A hop of an image fetch: public https (see `net::public_https`) on an allowed image host.
+fn check_image_hop(u: &url::Url) -> Result<(), String> {
+    crate::net::public_https(u)?;
+    if !is_catalog_image_host(u.as_str()) {
+        return Err("not an allowed image host".to_string());
+    }
+    Ok(())
+}
+
 /// Fetch a catalog mod image in Rust and return it as a `data:` URL the webview can render
 /// directly (the CSP keeps the webview from loading arbitrary image hosts). Sends Silo's
-/// own User-Agent and no Referer. Host-allowlisted and size-capped.
+/// own User-Agent and no Referer. Host-allowlisted (every redirect too) and size-capped.
 pub fn fetch_image(url: &str) -> Result<String, String> {
     if !is_catalog_image_host(url) {
         return Err("not an allowed image host".to_string());
     }
-    let resp = crate::net::api()
-        .get(url)
-        .call()
+    let resp = crate::net::get_guarded(crate::net::guarded_api(), url, &check_image_hop, None)
         .map_err(|e| e.to_string())?;
     let mime = resp
         .header("Content-Type")

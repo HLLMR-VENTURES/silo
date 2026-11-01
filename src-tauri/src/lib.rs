@@ -673,6 +673,19 @@ fn config_write_refusal(game_running: bool) -> Result<(), String> {
     }
 }
 
+/// "Use this version" and "Keep Silo's copy" move a mod's file in and out of the mods folder,
+/// which fails part-way while the game holds it open.
+const SWAP_GAME_RUNNING: &str =
+    "Close Farming Simulator 25 first. Silo won't swap a mod's files while the game is using them.";
+
+fn swap_refusal(game_running: bool) -> Result<(), String> {
+    if game_running {
+        Err(SWAP_GAME_RUNNING.into())
+    } else {
+        Ok(())
+    }
+}
+
 /// FS25's `modsDirectoryOverride` decides the active mods folder when the user hasn't chosen
 /// one in Silo, so only `point_game_at` (Settings) may change it, never a config edit.
 const OVERRIDE_IS_SILOS: &str = "Change the mods folder in Settings.";
@@ -1893,6 +1906,7 @@ async fn adopt_foreign_file(
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        swap_refusal(gamelaunch::fs25_running())?;
         let _write = library_write()?;
         ensure_archive_available()?;
         let layout = primary_layout(root)?;
@@ -1915,6 +1929,7 @@ async fn restore_foreign_file(
     ensure_no_move()?;
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        swap_refusal(gamelaunch::fs25_running())?;
         let _write = library_write()?;
         ensure_archive_available()?;
         let layout = primary_layout(root)?;
@@ -4746,9 +4761,13 @@ async fn scan_log() -> Result<logscan::LogReport, error::AppError> {
             ));
         }
         // Logs are read as lossy UTF-8; FS writes mostly ASCII but paths can carry stray bytes.
-        let bytes = std::fs::read(&path)?;
-        let text = String::from_utf8_lossy(&bytes);
-        Ok(logscan::parse(&text))
+        // A runaway log is read as its start and end only, so it can't exhaust memory (#351).
+        let file = std::fs::File::open(&path)?;
+        Ok(logscan::scan(
+            file,
+            logscan::LOG_HEAD_BYTES,
+            logscan::LOG_TAIL_BYTES,
+        )?)
     })
     .await
     .map_err(|e| error::AppError::from(e.to_string()))?
@@ -7132,6 +7151,17 @@ mod tests {
             super::effective_siloapi_base(None, true),
             siloapi::DEFAULT_BASE
         );
+    }
+
+    #[test]
+    fn use_this_version_and_keep_silos_copy_wait_for_the_game_to_close() {
+        let e = super::swap_refusal(true).unwrap_err();
+        assert_eq!(e, super::SWAP_GAME_RUNNING);
+        assert_eq!(
+            crate::error::AppError::from(e).code,
+            crate::error::code::GAME_RUNNING
+        );
+        assert!(super::swap_refusal(false).is_ok());
     }
 
     #[test]
