@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Switching mods folders now clears messages about the folder you left. (#396)
 - With a mod map that adds many material types, the ground-pile check no longer treats the
   base-game maps as uncertain too: each map is judged on whether its own material types fit.
   (#392)

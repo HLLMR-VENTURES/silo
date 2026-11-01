@@ -8,7 +8,9 @@
     ask,
     askWithOption,
     EmptyState,
+    dismissToast,
     toast,
+    toasts,
     type ToastHandle,
   } from "./lib/ui";
   import {
@@ -3000,6 +3002,8 @@
       )
         return;
       const st = await setModsRoot(path);
+      // Messages about the old folder don't apply any more.
+      for (const t of [...toasts]) dismissToast(t.id);
       // Switch first: if updating FS25's setting then fails, Silo is still on the chosen folder
       // and the mismatch banner explains (the error shows too).
       await applyModsStatus(st);
