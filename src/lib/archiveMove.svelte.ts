@@ -117,6 +117,11 @@ export class ArchiveMove {
       this.loadFailed = false;
       if (st.moving?.direction === "back") this.#sawTurnAround = true;
       if (st.moving && !st.running) this.pauseRequested = false;
+      // A followed move that stopped: the poll's timer stops with the move, so whichever read
+      // sees it first settles it (which also ends the follow hold).
+      if (!st.running && this.#followRelease && !this.#settling && this.#inFlight === 0) {
+        void this.#settle(null);
+      }
       return true;
     } catch (e) {
       if (!isStillLoading(e)) console.warn("[Silo] archive_status:", e);
@@ -154,7 +159,7 @@ export class ArchiveMove {
     const wasRunning = !!this.archive?.running;
     if (!(await this.refresh())) return;
     // A move this window isn't waiting on (e.g. after a webview reload) stopped: settle it here.
-    if (pollShouldSettle(wasRunning, this.archive, this.#inFlight)) {
+    if (pollShouldSettle(wasRunning, this.archive, this.#inFlight) && !this.#settling) {
       const release = this.#deps.holdCrashLooks?.();
       try {
         await this.#settle(null);
