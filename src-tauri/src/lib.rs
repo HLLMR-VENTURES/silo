@@ -2482,8 +2482,8 @@ fn rediscovered_archive_fits(
 static MODS_ROOT_RESOLVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Resolve the live mods folder, publish it (and its archive) as the trusted write roots, and
-/// describe it. Callers hold the library lock (or run before anything can write: startup), so
-/// the trusted roots never change under a write.
+/// describe it. Callers hold the library lock, so the trusted roots never change under a write
+/// (a refresh that may not hold it uses `refresh_mods_root`).
 fn compute_mods_root_status(conn: &rusqlite::Connection) -> ModsRootStatus {
     resolve_mods_root(conn, true)
 }
@@ -2624,16 +2624,29 @@ async fn mods_root_status(app: tauri::AppHandle) -> Result<ModsRootStatus, Strin
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db::open(&db)?;
-        // A refresh can pick up a change of FS25's own folder setting, so it publishes only
-        // under the library lock, like a switch.
-        let lock = status_publish_lock();
-        if lock.is_none() {
-            log::info!("mods folder status read while the library is busy; not republished");
-        }
-        Ok(resolve_mods_root(&conn, lock.is_some()))
+        Ok(refresh_mods_root(&conn))
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Resolve and describe the mods folder for a refresh (the status command, startup). A refresh
+/// can pick up a change of FS25's own folder setting, so it publishes only under the library
+/// lock (`status_publish_lock`), like a switch, or before the first resolution (`may_publish`);
+/// otherwise it only describes.
+fn refresh_mods_root(conn: &rusqlite::Connection) -> ModsRootStatus {
+    let lock = status_publish_lock();
+    let publish = may_publish(lock.is_some(), modsroot::resolved());
+    if !publish {
+        log::info!("mods folder status read while the library is busy; not republished");
+    }
+    resolve_mods_root(conn, publish)
+}
+
+/// Pure: whether a refresh may publish: holding the library lock, or before anything was ever
+/// resolved (every write refuses until then, so nothing can rely on the trusted roots yet).
+fn may_publish(locked: bool, resolved: bool) -> bool {
+    locked || !resolved
 }
 
 /// The library lock for a status refresh: waits behind an ordinary write (up to `LIBRARY_WAIT`)
@@ -5740,7 +5753,9 @@ pub fn run() {
                                 Err(e) => log::warn!("database snapshot failed: {e}"),
                             }
                         }
-                        let _ = compute_mods_root_status(&conn);
+                        // Under the library lock too: a status refresh may already have resolved
+                        // it and a write be under way.
+                        let _ = refresh_mods_root(&conn);
                         log::info!("library layout resolved at startup");
                     }
                     Err(e) => {
@@ -6461,6 +6476,16 @@ mod tests {
             super::trusted_roots(Some(a), true, false),
             vec![PathBuf::from("/m")]
         );
+    }
+
+    #[test]
+    fn a_refresh_publishes_only_under_the_lock_or_before_the_first_resolution() {
+        assert!(super::may_publish(true, true));
+        assert!(super::may_publish(true, false));
+        // Nothing can write before the first resolution, so startup always publishes.
+        assert!(super::may_publish(false, false));
+        // A write is under way: describe only, don't move the trusted roots under it.
+        assert!(!super::may_publish(false, true));
     }
 
     #[test]
