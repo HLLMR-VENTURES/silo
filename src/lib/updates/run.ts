@@ -32,7 +32,7 @@ export interface ExplainedError {
 }
 
 export interface CheckDeps {
-  catalog: (mods: { techName: string; version?: string }[]) => Promise<CatalogUpdate[]>;
+  catalog: (mods: { techName: string; version?: string; path?: string }[]) => Promise<CatalogUpdate[]>;
   checkRepo: (owner: string, repo: string, current: string) => Promise<UpdateInfo>;
   /** Log the failure and word it (inlineError + formatDetail). */
   explain: (e: unknown, op: string) => ExplainedError;
@@ -103,11 +103,17 @@ export async function runUpdateCheck(
 
   try {
     const catalog = await deps.catalog(
-      mods.map((m) => ({ techName: m.techName, version: m.version ?? undefined })),
+      // The file, so a mod Silo installed under another name finds its catalog entry (#386).
+      mods.map((m) => ({ techName: m.techName, version: m.version ?? undefined, path: m.path })),
     );
     for (const c of catalog) {
       const m = byTech.get(c.techName);
       if (!m) continue;
+      if (c.error) {
+        // Couldn't be checked (#386): shown as such, never as up to date.
+        rows.set(c.techName, { techName: c.techName, title: m.title || c.techName, path: m.path, error: c.error, errorDetail: c.error });
+        continue;
+      }
       rows.set(c.techName, {
         techName: c.techName,
         title: m.title || c.techName,

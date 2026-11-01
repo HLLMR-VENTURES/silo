@@ -1,7 +1,7 @@
 <script lang="ts">
   // What Silo's catalog says about this mod's version, inside the drawer's "Source and updates".
   // The drawer does the (best-effort) lookup and passes the result: `checked` false while it
-  // runs, `catalog` null when the mod isn't in the catalog or the lookup failed.
+  // runs, `catalog` null when the mod isn't in the catalog, `failed` when the lookup itself failed.
   import Icon from "../ui/Icon.svelte";
   import { displayVersion } from "../format";
   import type { ModEntry, CatalogUpdate } from "../types";
@@ -11,11 +11,14 @@
     mod,
     catalog,
     checked,
+    failed = false,
     pageUrl = null,
   }: {
     mod: ModEntry;
     catalog: CatalogUpdate | null;
     checked: boolean;
+    /** The catalog request failed, so Silo can't say whether the mod is in it. */
+    failed?: boolean;
     /** The catalog's page for the mod, offered when there's no download link. */
     pageUrl?: string | null;
   } = $props();
@@ -26,8 +29,12 @@
   <h4 class="d-label">Silo's catalog</h4>
   {#if !checked}
     <div class="d-log muted">Checking the catalog…</div>
+  {:else if failed}
+    <div class="d-log warn">Silo couldn't reach its catalog, so it can't say whether this mod is in it. Try again later.</div>
   {:else if !catalog}
     <div class="d-log muted">Not in Silo's catalog.</div>
+  {:else if catalog.error}
+    <div class="d-log warn">{catalog.error}</div>
   {:else if catalog.hasUpdate}
     {@const c = catalog}
     <div class="d-log warn">

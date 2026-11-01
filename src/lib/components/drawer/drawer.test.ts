@@ -8,7 +8,7 @@ import { tick } from "svelte";
 import ModDetail from "../ModDetail.svelte";
 import DrawerHarness from "./__tests__/DrawerHarness.svelte";
 import { setVerdict } from "../../provenanceCache.svelte";
-import { catalogCheckUpdates, revealInFolder, scanLog, setCuration } from "../../api";
+import { catalogCheckUpdates, catalogDetailByTech, revealInFolder, scanLog, setCuration } from "../../api";
 import type { Conflict, CurationRow, LogReport, ModEntry } from "../../types";
 
 vi.mock("../../api", async (importOriginal) => ({
@@ -210,6 +210,35 @@ describe("drawer lookups", () => {
     await settle();
     expect(within(header()).queryByText("Update available")).toBeNull();
     expect(screen.getByText(/Not in Silo's catalog/)).toBeInTheDocument();
+  });
+
+  it("asks the catalog about the mod's own file, so an install under another name finds its entry (#386)", async () => {
+    render(ModDetail, props(entry(23, { path: "C:/mods/FS25_FieldToDoList.zip", techName: "FS25_FieldToDoList" })));
+    await settle();
+    expect(catalogDetailByTech).toHaveBeenCalledWith("FS25_FieldToDoList", "C:/mods/FS25_FieldToDoList.zip");
+    expect(catalogCheckUpdates).toHaveBeenCalledWith([
+      { techName: "FS25_FieldToDoList", version: "1.0.0.0", path: "C:/mods/FS25_FieldToDoList.zip" },
+    ]);
+  });
+
+  it("says when the catalog couldn't check the mod, instead of 'not in the catalog' (#386)", async () => {
+    vi.mocked(catalogCheckUpdates).mockImplementation(() =>
+      Promise.resolve([
+        { techName: "FS25_Mod24", latest: null, hasUpdate: false, downloadUrl: null, source: null, error: "Silo couldn't check this mod against its catalog entry: in use" },
+      ]),
+    );
+    render(ModDetail, props(entry(24, { path: "C:/mods/err24.zip" })));
+    await settle();
+    expect(screen.getByText(/couldn't check this mod against its catalog entry/)).toBeInTheDocument();
+    expect(screen.queryByText(/Not in Silo's catalog/)).toBeNull();
+  });
+
+  it("says Silo couldn't reach the catalog when the request fails, not that the mod isn't in it", async () => {
+    vi.mocked(catalogCheckUpdates).mockImplementation(() => Promise.reject(new Error("offline")));
+    render(ModDetail, props(entry(25, { path: "C:/mods/off25.zip" })));
+    await settle();
+    expect(screen.getByText(/couldn't reach its catalog/)).toBeInTheDocument();
+    expect(screen.queryByText(/Not in Silo's catalog/)).toBeNull();
   });
 
   it("doesn't call a mod with no version outdated on the catalog's word alone", async () => {

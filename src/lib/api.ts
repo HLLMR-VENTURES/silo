@@ -628,9 +628,10 @@ export function siloapiModDetail(id: string): Promise<CatalogModDetail> {
 }
 
 /** Resolve a library mod (by tech name) to its catalog record, or null if not catalogued.
- *  Lets the library detail drawer show the same summary/sources/latest-version as Browse. */
-export function catalogDetailByTech(techName: string): Promise<CatalogModDetail | null> {
-  return invoke<CatalogModDetail | null>("catalog_detail_by_tech", { techName });
+ *  Lets the library detail drawer show the same summary/sources/latest-version as Browse.
+ *  `path` (the mod's file) lets a zip Silo installed under another name find its entry (#386). */
+export function catalogDetailByTech(techName: string, path?: string): Promise<CatalogModDetail | null> {
+  return invoke<CatalogModDetail | null>("catalog_detail_by_tech", { techName, path: path ?? null });
 }
 
 /** Fetch a catalog thumbnail as a data: URL (Rust adds the referer the Giants CDN now
@@ -657,12 +658,13 @@ export function onInstallProgress(
   return listen<InstallProgress>("install:progress", (e) => handler(e.payload));
 }
 
-/** Check the whole library against the catalog in one request (by tech name). */
+/** Check the whole library against the catalog in one request (by tech name). `path` (the
+ *  mod's file) lets a zip Silo installed under another name find its entry (#386). */
 export function catalogCheckUpdates(
-  mods: { techName: string; version?: string }[],
+  mods: { techName: string; version?: string; path?: string }[],
 ): Promise<CatalogUpdate[]> {
   return invoke<CatalogUpdate[]>("catalog_check_updates", {
-    mods: mods.map((m) => ({ techName: m.techName, version: m.version ?? null })),
+    mods: mods.map((m) => ({ techName: m.techName, version: m.version ?? null, path: m.path ?? null })),
   });
 }
 
