@@ -1105,6 +1105,14 @@ async fn install_remote_mod(
         // The filename comes from the catalog — validate it's a plain basename so a
         // hostile response can't redirect the write outside the mods folder.
         paths::safe_file_name(&resolved.filename)?;
+        // And it must be the mod the catalog names, never a differently named file.
+        if let Some(tech) = resolved
+            .tech_name
+            .as_deref()
+            .filter(|t| !t.trim().is_empty())
+        {
+            siloapi::check_download_name(&resolved.filename, tech)?;
+        }
         let dest = root.join(&resolved.filename);
         if path_taken(&dest) {
             return Err(already_in_library(&dest));
@@ -1127,12 +1135,32 @@ async fn install_remote_mod(
         )?;
         // A finished download waits out a busy spell instead of being thrown away.
         let _write = library_write_within(PLACE_WAIT)?;
+        install_recheck(&root, &dest)?;
         place_part(part.path(), &dest)?;
         Ok(resolved.filename)
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(error::AppError::from)
+}
+
+const MODS_FOLDER_CHANGED: &str =
+    "Your mods folder changed while this downloaded, so Silo didn't add it. Install it again.";
+
+/// What `install_remote_mod` checks again once it holds the library lock: the user may have
+/// switched mods folder while the download ran, and the mod must not land in the old one.
+fn install_recheck(root: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    ensure_library_write(dest)?;
+    still_a_mods_folder(root, &mods_roots())
+}
+
+/// `Ok` while `root` is still one of the current mods folders.
+fn still_a_mods_folder(root: &std::path::Path, mods_roots: &[PathBuf]) -> Result<(), String> {
+    if mods_roots.iter().any(|m| modsroot::same_folder(m, root)) {
+        Ok(())
+    } else {
+        Err(MODS_FOLDER_CHANGED.to_string())
+    }
 }
 
 /// Downloads whose `.zip.part` is in use, by `same_file_key`. Downloads run outside the
@@ -1160,20 +1188,21 @@ impl Drop for PartClaim {
     }
 }
 
-/// Paths that name the same file compare equal: on Windows file names are case-insensitive,
-/// so the name is lowercased (the parent is kept as given; callers join names onto one root).
+/// Paths that name the same file compare equal: the name is lowercased on every system, since
+/// Windows and macOS (APFS, HFS+) both ignore case by default. On a case-sensitive Linux folder
+/// this only over-claims (two case variants can't download at once), which is harmless. The
+/// parent is kept as given; callers join names onto one root.
 fn same_file_key(p: &std::path::Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        if let Some(name) = p.file_name() {
+    match p.file_name() {
+        Some(name) => {
             let lower = name.to_string_lossy().to_lowercase();
-            return match p.parent() {
+            match p.parent() {
                 Some(parent) => parent.join(lower),
                 None => PathBuf::from(lower),
-            };
+            }
         }
+        None => p.to_path_buf(),
     }
-    p.to_path_buf()
 }
 
 /// Claim the part file a download of `dest` streams into, refusing while another download
@@ -1227,13 +1256,11 @@ const DOWNLOAD_GONE: &str = "The download disappeared before Silo could add it. 
 
 /// Move a finished download into the library at `dest`, never replacing anything there.
 /// Hardlink then drop the part (the link fails if `dest` exists). Only when the link fails
-/// because the filesystem can't hardlink (`no_hardlink_support`) does it fall back to
-/// checking `dest` is free and renaming. A taken `dest` removes the part and refuses.
+/// because the filesystem can't hardlink (`no_hardlink_support`, e.g. a cloud-synced folder)
+/// does it fall back to `paths::rename_no_replace`, a rename that fails rather than replace
+/// `dest`. A taken `dest` removes the part and refuses.
 ///
-/// Call under the library lock, which keeps Silo's own writes out. The fallback still has a
-/// small window between the check and the rename in which another program could create
-/// `dest`; on Windows the rename would then replace it. Hardlink-capable filesystems (the
-/// usual case) have no such window.
+/// Call under the library lock, which keeps Silo's own writes out.
 fn place_part(part: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
     place_part_with(part, dest, |a, b| std::fs::hard_link(a, b))?;
     fslog::moved("install", part, dest);
@@ -1262,13 +1289,13 @@ fn place_part_with(
             return Ok(());
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return refuse(),
-        Err(e) if no_hardlink_support(&e) => {} // check + rename below
+        Err(e) if no_hardlink_support(&e) => {} // no-replace rename below
         Err(e) => return Err(io_err(e)),
     }
-    if path_taken(dest) {
-        return refuse();
+    match paths::rename_no_replace(part, dest) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => refuse(),
+        other => other.map_err(io_err),
     }
-    std::fs::rename(part, dest).map_err(io_err)
 }
 
 /// A hardlink error that means "this filesystem / pair of folders can't hardlink", as
@@ -4552,7 +4579,10 @@ async fn collection_apply(
 
             match siloapi::resolve_download(&base, cid, t.download_source.as_deref()) {
                 Ok(resolved) => {
-                    if let Err(e) = paths::safe_file_name(&resolved.filename) {
+                    // A plain basename, named after the mod this set asks for (never renamed).
+                    if let Err(e) = paths::safe_file_name(&resolved.filename).and_then(|_| {
+                        siloapi::check_download_name(&resolved.filename, &m.tech_name)
+                    }) {
                         rows.push(fail_row(&m.tech_name, e));
                         failed_count += 1;
                         continue;
@@ -4606,7 +4636,12 @@ async fn collection_apply(
                     }
                 }
                 // No direct download (ModHub gates it) — leave it for the user.
-                Err(_) => rows.push(gated_row(&m.tech_name)),
+                Err(siloapi::ResolveError::Gated(_)) => rows.push(gated_row(&m.tech_name)),
+                // Anything else is a failure, with its cause, not a site restriction.
+                Err(siloapi::ResolveError::Operational(e)) => {
+                    rows.push(fail_row(&m.tech_name, e));
+                    failed_count += 1;
+                }
             }
         }
 
@@ -6549,6 +6584,25 @@ mod tests {
     }
 
     #[test]
+    fn the_rename_fallback_never_replaces_a_file_that_appears_after_the_link_attempt() {
+        use std::io::{Error, ErrorKind};
+        let base = temp_base("place_race");
+        let dest = base.join("mods").join("FS25_Race.zip");
+        let part = dest.with_extension("zip.part");
+        std::fs::write(&part, b"download").unwrap();
+        // The link fails for lack of support, and meanwhile another program creates `dest`.
+        let racer = |_: &Path, d: &Path| {
+            std::fs::write(d, b"user's only copy").unwrap();
+            Err(Error::from(ErrorKind::Unsupported))
+        };
+        let err = super::place_part_with(&part, &dest, racer).unwrap_err();
+        assert_eq!(err, "FS25_Race.zip is already in your library");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"user's only copy");
+        assert!(!part.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn a_busy_library_fails_the_pending_downloads_and_removes_their_parts() {
         let base = temp_base("place_pending_busy");
         let dest = base.join("mods").join("FS25_Wait.zip");
@@ -6578,13 +6632,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[cfg(windows)]
     #[test]
-    fn claims_ignore_case_on_windows() {
+    fn claims_ignore_case_on_every_system() {
+        // macOS (APFS) ignores case as Windows does; on Linux this only over-claims.
         let base = temp_base("claim_case");
         let mods = base.join("mods");
         let _first = super::claim_part(&mods.join("FS25_Foo.zip")).unwrap();
         assert!(super::claim_part(&mods.join("fs25_foo.zip")).is_err());
+        assert!(
+            super::claim_part_at(&mods.join("FS25_FOO.zip"), mods.join("FS25_FOO.zip.part"))
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_install_is_not_placed_once_its_mods_folder_was_switched_away() {
+        let base = temp_base("install_recheck");
+        let (a, b) = (base.join("A"), base.join("B"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        assert_eq!(
+            super::still_a_mods_folder(&a, std::slice::from_ref(&a)),
+            Ok(())
+        );
+        assert_eq!(
+            super::still_a_mods_folder(&a, std::slice::from_ref(&b)),
+            Err(super::MODS_FOLDER_CHANGED.to_string())
+        );
+        assert_eq!(
+            super::still_a_mods_folder(&a, &[]),
+            Err(super::MODS_FOLDER_CHANGED.to_string())
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

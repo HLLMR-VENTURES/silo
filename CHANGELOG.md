@@ -25,6 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When Silo's catalog was down or sent back something it couldn't read, a mod it has a known
+  build for installed without being checked against that build. Silo now stops the install
+  instead; only a mod the catalog has never checked installs without that check. (#350)
+- In a cloud-synced mods folder (OneDrive, Proton Drive), installing or organizing a mod could,
+  in a rare moment, replace a file that had just appeared under the same name. Silo now moves
+  files in a way that can never replace one. (#350)
+- On macOS, two downloads whose names differed only in upper and lower case could write into the
+  same temporary file and damage a mod that had already been checked and added. They're now
+  kept apart on every system. (#350)
+- An install that finished after you switched to another mods folder no longer adds the mod to
+  the old folder. (#350)
+- Installing from **Browse** or from a shared mod set now refuses a download whose file name
+  isn't the mod's name (say `FS25_X_v2.zip` for `FS25_X`), since the game would load it as a
+  different mod and the set could never turn it on. Silo never renames a download. (#350)
+- When applying a shared mod set, a download that failed because the catalog didn't answer is
+  now shown as failed, with the reason, and counted. It used to say the site doesn't allow direct
+  downloads. (#350)
 - A mod set switch that fails (an unplugged library drive, say) no longer leaves the Library,
   **Play** and the multiplayer share list showing the new set while the game loads the old one.
   Silo reads your mods folder again before it lets go, and when nothing changed it doesn't save a

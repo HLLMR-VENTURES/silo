@@ -1369,9 +1369,9 @@ fn placement_dirs<'a>(to: &'a Path, anchor: Option<&Path>) -> Vec<&'a Path> {
 
 /// Put the finished temp `tmp` at `dst` without replacing anything there. A file is hardlinked
 /// (which fails if `dst` exists), then the temp dropped; where the folder can't hardlink (a
-/// cloud-synced Documents folder), and for a folder, `dst` is checked to be free right before
-/// the rename. Called under the library lock, which keeps Silo's own writes out; another
-/// program creating `dst` in the moment between the check and the rename is the only gap.
+/// cloud-synced Documents folder), and for a folder, it is renamed with
+/// `paths::rename_no_replace`, which fails rather than replace `dst`. Called under the library
+/// lock, which keeps Silo's own writes out.
 fn place_new(tmp: &Path, dst: &Path) -> std::io::Result<()> {
     use std::io::ErrorKind;
     let taken = || std::io::Error::from(ErrorKind::AlreadyExists);
@@ -1383,15 +1383,12 @@ fn place_new(tmp: &Path, dst: &Path) -> std::io::Result<()> {
                 return Ok(());
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => return Err(taken()),
-            Err(_) => {} // no hardlinks here: check + rename below
+            Err(_) => {} // no hardlinks here: no-replace rename below
         }
     }
     let mut tries = 0;
     loop {
-        if dst.symlink_metadata().is_ok() {
-            return Err(taken());
-        }
-        match std::fs::rename(tmp, dst) {
+        match crate::paths::rename_no_replace(tmp, dst) {
             // Windows refuses to rename a folder while a file in it is open, and an antivirus
             // or cloud-sync client often opens a just-written file for a moment.
             Err(e) if cfg!(windows) && e.kind() == ErrorKind::PermissionDenied && tries < 10 => {

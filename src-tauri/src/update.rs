@@ -67,7 +67,8 @@ pub fn fetch(url: &str, dest: &Path) -> Result<crate::PartClaim, String> {
 /// mod as `dest` (`github::verify_update_identity`).
 fn write_part(reader: impl Read, part: &Path, dest: &Path) -> Result<(), String> {
     {
-        let mut out = std::fs::File::create(part).map_err(|e| e.to_string())?;
+        // A new file every time; a leftover from a crashed run is removed, never written into.
+        let mut out = crate::paths::create_fresh(part).map_err(|e| e.to_string())?;
         let mut limited = reader.take(MAX_BYTES + 1);
         let n = std::io::copy(&mut limited, &mut out).map_err(|e| e.to_string())?;
         if n > MAX_BYTES {

@@ -448,6 +448,31 @@ pub struct ResolvedDownload {
     pub url: String,
     pub filename: String,
     pub expected_sha256: Option<String>,
+    /// The catalog's techName for the mod, when it has one.
+    pub tech_name: Option<String>,
+}
+
+/// Why a download couldn't be resolved. `Gated`: the source doesn't allow a direct download,
+/// so the user gets it from its page. `Operational`: anything else (the catalog didn't answer,
+/// or its answer was unusable), which is a failure, not a site restriction.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolveError {
+    Gated(String),
+    Operational(String),
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveError::Gated(m) | ResolveError::Operational(m) => f.write_str(m),
+        }
+    }
+}
+
+impl From<ResolveError> for String {
+    fn from(e: ResolveError) -> String {
+        e.to_string()
+    }
 }
 
 /// A catalog source id as people read it ("modhub" -> "ModHub").
@@ -463,58 +488,101 @@ pub fn resolve_download(
     base: &str,
     id: &str,
     want: Option<&str>,
-) -> Result<ResolvedDownload, String> {
-    let detail = detail(base, id)?;
-
-    let usable = |s: &&ModSource| s.installable && s.download_url.is_some();
-    let pick =
-        match want {
-            Some(name) => detail
-                .sources
-                .iter()
-                .find(|s| s.source == name)
-                .ok_or_else(|| format!("{} doesn't list this mod", source_label(name)))
-                .and_then(|s| {
-                    if usable(&s) {
-                        Ok(s)
-                    } else {
-                        Err(format!(
-                            "{} doesn't allow direct downloads. Open its page instead.",
-                            source_label(name)
-                        ))
-                    }
-                })?,
-            None => detail.sources.iter().find(usable).ok_or_else(|| {
-                "No source allows a direct download. Open the mod page.".to_string()
-            })?,
-        };
-
-    let url = pick
-        .download_url
-        .clone()
-        .ok_or_else(|| "This source doesn't offer a download.".to_string())?;
+) -> Result<ResolvedDownload, ResolveError> {
+    use ResolveError::Operational;
+    let detail = detail(base, id).map_err(Operational)?;
+    let (url, version) = pick_download(&detail, want)?;
     let filename = filename_from_url(&url).ok_or_else(|| {
-        "Silo couldn't tell what this download is called, so it didn't install it.".to_string()
+        Operational(
+            "Silo couldn't tell what this download is called, so it didn't install it.".to_string(),
+        )
     })?;
 
-    // Identity: the canonical whole-zip hash for the *version we're about to fetch*. Use the
-    // /manifest endpoint (server does version-equivalence). A network/404 miss → None → the
-    // download is still validated as an archive, just not identity-checked.
-    let version = pick
-        .version
-        .clone()
-        .or_else(|| detail.latest_version.clone())
-        .unwrap_or_default();
-    let expected_sha256 = manifest(base, id, &version)
-        .ok()
-        .flatten()
-        .and_then(|m| m.archive_sha256);
+    // Identity: the canonical whole-zip hash for the *version we're about to fetch*, from the
+    // /manifest endpoint (the server does version-equivalence). Only its 404 means "not hashed
+    // yet" (the download is then validated as an archive, not identity-checked). A catalog that
+    // doesn't answer, or answers with something unreadable, stops the install instead of
+    // skipping the check. With no version at all there is no build to look up.
+    let expected_sha256 = match version {
+        Some(v) => manifest(base, id, &v)
+            .map_err(|e| Operational(format!("{MANIFEST_UNCHECKED} {e}")))?
+            .and_then(|m| m.archive_sha256),
+        None => None,
+    };
 
     Ok(ResolvedDownload {
         url,
         filename,
         expected_sha256,
+        tech_name: detail.tech_name.clone(),
     })
+}
+
+const MANIFEST_UNCHECKED: &str =
+    "Silo couldn't check this download against the catalog's known build, so it didn't install it.";
+
+/// The download URL and version of the source to install from: `want` (the button the user
+/// clicked), or the API's best-ranked installable source. A source that's listed but doesn't
+/// allow a direct download is `Gated`; one that isn't listed at all is `Operational` (the
+/// catalog changed, which isn't a site restriction).
+fn pick_download(
+    detail: &BrowseMod,
+    want: Option<&str>,
+) -> Result<(String, Option<String>), ResolveError> {
+    use ResolveError::{Gated, Operational};
+    let usable = |s: &&ModSource| s.installable && s.download_url.is_some();
+    let pick = match want {
+        Some(name) => {
+            let s = detail
+                .sources
+                .iter()
+                .find(|s| s.source == name)
+                .ok_or_else(|| {
+                    Operational(format!("{} doesn't list this mod", source_label(name)))
+                })?;
+            if !usable(&s) {
+                return Err(Gated(format!(
+                    "{} doesn't allow direct downloads. Open its page instead.",
+                    source_label(name)
+                )));
+            }
+            s
+        }
+        None => detail.sources.iter().find(usable).ok_or_else(|| {
+            Gated("No source allows a direct download. Open the mod page.".to_string())
+        })?,
+    };
+    let url = pick
+        .download_url
+        .clone()
+        .ok_or_else(|| Gated("This source doesn't offer a download.".to_string()))?;
+    let version = pick
+        .version
+        .clone()
+        .or_else(|| detail.latest_version.clone())
+        .filter(|v| !v.trim().is_empty());
+    Ok((url, version))
+}
+
+/// Refuse a download whose file isn't named after the mod asked for: the stem of `filename`
+/// (without `.zip`) must equal `tech_name`, ignoring case. FS25 knows a mod by its file name,
+/// so `FS25_X_v2.zip` installed for `FS25_X` would never be the mod a set or savegame names.
+/// The download is never renamed to fit.
+pub fn check_download_name(filename: &str, tech_name: &str) -> Result<(), String> {
+    let stem = filename
+        .len()
+        .checked_sub(4)
+        .filter(|&i| filename.is_char_boundary(i))
+        .filter(|&i| filename[i..].eq_ignore_ascii_case(".zip"))
+        .map_or(filename, |i| &filename[..i]);
+    if stem.to_lowercase() == tech_name.trim().to_lowercase() {
+        Ok(())
+    } else {
+        Err(format!(
+            "The catalog's download for {tech_name} is a differently named file ({filename}), \
+             so Silo didn't install it: FS25 would load it as a different mod."
+        ))
+    }
 }
 
 /// Last path segment if it looks like a .zip.
@@ -589,7 +657,8 @@ fn fetch_and_validate(
         .filter(|&t| t <= CAP);
 
     // Errors return early; `download_to_part` removes the part (the handle is closed by then).
-    let mut file = std::fs::File::create(part).map_err(|e| e.to_string())?;
+    // Always a new file: a leftover from a crashed run is removed, never written into.
+    let mut file = crate::paths::create_fresh(part).map_err(|e| e.to_string())?;
     let mut reader = resp.into_reader();
 
     let mut buf = [0u8; 64 * 1024];
@@ -713,6 +782,147 @@ pub fn fetch_image(url: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    /// A catalog record with one source.
+    fn detail_with(source: &str, installable: bool, url: Option<&str>) -> BrowseMod {
+        serde_json::from_value(serde_json::json!({
+            "id": "m1",
+            "techName": "FS25_X",
+            "title": "X",
+            "latestVersion": "1.0.0.0",
+            "sources": [{
+                "source": source,
+                "sourceUrl": "https://example.com/x",
+                "installable": installable,
+                "downloadUrl": url,
+            }],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn only_a_source_that_refuses_direct_downloads_is_gated() {
+        let gh = detail_with("github", true, Some("https://github.com/a/b/FS25_X.zip"));
+        let (url, version) = pick_download(&gh, Some("github")).unwrap();
+        assert_eq!(url, "https://github.com/a/b/FS25_X.zip");
+        assert_eq!(version.as_deref(), Some("1.0.0.0"));
+
+        let modhub = detail_with("modhub", false, None);
+        assert!(matches!(
+            pick_download(&modhub, Some("modhub")),
+            Err(ResolveError::Gated(_))
+        ));
+        assert!(matches!(
+            pick_download(&modhub, None),
+            Err(ResolveError::Gated(_))
+        ));
+        // A source the catalog no longer lists is a failure, not a site restriction.
+        assert!(matches!(
+            pick_download(&gh, Some("modhub")),
+            Err(ResolveError::Operational(_))
+        ));
+    }
+
+    #[test]
+    fn a_download_must_be_named_after_the_mod_asked_for() {
+        assert!(check_download_name("FS25_X.zip", "FS25_X").is_ok());
+        assert!(check_download_name("fs25_x.ZIP", "FS25_X").is_ok());
+        let e = check_download_name("FS25_X_v2.zip", "FS25_X").unwrap_err();
+        assert!(e.contains("FS25_X_v2.zip"), "{e}");
+        assert!(check_download_name("FS25_X.zip", "FS25_Y").is_err());
+        assert!(check_download_name("FS25_XX.zip", "FS25_X").is_err());
+    }
+
+    /// Answer each request on `listener` by path: the mod record for `/mods/m1`, and
+    /// `manifest` (status line, body) for `/mods/m1/manifest`. Stops after `max` requests.
+    fn serve_catalog(
+        listener: std::net::TcpListener,
+        max: usize,
+        manifest: (&'static str, &'static str),
+    ) -> std::thread::JoinHandle<()> {
+        use std::io::{Read, Write};
+        std::thread::spawn(move || {
+            for _ in 0..max {
+                let Ok((mut s, _)) = listener.accept() else {
+                    return;
+                };
+                let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut req = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => req.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let line = String::from_utf8_lossy(&req)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                let (status, body) = if line.contains("/manifest") {
+                    manifest
+                } else {
+                    (
+                        "200 OK",
+                        r#"{"id":"m1","techName":"FS25_X","title":"X","latestVersion":"1.0.0.0",
+                            "sources":[{"source":"github","sourceUrl":"https://github.com/a/b",
+                            "installable":true,
+                            "downloadUrl":"https://github.com/a/b/releases/download/v1/FS25_X.zip"}]}"#,
+                    )
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(resp.as_bytes());
+            }
+        })
+    }
+
+    fn resolve_against(
+        manifest: (&'static str, &'static str),
+    ) -> Result<ResolvedDownload, ResolveError> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = serve_catalog(listener, 2, manifest);
+        let r = resolve_download(&base, "m1", Some("github"));
+        server.join().unwrap();
+        r
+    }
+
+    #[test]
+    fn a_hashed_build_is_held_to_its_hash() {
+        let r =
+            resolve_against(("200 OK", r#"{"archiveSha256":"abc","manifestHash":"h"}"#)).unwrap();
+        assert_eq!(r.filename, "FS25_X.zip");
+        assert_eq!(r.tech_name.as_deref(), Some("FS25_X"));
+        assert_eq!(r.expected_sha256.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn only_a_missing_manifest_means_unhashed() {
+        let r = resolve_against(("404 Not Found", r#"{"error":"no manifest"}"#)).unwrap();
+        assert_eq!(r.expected_sha256, None);
+    }
+
+    #[test]
+    fn a_catalog_error_stops_the_install_instead_of_skipping_the_hash_check() {
+        for manifest in [
+            ("503 Service Unavailable", "{}"),
+            ("500 Internal Server Error", "oops"),
+            ("200 OK", "not json"),
+        ] {
+            match resolve_against(manifest) {
+                Err(ResolveError::Operational(e)) => {
+                    assert!(e.starts_with(MANIFEST_UNCHECKED), "{e}")
+                }
+                Err(e) => panic!("{manifest:?}: expected an operational error, got {e:?}"),
+                Ok(_) => panic!("{manifest:?}: installed without its hash check"),
+            }
+        }
+    }
+
     #[test]
     fn source_ids_read_as_names() {
         assert_eq!(super::source_label("modhub"), "ModHub");

@@ -314,6 +314,145 @@ fn copy_new(source: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Create `path` as a new, empty file for writing: a file left there by an earlier run is
+/// removed first, then the file is created with `create_new`. The caller must own the name
+/// (a download's part claim). The result is always a new file, never one another writer still
+/// has open, so two writers can't end up sharing (and changing) the same bytes.
+pub fn create_fresh(path: &Path) -> std::io::Result<std::fs::File> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+/// Rename `from` to `to` (a file or a folder, on the same filesystem) without ever replacing
+/// anything at `to`: fails with `AlreadyExists` when `to` is taken, even by an empty folder.
+/// The check and the rename are one step on Windows (`MoveFileExW` without
+/// `MOVEFILE_REPLACE_EXISTING`), Linux (`renameat2` with `RENAME_NOREPLACE`) and macOS
+/// (`renamex_np` with `RENAME_EXCL`). Where the filesystem doesn't support that (some network
+/// and FUSE filesystems, an old kernel), it falls back to checking `to` is free right before a
+/// plain rename; another program creating `to` in between is then the only gap.
+pub fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    match rename_noreplace_native(from, to) {
+        Some(Ok(())) => Ok(()),
+        Some(Err(e)) => Err(taken_or(to, e)),
+        None => rename_checked(from, to),
+    }
+}
+
+/// A failed rename whose destination exists is reported as `AlreadyExists` (Windows can say
+/// "access denied" when `to` is a folder), so callers can tell "taken" from a real failure.
+fn taken_or(to: &Path, e: std::io::Error) -> std::io::Error {
+    if e.kind() != std::io::ErrorKind::AlreadyExists && to.symlink_metadata().is_ok() {
+        std::io::Error::from(std::io::ErrorKind::AlreadyExists)
+    } else {
+        e
+    }
+}
+
+/// The fallback: check `to` is free, then rename.
+fn rename_checked(from: &Path, to: &Path) -> std::io::Result<()> {
+    if to.symlink_metadata().is_ok() {
+        return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+    }
+    std::fs::rename(from, to)
+}
+
+/// The OS's no-replace rename; `None` when this system or filesystem doesn't offer one.
+#[cfg(windows)]
+fn rename_noreplace_native(from: &Path, to: &Path) -> Option<std::io::Result<()>> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    let wide =
+        |p: &Path| -> Vec<u16> { long_path(p).as_os_str().encode_wide().chain([0]).collect() };
+    let (a, b) = (wide(from), wide(to));
+    // SAFETY: both are NUL-terminated UTF-16 strings that outlive the call. Flags 0: no
+    // MOVEFILE_REPLACE_EXISTING (an existing `to` fails) and no MOVEFILE_COPY_ALLOWED.
+    let ok = unsafe { MoveFileExW(a.as_ptr(), b.as_ptr(), 0) };
+    Some(if ok != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    })
+}
+
+/// `p` in a form `MoveFileExW` accepts past 260 characters: its parent canonicalized (the
+/// `\\?\` form) with the name joined on. Short paths, and any that can't be resolved, are
+/// passed as given.
+#[cfg(windows)]
+fn long_path(p: &Path) -> PathBuf {
+    const MAX_PATH: usize = 260;
+    if p.as_os_str().len() < MAX_PATH {
+        return p.to_path_buf();
+    }
+    match (p.parent().map(std::fs::canonicalize), p.file_name()) {
+        (Some(Ok(parent)), Some(name)) => parent.join(name),
+        _ => p.to_path_buf(),
+    }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn rename_noreplace_native(from: &Path, to: &Path) -> Option<std::io::Result<()>> {
+    let (a, b) = (c_path(from)?, c_path(to)?);
+    // SAFETY: both are NUL-terminated C strings that outlive the call.
+    let r = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            a.as_ptr(),
+            libc::AT_FDCWD,
+            b.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    unix_result(r)
+}
+
+#[cfg(target_os = "macos")]
+fn rename_noreplace_native(from: &Path, to: &Path) -> Option<std::io::Result<()>> {
+    let (a, b) = (c_path(from)?, c_path(to)?);
+    // SAFETY: both are NUL-terminated C strings that outlive the call.
+    let r = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_EXCL) };
+    unix_result(r)
+}
+
+#[cfg(not(any(
+    windows,
+    target_os = "macos",
+    all(target_os = "linux", target_env = "gnu")
+)))]
+fn rename_noreplace_native(_from: &Path, _to: &Path) -> Option<std::io::Result<()>> {
+    None
+}
+
+/// A path as a C string; `None` (use the fallback) if it holds a NUL byte, which no real path
+/// does.
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+fn c_path(p: &Path) -> Option<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(p.as_os_str().as_bytes()).ok()
+}
+
+/// A no-replace rename's result. The flag being unsupported (`EINVAL` from a filesystem that
+/// doesn't know it, `ENOSYS` from an old kernel, `ENOTSUP`/`EOPNOTSUPP`) means "use the
+/// fallback" (`None`).
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+fn unix_result(r: libc::c_int) -> Option<std::io::Result<()>> {
+    if r == 0 {
+        return Some(Ok(()));
+    }
+    let e = std::io::Error::last_os_error();
+    let unsupported = [libc::EINVAL, libc::ENOSYS, libc::ENOTSUP, libc::EOPNOTSUPP];
+    if e.raw_os_error().is_some_and(|c| unsupported.contains(&c)) {
+        None
+    } else {
+        Some(Err(e))
+    }
+}
+
 /// Require that `path` has one of `allowed` extensions (case-insensitive). Defence-in-depth
 /// against a compromised webview handing a command a path of an unexpected type.
 pub fn require_ext(path: &Path, allowed: &[&str]) -> Result<(), String> {
@@ -838,5 +977,103 @@ mod tests {
             eprintln!("skipped: making a symlink needs Developer Mode or admin rights");
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A fresh scratch folder for one test.
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("silo_rnr_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn rename_no_replace_moves_into_a_free_name() {
+        let d = scratch("free");
+        std::fs::write(d.join("a.part"), b"new").unwrap();
+        rename_no_replace(&d.join("a.part"), &d.join("a.zip")).unwrap();
+        assert_eq!(std::fs::read(d.join("a.zip")).unwrap(), b"new");
+        assert!(d.join("a.part").symlink_metadata().is_err());
+        // A folder too.
+        std::fs::create_dir(d.join("tmp_dir")).unwrap();
+        std::fs::write(d.join("tmp_dir").join("modDesc.xml"), b"<modDesc/>").unwrap();
+        rename_no_replace(&d.join("tmp_dir"), &d.join("FS25_D")).unwrap();
+        assert!(d.join("FS25_D").join("modDesc.xml").is_file());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rename_no_replace_never_replaces_an_existing_destination() {
+        let d = scratch("taken");
+        let (part, dest) = (d.join("a.part"), d.join("a.zip"));
+        std::fs::write(&part, b"new").unwrap();
+        std::fs::write(&dest, b"user's only copy").unwrap();
+        let e = rename_no_replace(&part, &dest).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"user's only copy");
+        assert_eq!(std::fs::read(&part).unwrap(), b"new", "the source stays");
+
+        // Not over an empty folder (a plain Unix rename would replace it) ...
+        let tmp_dir = d.join("tmp_dir");
+        std::fs::create_dir(&tmp_dir).unwrap();
+        std::fs::write(tmp_dir.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        let empty = d.join("FS25_D");
+        std::fs::create_dir(&empty).unwrap();
+        let e = rename_no_replace(&tmp_dir, &empty).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(std::fs::read_dir(&empty).unwrap().next().is_none());
+        // ... nor a file over a folder, nor a folder over a file.
+        let e = rename_no_replace(&part, &empty).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        let e = rename_no_replace(&tmp_dir, &dest).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"user's only copy");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rename_no_replace_refuses_a_name_taken_in_another_case_where_names_ignore_case() {
+        let d = scratch("case");
+        std::fs::write(d.join("probe"), b"").unwrap();
+        let case_insensitive = d.join("PROBE").symlink_metadata().is_ok();
+        std::fs::write(d.join("a.part"), b"new").unwrap();
+        std::fs::write(d.join("FS25_X.zip"), b"theirs").unwrap();
+        let r = rename_no_replace(&d.join("a.part"), &d.join("fs25_x.zip"));
+        if case_insensitive {
+            assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        } else {
+            r.unwrap();
+        }
+        assert_eq!(std::fs::read(d.join("FS25_X.zip")).unwrap(), b"theirs");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_checked_fallback_never_replaces_either() {
+        let d = scratch("fallback");
+        std::fs::write(d.join("a.part"), b"new").unwrap();
+        std::fs::write(d.join("a.zip"), b"theirs").unwrap();
+        let e = rename_checked(&d.join("a.part"), &d.join("a.zip")).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(d.join("a.zip")).unwrap(), b"theirs");
+        rename_checked(&d.join("a.part"), &d.join("b.zip")).unwrap();
+        assert_eq!(std::fs::read(d.join("b.zip")).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn create_fresh_replaces_a_leftover_with_a_new_file() {
+        let d = scratch("fresh");
+        let part = d.join("FS25_X.zip.part");
+        std::fs::write(&part, b"half a download from a crash").unwrap();
+        // A writer still holding the leftover keeps its own (now nameless) file.
+        let mut old = std::fs::OpenOptions::new().write(true).open(&part).unwrap();
+        let mut f = create_fresh(&part).unwrap();
+        f.write_all(b"PK new").unwrap();
+        drop(f);
+        old.write_all(b"late bytes").unwrap();
+        drop(old);
+        assert_eq!(std::fs::read(&part).unwrap(), b"PK new");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
