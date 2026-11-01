@@ -543,12 +543,18 @@ fn rename_or_copy(
 
 /// Write a rename's folder entries to disk before anything relies on it (an unrecord, the
 /// switch at the end of the move): every folder above where it landed (the move may have made
-/// some of them) and the folder it left. Nothing inside it changed, so no file is flushed.
+/// some of them) and the folder it left, or that folder's nearest existing parent when it isn't
+/// there (never made, for a mod recorded but not renamed yet; or tidied away). Nothing inside
+/// the mod changed, so no file is flushed.
 fn flush_rename(placed: &Path, left: &Path) -> std::io::Result<()> {
     for dir in placed.ancestors().skip(1) {
         organize::sync_dir(dir)?;
     }
-    if let Some(dir) = left.parent() {
+    if let Some(dir) = left
+        .ancestors()
+        .skip(1)
+        .find(|d| d.symlink_metadata().is_ok())
+    {
         organize::sync_dir(dir)?;
     }
     Ok(())
@@ -660,10 +666,12 @@ fn relink_renamed(
 
 /// A crash between a rename and its re-link leaves that mod's mods-folder entry naming the
 /// place it left (a symlink or junction), or missing (Windows' `replace_dir_link` removes the
-/// old folder link before the new one goes in). Before the first boundary can pause the move,
-/// every such entry of a recorded active mod is re-pointed at (or made again for) whichever of
-/// its two places holds the mod now, when that is the real copy. Returns what couldn't be
-/// mended, phrased like a step's errors: the run then pauses at once, listing them.
+/// old folder link before the new one goes in, on the copy path too). Before the first boundary
+/// can pause the move, every such entry of a recorded active mod is re-pointed at (or made
+/// again for) whichever of its two places holds the mod now, when that is the real copy (with
+/// both there, a missing entry is made for the one the step moves from). Runs on every run,
+/// whatever the drives look like now: the work it mends was recorded earlier. Returns what
+/// couldn't be mended, phrased like a step's errors: the run then pauses at once, listing them.
 fn mend_renamed_links(env: &Env, marker: &mut MoveMarker) -> Vec<String> {
     let rows = db::load_organized(env.conn, env.mods_key);
     let journal = env.journal();
@@ -744,23 +752,46 @@ fn mend_renamed_links(env: &Env, marker: &mut MoveMarker) -> Vec<String> {
         .filter(|r| r.active && marker.moved.contains(&r.tech_name))
     {
         let link = env.mods.join(&row.file_name);
-        match link.symlink_metadata() {
-            Ok(m) if m.file_type().is_symlink() => {}
+        let missing = match link.symlink_metadata() {
+            Ok(m) if m.file_type().is_symlink() => false,
             Ok(_) => continue, // a hardlink or the mod's own copy: a rename never breaks it
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
             Err(e) => {
                 errors.push(format!("{}: relink: {e}", row.tech_name));
                 continue;
             }
-        }
+        };
+        // A missing entry the mend can't make again is listed: the move pauses saying so.
+        let cant = |errors: &mut Vec<String>, why: &str| {
+            if missing {
+                errors.push(format!(
+                    "{}: relink: its entry in your mods folder is missing, and Silo can't make it again ({why}). Check both archive folders, then resume.",
+                    row.tech_name
+                ));
+            }
+        };
         let a = organize::archive_path(&marker.from, &row.category, &row.file_name);
         let b = organize::archive_path(&marker.to, &row.category, &row.file_name);
         let (gone, here, archive) = match (exists(&a), exists(&b)) {
             (false, true) => (a, b, &marker.to),
             (true, false) => (b, a, &marker.from),
-            _ => continue, // both or neither: the mod's own step sorts it out
+            // Both (a copy not yet deleted): a missing entry is made again for the copy the
+            // step moves from, as it was; a link is the step's to sort out.
+            (true, true) if missing => match marker.direction {
+                Direction::Forward => (b, a, &marker.from),
+                Direction::Back => (a, b, &marker.to),
+            },
+            (true, true) => continue,
+            (false, false) => {
+                cant(&mut errors, "neither archive holds it");
+                continue;
+            }
         };
         if real_copy(&here, &row.kind).is_none() {
+            cant(
+                &mut errors,
+                &format!("{} isn't the mod's copy", here.display()),
+            );
             continue;
         }
         let layout = Layout {
@@ -1324,10 +1355,9 @@ fn forward_one(
                 )));
             }
             repoint(env, row, &src, &dst, policy)?;
-            if env.same_volume {
-                // Renamed by an earlier run: on disk before the move can finish.
-                flushed(env, &dst, &src)?;
-            }
+            // Maybe renamed by an earlier run (whatever the drives look like now): on disk before
+            // the move can finish.
+            flushed(env, &dst, &src)?;
             return Ok(Step::AlreadyDone);
         }
         (true, true) => {
@@ -1420,10 +1450,8 @@ fn back_one(
                 )));
             }
             repoint(env, row, &src, &home, policy)?;
-            if env.same_volume {
-                // Renamed home by an earlier run: on disk before it's un-recorded.
-                flushed(env, &home, &src)?;
-            }
+            // Maybe renamed home by an earlier run: on disk before it's un-recorded.
+            flushed(env, &home, &src)?;
             env.unrecord(marker, &row.tech_name)?;
             return Ok(Step::AlreadyDone);
         }
@@ -2106,15 +2134,13 @@ fn run_locked(
     marker.pause_reason = None;
     marker.errors.clear();
     save_marker(env.conn, env.mods_key, &marker)?;
-    if env.same_volume {
-        // Relink temps an earlier run left are cleared first (only those proven redundant), so
-        // the space a finished one holds is free before the mend may need it.
-        scratch::sweep_where(&env.journal(), &|e| e.role == scratch::Role::RelinkTmp);
-        let unmended = mend_renamed_links(&env, &mut marker);
-        if !unmended.is_empty() {
-            marker.errors.extend(unmended);
-            return pause(&env, marker);
-        }
+    // Relink temps an earlier run left are cleared first (only those proven redundant), so the
+    // space a finished one holds is free before the mend may need it.
+    scratch::sweep_where(&env.journal(), &|e| e.role == scratch::Role::RelinkTmp);
+    let unmended = mend_renamed_links(&env, &mut marker);
+    if !unmended.is_empty() {
+        marker.errors.extend(unmended);
+        return pause(&env, marker);
     }
     if let Some(reason) = settle_updates(&env, &marker, marker.direction) {
         marker.pause_reason = Some(reason);
@@ -5634,5 +5660,140 @@ mod tests {
         {
             std::os::windows::fs::symlink_dir(target, link)
         }
+    }
+    /// Drive `op` with `relation` as the drives' answer and `request` set before the run.
+    fn run_on(
+        f: &Fx,
+        op: Op,
+        relation: Relation,
+        request: u8,
+    ) -> Result<Option<MoveMarker>, String> {
+        let _turn = RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let req = AtomicU8::new(request);
+        let mut quiet = |_: &Progress| {};
+        let mut ctx = RunCtx {
+            same_volume: &relation,
+            free_space: &|_| Some(0),
+            ..ctx_for(f, &|| false, &req, &mut quiet)
+        };
+        drive(&mut ctx, f, op)
+    }
+
+    /// What `RunCtx::same_volume` answers.
+    type Relation = fn(&Path, &Path) -> Option<bool>;
+
+    fn other_drive(_: &Path, _: &Path) -> Option<bool> {
+        Some(false)
+    }
+
+    fn unknown_drive(_: &Path, _: &Path) -> Option<bool> {
+        None
+    }
+
+    /// A crash mid-rename is mended from its note even when the drives can't be told apart
+    /// on Resume (or now look like two): paused at once, and run through to the end.
+    #[test]
+    fn a_crash_mid_rename_is_mended_whatever_the_drives_look_like_on_resume() {
+        let cases: [(&str, Relation, u8); 4] = [
+            ("renamevol1", unknown_drive, PAUSE),
+            ("renamevol2", unknown_drive, 0),
+            ("renamevol3", other_drive, PAUSE),
+            ("renamevol4", other_drive, 0),
+        ];
+        for (tag, relation, request) in cases {
+            let f = fx(tag);
+            let Some((_, dst, link)) = crashed_with_unrecognizable_link(&f) else {
+                let _ = std::fs::remove_dir_all(&f.base);
+                return;
+            };
+            let out = run_on(&f, Op::Resume, relation, request).unwrap();
+            match &out {
+                Some(m) => assert!(m.errors.is_empty() && m.relinking.is_empty(), "{tag}"),
+                None => assert!(load_marker(&f.conn, &f.key).is_none(), "{tag}"),
+            }
+            assert_eq!(out.is_some(), request == PAUSE, "{tag}");
+            assert_eq!(
+                std::fs::canonicalize(&link).unwrap(),
+                std::fs::canonicalize(&dst).unwrap(),
+                "{tag}"
+            );
+            let _ = std::fs::remove_dir_all(&f.base);
+        }
+    }
+
+    /// A folder link lost by a crash mid-rename (no note: the link was made again elsewhere),
+    /// where the two archives don't say plainly where the mod is: with a copy in each it's made
+    /// again for the one the move goes from; with none, or only something that isn't the mod's
+    /// copy, the move pauses at once saying so.
+    #[test]
+    fn a_missing_link_is_made_again_or_reported_before_the_first_pause() {
+        for (tag, case) in [
+            ("renamemissboth", "both"),
+            ("renamemissneither", "neither"),
+            ("renamemissnotcopy", "not a copy"),
+        ] {
+            let f = fx(tag);
+            let (src, dst, link, _) = crashed_after_rename(&f);
+            organize::remove_link(&link)
+                .or_else(|_| std::fs::remove_dir(&link))
+                .unwrap();
+            match case {
+                "both" => {
+                    std::fs::create_dir_all(&src).unwrap();
+                    std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+                }
+                "neither" => std::fs::remove_dir_all(&dst).unwrap(),
+                _ => {
+                    std::fs::remove_dir_all(&dst).unwrap();
+                    std::fs::write(&dst, b"not a folder").unwrap();
+                }
+            }
+            let paused = resume_paused_at_once(&f);
+            if case == "both" {
+                assert!(paused.errors.is_empty(), "{tag}: {:?}", paused.errors);
+                assert_eq!(
+                    std::fs::canonicalize(&link).unwrap(),
+                    std::fs::canonicalize(&src).unwrap(),
+                    "{tag}"
+                );
+            } else {
+                assert_eq!(paused.errors.len(), 1, "{tag}: {:?}", paused.errors);
+                assert!(
+                    paused.errors[0].contains("is missing, and Silo can't make it again"),
+                    "{tag}: {:?}",
+                    paused.errors
+                );
+                assert!(link.symlink_metadata().is_err(), "{tag}");
+            }
+            let _ = std::fs::remove_dir_all(&f.base);
+        }
+    }
+
+    /// Cancel right after a mod was recorded, before its rename made its category folder in the
+    /// new archive: the flush finds that folder missing and flushes its parent instead, so the
+    /// cancel finishes (a missing folder made it fail on unix).
+    #[test]
+    fn a_cancel_before_the_first_rename_finishes() {
+        let f = fx("renamecancelearly");
+        add_zip(&f, "FS25_A", false);
+        let mut m = marker(&f);
+        env(&f).record(&mut m, "FS25_A").unwrap();
+        m.paused = true;
+        save_marker(&f.conn, &f.key, &m).unwrap();
+        assert!(!f.new.join("Tools").exists());
+        assert!(one_drive_run(&f, Op::Cancel).unwrap().is_none());
+        assert!(zip_at(&f.old, "FS25_A").exists());
+        assert!(load_marker(&f.conn, &f.key).is_none());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// The flush of a rename whose old folder is gone flushes that folder's parent.
+    #[test]
+    fn a_rename_flush_skips_a_folder_that_isnt_there() {
+        let f = fx("renameflushgone");
+        let placed = zip_at(&f.old, "FS25_A");
+        std::fs::write(&placed, b"PK").unwrap();
+        flush_rename(&placed, &f.new.join("Tools").join("FS25_A.zip")).unwrap();
+        let _ = std::fs::remove_dir_all(&f.base);
     }
 }
