@@ -85,28 +85,33 @@ impl From<std::io::Error> for AppError {
     }
 }
 
-impl From<ureq::Error> for AppError {
-    fn from(e: ureq::Error) -> Self {
+impl From<crate::net::HttpError> for AppError {
+    fn from(e: crate::net::HttpError) -> Self {
+        use crate::net::{HttpError, RespExt};
         let message = e.to_string();
         let code = match e {
-            ureq::Error::Status(status, resp) => {
-                let host = url::Url::parse(resp.get_url())
+            HttpError::Status(status, s) => {
+                let host = url::Url::parse(s.url())
                     .ok()
                     .and_then(|u| u.host_str().map(str::to_ascii_lowercase));
-                let rate_header = resp.header("x-ratelimit-remaining") == Some("0")
-                    || resp.header("retry-after").is_some();
+                let rate_header = s.header("x-ratelimit-remaining") == Some("0")
+                    || s.header("retry-after").is_some();
                 // Only 403/429 bodies are read, and only a little: enough for GitHub's
                 // "API rate limit exceeded" JSON.
                 let rate_body = matches!(status, 403 | 429) && {
                     use std::io::Read;
                     let mut body = String::new();
-                    let _ = resp.into_reader().take(8192).read_to_string(&mut body);
+                    let _ = s
+                        .into_response()
+                        .into_reader()
+                        .take(8192)
+                        .read_to_string(&mut body);
                     body.to_ascii_lowercase().contains("rate limit")
                 };
                 http_code(status, host.as_deref(), rate_header || rate_body)
                     .unwrap_or_else(|| classify(&message))
             }
-            ureq::Error::Transport(t) => transport_code(t.kind(), &message),
+            HttpError::Transport(t) => transport_code(t.error(), &message),
         };
         AppError { code, message }
     }
@@ -337,17 +342,27 @@ fn http_code(status: u16, host: Option<&str>, rate_limited: bool) -> Option<&'st
     }
 }
 
-/// A ureq transport failure: DNS and refused connections are offline, unless the text says
-/// it timed out; other kinds (bad URL, bad header…) go by the text alone.
-fn transport_code(kind: ureq::ErrorKind, message: &str) -> &'static str {
-    use ureq::ErrorKind as K;
+/// A ureq transport failure: a timeout is a timeout; DNS failures are offline; refused,
+/// reset or failed connections (TLS included) are offline unless the text says it timed out;
+/// other kinds (bad URL, bad header…) go by the text alone. The same buckets as ureq 2's
+/// `Dns` / `ConnectionFailed | Io | ProxyConnect` kinds.
+fn transport_code(e: &ureq::Error, message: &str) -> &'static str {
+    use ureq::Error as E;
     let by_text = classify(message);
-    match kind {
-        K::Dns => code::NET_OFFLINE,
-        K::ConnectionFailed | K::Io | K::ProxyConnect => match by_text {
+    match e {
+        E::Timeout(_) => code::NET_TIMEOUT,
+        E::HostNotFound => code::NET_OFFLINE,
+        E::Other(o) if o.is::<crate::net::DnsFailed>() => code::NET_OFFLINE,
+        E::Other(o) if o.is::<crate::net::ConnectFailed>() => match by_text {
             code::NET_TIMEOUT | code::NET_OFFLINE => by_text,
             _ => code::NET_OFFLINE,
         },
+        E::Io(_) | E::ConnectionFailed | E::ConnectProxyFailed(_) | E::Rustls(_) | E::Tls(_) => {
+            match by_text {
+                code::NET_TIMEOUT | code::NET_OFFLINE => by_text,
+                _ => code::NET_OFFLINE,
+            }
+        }
         _ => by_text,
     }
 }
@@ -404,7 +419,7 @@ const REDACTED: &str = "[redacted]";
 const TOKEN_PREFIXES: [&str; 6] = ["github_pat_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_"];
 
 /// `s` with anything shaped like a credential replaced by `[redacted]`, for text bound for the
-/// log or diagnostics: the quoted header in ureq's "invalid header '…'" error (which carries the
+/// log or diagnostics: the quoted header in ureq 2's "invalid header '…'" error (which carries the
 /// whole `Authorization` line, even across a line break), the word after `Bearer `, and GitHub
 /// tokens (a known prefix plus 8+ token characters, not inside a longer word). Callers should
 /// never pass secrets; this is the backstop for one that slips through.
@@ -809,47 +824,131 @@ mod tests {
         assert_eq!(http_code(404, Some("api.github.com"), true), None);
     }
 
+    /// A 4xx/5xx answer from `url`, as `net::CallExt` hands it back.
+    fn status_err(url: &str, status: u16, headers: &[(&str, &str)], body: &str) -> AppError {
+        let mut b = ureq::http::Response::builder().status(status);
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        let resp = b
+            .body(ureq::Body::builder().data(body.as_bytes().to_vec()))
+            .unwrap();
+        crate::net::HttpError::status(url, resp).into()
+    }
+
     #[test]
     fn ureq_status_errors() {
-        // Parsed responses carry ureq's placeholder URL (example.com), so a 401 isn't GitHub's.
-        let resp: ureq::Response = ureq::Response::new(401, "Unauthorized", "").unwrap();
-        let e: AppError = ureq::Error::Status(401, resp).into();
+        // A 401 is GitHub's only when GitHub said it; example.com's isn't.
+        let e = status_err("https://example.com/", 401, &[], "");
         assert_eq!(e.code, code::UNKNOWN);
         assert!(e.message.ends_with("status code 401"), "{}", e.message);
+        let e = status_err("https://api.github.com/user", 401, &[], "");
+        assert_eq!(e.code, code::GITHUB_AUTH);
+        assert_eq!(e.message, "https://api.github.com/user: status code 401");
 
-        let limited: ureq::Response = "HTTP/1.1 403 Forbidden\r\nx-ratelimit-remaining: 0\r\n\r\n"
-            .parse()
-            .unwrap();
-        let e: AppError = ureq::Error::Status(403, limited).into();
-        assert_eq!(e.code, code::GITHUB_RATE_LIMIT);
-
-        let body = ureq::Response::new(
+        let e = status_err(
+            "https://example.com/",
             403,
-            "Forbidden",
-            "{\"message\":\"API rate limit exceeded\"}",
-        )
-        .unwrap();
-        let e: AppError = ureq::Error::Status(403, body).into();
+            &[("x-ratelimit-remaining", "0")],
+            "",
+        );
+        assert_eq!(e.code, code::GITHUB_RATE_LIMIT);
+        let e = status_err("https://example.com/", 429, &[("retry-after", "30")], "");
         assert_eq!(e.code, code::GITHUB_RATE_LIMIT);
 
-        let plain = ureq::Response::new(403, "Forbidden", "no").unwrap();
-        let e: AppError = ureq::Error::Status(403, plain).into();
+        let e = status_err(
+            "https://example.com/",
+            403,
+            &[],
+            "{\"message\":\"API rate limit exceeded\"}",
+        );
+        assert_eq!(e.code, code::GITHUB_RATE_LIMIT);
+
+        let e = status_err("https://example.com/", 403, &[], "no");
+        assert_eq!(e.code, code::UNKNOWN);
+        // Only 403/429 bodies are read: a 404 saying "rate limit" is still just a 404.
+        let e = status_err("https://example.com/", 404, &[], "rate limit");
         assert_eq!(e.code, code::UNKNOWN);
     }
 
     #[test]
     fn ureq_transport_kinds() {
-        use ureq::ErrorKind as K;
-        assert_eq!(transport_code(K::Dns, "x: Dns Failed"), code::NET_OFFLINE);
+        use crate::net::{DnsFailed, HttpError};
+        use std::io::{Error as IoError, ErrorKind as IoKind};
+        use ureq::Error as E;
+        let app =
+            |e: E| -> AppError { HttpError::transport(Some("https://x.test/".into()), e).into() };
+        let dns = || DnsFailed::error("x.test:443".into(), IoError::other("no such host"));
+
+        // DNS failures (and a lookup Silo refused) are offline, as ureq 2's Dns kind was.
+        let e = app(dns());
+        assert_eq!(e.code, code::NET_OFFLINE);
+        assert!(e.message.contains("Dns Failed"), "{}", e.message);
+        assert_eq!(transport_code(&dns(), "x: Dns Failed"), code::NET_OFFLINE);
+        assert_eq!(transport_code(&E::HostNotFound, "x"), code::NET_OFFLINE);
         assert_eq!(
-            transport_code(K::ConnectionFailed, "x: Connection Failed: timed out"),
+            app(DnsFailed::error(
+                "evil.test:443".into(),
+                IoError::new(
+                    IoKind::PermissionDenied,
+                    "refusing evil.test:443: it has no public address"
+                ),
+            ))
+            .code,
+            code::NET_OFFLINE
+        );
+        // A failed connection is offline unless its text says it timed out.
+        assert_eq!(
+            transport_code(&E::ConnectionFailed, "x: Connection Failed: timed out"),
             code::NET_TIMEOUT
         );
         assert_eq!(
-            transport_code(K::Io, "x: Network Error: connection reset"),
+            transport_code(&E::ConnectionFailed, "x: Connection Failed"),
             code::NET_OFFLINE
         );
-        assert_eq!(transport_code(K::InvalidUrl, "x: Bad URL"), code::UNKNOWN);
+        assert_eq!(
+            transport_code(
+                &E::Io(IoError::new(IoKind::ConnectionReset, "connection reset")),
+                "x: Network Error: connection reset"
+            ),
+            code::NET_OFFLINE
+        );
+        // A connection Silo's connector reports as failed: offline, and its text says so.
+        let failed = app(crate::net::ConnectFailed::error(IoError::other(
+            "No route to host (os error 113)",
+        )));
+        assert_eq!(failed.code, code::NET_OFFLINE);
+        assert!(
+            failed.message.contains("Connection Failed"),
+            "{}",
+            failed.message
+        );
+        assert_eq!(AppError::from(failed.message).code, code::NET_OFFLINE);
+        let refused = app(E::Io(IoError::new(IoKind::ConnectionRefused, "refused")));
+        assert_eq!(refused.code, code::NET_OFFLINE);
+        assert!(refused
+            .message
+            .starts_with("https://x.test/: Network Error: refused"));
+        // Every ureq timeout is a timeout.
+        for t in [
+            ureq::Timeout::Global,
+            ureq::Timeout::PerRead,
+            ureq::Timeout::Connect,
+        ] {
+            let e = app(E::Timeout(t));
+            assert_eq!(e.code, code::NET_TIMEOUT, "{}", e.message);
+            assert!(e.message.contains("timed out"), "{}", e.message);
+        }
+        // Anything else goes by its text.
+        assert_eq!(
+            transport_code(&E::BadUri("x".into()), "x: Bad URL"),
+            code::UNKNOWN
+        );
+        assert_eq!(app(E::TooManyRedirects).code, code::UNKNOWN);
+        assert_eq!(
+            app(E::RequireHttpsOnly("http://x.test/".into())).code,
+            code::UNKNOWN
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! Unauthenticated (60 req/hr per IP) is fine for on-demand checks; a PAT can lift
 //! that to 5000/hr later. All network stays in Rust (the webview CSP blocks it).
 
+use crate::net::{CallExt, HttpError, RespExt, SendExt};
 use serde::Serialize;
 
 // ── Input validation + safe API URLs ──
@@ -104,13 +105,13 @@ pub fn latest_release(owner: &str, repo: &str, token: Option<&str>) -> Result<Re
     let url = api_url(&["repos", owner, repo, "releases", "latest"])?;
     let mut req = crate::net::api()
         .get(url.as_str())
-        .set("Accept", "application/vnd.github+json");
+        .header("Accept", "application/vnd.github+json");
     if let Some(t) = token {
-        req = req.set("Authorization", &format!("Bearer {t}"));
+        req = req.header("Authorization", &format!("Bearer {t}"));
     }
-    let resp = req.call().map_err(|e| match e {
-        ureq::Error::Status(404, _) => not_found_text(owner, repo, repo_exists(owner, repo, token)),
-        ureq::Error::Status(403, r) => forbidden_text(
+    let resp = req.call_checked().map_err(|e| match e {
+        HttpError::Status(404, _) => not_found_text(owner, repo, repo_exists(owner, repo, token)),
+        HttpError::Status(403, r) => forbidden_text(
             r.header("x-ratelimit-remaining"),
             r.header("retry-after").is_some(),
             token.is_some(),
@@ -363,8 +364,8 @@ impl Default for SignOutGate {
 pub fn device_start(client_id: &str, scope: &str) -> Result<DeviceCode, String> {
     let resp = crate::net::api()
         .post("https://github.com/login/device/code")
-        .set("Accept", "application/json")
-        .send_form(&[("client_id", client_id), ("scope", scope)])
+        .header("Accept", "application/json")
+        .send_form_checked(&[("client_id", client_id), ("scope", scope)])
         .map_err(|e| e.to_string())?;
     let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
     if let Some(err) = v["error"].as_str() {
@@ -392,8 +393,8 @@ pub fn device_start(client_id: &str, scope: &str) -> Result<DeviceCode, String> 
 pub fn device_poll(client_id: &str, device_code: &str) -> Result<PollResult, String> {
     let resp = crate::net::api()
         .post("https://github.com/login/oauth/access_token")
-        .set("Accept", "application/json")
-        .send_form(&[
+        .header("Accept", "application/json")
+        .send_form_checked(&[
             ("client_id", client_id),
             ("device_code", device_code),
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
@@ -539,9 +540,9 @@ pub fn whoami(token: &str) -> Result<String, String> {
 pub fn whoami_scoped(token: &str) -> Result<(String, String), String> {
     let resp = crate::net::api()
         .get("https://api.github.com/user")
-        .set("Accept", "application/vnd.github+json")
-        .set("Authorization", &format!("Bearer {token}"))
-        .call()
+        .header("Accept", "application/vnd.github+json")
+        .header("Authorization", &format!("Bearer {token}"))
+        .call_checked()
         .map_err(gh_err)?;
     let scopes = resp.header("X-OAuth-Scopes").unwrap_or("").to_string();
     let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
@@ -574,11 +575,11 @@ pub struct RepoStats {
 fn gh_get(url: &str, token: Option<&str>) -> Result<serde_json::Value, String> {
     let mut req = crate::net::api()
         .get(url)
-        .set("Accept", "application/vnd.github+json");
+        .header("Accept", "application/vnd.github+json");
     if let Some(t) = token {
-        req = req.set("Authorization", &format!("Bearer {t}"));
+        req = req.header("Authorization", &format!("Bearer {t}"));
     }
-    req.call()
+    req.call_checked()
         .map_err(gh_err)?
         .into_json()
         .map_err(|e| e.to_string())
@@ -604,13 +605,13 @@ fn repo_exists(owner: &str, repo: &str, token: Option<&str>) -> Option<bool> {
     let url = api_url(&["repos", owner, repo]).ok()?;
     let mut req = crate::net::api()
         .get(url.as_str())
-        .set("Accept", "application/vnd.github+json");
+        .header("Accept", "application/vnd.github+json");
     if let Some(t) = token {
-        req = req.set("Authorization", &format!("Bearer {t}"));
+        req = req.header("Authorization", &format!("Bearer {t}"));
     }
-    match req.call() {
+    match req.call_checked() {
         Ok(_) => Some(true),
-        Err(ureq::Error::Status(404, _)) => Some(false),
+        Err(HttpError::Status(404, _)) => Some(false),
         Err(_) => None,
     }
 }
@@ -633,17 +634,17 @@ fn forbidden_text(remaining: Option<&str>, retry_after: bool, has_token: bool) -
 
 /// Map a ureq error to a friendly string, calling out the scope case so the UI can
 /// prompt the user to re-connect with actions enabled.
-fn gh_err(e: ureq::Error) -> String {
+fn gh_err(e: HttpError) -> String {
     match e {
-        ureq::Error::Status(401, _) => {
+        HttpError::Status(401, _) => {
             "GitHub rejected the token. Reconnect your account.".to_string()
         }
-        ureq::Error::Status(403, _) => {
+        HttpError::Status(403, _) => {
             "This token can't perform that action. Reconnect GitHub and allow the extra \
              permission."
                 .to_string()
         }
-        ureq::Error::Status(404, _) => {
+        HttpError::Status(404, _) => {
             "Silo couldn't find this on GitHub. It may have been renamed, made private or deleted."
                 .to_string()
         }
@@ -651,11 +652,12 @@ fn gh_err(e: ureq::Error) -> String {
     }
 }
 
-/// A ureq error as text, except a refused header: ureq quotes the whole header line in that
-/// error, so for `Authorization` it would carry the token into the UI and the log.
-fn transport_text(e: ureq::Error) -> String {
+/// An HTTP error as text, except a refused header, which gets a fixed text: ureq 2 quoted the
+/// whole header line in that error, so for `Authorization` it would have carried the token into
+/// the UI and the log. ureq 3's text doesn't, but the wording stays the same.
+fn transport_text(e: HttpError) -> String {
     match &e {
-        ureq::Error::Transport(t) if t.kind() == ureq::ErrorKind::BadHeader => {
+        HttpError::Transport(t) if t.is_bad_header() => {
             "GitHub request had a malformed header, so it wasn't sent.".to_string()
         }
         _ => e.to_string(),
@@ -722,12 +724,12 @@ pub fn repo_stats(owner: &str, repo: &str, token: Option<&str>) -> Result<RepoSt
 fn present_check(url: &str, token: &str) -> Result<bool, String> {
     match crate::net::api()
         .get(url)
-        .set("Accept", "application/vnd.github+json")
-        .set("Authorization", &format!("Bearer {token}"))
-        .call()
+        .header("Accept", "application/vnd.github+json")
+        .header("Authorization", &format!("Bearer {token}"))
+        .call_checked()
     {
         Ok(_) => Ok(true),
-        Err(ureq::Error::Status(404, _)) => Ok(false),
+        Err(HttpError::Status(404, _)) => Ok(false),
         Err(e) => Err(gh_err(e)),
     }
 }
@@ -745,15 +747,15 @@ pub fn watch_state(owner: &str, repo: &str, token: &str) -> Result<bool, String>
     let url = api_url(&["repos", owner, repo, "subscription"])?;
     match crate::net::api()
         .get(url.as_str())
-        .set("Accept", "application/vnd.github+json")
-        .set("Authorization", &format!("Bearer {token}"))
-        .call()
+        .header("Accept", "application/vnd.github+json")
+        .header("Authorization", &format!("Bearer {token}"))
+        .call_checked()
     {
         Ok(resp) => {
             let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
             Ok(watching_from(&v))
         }
-        Err(ureq::Error::Status(404, _)) => Ok(false),
+        Err(HttpError::Status(404, _)) => Ok(false),
         Err(e) => Err(gh_err(e)),
     }
 }
@@ -768,15 +770,23 @@ fn watching_from(v: &serde_json::Value) -> bool {
 pub fn set_star(owner: &str, repo: &str, token: &str, on: bool) -> Result<bool, String> {
     check_repo(owner, repo)?;
     let url = api_url(&["user", "starred", owner, repo])?;
-    let req = if on {
-        crate::net::api().put(url.as_str())
+    let auth = format!("Bearer {token}");
+    if on {
+        crate::net::api()
+            .put(url.as_str())
+            .header("Accept", "application/vnd.github+json")
+            .header("Content-Length", "0")
+            .header("Authorization", &auth)
+            .send_empty_checked()
     } else {
-        crate::net::api().delete(url.as_str())
+        crate::net::api()
+            .delete(url.as_str())
+            .header("Accept", "application/vnd.github+json")
+            .header("Content-Length", "0")
+            .header("Authorization", &auth)
+            .call_checked()
     }
-    .set("Accept", "application/vnd.github+json")
-    .set("Content-Length", "0")
-    .set("Authorization", &format!("Bearer {token}"));
-    req.call().map_err(gh_err)?;
+    .map_err(gh_err)?;
     Ok(on)
 }
 
@@ -787,17 +797,17 @@ pub fn set_watch(owner: &str, repo: &str, token: &str, on: bool) -> Result<bool,
     if on {
         crate::net::api()
             .put(url.as_str())
-            .set("Accept", "application/vnd.github+json")
-            .set("Authorization", &format!("Bearer {token}"))
-            .send_json(ureq::json!({ "subscribed": true, "ignored": false }))
+            .header("Accept", "application/vnd.github+json")
+            .header("Authorization", &format!("Bearer {token}"))
+            .send_json_checked(serde_json::json!({ "subscribed": true, "ignored": false }))
             .map_err(gh_err)?;
     } else {
         crate::net::api()
             .delete(url.as_str())
-            .set("Accept", "application/vnd.github+json")
-            .set("Content-Length", "0")
-            .set("Authorization", &format!("Bearer {token}"))
-            .call()
+            .header("Accept", "application/vnd.github+json")
+            .header("Content-Length", "0")
+            .header("Authorization", &format!("Bearer {token}"))
+            .call_checked()
             .map_err(gh_err)?;
     }
     Ok(on)
@@ -825,16 +835,16 @@ pub fn create_secret_gist(
     filename: &str,
     content: &str,
 ) -> Result<GistRef, String> {
-    let body = ureq::json!({
+    let body = serde_json::json!({
         "description": description,
         "public": false,
         "files": { filename: { "content": content } },
     });
     let v = crate::net::api()
         .post("https://api.github.com/gists")
-        .set("Accept", "application/vnd.github+json")
-        .set("Authorization", &format!("Bearer {token}"))
-        .send_json(body)
+        .header("Accept", "application/vnd.github+json")
+        .header("Authorization", &format!("Bearer {token}"))
+        .send_json_checked(body)
         .map_err(gh_err)?
         .into_json::<serde_json::Value>()
         .map_err(|e| e.to_string())?;
@@ -856,10 +866,10 @@ pub fn update_gist_file(
 ) -> Result<(), String> {
     check_gist_id(id)?;
     crate::net::api()
-        .request("PATCH", api_url(&["gists", id])?.as_str())
-        .set("Accept", "application/vnd.github+json")
-        .set("Authorization", &format!("Bearer {token}"))
-        .send_json(ureq::json!({ "files": { filename: { "content": content } } }))
+        .patch(api_url(&["gists", id])?.as_str())
+        .header("Accept", "application/vnd.github+json")
+        .header("Authorization", &format!("Bearer {token}"))
+        .send_json_checked(serde_json::json!({ "files": { filename: { "content": content } } }))
         .map_err(gh_err)?;
     Ok(())
 }
@@ -902,9 +912,9 @@ pub fn delete_gist(token: &str, id: &str) -> Result<(), String> {
     check_gist_id(id)?;
     crate::net::api()
         .delete(api_url(&["gists", id])?.as_str())
-        .set("Accept", "application/vnd.github+json")
-        .set("Authorization", &format!("Bearer {token}"))
-        .call()
+        .header("Accept", "application/vnd.github+json")
+        .header("Authorization", &format!("Bearer {token}"))
+        .call_checked()
         .map_err(gh_err)?;
     Ok(())
 }
@@ -983,7 +993,7 @@ fn fetch_gist_raw(url: &str, token: Option<&str>) -> Result<String, String> {
         auth.as_deref(),
     )
     .map_err(|e| match e {
-        crate::net::FetchError::Http(e) => gh_err(*e),
+        crate::net::FetchError::Http(e) => gh_err(e),
         crate::net::FetchError::Refused(s) => s,
     })?
     .into_string()
@@ -1011,7 +1021,7 @@ pub fn read_repo_file(
     token: Option<&str>,
 ) -> Result<String, String> {
     repo_file_request(owner, repo, path, token)?
-        .call()
+        .call_checked()
         .map_err(gh_err)?
         .into_string()
         .map_err(|e| e.to_string())
@@ -1026,9 +1036,9 @@ pub fn read_repo_file_if_present(
     path: &str,
     token: Option<&str>,
 ) -> Result<Option<String>, String> {
-    match repo_file_request(owner, repo, path, token)?.call() {
+    match repo_file_request(owner, repo, path, token)?.call_checked() {
         Ok(resp) => resp.into_string().map(Some).map_err(|e| e.to_string()),
-        Err(ureq::Error::Status(404, _)) => Ok(None),
+        Err(HttpError::Status(404, _)) => Ok(None),
         Err(e) => Err(gh_err(e)),
     }
 }
@@ -1039,14 +1049,14 @@ fn repo_file_request(
     repo: &str,
     path: &str,
     token: Option<&str>,
-) -> Result<ureq::Request, String> {
+) -> Result<ureq::RequestBuilder<ureq::typestate::WithoutBody>, String> {
     check_repo(owner, repo)?;
     let url = contents_url(owner, repo, path)?;
     let mut req = crate::net::api()
         .get(url.as_str())
-        .set("Accept", "application/vnd.github.raw");
+        .header("Accept", "application/vnd.github.raw");
     if let Some(t) = token {
-        req = req.set("Authorization", &format!("Bearer {t}"));
+        req = req.header("Authorization", &format!("Bearer {t}"));
     }
     Ok(req)
 }
@@ -1070,7 +1080,7 @@ const REPO_NAME_TAKEN: &str =
 /// own, public, still empty, with Silo's description), that repo is returned instead, so a
 /// retry carries on rather than failing with "name taken" (#355).
 pub fn create_public_repo(token: &str, name: &str, description: &str) -> Result<RepoRef, String> {
-    let body = ureq::json!({
+    let body = serde_json::json!({
         "name": name,
         "description": description,
         "private": false,
@@ -1078,14 +1088,14 @@ pub fn create_public_repo(token: &str, name: &str, description: &str) -> Result<
     });
     let v = match crate::net::api()
         .post("https://api.github.com/user/repos")
-        .set("Accept", "application/vnd.github+json")
-        .set("Authorization", &format!("Bearer {token}"))
-        .send_json(body)
+        .header("Accept", "application/vnd.github+json")
+        .header("Authorization", &format!("Bearer {token}"))
+        .send_json_checked(body)
     {
         Ok(resp) => resp
             .into_json::<serde_json::Value>()
             .map_err(|e| e.to_string())?,
-        Err(ureq::Error::Status(422, _)) => {
+        Err(HttpError::Status(422, _)) => {
             return match unfinished_collection_repo(token, name, description) {
                 Ok(Some(repo)) => Ok(repo),
                 Ok(None) => Err(REPO_NAME_TAKEN.to_string()),
@@ -1158,12 +1168,12 @@ fn repo_is_empty(token: &str, owner: &str, repo: &str) -> Result<bool, String> {
     url.set_query(Some("per_page=1"));
     match crate::net::api()
         .get(url.as_str())
-        .set("Accept", "application/vnd.github+json")
-        .set("Authorization", &format!("Bearer {token}"))
-        .call()
+        .header("Accept", "application/vnd.github+json")
+        .header("Authorization", &format!("Bearer {token}"))
+        .call_checked()
     {
         Ok(_) => Ok(false),
-        Err(ureq::Error::Status(409, _)) => Ok(true),
+        Err(HttpError::Status(409, _)) => Ok(true),
         Err(e) => Err(gh_err(e)),
     }
 }
@@ -1208,7 +1218,7 @@ fn write_repo_file(
     use base64::Engine;
     check_repo(owner, repo)?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
-    let mut body = ureq::json!({
+    let mut body = serde_json::json!({
         "message": message,
         "content": encoded,
         "branch": "main",
@@ -1222,9 +1232,9 @@ fn write_repo_file(
     }
     crate::net::api()
         .put(contents_url(owner, repo, path)?.as_str())
-        .set("Accept", "application/vnd.github+json")
-        .set("Authorization", &format!("Bearer {token}"))
-        .send_json(body)
+        .header("Accept", "application/vnd.github+json")
+        .header("Authorization", &format!("Bearer {token}"))
+        .send_json_checked(body)
         .map_err(gh_err)?;
     Ok(())
 }
@@ -1335,20 +1345,31 @@ mod tests {
 
     #[test]
     fn a_malformed_auth_header_never_reaches_the_error_text() {
-        // ureq refuses the header before connecting and quotes the whole header line in its
-        // error, token included; gh_err must not pass that on.
+        // ureq refuses the header before connecting. ureq 2 quoted the whole header line in
+        // its error, token included; neither ureq's text nor gh_err's may carry it.
         let secret = "ghp_SECRETsecret0123456789";
-        let err = crate::net::api()
-            .get("https://api.github.com/user")
-            .set("Authorization", &format!("Bearer {secret}\u{200b}"))
-            .call()
-            .unwrap_err();
-        assert!(
-            err.to_string().contains(secret),
-            "ureq's own text does carry it"
-        );
-        let text = gh_err(err);
-        assert!(!text.contains("SECRET"), "{text}");
+        for bad in [
+            format!("Bearer {secret}\u{200b}"),
+            format!("Bearer {secret}\r\nX-Injected: 1"),
+        ] {
+            let err = crate::net::api()
+                .get("https://api.github.com/user")
+                .header("Authorization", &bad)
+                .call_checked()
+                .unwrap_err();
+            assert!(
+                matches!(&err, HttpError::Transport(t) if t.is_bad_header()),
+                "{err:?}"
+            );
+            assert!(!err.to_string().contains("SECRET"), "{err}");
+            assert!(!format!("{err:?}").contains("SECRET"), "{err:?}");
+            let text = gh_err(err);
+            assert!(!text.contains("SECRET"), "{text}");
+            assert_eq!(
+                text,
+                "GitHub request had a malformed header, so it wasn't sent."
+            );
+        }
     }
 
     #[test]

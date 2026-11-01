@@ -13,6 +13,7 @@
 //! rolls back from there. Nothing is ever truncated or overwritten in place, and the old
 //! version is never deleted until a newer one is in backups.
 
+use crate::net::RespExt;
 use crate::organize::{self, LinkPolicy};
 use std::io::Read;
 use std::path::{Path, PathBuf};

@@ -5789,6 +5789,7 @@ fn log_plugin<R: tauri::Runtime>(to_file: bool) -> tauri::plugin::TauriPlugin<R>
         .level_for("tao", log::LevelFilter::Warn)
         .level_for("wry", log::LevelFilter::Warn)
         .level_for("ureq", log::LevelFilter::Warn)
+        .level_for("ureq_proto", log::LevelFilter::Warn)
         .level_for("rustls", log::LevelFilter::Warn)
         .max_file_size(2_000_000)
         // KeepSome(n) keeps n rotated files besides the live one: five files in all.
