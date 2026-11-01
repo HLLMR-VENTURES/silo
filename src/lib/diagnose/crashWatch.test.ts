@@ -114,6 +114,27 @@ describe("check (window focus)", () => {
     expect(deps.onRun).toHaveBeenCalledTimes(2);
   });
 
+  it("a look queued behind an old one doesn't start once a switch paused looking (#387)", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const scan = vi.fn(async () => {
+      await gate;
+      return report(true);
+    });
+    const { deps, watch } = setup({ scan });
+    const old = watch.check();
+    await Promise.resolve();
+    watch.logChanged();
+    const queued = watch.check();
+    watch.pause();
+    release();
+    await old;
+    await queued;
+    // Only the first look read anything, and neither announced (both logs are stale now).
+    expect(deps.status).toHaveBeenCalledTimes(1);
+    expect(deps.onRun).not.toHaveBeenCalled();
+  });
+
   it("looks nothing up while a mods-folder switch runs, and looks again after (#387)", async () => {
     const { deps, watch } = setup();
     watch.pause();

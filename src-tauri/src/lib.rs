@@ -6877,6 +6877,39 @@ fn ensure_well_formed(xml: &str) -> Result<(), String> {
 }
 
 // ── Savegames ──
+
+/// What the app shows from the game's user folder, read together (`game_files`).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GameFiles {
+    /// The user folder the config editors open (`gameprofile::Place::GameConfig`).
+    user_dir: Option<String>,
+    savegames: Vec<savegame::Savegame>,
+    mods_with_settings: Vec<String>,
+}
+
+/// Savegames, the user folder and the mods with settings from one read of the FS25 profile in
+/// use (#387), so a save listed from one profile is never shown beside another one's folder
+/// (the config editors build a save's path from that folder).
+#[tauri::command]
+async fn game_files() -> Result<GameFiles, String> {
+    off_main(|| {
+        let main = fsgame::user_dir();
+        let profile = gameprofile::active();
+        let at = |place| gameprofile::resolve(place, main.clone(), profile.clone());
+        Ok(GameFiles {
+            user_dir: at(gameprofile::Place::GameConfig).map(|p| p.to_string_lossy().into_owned()),
+            savegames: at(gameprofile::Place::Savegames)
+                .map(|d| savegame::list_savegames(&d))
+                .unwrap_or_default(),
+            mods_with_settings: at(gameprofile::Place::ModSettings)
+                .map(|d| settings_form::mods_with_settings(&d))
+                .unwrap_or_default(),
+        })
+    })
+    .await
+}
+
 #[tauri::command]
 async fn get_savegames() -> Result<Vec<savegame::Savegame>, String> {
     off_main(|| {
@@ -7096,6 +7129,7 @@ pub fn run() {
         export_set_file,
         shared_file_kind,
         get_savegames,
+        game_files,
         backup_savegame,
         detect_conflicts,
         detect_game,

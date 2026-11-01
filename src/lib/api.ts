@@ -490,6 +490,16 @@ export function getSavegames(): Promise<Savegame[]> {
   return invoke<Savegame[]>("get_savegames");
 }
 
+/** Savegames, the user folder and the mods with settings, read from one FS25 profile (#387). */
+export interface GameFiles {
+  userDir: string | null;
+  savegames: Savegame[];
+  modsWithSettings: string[];
+}
+export function gameFiles(): Promise<GameFiles> {
+  return invoke<GameFiles>("game_files");
+}
+
 /** `userDir`: the user folder the save was listed from (refused if the FS25 profile changed). */
 export function backupSavegame(folder: string, userDir?: string | null): Promise<string> {
   return invoke<string>("backup_savegame", { folder, userDir: userDir ?? null });

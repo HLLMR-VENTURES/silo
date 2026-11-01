@@ -33,6 +33,7 @@
     flatten,
     clearScanCache,
     getSavegames,
+    gameFiles,
     backupSavegame,
     detectConflicts,
     detectGame,
@@ -2890,15 +2891,13 @@
     // Only the newest load lands: an older one may describe the other profile's folder.
     const gen = ++gameFilesGen;
     try {
-      const [saves, dir, withSettings] = await Promise.all([
-        getSavegames(),
-        userDirPath(),
-        modsWithSettings(),
-      ]);
+      // One backend read: the saves and the folder their paths are built from never come from
+      // two different FS25 profiles.
+      const files = await gameFiles();
       if (gen !== gameFilesGen) return;
-      savegames = saves;
-      userDir = dir;
-      settingsModsSet = new Set(withSettings);
+      savegames = files.savegames;
+      userDir = files.userDir;
+      settingsModsSet = new Set(files.modsWithSettings);
       shownProfile = profileInUse(modsStatus);
     } catch (e) {
       if (gen === gameFilesGen) reportError(e, "Reading the game's files", { background: true });

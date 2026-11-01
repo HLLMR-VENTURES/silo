@@ -151,8 +151,11 @@ export function createCrashWatch(deps: CrashWatchDeps): CrashWatch {
 
   function check(): Promise<void> {
     if (paused) return Promise.resolve();
+    // The log this look is for is the one watched when it was asked for: a look queued behind
+    // an older one that only starts after a profile change (or during a switch) does nothing.
+    const epoch = logEpoch;
     return once(async () => {
-      const epoch = logEpoch;
+      if (paused || epoch !== logEpoch) return;
       await evaluate(await deps.status(), epoch);
     });
   }
