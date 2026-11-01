@@ -1009,7 +1009,7 @@ fn filed_mods_with(
         if !is_dir {
             continue;
         }
-        for (p, _) in list(&cat).map_err(|e| cant_read(&cat, e))? {
+        for (p, is_dir) in list(&cat).map_err(|e| cant_read(&cat, e))? {
             let n = p
                 .file_name()
                 .map(|n| n.to_string_lossy().to_lowercase())
@@ -1017,12 +1017,27 @@ fn filed_mods_with(
             if crate::scan::is_silo_temp(&n) {
                 continue;
             }
-            if n.ends_with(".zip") || p.join("modDesc.xml").is_file() {
+            if n.ends_with(".zip") || has_moddesc(&p, is_dir)? {
                 out.push(p);
             }
         }
     }
     Ok(out)
+}
+
+/// Whether `p` is a folder mod (holds a `modDesc.xml`). A folder that can't be looked into is
+/// an error naming it, never "not a mod". Anything that isn't a plain folder (a file, a link)
+/// is checked as before, best effort.
+fn has_moddesc(p: &Path, is_dir: bool) -> std::io::Result<bool> {
+    let desc = p.join("modDesc.xml");
+    if !is_dir {
+        return Ok(desc.is_file());
+    }
+    match std::fs::metadata(&desc) {
+        Ok(m) => Ok(m.is_file()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(cant_read(p, e)),
+    }
 }
 
 /// A listing error that names the folder Silo couldn't read (same kind as `e`).
@@ -2629,6 +2644,33 @@ mod tests {
         );
         assert!(zip_at(&f.old, "FS25_A").exists() && !zip_at(&f.new, "FS25_A").exists());
         assert!(locked.join("FS25_Stray.zip").exists());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    // The category lists fine, but an unrecorded folder mod in it can't be looked into: that's
+    // "can't read", not "not a mod".
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_mod_that_cant_be_looked_into_is_an_error_not_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fx("unreadable_mod");
+        let stray = f.old.join("Tools/FS25_Stray");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::set_permissions(&stray, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::metadata(stray.join("modDesc.xml")).is_ok() {
+            // Running as root: permissions don't stop the look, so there's nothing to test.
+            std::fs::set_permissions(&stray, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_dir_all(&f.base);
+            return;
+        }
+        let res = unknown_mods(&f.old, &[]);
+        std::fs::set_permissions(&stray, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let e = res.unwrap_err();
+        assert!(e.to_string().contains("FS25_Stray"), "{e}");
+        // A plain folder without a modDesc is still just "not a mod".
+        std::fs::create_dir_all(f.old.join("Tools/notes")).unwrap();
+        assert_eq!(unknown_mods(&f.old, &[]).unwrap(), vec![stray]);
         let _ = std::fs::remove_dir_all(&f.base);
     }
 

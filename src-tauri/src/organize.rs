@@ -427,12 +427,14 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
             }
         } else {
             // Nothing at the name and not wanted: a crash between unlinking and recording can
-            // leave `active = true` behind.
+            // leave `active = true` behind, and the gone projection's record with it (which must
+            // never vouch for a file put at that name later).
             if row.active {
-                if let Err(e) = db::set_organized_active(conn, &key, &row.tech_name, false) {
-                    rep.errors.push(format!("{}: manifest: {e}", row.tech_name));
+                db::forget_projection(conn, &key, &row.file_name);
+                match db::set_organized_active(conn, &key, &row.tech_name, false) {
+                    Ok(()) => rep.changed += 1,
+                    Err(e) => rep.errors.push(format!("{}: manifest: {e}", row.tech_name)),
                 }
-                rep.changed += 1;
             } else {
                 rep.skipped += 1;
             }
@@ -2616,10 +2618,15 @@ mod tests {
         let key = crate::modsroot::canonical_key(&base);
         std::fs::write(base.join(ARCHIVE).join("Vehicles/FS25_Foo.zip"), b"PK").unwrap();
         organize_row(&conn, &base, "FS25_Foo", "Vehicles", true);
+        db::record_projection(&conn, &key, "FS25_Foo.zip", 2, 1);
 
         let rep = set_active(&conn, &Layout::default_for(&base), &HashSet::new());
         assert_eq!(rep.changed, 1);
         assert!(!db::load_organized(&conn, &key)[0].active);
+        assert!(
+            db::projection_stats(&conn, &key, "FS25_Foo.zip").is_none(),
+            "the gone projection's record is dropped"
+        );
         assert!(!base.join("FS25_Foo.zip").exists());
 
         let _ = std::fs::remove_dir_all(&base);
