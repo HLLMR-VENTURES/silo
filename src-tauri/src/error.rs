@@ -353,6 +353,10 @@ fn transport_code(e: &ureq::Error, message: &str) -> &'static str {
         E::Timeout(_) => code::NET_TIMEOUT,
         E::HostNotFound => code::NET_OFFLINE,
         E::Other(o) if o.is::<crate::net::DnsFailed>() => code::NET_OFFLINE,
+        E::Other(o) if o.is::<crate::net::ConnectFailed>() => match by_text {
+            code::NET_TIMEOUT | code::NET_OFFLINE => by_text,
+            _ => code::NET_OFFLINE,
+        },
         E::Io(_) | E::ConnectionFailed | E::ConnectProxyFailed(_) | E::Rustls(_) | E::Tls(_) => {
             match by_text {
                 code::NET_TIMEOUT | code::NET_OFFLINE => by_text,
@@ -909,6 +913,17 @@ mod tests {
             ),
             code::NET_OFFLINE
         );
+        // A connection Silo's connector reports as failed: offline, and its text says so.
+        let failed = app(crate::net::ConnectFailed::error(IoError::other(
+            "No route to host (os error 113)",
+        )));
+        assert_eq!(failed.code, code::NET_OFFLINE);
+        assert!(
+            failed.message.contains("Connection Failed"),
+            "{}",
+            failed.message
+        );
+        assert_eq!(AppError::from(failed.message).code, code::NET_OFFLINE);
         let refused = app(E::Io(IoError::new(IoKind::ConnectionRefused, "refused")));
         assert_eq!(refused.code, code::NET_OFFLINE);
         assert!(refused

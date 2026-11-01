@@ -23,14 +23,16 @@
 //! and body.
 
 use std::io::{self, Read};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use ureq::config::{Config, ConfigBuilder};
 use ureq::http::Uri;
 use ureq::typestate::{AgentScope, WithBody, WithoutBody};
 use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
-use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
+use ureq::unversioned::transport::{
+    ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport,
+};
 use ureq::{Agent, RequestBuilder, ResponseExt};
 use url::{Host, Url};
 
@@ -73,11 +75,12 @@ fn agent_config(
         .http_status_as_error(false)
 }
 
-/// An agent from `config` that resolves names with [`SiloResolver`].
+/// An agent from `config` that resolves names with [`SiloResolver`] and connects with
+/// [`SiloConnector`].
 fn agent_with(config: Config, public_only: bool) -> Agent {
     Agent::with_parts(
         config,
-        DefaultConnector::default(),
+        SiloConnector::default(),
         SiloResolver { public_only },
     )
 }
@@ -187,14 +190,22 @@ pub fn download() -> &'static GuardedAgent {
         .get_or_init(|| build_guarded_agent(Duration::from_secs(10), Duration::from_secs(30), None))
 }
 
-/// Name resolution for every agent: the system resolver (ureq's default, which also honours
-/// the request's timeouts), with a failed lookup reported as [`DnsFailed`]. With
-/// `public_only`, only the addresses [`public_addrs`] keeps are handed to ureq, which
-/// connects to nothing else.
+/// Name resolution for every agent, with a failed lookup reported as [`DnsFailed`].
+///
+/// - Plain agents use the system resolver through ureq's `DefaultResolver`, which honours the
+///   request's timeouts.
+/// - With `public_only`, Silo looks the name up itself (same system resolver, same timeout
+///   handling), keeps only the addresses [`public_addrs`] allows, and hands ureq at most the
+///   first [`MAX_ADDRS`] of those; ureq connects to nothing else. Filtering before that cap
+///   (ureq's own resolver stops at 16 answers) keeps a public address that comes after 16
+///   private ones, as ureq 2 did.
 #[derive(Debug)]
 struct SiloResolver {
     public_only: bool,
 }
+
+/// Most addresses ureq takes from a resolver (`ResolvedSocketAddrs`'s capacity).
+const MAX_ADDRS: usize = 16;
 
 impl Resolver for SiloResolver {
     fn resolve(
@@ -203,29 +214,28 @@ impl Resolver for SiloResolver {
         config: &Config,
         timeout: NextTimeout,
     ) -> Result<ResolvedSocketAddrs, ureq::Error> {
-        let found = DefaultResolver::default().resolve(uri, config, timeout);
         let netloc = || {
             uri.scheme()
                 .zip(uri.authority())
                 .and_then(|(s, a)| DefaultResolver::host_and_port(s, a))
-                .unwrap_or_default()
-        };
-        let found = match found {
-            Ok(found) => found,
-            Err(ureq::Error::Io(e)) => return Err(DnsFailed::error(netloc(), e)),
-            Err(ureq::Error::HostNotFound) => {
-                let e = io::Error::new(io::ErrorKind::NotFound, "no address found");
-                return Err(DnsFailed::error(netloc(), e));
-            }
-            // A timeout, a bad URI: ureq's own error.
-            Err(e) => return Err(e),
         };
         if !self.public_only {
-            return Ok(found);
+            return match DefaultResolver::default().resolve(uri, config, timeout) {
+                Ok(found) => Ok(found),
+                Err(ureq::Error::Io(e)) => Err(DnsFailed::error(netloc().unwrap_or_default(), e)),
+                Err(ureq::Error::HostNotFound) => {
+                    let e = io::Error::new(io::ErrorKind::NotFound, "no address found");
+                    Err(DnsFailed::error(netloc().unwrap_or_default(), e))
+                }
+                // A timeout, a bad URI: ureq's own error.
+                Err(e) => Err(e),
+            };
         }
-        let netloc = netloc();
-        let kept = public_addrs(&netloc, |_| Ok(found.to_vec()))
-            .map_err(|e| DnsFailed::error(netloc.clone(), e))?;
+        let Some(netloc) = netloc() else {
+            return Err(ureq::Error::BadUri(format!("no host and port in {uri}")));
+        };
+        let all = lookup_within(&netloc, timeout)?;
+        let kept = guarded_addrs(&netloc, all).map_err(|e| DnsFailed::error(netloc, e))?;
         let mut out = self.empty();
         for a in kept {
             out.push(a);
@@ -233,6 +243,81 @@ impl Resolver for SiloResolver {
         Ok(out)
     }
 }
+
+/// What a guarded agent may connect to out of `all` (every address a lookup of `netloc`
+/// found): the public ones, at most [`MAX_ADDRS`], filtered before the cap.
+fn guarded_addrs(netloc: &str, all: Vec<SocketAddr>) -> io::Result<Vec<SocketAddr>> {
+    let mut kept = public_addrs(netloc, |_| Ok(all.clone()))?;
+    kept.truncate(MAX_ADDRS);
+    Ok(kept)
+}
+
+/// Every address the system resolver has for `netloc`, giving up when `timeout` runs out the
+/// way ureq's `DefaultResolver` does: with no timeout the lookup runs on this thread; with one,
+/// on its own thread, which is left to finish if the time runs out first.
+fn lookup_within(netloc: &str, timeout: NextTimeout) -> Result<Vec<SocketAddr>, ureq::Error> {
+    let failed = |e: io::Error| DnsFailed::error(netloc.to_string(), e);
+    if timeout.after.is_not_happening() {
+        return netloc
+            .to_socket_addrs()
+            .map(Iterator::collect)
+            .map_err(failed);
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let owned = netloc.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(owned.to_socket_addrs().map(Iterator::collect::<Vec<_>>));
+    });
+    match rx.recv_timeout(*timeout.after) {
+        Ok(found) => found.map_err(failed),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(ureq::Error::Timeout(timeout.reason))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(failed(io::Error::other(
+            "the lookup stopped without an answer",
+        ))),
+    }
+}
+
+/// ureq's own connector, with an I/O failure while connecting (refused, unreachable, reset
+/// during the TLS handshake) reported as [`ConnectFailed`], ureq 2's "Connection Failed".
+/// Everything else, timeouts included, passes through unchanged.
+#[derive(Debug, Default)]
+struct SiloConnector(DefaultConnector);
+
+impl Connector<()> for SiloConnector {
+    type Out = Box<dyn Transport>;
+
+    fn connect(
+        &self,
+        details: &ConnectionDetails,
+        chained: Option<()>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
+        self.0.connect(details, chained).map_err(|e| match e {
+            ureq::Error::Io(source) => ConnectFailed::error(source),
+            e => e,
+        })
+    }
+}
+
+/// A connection that couldn't be made (ureq 2's "Connection Failed"). Carried in
+/// `ureq::Error::Other`.
+#[derive(Debug)]
+pub(crate) struct ConnectFailed(io::Error);
+
+impl ConnectFailed {
+    pub(crate) fn error(source: io::Error) -> ureq::Error {
+        ureq::Error::Other(Box::new(ConnectFailed(source)))
+    }
+}
+
+impl std::fmt::Display for ConnectFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Connect error: {}", self.0)
+    }
+}
+
+impl std::error::Error for ConnectFailed {}
 
 /// A name lookup that failed or found no address Silo may use (ureq 2's "Dns Failed"). Carried
 /// in `ureq::Error::Other`.
@@ -357,6 +442,7 @@ fn transport_label(e: &ureq::Error) -> Option<&'static str> {
         E::Other(o) if o.is::<DnsFailed>() => "Dns Failed",
         E::HostNotFound => "Dns Failed",
         E::Io(_) | E::Timeout(_) | E::Rustls(_) | E::Tls(_) => "Network Error",
+        E::Other(o) if o.is::<ConnectFailed>() => "Connection Failed",
         E::ConnectionFailed => "Connection Failed",
         E::RequireHttpsOnly(_) => "Insecure request attempted with https_only set",
         E::TooManyRedirects => "Too Many Redirects",
@@ -1555,5 +1641,104 @@ mod tests {
         let err = res.unwrap_err();
         assert!(err.to_string().contains("timeout"), "{err}");
         assert!(took < Duration::from_secs(5), "took {took:?}");
+    }
+
+    #[test]
+    fn a_public_address_after_sixteen_private_ones_is_kept() {
+        // ureq's own resolver keeps only the first 16 answers; the guard filters first.
+        let mut all: Vec<SocketAddr> = (1..=16)
+            .map(|i| format!("10.0.0.{i}:443").parse().unwrap())
+            .collect();
+        all.push("140.82.112.3:443".parse().unwrap());
+        assert_eq!(
+            guarded_addrs("many.example.com:443", all).unwrap(),
+            vec!["140.82.112.3:443".parse::<SocketAddr>().unwrap()]
+        );
+        // More than 16 public answers: the first 16, as many as ureq takes.
+        let all: Vec<SocketAddr> = (1..=20)
+            .map(|i| format!("140.82.112.{i}:443").parse().unwrap())
+            .collect();
+        let kept = guarded_addrs("cdn.example.com:443", all.clone()).unwrap();
+        assert_eq!(kept, all[..MAX_ADDRS].to_vec());
+        // Nothing public: refused.
+        let private: Vec<SocketAddr> = vec!["192.168.0.1:443".parse().unwrap()];
+        assert!(guarded_addrs("evil.example.com:443", private).is_err());
+    }
+
+    #[test]
+    fn a_lookup_without_a_timeout_finds_every_address() {
+        let none = NextTimeout {
+            after: ureq::unversioned::transport::time::Duration::NotHappening,
+            reason: ureq::Timeout::Resolve,
+            per_read: None,
+            per_write: None,
+        };
+        let found = lookup_within("127.0.0.1:443", none).unwrap();
+        assert_eq!(found, vec!["127.0.0.1:443".parse::<SocketAddr>().unwrap()]);
+        // With a budget, the lookup runs on its own thread and still answers.
+        let some = NextTimeout {
+            after: ureq::unversioned::transport::time::Duration::Exact(Duration::from_secs(5)),
+            ..none
+        };
+        assert_eq!(lookup_within("127.0.0.1:443", some).unwrap(), found);
+    }
+
+    #[test]
+    fn a_refused_connection_reads_as_offline_even_as_text() {
+        // A port nothing listens on: bind, note it, close it.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        // Windows retries a refused loopback connect for about 2 s before giving up.
+        let agent = build_agent(Duration::from_secs(8), Duration::from_millis(500), None);
+        let e = agent
+            .get(&format!("http://127.0.0.1:{port}/"))
+            .call_checked()
+            .unwrap_err();
+        let text = e.to_string();
+        assert!(text.contains("Connection Failed"), "{text}");
+        // Callers like gh_err and catalog_err hand the text on; it must classify the same way
+        // as the typed error does.
+        assert_eq!(
+            crate::error::AppError::from(text.clone()).code,
+            crate::error::code::NET_OFFLINE,
+            "{text}"
+        );
+        assert_eq!(
+            crate::error::AppError::from(e).code,
+            crate::error::code::NET_OFFLINE
+        );
+    }
+
+    #[test]
+    fn api_does_not_replay_a_write_on_a_307() {
+        // ureq 2 handed back the 307 as a bare success; ureq 3 refuses to resend a body, and
+        // Silo reports that as a failure rather than a write that never happened.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve(
+            listener,
+            vec![answer(
+                "307 Temporary Redirect",
+                &format!("Location: http://{addr}/elsewhere\r\n"),
+                "",
+            )],
+        );
+        let agent = build_api_agent(Duration::from_millis(500), Duration::from_millis(500), None);
+        let e = agent
+            .put(&format!("http://{addr}/x"))
+            .send_json_checked(serde_json::json!({ "a": 1 }))
+            .unwrap_err();
+        assert!(
+            matches!(&e, HttpError::Transport(t) if matches!(t.error(), ureq::Error::RedirectFailed)),
+            "{e}"
+        );
+        assert_eq!(
+            server.join().unwrap().len(),
+            1,
+            "the body is sent once only"
+        );
     }
 }
