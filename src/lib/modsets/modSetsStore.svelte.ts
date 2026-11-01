@@ -183,6 +183,9 @@ export function createModSets(deps: ModSetsDeps): ModSets {
     const clean = await deps.setActiveSetTo(mods, `Switching to ${name}`);
     // Refused, or failed with nothing changed (said so): no snapshot, not remembered, no Undo.
     if (clean === null) return;
+    // What the switch left (mods Silo couldn't park stay on), so Undo's staleness check holds.
+    // Kept now: a scan landing during the saves below could bring changes made since.
+    const left = [...deps.active()];
     let snapshotId: number | null = null;
     if (previous.length > 0) {
       try {
@@ -202,8 +205,7 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       message: clean ? `Switched to ${name}.` : `Switch to ${name} finished with problems.`,
       tone: clean ? "neutral" : "warn",
       previous,
-      // What the switch left (mods Silo couldn't park stay on), so Undo's staleness check holds.
-      expected: [...deps.active()],
+      expected: left,
     });
   }
 
@@ -463,6 +465,9 @@ export function createModSets(deps: ModSetsDeps): ModSets {
       switched = await deps.setActiveSetTo([...target], label);
       if (switched === null) return false; // refused, cancelled or failed: nothing changed
     }
+    // What the switch left, kept now for Undo's staleness check: a scan landing during the save
+    // below could bring changes made since.
+    const expected = [...deps.active()];
     const before = edits.map((e) => ({ id: e.set.id, name: e.set.name, mods: [...e.set.mods] }));
     const written = new Map(edits.map((e) => [e.set.id, e.mods]));
     try {
@@ -476,12 +481,11 @@ export function createModSets(deps: ModSetsDeps): ModSets {
           message: "Your mod sets weren't saved, but your active mods changed.",
           tone: "warn",
           previous,
-          expected: [...deps.active()],
+          expected,
         });
       return false;
     }
     await reload();
-    const expected = [...deps.active()];
     const names = techNames.map(deps.title);
     let message = membershipMessage(names, edits);
     if (switched !== null) {

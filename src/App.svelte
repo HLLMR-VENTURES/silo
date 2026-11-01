@@ -993,17 +993,24 @@
       const one = loose.length === 1 ? loose[0] : null;
       const name = one ? (one.title ?? one.techName) : modsCount(loose.length);
       if (!(await explainParkLoose(name, one?.category ?? null, loose.length))) return null;
-      // Filed and kept active (linked back): the switch below parks them through set_active, so
-      // if it's refused they're simply still on, as before.
-      const filed = await applyLoose(
-        loose.map(looseInput),
-        loose.map((m) => m.techName),
-        true,
-      );
-      if (filed === null) return null; // refused, and said why: nothing changed
-      // Filing rescans, but skips that when a scan was already running (the dialog was open
-      // meanwhile): wait for that one too, so it can't land on top of the switch.
-      if (!(await settleScanOrRefuse())) return stopped();
+      // A scan started while the dialog was open (alt-tabbing back) read the folder before the
+      // filing: landing after it, it would still show these mods as loose and the switch below
+      // would keep them on. Wait for it, then file the explained mods that are still loose.
+      if (!(await settleScanOrRefuse())) return null;
+      const explained = new Set(loose.map((m) => m.techName));
+      const toFile = parkPlan(mods, activeSet, target).loose.filter((m) => explained.has(m.techName));
+      if (toFile.length > 0) {
+        // Filed and kept active (linked back): the switch below parks them through set_active,
+        // so if it's refused they're simply still on, as before. Filing ends with a rescan.
+        const filed = await applyLoose(
+          toFile.map(looseInput),
+          toFile.map((m) => m.techName),
+          true,
+        );
+        if (filed === null) return null; // refused, and said why: nothing changed
+        // Its rescan is skipped if another scan began meanwhile: that one must land first too.
+        if (!(await settleScanOrRefuse())) return stopped();
+      }
     }
     // Whatever is still active and can't be parked (folder mods, a zip that couldn't be filed)
     // stays in the set, so what Silo shows is what the game loads.

@@ -148,6 +148,17 @@ describe("switchTo", () => {
     );
   });
 
+  it("Undo expects what the switch left, not a change a scan brought in while the snapshot saved (#347)", async () => {
+    const t = setup();
+    await t.store.load();
+    vi.mocked(saveAutoSnapshot).mockImplementationOnce(async () => {
+      (t.active() as Set<string>).add("X"); // turned on outside Silo; a scan landed meanwhile
+      return 60;
+    });
+    await t.store.switchTo(forestry);
+    expect(t.undo.offer).toHaveBeenCalledWith(expect.objectContaining({ expected: ["C", "D", "Z"] }));
+  });
+
   it("waits for a running scan before it reads the active mods, and asks nothing when it still runs (#347)", async () => {
     const t = setup();
     await t.store.load();
@@ -518,6 +529,18 @@ describe("applyMembership (the Library's Mod sets… dialog, #323)", () => {
     expect(lastToast()).toMatchObject({ message: opts.message, action: { label: "Undo" } });
     await lastToast().action!.run();
     expect(t.setActiveSetTo).toHaveBeenLastCalledWith(["A", "B"], "Switching back");
+  });
+
+  it("Undo expects what the switch left, not a change a scan brought in while the sets saved (#347)", async () => {
+    const t = setup(["A", "B"]);
+    await t.store.load();
+    vi.mocked(replaceLoadoutMods).mockImplementationOnce(async (edits) => {
+      for (const e of edits) db.find((l) => l.id === e.id)!.mods = [...e.mods];
+      (t.active() as Set<string>).add("X");
+    });
+    await t.store.applyMembership(["B"], editsFor(t, ["B"], [[1, "none"]]));
+    await lastToast().action!.run();
+    expect(t.activeUndoBlocked).toHaveBeenCalledWith(["A"]);
   });
 
   it("Undo refuses once a set changed since", async () => {
