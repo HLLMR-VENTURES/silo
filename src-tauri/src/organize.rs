@@ -324,6 +324,7 @@ pub fn set_active(conn: &Connection, layout: &Layout, active: &HashSet<String>) 
         let link = root.join(&row.file_name);
         let src = archive_path(&layout.archive, &row.category, &row.file_name);
         let want = active.contains(&row.tech_name);
+        sweep_copy_temp(&link);
         // A link into a folder that's gone (a re-pointed archive's old drive) would otherwise
         // count as "already linked" and the mod could never be activated or parked again.
         let stale = match remove_dangling_link(&link) {
@@ -933,7 +934,8 @@ pub(crate) fn cleanup_empty_archive(
 
 // ── filesystem primitives ──
 
-/// A hidden temp sibling of `to`, used for the copy-and-swap fallback.
+/// A hidden temp sibling of `to` (`.{name}.silo-tmp`, which scans skip), where a cross-drive
+/// move or a copy projection is built before it's placed at `to`.
 fn tmp_sibling(to: &Path) -> PathBuf {
     let name = to
         .file_name()
@@ -966,6 +968,12 @@ pub(crate) fn move_path(from: &Path, to: &Path) -> std::io::Result<()> {
 /// [`move_path`], logged as `action` (`backup` for an update's previous version), so each move
 /// is one log line that says what it was for.
 pub(crate) fn move_path_as(from: &Path, to: &Path, action: &str) -> std::io::Result<()> {
+    // The nearest folder above `to` that already exists: every folder made below it is a new
+    // name a cross-drive move flushes before deleting its source.
+    let anchor = to
+        .parent()
+        .and_then(|p| p.ancestors().find(|a| a.symlink_metadata().is_ok()))
+        .map(Path::to_path_buf);
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -974,7 +982,7 @@ pub(crate) fn move_path_as(from: &Path, to: &Path, action: &str) -> std::io::Res
         // A rename that failed for another reason would fail the copy's final delete the same
         // way, after the copy was placed: two copies, or a half-deleted folder mod.
         Err(e) if !crosses_drives(&e) => return Err(e),
-        Err(_) => copy_then_remove(from, to)?,
+        Err(_) => copy_then_remove(from, to, anchor.as_deref())?,
     }
     crate::fslog::moved(action, from, to);
     Ok(())
@@ -991,21 +999,20 @@ fn crosses_drives(e: &std::io::Error) -> bool {
 /// then remove `from`. If `from` can't be removed, the copy at `to` (Silo's own, just made) is
 /// removed again, so a failure leaves exactly the original. A folder is first renamed aside on
 /// its own drive, so a delete that stops halfway never leaves a half-deleted mod under its
-/// real name.
-fn copy_then_remove(from: &Path, to: &Path) -> std::io::Result<()> {
+/// real name. `anchor` is the highest folder whose entries the move changed (see
+/// [`sync_placement`]).
+fn copy_then_remove(from: &Path, to: &Path, anchor: Option<&Path>) -> std::io::Result<()> {
     let tmp = tmp_sibling(to);
-    let _ = remove_path(&tmp); // clear any stale temp from a prior aborted run
+    remove_path(&tmp)?; // clear any stale temp from a prior aborted run
     let is_dir = from.is_dir();
+    // Every copied file is flushed before the temp is placed, and the placement before `from`
+    // is removed: a power cut can't leave the delete on disk without the copy.
     let copied = if is_dir {
         copy_dir_all(from, &tmp)
     } else {
-        std::fs::copy(from, &tmp).map(|_| ())
+        copy_file_synced(from, &tmp)
     };
-    if let Err(e) = copied {
-        let _ = remove_path(&tmp);
-        return Err(e);
-    }
-    if let Err(e) = std::fs::rename(&tmp, to) {
+    if let Err(e) = copied.and_then(|()| place_new(&tmp, to)) {
         let _ = remove_path(&tmp);
         return Err(e);
     }
@@ -1013,6 +1020,7 @@ fn copy_then_remove(from: &Path, to: &Path) -> std::io::Result<()> {
         let _ = remove_path(to);
         e
     };
+    sync_placement(to, anchor).map_err(undo)?;
     if !is_dir {
         return std::fs::remove_file(from).map_err(undo);
     }
@@ -1200,22 +1208,190 @@ fn link_zip(
     copy_new(src, link)
 }
 
-/// Copy `src` to a **new** file `dst`: refuses (AlreadyExists) rather than truncating an
-/// existing file, and removes the partial file if the copy fails — safe, since `create_new`
-/// proves we created it.
+/// Copy `src` to a **new** file `dst`: refuses (AlreadyExists) rather than replacing an
+/// existing file. The copy is built and flushed under a Silo temp sibling
+/// (`.{name}.silo-tmp`, which scans skip) and only then placed at `dst`, so a copy that stops
+/// part-way (a full disk, an archive file that won't read, Silo closed mid-copy) never leaves a
+/// truncated mod under its real name. A failed copy removes its temp.
 fn copy_new(src: &Path, dst: &Path) -> std::io::Result<()> {
+    copy_new_with(src, dst, stream_new_synced)
+}
+
+/// [`copy_new`] with the write into the temp injected, so a copy cut off part-way is testable.
+fn copy_new_with(
+    src: &Path,
+    dst: &Path,
+    write: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    if dst.symlink_metadata().is_ok() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
+    let tmp = tmp_sibling(dst);
+    remove_path(&tmp)?; // a stale temp from a copy that was cut off
+    if let Err(e) = write(src, &tmp).and_then(|()| place_new(&tmp, dst)) {
+        let _ = remove_path(&tmp);
+        return Err(e);
+    }
+    crate::fslog::moved("copy", src, dst);
+    Ok(())
+}
+
+/// Stream `src`'s bytes into a new file `dst` and flush it. Only the bytes: a projection never
+/// takes the archived file's read-only attribute, which would stop Silo removing it later.
+/// Opens `src` first, so a missing source creates nothing.
+fn stream_new_synced(src: &Path, dst: &Path) -> std::io::Result<()> {
     let mut from = std::fs::File::open(src)?;
     let mut to = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(dst)?;
-    if let Err(e) = std::io::copy(&mut from, &mut to) {
-        drop(to);
-        let _ = std::fs::remove_file(dst);
-        return Err(e);
+    std::io::copy(&mut from, &mut to)?;
+    to.sync_all()
+}
+
+/// Copy one file to a **new** name `dst` (never replacing a file there) and flush it to disk.
+/// `std::fs::copy` keeps what it always kept (permissions; on Windows the modified time,
+/// attributes and alternate streams). A missing source creates nothing; a copy that fails
+/// part-way can leave a partial `dst`, which the callers (always writing to a Silo temp) remove.
+fn copy_file_synced(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::metadata(src)?;
+    if dst.symlink_metadata().is_ok() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
     }
-    crate::fslog::moved("copy", src, dst);
+    std::fs::copy(src, dst)?;
+    flush_file(dst)
+}
+
+/// Flush a file's data and metadata to disk. Unix flushes through a read handle. Windows needs a
+/// write handle, so a read-only file (`std::fs::copy` keeps the attribute) is made writable
+/// for the moment and set back.
+fn flush_file(p: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(p)?.sync_all()
+    }
+    #[cfg(windows)]
+    {
+        let flush = || std::fs::OpenOptions::new().write(true).open(p)?.sync_all();
+        let perms = std::fs::metadata(p)?.permissions();
+        if !perms.readonly() {
+            return flush();
+        }
+        let mut writable = perms.clone();
+        #[allow(clippy::permissions_set_readonly_false)] // Windows: only clears the attribute
+        writable.set_readonly(false);
+        std::fs::set_permissions(p, writable)?;
+        let flushed = flush();
+        let restored = std::fs::set_permissions(p, perms);
+        flushed.and(restored)
+    }
+}
+
+/// Make a cross-drive move's placement at `to` durable before its source is deleted. The
+/// placed file is flushed again (on Windows that commits NTFS's metadata for it, the new name
+/// included), then on Unix every folder from the one holding `to` up to `anchor`, the nearest
+/// one that existed before the move (`move_path_as` may have created the folders below it,
+/// e.g. a new archive category). Without an anchor, only the folder holding `to`.
+fn sync_placement(to: &Path, anchor: Option<&Path>) -> std::io::Result<()> {
+    if to.symlink_metadata()?.is_dir() {
+        sync_dir(to)?;
+    } else {
+        flush_file(to)?;
+    }
+    for dir in placement_dirs(to, anchor) {
+        sync_dir(dir)?;
+    }
     Ok(())
+}
+
+/// The folders whose entries placing `to` changed: the one holding it, up to and including
+/// `anchor` (just the one holding it without an anchor).
+fn placement_dirs<'a>(to: &'a Path, anchor: Option<&Path>) -> Vec<&'a Path> {
+    let mut dirs = Vec::new();
+    for dir in to.parent().into_iter().flat_map(Path::ancestors) {
+        dirs.push(dir);
+        if anchor.map_or(true, |a| dir == a) {
+            break;
+        }
+    }
+    dirs
+}
+
+/// Put the finished temp `tmp` at `dst` without replacing anything there. A file is hardlinked
+/// (which fails if `dst` exists), then the temp dropped; where the folder can't hardlink (a
+/// cloud-synced Documents folder), and for a folder, `dst` is checked to be free right before
+/// the rename. Called under the library lock, which keeps Silo's own writes out; another
+/// program creating `dst` in the moment between the check and the rename is the only gap.
+fn place_new(tmp: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::io::ErrorKind;
+    let taken = || std::io::Error::from(ErrorKind::AlreadyExists);
+    if !tmp.symlink_metadata()?.is_dir() {
+        match std::fs::hard_link(tmp, dst) {
+            Ok(()) => {
+                // A leftover second name holds no extra data; the next activation sweeps it.
+                let _ = std::fs::remove_file(tmp);
+                return Ok(());
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => return Err(taken()),
+            Err(_) => {} // no hardlinks here: check + rename below
+        }
+    }
+    let mut tries = 0;
+    loop {
+        if dst.symlink_metadata().is_ok() {
+            return Err(taken());
+        }
+        match std::fs::rename(tmp, dst) {
+            // Windows refuses to rename a folder while a file in it is open, and an antivirus
+            // or cloud-sync client often opens a just-written file for a moment.
+            Err(e) if cfg!(windows) && e.kind() == ErrorKind::PermissionDenied && tries < 10 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Flush a folder's entries (names just created or renamed in it) to disk. On Unix a file's
+/// own flush doesn't cover its name; a filesystem that can't flush a folder (`EINVAL`,
+/// unsupported) is let through, any other failure is returned. On Windows it's best effort:
+/// the folder is flushed through a backup-semantics handle where NTFS allows it.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::ErrorKind::{InvalidInput, Unsupported};
+        match std::fs::File::open(dir)?.sync_all() {
+            Err(e) if matches!(e.kind(), InvalidInput | Unsupported) => Ok(()),
+            other => other,
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        if let Ok(d) = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
+        {
+            let _ = d.sync_all();
+        }
+        Ok(())
+    }
+}
+
+/// Remove the Silo temp a copy into `link` left when it was cut off (Silo closed or crashed
+/// mid-copy). Scans already skip it; this frees the space. The name is Silo's own
+/// (`.{name}.silo-tmp`), so nothing else puts anything there.
+fn sweep_copy_temp(link: &Path) {
+    let tmp = tmp_sibling(link);
+    if tmp.symlink_metadata().is_err() {
+        return;
+    }
+    if let Err(e) = remove_path(&tmp) {
+        log::warn!("couldn't remove the leftover {}: {e}", tmp.display());
+    }
 }
 
 /// Name prefixes of the link probes below (`scan::is_silo_temp` skips them; the fixed-name
@@ -1523,17 +1699,37 @@ fn listing_of(dir: &Path) -> std::io::Result<Vec<ListedFile>> {
 
 /// Copy a directory as a projection and drop the ownership marker, so a later flatten /
 /// deactivate can prove Silo created it (a copied dir has no link identity to compare). The
-/// marker lists the copy's own files as written, so later edits can be detected.
+/// marker lists the copy's own files as written, so later edits can be detected. The copy is
+/// built and flushed under a Silo temp sibling (`.{name}.silo-tmp`), marker included, and only
+/// then renamed to `dst`: a copy that stops part-way never leaves a partial mod under its real
+/// name, and a failed copy removes its temp. Never merges into an existing `dst`.
 fn copy_dir_projection(src: &Path, dst: &Path) -> std::io::Result<()> {
-    copy_dir_all(src, dst)?;
-    let listing = CopyListing {
-        v: 2,
-        files: listing_of(dst)?,
-    };
-    let json = serde_json::to_vec(&listing).map_err(std::io::Error::other)?;
-    std::fs::write(dst.join(SILO_MARKER), json)?;
+    if dst.symlink_metadata().is_ok() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
+    let tmp = tmp_sibling(dst);
+    remove_path(&tmp)?; // a stale temp from a copy that was cut off
+    if let Err(e) = build_dir_copy(src, &tmp).and_then(|()| place_new(&tmp, dst)) {
+        let _ = remove_path(&tmp);
+        return Err(e);
+    }
     crate::fslog::moved("copy", src, dst);
     Ok(())
+}
+
+/// The body of [`copy_dir_projection`]: copy `src` into `tmp` and write the marker, all flushed.
+fn build_dir_copy(src: &Path, tmp: &Path) -> std::io::Result<()> {
+    copy_dir_all(src, tmp)?;
+    let listing = CopyListing {
+        v: 2,
+        files: listing_of(tmp)?,
+    };
+    let json = serde_json::to_vec(&listing).map_err(std::io::Error::other)?;
+    // Replaces a marker that came with `src` (a copy that was filed back into the archive).
+    let mut marker = std::fs::File::create(tmp.join(SILO_MARKER))?;
+    std::io::Write::write_all(&mut marker, &json)?;
+    marker.sync_all()?;
+    sync_dir(tmp)
 }
 
 /// The v2 listing in `dir`'s marker; `None` for a legacy (`silo\n`) or unreadable marker.
@@ -1847,6 +2043,7 @@ pub(crate) fn remove_link(link: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Copy the folder `src` to `dst`, every file flushed to disk (see [`copy_file_synced`]).
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -1856,10 +2053,10 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
         if ty.is_dir() {
             copy_dir_all(&entry.path(), &to)?;
         } else {
-            std::fs::copy(entry.path(), &to)?;
+            copy_file_synced(&entry.path(), &to)?;
         }
     }
-    Ok(())
+    sync_dir(dst)
 }
 
 #[cfg(test)]
@@ -1950,21 +2147,21 @@ mod tests {
         let to = base.join("other/FS25_A.zip");
         std::fs::create_dir_all(to.parent().unwrap()).unwrap();
         let held = open(&file);
-        assert!(copy_then_remove(&file, &to).is_err());
+        assert!(copy_then_remove(&file, &to, to.parent()).is_err());
         drop(held);
         assert!(file.exists() && !to.exists());
 
         let dir = base.join("FS25_Dir");
         let to = base.join("other/FS25_Dir");
         let held = open(&inner);
-        assert!(copy_then_remove(&dir, &to).is_err());
+        assert!(copy_then_remove(&dir, &to, to.parent()).is_err());
         drop(held);
         assert!(inner.exists(), "the folder is whole");
         assert!(dir.join("modDesc.xml").exists());
         assert!(!to.exists() && !aside_sibling(&dir).exists());
 
         // Nothing held: the folder moves and no leftover remains.
-        copy_then_remove(&dir, &to).unwrap();
+        copy_then_remove(&dir, &to, to.parent()).unwrap();
         assert!(to.join("data/x.i3d").exists() && !dir.exists());
         assert!(!aside_sibling(&dir).exists());
         let _ = std::fs::remove_dir_all(&base);
@@ -3035,6 +3232,285 @@ mod tests {
             dst.symlink_metadata().is_err(),
             "no partial file under the name"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Make `file` unreadable for as long as the returned guard lives: on Windows a handle that
+    /// shares nothing (like a locked file), on Unix a dangling symlink in its place (like a
+    /// cloud placeholder that won't download).
+    fn unreadable(file: &Path) -> impl Drop {
+        struct Guard(Option<std::fs::File>, PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.take();
+                if cfg!(unix) {
+                    let _ = std::fs::remove_file(&self.1);
+                    let _ = std::fs::write(&self.1, b"ok");
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::write(file, b"ok").unwrap();
+            let held = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(file)
+                .unwrap();
+            Guard(Some(held), file.to_path_buf())
+        }
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(file);
+            std::os::unix::fs::symlink(file.with_file_name("gone"), file).unwrap();
+            Guard(None, file.to_path_buf())
+        }
+    }
+
+    #[test]
+    fn a_folder_copy_that_stops_part_way_leaves_nothing_under_the_mods_name() {
+        let base = temp_dir_for("dircopy_partial");
+        let src = base.join("archived").join("FS25_Dir");
+        std::fs::create_dir_all(src.join("data")).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::write(src.join("data").join("a.i3d"), b"i3d").unwrap();
+        let bad = src.join("data").join("b.dds");
+        let dst = base.join("mods").join("FS25_Dir");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+
+        let guard = unreadable(&bad);
+        assert!(copy_dir_projection(&src, &dst).is_err());
+        assert!(
+            dst.symlink_metadata().is_err(),
+            "no partial mod at its name"
+        );
+        assert!(
+            tmp_sibling(&dst).symlink_metadata().is_err(),
+            "the temp is removed"
+        );
+        drop(guard);
+
+        // Readable again: the whole copy lands, marked, with no temp left behind.
+        copy_dir_projection(&src, &dst).unwrap();
+        assert_eq!(
+            std::fs::read(dst.join("data").join("b.dds")).unwrap(),
+            b"ok"
+        );
+        assert!(is_silo_projection(&dst, &src, "dir"));
+        assert!(copy_unchanged(&dst, &src).unwrap());
+        assert!(tmp_sibling(&dst).symlink_metadata().is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_zip_copy_is_placed_whole_and_never_over_an_existing_entry() {
+        let base = temp_dir_for("zipcopy_place");
+        let src = base.join("FS25_A.zip");
+        std::fs::write(&src, b"PK\x03\x04 whole").unwrap();
+        let dst = base.join("mods").join("FS25_A.zip");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        // A temp a cut-off copy left behind is replaced, never placed.
+        std::fs::write(tmp_sibling(&dst), b"PK half").unwrap();
+
+        copy_new(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"PK\x03\x04 whole");
+        assert!(tmp_sibling(&dst).symlink_metadata().is_err());
+
+        // The name is taken: refused, the entry untouched, no temp left.
+        std::fs::write(&dst, b"user's").unwrap();
+        let e = copy_new(&src, &dst).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&dst).unwrap(), b"user's");
+        assert!(tmp_sibling(&dst).symlink_metadata().is_err());
+
+        // Placing never replaces a file, or an empty folder (which a Unix rename would).
+        let tmp = base.join("mods").join(".FS25_A.zip.silo-tmp");
+        std::fs::write(&tmp, b"new").unwrap();
+        assert!(place_new(&tmp, &dst).is_err());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"user's");
+        let tmp_dir = base.join("mods").join(".FS25_D.silo-tmp");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        std::fs::write(tmp_dir.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        let empty = base.join("mods").join("FS25_D");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(place_new(&tmp_dir, &empty).is_err());
+        assert!(std::fs::read_dir(&empty).unwrap().next().is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Set or clear a file's read-only flag.
+    fn set_readonly(p: &Path, on: bool) {
+        let mut perms = std::fs::metadata(p).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)] // a test file in a temp folder
+        perms.set_readonly(on);
+        std::fs::set_permissions(p, perms).unwrap();
+    }
+
+    #[test]
+    fn a_read_only_file_still_copies_and_flushes_and_keeps_its_flag() {
+        let base = temp_dir_for("copy_readonly");
+        let src = base.join("modDesc.xml");
+        std::fs::write(&src, b"<modDesc/>").unwrap();
+        set_readonly(&src, true);
+        let dst = base.join("copy.xml");
+        copy_file_synced(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"<modDesc/>");
+        assert!(std::fs::metadata(&dst).unwrap().permissions().readonly());
+        // Never over an existing file.
+        assert!(copy_file_synced(&src, &dst).is_err());
+        set_readonly(&dst, false);
+
+        // A cut-off folder copy's temp holding a read-only file is still cleared, and the
+        // next copy lands.
+        let folder = base.join("FS25_Dir");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::copy(&src, folder.join("modDesc.xml")).unwrap();
+        let dst = base.join("mods").join("FS25_Dir");
+        std::fs::create_dir_all(tmp_sibling(&dst)).unwrap();
+        std::fs::copy(&src, tmp_sibling(&dst).join("modDesc.xml")).unwrap();
+        copy_dir_projection(&folder, &dst).unwrap();
+        assert!(tmp_sibling(&dst).symlink_metadata().is_err());
+        assert!(is_silo_projection(&dst, &folder, "dir"));
+        set_readonly(&src, false);
+        set_readonly(&folder.join("modDesc.xml"), false);
+        set_readonly(&dst.join("modDesc.xml"), false);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_zip_copy_cut_off_after_some_bytes_leaves_nothing_under_the_mods_name() {
+        let base = temp_dir_for("zipcopy_cutoff");
+        let src = base.join("FS25_A.zip");
+        std::fs::write(&src, b"PK\x03\x04 whole").unwrap();
+        let dst = base.join("FS25_A_flat.zip");
+        let disk_full = |_: &Path, tmp: &Path| -> std::io::Result<()> {
+            std::fs::write(tmp, b"PK\x03")?;
+            Err(std::io::Error::other("no space left on device"))
+        };
+        assert!(copy_new_with(&src, &dst, disk_full).is_err());
+        assert!(dst.symlink_metadata().is_err(), "nothing at the real name");
+        assert!(
+            tmp_sibling(&dst).symlink_metadata().is_err(),
+            "temp removed"
+        );
+
+        // A flush that fails after the whole copy was written: same.
+        let flush_fails = |s: &Path, tmp: &Path| -> std::io::Result<()> {
+            std::fs::copy(s, tmp)?;
+            Err(std::io::Error::other("flush failed"))
+        };
+        assert!(copy_new_with(&src, &dst, flush_fails).is_err());
+        assert!(dst.symlink_metadata().is_err() && tmp_sibling(&dst).symlink_metadata().is_err());
+
+        copy_new(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"PK\x03\x04 whole");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_move_flushes_up_to_the_first_folder_that_already_existed() {
+        let base = temp_dir_for("move_anchor");
+        let from = base.join("FS25_A.zip");
+        std::fs::write(&from, b"PK").unwrap();
+        // New archive and category folders below an existing one.
+        let to = base.join("new_archive").join("Tools").join("FS25_A.zip");
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        copy_then_remove(&from, &to, Some(&base)).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"PK");
+        assert!(!from.exists());
+        let tools = to.parent().unwrap();
+        assert_eq!(
+            placement_dirs(&to, Some(&base)),
+            [tools, tools.parent().unwrap(), base.as_path()]
+        );
+        assert_eq!(placement_dirs(&to, None), [tools]);
+        assert_eq!(placement_dirs(&to, Some(tools)), [tools]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_folder_filed_back_with_silos_marker_still_projects() {
+        let base = temp_dir_for("dircopy_marker");
+        let src = base.join("archived").join("FS25_Dir");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        std::fs::write(src.join(SILO_MARKER), b"silo\n").unwrap();
+        let dst = base.join("FS25_Dir");
+        copy_dir_projection(&src, &dst).unwrap();
+        assert!(marker_listing(&dst).unwrap().is_some(), "a fresh v2 marker");
+        assert!(copy_unchanged(&dst, &src).unwrap());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_move_never_replaces_what_is_at_its_destination() {
+        let base = temp_dir_for("move_noreplace");
+        let from = base.join("FS25_A.zip");
+        std::fs::write(&from, b"PK mine").unwrap();
+        let to = base.join("other").join("FS25_A.zip");
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::write(&to, b"PK theirs").unwrap();
+        assert!(copy_then_remove(&from, &to, to.parent()).is_err());
+        assert_eq!(std::fs::read(&from).unwrap(), b"PK mine");
+        assert_eq!(std::fs::read(&to).unwrap(), b"PK theirs");
+        assert!(tmp_sibling(&to).symlink_metadata().is_err());
+
+        // Free destination: copied whole, source gone, no temp.
+        std::fs::remove_file(&to).unwrap();
+        copy_then_remove(&from, &to, to.parent()).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), b"PK mine");
+        assert!(!from.exists() && tmp_sibling(&to).symlink_metadata().is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_cut_off_copy_temp_is_swept_and_the_next_activation_projects_the_mod() {
+        let base = temp_dir_for("copytemp_sweep");
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let mods = base.join("mods");
+        let layout = Layout::default_for(&mods);
+        let key = crate::modsroot::canonical_key(&mods);
+        let zip = archive_path(&layout.archive, "Misc", "FS25_A.zip");
+        let dir = archive_path(&layout.archive, "Misc", "FS25_D");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&zip, b"PK\x03\x04 whole").unwrap();
+        std::fs::write(dir.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        for (name, kind) in [("FS25_A.zip", "zip"), ("FS25_D", "dir")] {
+            let row = OrganizedRow {
+                tech_name: name.trim_end_matches(".zip").into(),
+                file_name: name.into(),
+                kind: kind.into(),
+                category: "Misc".into(),
+                subcategory: None,
+                active: false,
+            };
+            db::upsert_organized(&conn, &key, &row).unwrap();
+        }
+        // What Silo closing mid-copy leaves: half-written temps, nothing at the real names.
+        let zip_tmp = tmp_sibling(&mods.join("FS25_A.zip"));
+        let dir_tmp = tmp_sibling(&mods.join("FS25_D"));
+        std::fs::write(&zip_tmp, b"PK half").unwrap();
+        std::fs::create_dir_all(&dir_tmp).unwrap();
+        std::fs::write(dir_tmp.join("modDesc.xml"), b"<mod").unwrap();
+        assert!(crate::scan::is_silo_temp(".FS25_A.zip.silo-tmp"));
+        assert!(crate::scan::is_silo_temp(".FS25_D.silo-tmp"));
+
+        let on: HashSet<String> = ["FS25_A", "FS25_D"].iter().map(|s| s.to_string()).collect();
+        let rep = set_active(&conn, &layout, &on);
+        assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+        assert_eq!(rep.changed, 2);
+        assert!(zip_tmp.symlink_metadata().is_err() && dir_tmp.symlink_metadata().is_err());
+        assert_eq!(
+            std::fs::read(mods.join("FS25_A.zip")).unwrap(),
+            b"PK\x03\x04 whole"
+        );
+        assert_eq!(
+            std::fs::read(mods.join("FS25_D").join("modDesc.xml")).unwrap(),
+            b"<modDesc/>"
+        );
+        assert!(is_silo_projection(&mods.join("FS25_D"), &dir, "dir"));
+        drop(conn);
         let _ = std::fs::remove_dir_all(&base);
     }
 
