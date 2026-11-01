@@ -189,6 +189,19 @@ describe("githubAuth device flow", () => {
     expect(ghDevicePoll).toHaveBeenCalledTimes(1);
   });
 
+  it("a sign-in that fails while saving re-reads the status (the backend may have signed out)", async () => {
+    const detach = attachGithubView();
+    vi.mocked(ghDevicePoll).mockRejectedValue("database is locked");
+    vi.mocked(ghStatus).mockResolvedValue({ ...connected, user: null });
+    await startDeviceFlow();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(githubAuth.flow).toBeNull();
+    expect(githubAuth.message).toContain("database is locked");
+    expect(ghStatus).toHaveBeenCalledTimes(1);
+    expect(githubAuth.status.user).toBeNull();
+    detach();
+  });
+
   it("a late success after cancel changes nothing", async () => {
     let resolvePoll!: (r: PollResult) => void;
     vi.mocked(ghDevicePoll).mockImplementation(() => new Promise((r) => (resolvePoll = r)));

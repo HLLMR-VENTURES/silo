@@ -586,6 +586,34 @@ fn gh_bearer_required(conn: &rusqlite::Connection) -> Result<gh_session::Bearer<
     gh_bearer(conn).ok_or_else(|| "Connect your GitHub account first.".to_string())
 }
 
+/// Store a sign-in's account: token, login and the scopes GitHub granted. A failure says whether
+/// the token may have changed anyway (then the session signs out rather than act half-switched).
+fn store_gh_account(
+    conn: &rusqlite::Connection,
+    token: &str,
+    user: &str,
+    scopes: &str,
+) -> Result<(), gh_session::StoreFailed> {
+    secrets::store(conn, "gh_token", token).map_err(|e| gh_session::StoreFailed {
+        token_changed: e.changed,
+        message: if e.changed {
+            format!("{} {GH_HALF_SAVED}", e.message)
+        } else {
+            e.message
+        },
+    })?;
+    let half_saved = |e: String| gh_session::StoreFailed {
+        message: format!("{e} {GH_HALF_SAVED}"),
+        token_changed: true,
+    };
+    db::set_app_setting(conn, "gh_user", Some(user)).map_err(half_saved)?;
+    db::set_app_setting(conn, "gh_scopes", Some(scopes)).map_err(half_saved)
+}
+
+/// Added when a sign-in's token was saved but the rest wasn't.
+const GH_HALF_SAVED: &str =
+    "Silo disconnected GitHub so it doesn't act as the wrong account. Connect again.";
+
 /// A poll's answer for a device flow that's over without storing anything: `status` is
 /// "cancelled" (a newer sign-in, a cancel or a Disconnect) or "expired".
 fn ended_poll(status: &str) -> github::PollResult {
@@ -625,17 +653,11 @@ async fn gh_device_poll(
             if let Some(tok) = &res.token {
                 let user =
                     github::whoami(&GH_SESSION.sign_in_bearer(attempt, tok)).unwrap_or_default();
-                let stored = GH_SESSION.commit(attempt, || -> Result<(), String> {
-                    secrets::set(&conn, "gh_token", Some(tok))?;
-                    db::set_app_setting(&conn, "gh_user", Some(&user))?;
-                    // Store the scopes GitHub actually granted — capability is derived from
-                    // these, not from what we asked for. Accumulates across re-auth.
-                    db::set_app_setting(
-                        &conn,
-                        "gh_scopes",
-                        Some(res.scope.as_deref().unwrap_or("")),
-                    )
-                });
+                // Store the scopes GitHub actually granted — capability is derived from these,
+                // not from what we asked for. Accumulates across re-auth.
+                let scopes = res.scope.as_deref().unwrap_or("");
+                let stored =
+                    GH_SESSION.commit(attempt, || store_gh_account(&conn, tok, &user, scopes));
                 match stored {
                     Some(r) => r?,
                     // Replaced, cancelled or Disconnected while this flow was out: dropped.
@@ -685,11 +707,7 @@ async fn gh_set_pat(app: tauri::AppHandle, pat: String) -> Result<String, String
             scopes
         };
         GH_SESSION
-            .commit(attempt, || -> Result<(), String> {
-                secrets::set(&conn, "gh_token", Some(&pat))?;
-                db::set_app_setting(&conn, "gh_user", Some(&user))?;
-                db::set_app_setting(&conn, "gh_scopes", Some(&stored))
-            })
+            .commit(attempt, || store_gh_account(&conn, &pat, &user, &stored))
             .ok_or_else(|| gh_session::SUPERSEDED.to_string())??;
         Ok(user)
     })
@@ -1679,12 +1697,15 @@ async fn verify_mod(
 #[tauri::command]
 async fn gh_logout(app: tauri::AppHandle) -> Result<(), String> {
     let db = db_path(&app)?;
+    // Counts from the click: nothing more is sent with the token, and no sign-in already out
+    // (or started before this ends) can store one. Requests already admitted finish first.
+    let signing_out = GH_SESSION.begin_sign_out();
     off_main(move || {
-        let conn = db::open(&db);
-        // Signed out from here on in this run, whatever storage does: no stored token is used
-        // until a sign-in stores a new one, and requests already admitted finish first.
-        GH_SESSION.sign_out(|| {
-            let conn = conn?;
+        signing_out.finish(|marked| {
+            let conn = match db::open(&db) {
+                Ok(c) => c,
+                Err(e) => return (false, Err(gh_not_removed(&e, marked))),
+            };
             // Silo stops using the token even when the keychain keeps a copy it couldn't
             // delete (it's distrusted, and removed once the store allows), or the database
             // keeps a row it couldn't delete (revoked), so the account is disconnected either
@@ -1696,14 +1717,31 @@ async fn gh_logout(app: tauri::AppHandle) -> Result<(), String> {
                 .into_iter()
                 .map(|k| db::set_app_setting(&conn, k, None))
                 .fold(Ok(()), Result::and);
-            match token {
-                Ok(true) => rest,
-                Ok(false) => Err(secrets::REMOVE_FAILED.to_string()),
-                Err(e) => Err(e),
+            // Clean (so the signed-out marker can go): the token can't be read back, even after
+            // a restart, and the account details are gone.
+            match (token, rest) {
+                (Ok(left), Ok(())) => (true, left.message().map_or(Ok(()), |m| Err(m.into()))),
+                (Ok(_), Err(e)) | (Err(e), _) => (false, Err(gh_not_removed(&e, marked))),
             }
         })
     })
     .await
+}
+
+/// Disconnect couldn't clean up storage (`e`). Silo stays signed out for this run; across a
+/// restart only if the signed-out marker was written (`marked`).
+fn gh_not_removed(e: &str, marked: bool) -> String {
+    if marked {
+        format!(
+            "Silo couldn't remove your GitHub account from its storage ({e}). It won't use \
+             the token, even after a restart. Connecting again replaces it."
+        )
+    } else {
+        format!(
+            "Silo couldn't remove your GitHub account from its storage ({e}). It won't use \
+             the token while Silo stays open, but may find it again after a restart."
+        )
+    }
 }
 
 // ── Tags ──
@@ -6154,6 +6192,11 @@ pub fn run() {
                 e.to_string()
             });
             app.manage(LogFileError(log_error));
+            // A Disconnect (or a half-saved sign-in) in an earlier run that couldn't clean up
+            // storage left this marker: stay signed out until a sign-in succeeds.
+            if let Ok(p) = db_path(app.handle()) {
+                GH_SESSION.use_marker(p.with_file_name("github-signed-out"));
+            }
             log::info!(
                 "Silo {} starting on {}",
                 app.package_info().version,

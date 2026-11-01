@@ -127,10 +127,10 @@ fn set_revoked(conn: &Connection, key: &str, row: Option<&str>) -> Result<(), St
 
 /// Store `v` in the SQLite fallback. A revocation naming this very value (the user reconnects
 /// with the token a failed disconnect left behind) is lifted, or the save fails.
-fn write_fallback(conn: &Connection, key: &str, v: &str) -> Result<(), String> {
-    db::set_app_setting(conn, key, Some(v))?;
+fn write_fallback(conn: &Connection, key: &str, v: &str) -> Result<(), SaveError> {
+    db::set_app_setting(conn, key, Some(v)).map_err(SaveError::unchanged)?;
     if row_revoked(conn, key, v) {
-        set_revoked(conn, key, None)?;
+        set_revoked(conn, key, None).map_err(SaveError::changed)?;
     }
     Ok(())
 }
@@ -207,16 +207,69 @@ pub(crate) const REMOVE_FAILED: &str = "Silo couldn't remove the token from your
 pub(crate) const REMOVE_ROW_FAILED: &str = "Silo couldn't remove the token from its database. \
      Silo won't use it, and removes it the next time it can.";
 
+/// Why a secret couldn't be saved, and whether the stored value may have changed anyway (it was
+/// written, but a step after it failed). When `changed` is false nothing was written, so the
+/// value stored before (the account connected now) is still the one in use.
+#[derive(Debug, PartialEq)]
+pub struct SaveError {
+    pub message: String,
+    pub changed: bool,
+}
+
+impl SaveError {
+    fn unchanged(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            changed: false,
+        }
+    }
+    fn changed(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            changed: true,
+        }
+    }
+}
+
+/// What a disconnect left behind. Silo uses neither: a kept keychain copy is distrusted and a
+/// kept row is revoked, and both are deleted once the stores allow.
+#[derive(Debug, Default, PartialEq)]
+pub struct Removal {
+    /// The keychain may still hold a copy.
+    pub keychain_kept: bool,
+    /// The database still holds its row.
+    pub row_kept: bool,
+}
+
+impl Removal {
+    /// What to tell the user, when something was left behind.
+    pub fn message(&self) -> Option<&'static str> {
+        if self.keychain_kept {
+            Some(REMOVE_FAILED)
+        } else if self.row_kept {
+            Some(REMOVE_ROW_FAILED)
+        } else {
+            None
+        }
+    }
+}
+
 /// Store (`Some`) or clear (`None`) a secret. Keychain-primary; SQLite only when this machine
 /// has no usable keychain at all. Any other keychain failure is returned, never swallowed.
 pub fn set(conn: &Connection, key: &str, value: Option<&str>) -> Result<(), String> {
     set_with(conn, key, value, entry(key).as_ref(), keychain_missing)
 }
 
-/// Forget a secret (disconnect). Silo stops using it either way. Returns false when the
-/// keychain kept a copy it couldn't delete; Err only when the database couldn't be updated
-/// (then nothing changed).
-pub fn clear(conn: &Connection, key: &str) -> Result<bool, String> {
+/// Save a secret (connect), saying whether a failure may still have changed it.
+pub fn store(conn: &Connection, key: &str, value: &str) -> Result<(), SaveError> {
+    let _held = store_lock();
+    store_with(conn, key, value, entry(key).as_ref(), keychain_missing)
+}
+
+/// Forget a secret (disconnect). Silo stops using it either way; the `Removal` says what was
+/// left behind. Err when even that couldn't be recorded in the database, so a copy might be
+/// read back later (in a later run of Silo).
+pub fn clear(conn: &Connection, key: &str) -> Result<Removal, String> {
     let _held = store_lock();
     clear_with(conn, key, entry(key).as_ref(), keychain_missing)
 }
@@ -231,14 +284,27 @@ fn set_with(
     missing: impl Fn() -> bool,
 ) -> Result<(), String> {
     let _held = store_lock();
-    match (value, keychain) {
-        // Demo profile, or no keychain backend at all.
-        (Some(v), None) => write_fallback(conn, key, v),
-        (Some(v), Some(e)) => save(conn, key, v, e, missing),
-        (None, keychain) => match clear_with(conn, key, keychain, missing)? {
-            true => Ok(()),
-            false => Err(REMOVE_FAILED.to_string()),
+    match value {
+        Some(v) => store_with(conn, key, v, keychain, missing).map_err(|e| e.message),
+        None => match clear_with(conn, key, keychain, missing)?.message() {
+            None => Ok(()),
+            Some(m) => Err(m.to_string()),
         },
+    }
+}
+
+/// `store` without the lock, with the keychain entry and probe passed in.
+fn store_with(
+    conn: &Connection,
+    key: &str,
+    v: &str,
+    keychain: Option<&keyring::Entry>,
+    missing: impl Fn() -> bool,
+) -> Result<(), SaveError> {
+    match keychain {
+        // Demo profile, or no keychain backend at all.
+        None => write_fallback(conn, key, v),
+        Some(e) => save(conn, key, v, e, missing),
     }
 }
 
@@ -249,9 +315,9 @@ fn save(
     v: &str,
     e: &keyring::Entry,
     missing: impl Fn() -> bool,
-) -> Result<(), String> {
+) -> Result<(), SaveError> {
     match e.set_password(v) {
-        Ok(()) => saved_to_keychain(conn, key),
+        Ok(()) => saved_to_keychain(conn, key).map_err(SaveError::changed),
         // No usable keychain (e.g. a Linux box without Secret Service): keep the feature working
         // via SQLite; the keychain_available warning covers this. Only when the write, a read,
         // the probe (a throwaway entry) and one more write all fail at the platform level: a
@@ -268,20 +334,20 @@ fn save(
             // The store may have come back meanwhile: try the keychain once more, as an
             // overwrite (never delete-then-write).
             match e.set_password(v) {
-                Ok(()) => saved_to_keychain(conn, key),
+                Ok(()) => saved_to_keychain(conn, key).map_err(SaveError::changed),
                 Err(again) if no_keychain_service(&again) => {
                     log::warn!("{key}: no usable keychain ({err}); storing it in the database");
                     write_fallback(conn, key, v)
                 }
                 Err(again) => {
                     log::warn!("{key}: the keychain answered, but refused the write: {again}");
-                    Err(SAVE_FAILED.into())
+                    Err(SaveError::unchanged(SAVE_FAILED))
                 }
             }
         }
         Err(err) => {
             log::warn!("{key}: couldn't save to the keychain: {err}");
-            Err(SAVE_FAILED.into())
+            Err(SaveError::unchanged(SAVE_FAILED))
         }
     }
 }
@@ -324,11 +390,13 @@ fn clear_with(
     key: &str,
     keychain: Option<&keyring::Entry>,
     missing: impl Fn() -> bool,
-) -> Result<bool, String> {
+) -> Result<Removal, String> {
     let row = db::get_app_setting(conn, key);
     let Some(e) = keychain else {
-        drop_row(conn, key, row.as_deref())?;
-        return Ok(true);
+        return Ok(Removal {
+            keychain_kept: false,
+            row_kept: drop_row(conn, key, row.as_deref())?,
+        });
     };
     let removed = match clear_keychain(e) {
         Cleared::Gone => {
@@ -345,24 +413,27 @@ fn clear_with(
         log::warn!("{key}: couldn't remove it from the keychain; it won't be used");
     }
     // The plaintext copy goes either way.
-    drop_row(conn, key, row.as_deref())?;
-    Ok(removed)
+    Ok(Removal {
+        keychain_kept: !removed,
+        row_kept: drop_row(conn, key, row.as_deref())?,
+    })
 }
 
 /// Delete the SQLite row (`row`, as read just before). It's revoked first, so a row the delete
 /// leaves behind is never read back; if even that write fails, the delete may still work.
-fn drop_row(conn: &Connection, key: &str, row: Option<&str>) -> Result<(), String> {
+/// Ok(true) when the row stayed (revoked); Err when it stayed unrevoked.
+fn drop_row(conn: &Connection, key: &str, row: Option<&str>) -> Result<bool, String> {
     let revoked = match row {
         Some(r) => set_revoked(conn, key, Some(r)),
         None => Ok(()),
     };
-    clear_fallback(conn, key).map_err(|e| {
-        log::warn!("{key}: couldn't delete it from the database: {e}");
-        match revoked {
-            Ok(()) => REMOVE_ROW_FAILED.to_string(),
-            Err(_) => e,
+    match clear_fallback(conn, key) {
+        Ok(()) => Ok(false),
+        Err(e) => {
+            log::warn!("{key}: couldn't delete it from the database: {e}");
+            revoked.map(|()| true).map_err(|_| e)
         }
-    })
+    }
 }
 
 /// A keychain error saying the platform's store itself failed (in keyring 3.6: no Secret
@@ -870,7 +941,7 @@ mod tests {
         let k = FakeKeychain::with(|s| s.stored = Some("tok".into()));
         assert_eq!(
             clear_with(&conn, KEY, Some(&k.entry()), KEYCHAIN_WORKS),
-            Ok(true)
+            Ok(Removal::default())
         );
         let k = FakeKeychain::with(|s| {
             s.stored = Some("tok".into());
@@ -878,9 +949,34 @@ mod tests {
         });
         assert_eq!(
             clear_with(&conn, KEY, Some(&k.entry()), KEYCHAIN_WORKS),
-            Ok(false)
+            Ok(Removal {
+                keychain_kept: true,
+                row_kept: false
+            })
         );
-        assert_eq!(clear_with(&conn, KEY, None, KEYCHAIN_WORKS), Ok(true));
+        assert_eq!(
+            clear_with(&conn, KEY, None, KEYCHAIN_WORKS),
+            Ok(Removal::default())
+        );
+        // A row the database won't drop is revoked and reported; one it won't even revoke is
+        // an error.
+        db::set_app_setting(&conn, KEY, Some("tok")).unwrap();
+        refuse_row_delete(&conn);
+        assert_eq!(
+            clear_with(&conn, KEY, None, KEYCHAIN_WORKS),
+            Ok(Removal {
+                keychain_kept: false,
+                row_kept: true
+            })
+        );
+        let sql = format!(
+            "CREATE TRIGGER no_revoke BEFORE INSERT ON app_setting WHEN new.key = '{}' \
+             BEGIN SELECT RAISE(FAIL, 'busy'); END",
+            revoked_key(KEY)
+        );
+        conn.execute_batch(&sql).unwrap();
+        set_revoked(&conn, KEY, None).unwrap();
+        assert!(clear_with(&conn, KEY, None, KEYCHAIN_WORKS).is_err());
     }
 
     #[test]
@@ -994,8 +1090,13 @@ mod tests {
                 s.delete_fails = Some(Fail::NoAccess);
                 s.get_fails = get;
             });
-            let e = set_with(&conn, KEY, None, Some(&k.entry()), KEYCHAIN_WORKS);
-            assert_eq!(e, Err(REMOVE_ROW_FAILED.to_string()));
+            assert_eq!(
+                clear_with(&conn, KEY, Some(&k.entry()), KEYCHAIN_WORKS),
+                Ok(Removal {
+                    keychain_kept: true,
+                    row_kept: true
+                })
+            );
             assert_eq!(
                 row(&conn).as_deref(),
                 Some("tok"),
@@ -1066,6 +1167,36 @@ mod tests {
             get_with(&conn, KEY, Some(&k.entry())).as_deref(),
             Some("new")
         );
+    }
+
+    #[test]
+    fn a_failed_save_says_whether_the_token_changed() {
+        // Refused before anything was written: unchanged, the old token is still stored.
+        let conn = mem_db();
+        let k = FakeKeychain::with(|s| {
+            s.stored = Some("account-a".into());
+            s.set_fails = Some(Fail::NoAccess);
+        });
+        let e = store_with(&conn, KEY, "account-b", Some(&k.entry()), KEYCHAIN_WORKS);
+        assert_eq!(e, Err(SaveError::unchanged(SAVE_FAILED)));
+        assert_eq!(k.stored().as_deref(), Some("account-a"));
+        // The keychain took it, but the database step after it failed: changed.
+        let conn = mem_db();
+        db::set_app_setting(&conn, KEY, Some("old-row")).unwrap();
+        refuse_row_delete(&conn);
+        let k = FakeKeychain::default();
+        let e = store_with(&conn, KEY, "account-b", Some(&k.entry()), KEYCHAIN_WORKS);
+        assert!(matches!(e, Err(SaveError { changed: true, .. })));
+        assert_eq!(k.stored().as_deref(), Some("account-b"));
+        // The fallback write itself refused: unchanged.
+        let conn = mem_db();
+        conn.execute_batch(
+            "CREATE TRIGGER no_insert BEFORE INSERT ON app_setting \
+             BEGIN SELECT RAISE(FAIL, 'read-only'); END",
+        )
+        .unwrap();
+        let e = store_with(&conn, KEY, "account-b", None, NO_KEYCHAIN);
+        assert!(matches!(e, Err(SaveError { changed: false, .. })));
     }
 
     #[test]

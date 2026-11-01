@@ -53,6 +53,8 @@
       await refresh();
     } catch (e) {
       githubAuth.message = inlineError(e, "Saving your GitHub token");
+      // A save that fails halfway signs the account out: show what's connected now.
+      await refresh();
     }
   }
 

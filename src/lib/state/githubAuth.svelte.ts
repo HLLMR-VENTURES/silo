@@ -127,7 +127,10 @@ async function poll(gen: number, deviceCode: string, seconds: number): Promise<v
   try {
     r = await ghDevicePoll(deviceCode);
   } catch (e) {
-    if (gen === generation) fail(gen, inlineError(e, "Waiting for GitHub to confirm"));
+    if (gen !== generation) return;
+    fail(gen, inlineError(e, "Waiting for GitHub to confirm"));
+    // Saving the sign-in can fail halfway, and then the backend signs out: show what's true.
+    void refreshGithub();
     return;
   }
   // Cancelled (or restarted) while the poll was out: drop its answer.

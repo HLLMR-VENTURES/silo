@@ -7,19 +7,18 @@
 //! * **Sign-ins.** Each device flow, PAT save and cancel starts a new sign-in attempt; only the
 //!   newest attempt may store its token ([`Session::commit`]), and its own requests (the code
 //!   exchange, `whoami`) are admitted only while it's the newest. An older sign-in that finishes
-//!   late can't overwrite a newer one.
+//!   late can't overwrite a newer one, and one still out when a Disconnect ends can't land.
 //! * **Device flows.** Only the newest attempt's flow is remembered, until GitHub's own expiry,
 //!   so a stale start can't push out a valid flow.
 //!
-//! After a Disconnect, no stored token is used in this run of Silo until a sign-in commits,
-//! even if removing it from storage failed.
+//! **Signed out.** After a Disconnect, no stored token is used until a sign-in commits, even if
+//! removing it from storage failed. A file beside the database (the marker, see
+//! [`Session::use_marker`]) keeps that across restarts whenever storage couldn't be cleaned up,
+//! or a failed sign-in may have left a different token behind.
 
+use std::path::PathBuf;
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-
-/// How long Disconnect waits for requests it already admitted. Each one is bounded by the HTTP
-/// agent's own timeouts (`net::api`: 60 s overall), so this only matters for a stuck one.
-const DRAIN: Duration = Duration::from_secs(75);
 
 /// A device code is never remembered longer than this, whatever GitHub's `expires_in` says.
 const MAX_FLOW_LIFETIME: Duration = Duration::from_secs(30 * 60);
@@ -41,16 +40,21 @@ struct State {
     /// Bumped when a Disconnect finishes and when a sign-in stores a token: a token read under
     /// an older value may be stale.
     session: u64,
-    /// Bumped by every sign-in start, cancel, commit and Disconnect: only the newest may commit.
+    /// Bumped by every sign-in start, cancel and commit, and when a Disconnect starts and ends:
+    /// only the newest may commit.
     attempt: u64,
     /// Disconnects running now. Nothing is admitted meanwhile.
     closing: usize,
-    /// A Disconnect ran and no sign-in has stored a token since: stored tokens aren't used.
+    /// No stored token may be used: a Disconnect ran (in this run, or in an earlier one whose
+    /// cleanup failed) or a failed sign-in may have changed the token, and no sign-in has stored
+    /// one since.
     signed_out: bool,
     /// Admitted requests still running.
     in_flight: usize,
     /// The newest attempt's device flow.
     flow: Option<Flow>,
+    /// Where the signed-out marker lives (beside the database); None until the app sets it.
+    marker: Option<PathBuf>,
 }
 
 struct Flow {
@@ -76,6 +80,14 @@ pub enum FlowState {
     Expired,
     /// Not the newest flow (cancelled, replaced, Disconnected, finished) or never issued.
     Gone,
+}
+
+/// Why a sign-in's store failed, and whether the stored token may have changed anyway (it was
+/// written, but the rest wasn't). Then the account is signed out rather than left half-switched.
+#[derive(Debug, PartialEq)]
+pub struct StoreFailed {
+    pub message: String,
+    pub token_changed: bool,
 }
 
 /// A GitHub token tied to the session (or sign-in attempt) it belongs to. It can only be put on
@@ -131,6 +143,53 @@ pub fn admit_optional<'s>(token: Option<&Bearer<'s>>) -> Option<Admitted<'s>> {
     token.and_then(|t| t.admit().ok())
 }
 
+/// A Disconnect that has started: nothing is admitted and no sign-in already out can store.
+/// [`SignOut::finish`] clears storage; dropping it unfinished still ends the session.
+pub struct SignOut<'s> {
+    gate: &'s Session,
+    done: bool,
+}
+
+impl Drop for SignOut<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            let mut g = self.gate.lock();
+            Session::end_sign_out(&mut g);
+        }
+    }
+}
+
+impl SignOut<'_> {
+    /// Wait for the requests already admitted (each is bounded by the HTTP agent's timeouts),
+    /// mark the account signed out on disk, then run `clear` under the lock. `clear` is told
+    /// whether the marker was written, and returns whether storage is now clean (the token
+    /// can't be read back and the account details are gone) along with its result; when it is,
+    /// the marker is removed again. Then the session ends: a token read before is never sent,
+    /// and no stored token is used until a sign-in commits.
+    pub fn finish<T>(mut self, clear: impl FnOnce(bool) -> (bool, T)) -> T {
+        let gate = self.gate;
+        let mut g = gate.lock();
+        while g.in_flight > 0 {
+            g = gate.idle.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+        let marked = Session::write_marker(&g);
+        // Ends the session even if `clear` panics.
+        struct End<'a>(MutexGuard<'a, State>);
+        impl Drop for End<'_> {
+            fn drop(&mut self) {
+                Session::end_sign_out(&mut self.0);
+            }
+        }
+        self.done = true;
+        let end = End(g);
+        let (clean, out) = clear(marked);
+        if clean {
+            Session::remove_marker(&end.0);
+        }
+        out
+    }
+}
+
 impl Session {
     pub const fn new() -> Self {
         Self {
@@ -141,6 +200,7 @@ impl Session {
                 signed_out: false,
                 in_flight: 0,
                 flow: None,
+                marker: None,
             }),
             idle: Condvar::new(),
         }
@@ -148,6 +208,46 @@ impl Session {
 
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Keep the signed-out state in the file at `path` (beside the database). Call once at
+    /// startup: a marker left by an earlier run means that run's Disconnect (or a failed
+    /// sign-in) couldn't clean up storage, so the stored token isn't used.
+    pub fn use_marker(&self, path: PathBuf) {
+        let mut g = self.lock();
+        if path.exists() {
+            log::warn!("GitHub: an earlier Disconnect didn't finish; staying signed out");
+            g.signed_out = true;
+        }
+        g.marker = Some(path);
+    }
+
+    fn write_marker(g: &State) -> bool {
+        match &g.marker {
+            Some(p) => std::fs::write(p, b"signed out\n")
+                .map_err(|e| log::warn!("GitHub: couldn't write the signed-out marker: {e}"))
+                .is_ok(),
+            None => false,
+        }
+    }
+
+    fn remove_marker(g: &State) {
+        if let Some(p) = &g.marker {
+            match std::fs::remove_file(p) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => log::warn!("GitHub: couldn't remove the signed-out marker: {e}"),
+            }
+        }
+    }
+
+    fn end_sign_out(g: &mut State) {
+        g.session += 1;
+        // A sign-in begun while this Disconnect ran is from before it ended: it can't land.
+        g.attempt += 1;
+        g.flow = None;
+        g.signed_out = true;
+        g.closing = g.closing.saturating_sub(1);
     }
 
     fn current(g: &State, ticket: Ticket) -> bool {
@@ -190,14 +290,15 @@ impl Session {
         })
     }
 
-    /// Whether a Disconnect happened in this run and no sign-in stored a token since.
+    /// Whether stored tokens are off limits now (signed out, or a Disconnect is running).
     pub fn signed_out(&self) -> bool {
         let g = self.lock();
         g.signed_out || g.closing > 0
     }
 
     /// Start a sign-in attempt (a device flow or a PAT save). Every older attempt loses its
-    /// right to store a token or send requests.
+    /// right to store a token or send requests. Call it first thing in the command, so attempts
+    /// and Disconnects are ordered as the user clicked them.
     pub fn begin(&self) -> u64 {
         let mut g = self.lock();
         g.attempt += 1;
@@ -292,12 +393,14 @@ impl Session {
     /// Store a sign-in's token, only if `attempt` is still the newest and no Disconnect is
     /// running; None (and `store` didn't run) otherwise. Runs under the lock, so a Disconnect
     /// or a newer attempt is ordered entirely before or after it. Once `store` ran, tokens read
-    /// before are stale (the session moves on); on Ok the account counts as signed in again.
-    pub fn commit<T, E>(
+    /// before are stale (the session moves on). On Ok the account is signed in again; on a
+    /// failure that may have changed the token, it's signed out (on disk too) instead of being
+    /// left half-switched.
+    pub fn commit<T>(
         &self,
         attempt: u64,
-        store: impl FnOnce() -> Result<T, E>,
-    ) -> Option<Result<T, E>> {
+        store: impl FnOnce() -> Result<T, StoreFailed>,
+    ) -> Option<Result<T, String>> {
         let mut g = self.lock();
         if g.attempt != attempt || g.closing > 0 {
             return None;
@@ -306,52 +409,34 @@ impl Session {
         g.session += 1;
         g.attempt += 1; // this attempt is done
         g.flow = None;
-        if r.is_ok() {
-            g.signed_out = false;
-        }
-        Some(r)
+        Some(match r {
+            Ok(v) => {
+                g.signed_out = false;
+                Self::remove_marker(&g);
+                Ok(v)
+            }
+            Err(e) => {
+                if e.token_changed {
+                    g.signed_out = true;
+                    Self::write_marker(&g);
+                }
+                Err(e.message)
+            }
+        })
     }
 
-    /// Disconnect. At once: nothing more is admitted and every sign-in still out loses its right
-    /// to store. Then it waits (up to [`DRAIN`]) for the requests already admitted, runs `clear`
-    /// under the lock, and ends the session: a token read before can't be sent afterwards, and
-    /// no stored token is used until a sign-in commits.
-    pub fn sign_out<T>(&self, clear: impl FnOnce() -> T) -> T {
-        self.sign_out_within(DRAIN, clear)
-    }
-
-    fn sign_out_within<T>(&self, drain: Duration, clear: impl FnOnce() -> T) -> T {
+    /// Start a Disconnect, first thing in the command: from here nothing is admitted, and every
+    /// sign-in already out (or begun before it ends) loses its right to store. Finish it with
+    /// [`SignOut::finish`].
+    pub fn begin_sign_out(&self) -> SignOut<'_> {
         let mut g = self.lock();
         g.closing += 1;
         g.attempt += 1;
         g.flow = None;
-        let deadline = Instant::now() + drain;
-        while g.in_flight > 0 {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                log::warn!(
-                    "GitHub: {} request(s) still running at Disconnect; signing out anyway",
-                    g.in_flight
-                );
-                break;
-            }
-            g = self
-                .idle
-                .wait_timeout(g, left)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
+        SignOut {
+            gate: self,
+            done: false,
         }
-        // Ends the session even if `clear` panics.
-        struct Reopen<'a>(MutexGuard<'a, State>);
-        impl Drop for Reopen<'_> {
-            fn drop(&mut self) {
-                self.0.session += 1;
-                self.0.signed_out = true;
-                self.0.closing -= 1;
-            }
-        }
-        let _reopen = Reopen(g);
-        clear()
     }
 }
 
@@ -365,10 +450,31 @@ impl Default for Session {
 mod tests {
     use super::*;
     use std::sync::mpsc;
-    use std::sync::Arc;
 
     fn stored<'s>(gate: &'s Session, tok: &str) -> Bearer<'s> {
         gate.bearer(|| Some(tok.to_string())).unwrap()
+    }
+
+    fn sign_out(gate: &Session) {
+        gate.begin_sign_out().finish(|_| (true, ()));
+    }
+
+    fn ok() -> Result<(), StoreFailed> {
+        Ok(())
+    }
+
+    fn failed(token_changed: bool) -> Result<(), StoreFailed> {
+        Err(StoreFailed {
+            message: "busy".into(),
+            token_changed,
+        })
+    }
+
+    /// A fresh marker path in the temp folder, removed first.
+    fn marker_path(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("silo_gh_marker_{}_{name}", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
     }
 
     #[test]
@@ -376,7 +482,7 @@ mod tests {
         let gate = Session::new();
         let a = stored(&gate, "tok-a");
         assert_eq!(a.admit().unwrap().header(), "Bearer tok-a");
-        gate.sign_out(|| ());
+        sign_out(&gate);
         assert_eq!(a.admit().err().as_deref(), Some(NOT_SENT));
         assert!(
             admit_optional(Some(&a)).is_none(),
@@ -388,6 +494,38 @@ mod tests {
     }
 
     #[test]
+    fn a_disconnect_counts_from_when_it_was_clicked() {
+        // The command started (clicked) but its blocking work hasn't run yet: already nothing
+        // is admitted, and a sign-in that was out can't store.
+        let gate = Session::new();
+        let a = stored(&gate, "tok-a");
+        let pat = gate.begin();
+        let so = gate.begin_sign_out();
+        assert!(a.admit().is_err());
+        assert!(gate.bearer(|| Some("tok-a".into())).is_none());
+        assert_eq!(gate.commit(pat, ok), None);
+        // A sign-in begun while it runs can't land after it ends either.
+        let during = gate.begin();
+        so.finish(|_| (true, ()));
+        assert_eq!(gate.commit(during, ok), None);
+        // One begun afterwards (the user connects again) does.
+        let after = gate.begin();
+        assert_eq!(gate.commit(after, ok), Some(Ok(())));
+        assert!(!gate.signed_out());
+    }
+
+    #[test]
+    fn an_unfinished_sign_out_still_ends_the_session() {
+        let gate = Session::new();
+        let a = stored(&gate, "tok-a");
+        drop(gate.begin_sign_out()); // e.g. its task never ran
+        assert!(a.admit().is_err());
+        assert!(gate.signed_out());
+        let attempt = gate.begin();
+        assert!(gate.commit(attempt, ok).is_some(), "not stuck closing");
+    }
+
+    #[test]
     fn a_new_sign_in_retires_tokens_read_before_it() {
         let gate = Session::new();
         let a = stored(&gate, "tok-a");
@@ -396,7 +534,7 @@ mod tests {
             a.admit().is_ok(),
             "starting a sign-in doesn't change the account yet"
         );
-        assert_eq!(gate.commit(attempt, || Ok::<_, ()>(())), Some(Ok(())));
+        assert_eq!(gate.commit(attempt, ok), Some(Ok(())));
         assert!(a.admit().is_err());
         assert!(stored(&gate, "tok-b").admit().is_ok());
     }
@@ -408,7 +546,7 @@ mod tests {
         let gate = Session::new();
         let b = gate
             .bearer(|| {
-                gate.sign_out(|| ());
+                sign_out(&gate);
                 Some("tok-a".to_string())
             })
             .unwrap();
@@ -418,7 +556,7 @@ mod tests {
         let attempt = gate.begin();
         let b = gate
             .bearer(|| {
-                gate.commit(attempt, || Ok::<_, ()>(())).unwrap().unwrap();
+                gate.commit(attempt, ok).unwrap().unwrap();
                 Some("tok-a".to_string())
             })
             .unwrap();
@@ -427,13 +565,13 @@ mod tests {
 
     #[test]
     fn disconnect_waits_for_admitted_requests_and_admits_nothing_meanwhile() {
-        let gate = Arc::new(Session::new());
+        // Leaked so the threads can borrow it, as they borrow the app's static session.
+        let gate: &'static Session = Box::leak(Box::new(Session::new()));
         let (sent_tx, sent_rx) = mpsc::channel::<()>();
         let (finish_tx, finish_rx) = mpsc::channel::<()>();
         let request = {
-            let gate = gate.clone();
             std::thread::spawn(move || {
-                let b = stored(&gate, "tok");
+                let b = stored(gate, "tok");
                 let admitted = b.admit().unwrap();
                 sent_tx.send(()).unwrap();
                 finish_rx.recv().unwrap(); // the request is on the wire
@@ -441,16 +579,18 @@ mod tests {
             })
         };
         sent_rx.recv().unwrap();
-        let other = stored(&gate, "tok");
+        let other = stored(gate, "tok");
         let (cleared_tx, cleared_rx) = mpsc::channel::<()>();
+        let so = gate.begin_sign_out();
         let logout = {
-            let gate = gate.clone();
-            std::thread::spawn(move || gate.sign_out(|| cleared_tx.send(()).unwrap()))
+            std::thread::spawn(move || {
+                so.finish(|_| {
+                    cleared_tx.send(()).unwrap();
+                    (true, ())
+                })
+            })
         };
         // Disconnect has started: a new request isn't admitted, and the clear waits.
-        while !gate.signed_out() {
-            std::thread::yield_now();
-        }
         assert!(other.admit().is_err());
         assert!(gate.bearer(|| Some("tok".into())).is_none());
         assert!(cleared_rx.recv_timeout(Duration::from_millis(100)).is_err());
@@ -458,19 +598,6 @@ mod tests {
         cleared_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         logout.join().unwrap();
         request.join().unwrap();
-    }
-
-    #[test]
-    fn disconnect_stops_waiting_for_a_stuck_request() {
-        let gate = Session::new();
-        let b = stored(&gate, "tok");
-        let stuck = b.admit().unwrap();
-        assert_eq!(
-            gate.sign_out_within(Duration::from_millis(20), || "cleared"),
-            "cleared"
-        );
-        drop(stuck);
-        assert!(b.admit().is_err());
     }
 
     #[test]
@@ -482,23 +609,19 @@ mod tests {
         assert!(gate.cancel_flow("code-a"));
         let b = gate.begin();
         gate.remember_flow("code-b", b, 900).unwrap();
-        assert_eq!(
-            gate.commit(a, || Ok::<_, ()>("A")),
-            None,
-            "A can't overwrite B"
-        );
-        assert_eq!(gate.commit(b, || Ok::<_, ()>("B")), Some(Ok("B")));
+        assert_eq!(gate.commit(a, ok), None, "A can't overwrite B");
+        assert_eq!(gate.commit(b, ok), Some(Ok(())));
         // An attempt commits once.
-        assert_eq!(gate.commit(b, || Ok::<_, ()>("B again")), None);
+        assert_eq!(gate.commit(b, ok), None);
         // A PAT save started after a device flow replaces it too.
         let flow = gate.begin();
         let pat = gate.begin();
-        assert_eq!(gate.commit(flow, || Ok::<_, ()>(())), None);
-        assert!(gate.commit(pat, || Ok::<_, ()>(())).is_some());
+        assert_eq!(gate.commit(flow, ok), None);
+        assert!(gate.commit(pat, ok).is_some());
         // And a Disconnect beats every sign-in already out.
         let late = gate.begin();
-        gate.sign_out(|| ());
-        assert_eq!(gate.commit(late, || Ok::<_, ()>(())), None);
+        sign_out(&gate);
+        assert_eq!(gate.commit(late, ok), None);
     }
 
     #[test]
@@ -513,27 +636,82 @@ mod tests {
         assert_eq!(whoami.admit().err().as_deref(), Some(SUPERSEDED));
         // A Disconnect does the same.
         let c = gate.begin();
-        gate.sign_out(|| ());
+        sign_out(&gate);
         assert!(gate.admit_attempt(c).is_err());
     }
 
     #[test]
-    fn a_failed_store_still_moves_the_session_on() {
+    fn a_failed_store_signs_out_only_when_the_token_may_have_changed() {
+        // Connected as A; storing B fails before anything was written: A stays connected.
         let gate = Session::new();
-        let old = stored(&gate, "tok-a");
-        gate.sign_out(|| ());
         let attempt = gate.begin();
         assert_eq!(
-            gate.commit(attempt, || Err::<(), _>("locked")),
-            Some(Err("locked"))
+            gate.commit(attempt, || failed(false)),
+            Some(Err("busy".into()))
         );
-        assert!(old.admit().is_err());
-        // Still signed out: the store failed, so nothing new was connected.
-        assert!(gate.signed_out());
-        let attempt = gate.begin();
-        gate.commit(attempt, || Ok::<_, ()>(())).unwrap().unwrap();
         assert!(!gate.signed_out());
-        assert!(stored(&gate, "tok-b").admit().is_ok());
+        assert!(stored(&gate, "tok-a").admit().is_ok());
+        // B's token was written but its account name wasn't: signed out, not half-switched.
+        let old = stored(&gate, "tok-a");
+        let attempt = gate.begin();
+        assert!(gate.commit(attempt, || failed(true)).unwrap().is_err());
+        assert!(gate.signed_out());
+        assert!(old.admit().is_err());
+        assert!(gate.bearer(|| Some("tok-b".into())).is_none());
+        // A later sign-in that stores cleanly connects again.
+        let attempt = gate.begin();
+        gate.commit(attempt, ok).unwrap().unwrap();
+        assert!(!gate.signed_out());
+        assert!(stored(&gate, "tok-c").admit().is_ok());
+    }
+
+    #[test]
+    fn a_disconnect_that_couldnt_clean_up_holds_after_a_restart() {
+        let path = marker_path("restart");
+        let gate = Session::new();
+        gate.use_marker(path.clone());
+        assert!(!gate.signed_out());
+        // Storage couldn't be cleared: the marker stays.
+        let marked = gate.begin_sign_out().finish(|marked| (false, marked));
+        assert!(marked);
+        assert!(path.exists());
+        // Next run: still signed out, whatever storage returns.
+        let next = Session::new();
+        next.use_marker(path.clone());
+        assert!(next.signed_out());
+        assert!(next.bearer(|| Some("survivor".into())).is_none());
+        // Connecting again clears it.
+        let attempt = next.begin();
+        next.commit(attempt, ok).unwrap().unwrap();
+        assert!(!path.exists());
+        assert!(!next.signed_out());
+        // A Disconnect that cleaned up leaves no marker, so the next run starts normally (and
+        // simply finds no token).
+        next.begin_sign_out().finish(|_| (true, ()));
+        assert!(!path.exists());
+        let third = Session::new();
+        third.use_marker(path.clone());
+        assert!(!third.signed_out());
+    }
+
+    #[test]
+    fn a_half_switched_sign_in_holds_after_a_restart() {
+        let path = marker_path("half");
+        let gate = Session::new();
+        gate.use_marker(path.clone());
+        let attempt = gate.begin();
+        assert!(gate.commit(attempt, || failed(true)).unwrap().is_err());
+        assert!(path.exists());
+        let next = Session::new();
+        next.use_marker(path.clone());
+        assert!(next.signed_out());
+        // A failed store that changed nothing leaves no marker.
+        let _ = std::fs::remove_file(&path);
+        let attempt = gate.begin();
+        gate.commit(attempt, ok).unwrap().unwrap();
+        let attempt = gate.begin();
+        assert!(gate.commit(attempt, || failed(false)).unwrap().is_err());
+        assert!(!path.exists());
     }
 
     #[test]
@@ -597,14 +775,14 @@ mod tests {
         gate.remember_flow("code-b", b, 900).unwrap();
         assert!(!gate.cancel_flow("code-a"));
         assert_eq!(gate.flow("code-b"), FlowState::Live(b));
-        assert!(gate.commit(b, || Ok::<_, ()>(())).is_some());
+        assert!(gate.commit(b, ok).is_some());
         // A cancel that arrives after the commit says the flow was already gone.
         assert!(!gate.cancel_flow("code-b"));
         // A cancel that wins: the poll can't commit afterwards.
         let c = gate.begin();
         gate.remember_flow("code-c", c, 900).unwrap();
         assert!(gate.cancel_flow("code-c"));
-        assert_eq!(gate.commit(c, || Ok::<_, ()>(())), None);
+        assert_eq!(gate.commit(c, ok), None);
         assert_eq!(gate.flow("code-c"), FlowState::Gone);
     }
 
@@ -613,7 +791,7 @@ mod tests {
         let gate = Session::new();
         let a = gate.begin();
         gate.remember_flow("code", a, 900).unwrap();
-        gate.sign_out(|| ());
+        sign_out(&gate);
         assert_eq!(gate.flow("code"), FlowState::Gone);
         // A start issued before the Disconnect answers after it: refused.
         assert!(gate.remember_flow("code", a, 900).is_err());
