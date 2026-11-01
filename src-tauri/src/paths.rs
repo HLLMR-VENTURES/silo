@@ -355,7 +355,8 @@ static FALLBACK_RENAMES: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 /// A failed rename whose destination exists is reported as `AlreadyExists` (Windows can say
 /// "access denied" when `to` is a folder), so callers can tell "taken" from a real failure.
 fn taken_or(to: &Path, e: std::io::Error) -> std::io::Error {
-    if e.kind() != std::io::ErrorKind::AlreadyExists && to.symlink_metadata().is_ok() {
+    use std::io::ErrorKind::{AlreadyExists, InvalidInput};
+    if !matches!(e.kind(), AlreadyExists | InvalidInput) && to.symlink_metadata().is_ok() {
         std::io::Error::from(std::io::ErrorKind::AlreadyExists)
     } else {
         e
@@ -1121,6 +1122,11 @@ mod tests {
         bad.push("\0ignored");
         let e = rename_no_replace(Path::new(&bad), &d.join("a.zip")).unwrap_err();
         assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        // Also when the destination exists: an invalid path, not a taken name.
+        std::fs::write(d.join("a.zip"), b"theirs").unwrap();
+        let e = rename_no_replace(Path::new(&bad), &d.join("a.zip")).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+        std::fs::remove_file(d.join("a.zip")).unwrap();
         let mut bad_to = d.join("a.zip").into_os_string();
         bad_to.push("\0ignored");
         let e = rename_no_replace(&d.join("a.part"), Path::new(&bad_to)).unwrap_err();

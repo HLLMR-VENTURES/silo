@@ -1165,13 +1165,13 @@ fn still_a_mods_folder(root: &std::path::Path, mods_roots: &[PathBuf]) -> Result
 
 /// Downloads whose `.zip.part` is in use, by `same_file_key`. Downloads run outside the
 /// library lock, so two at once for the same file must not share (and corrupt) one part file.
-static PARTS_IN_FLIGHT: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+static PARTS_IN_FLIGHT: std::sync::Mutex<Vec<FileKey>> = std::sync::Mutex::new(Vec::new());
 
 /// A download's claim on its part file. Dropping it removes whatever part is left
 /// (a failed or abandoned download) and frees the name.
 pub struct PartClaim {
     path: PathBuf,
-    key: PathBuf,
+    key: FileKey,
 }
 
 impl PartClaim {
@@ -1188,30 +1188,50 @@ impl Drop for PartClaim {
     }
 }
 
-/// Paths that name the same file compare equal, on every system: Windows ignores case (by
-/// uppercasing, so `σ` and `ς` are one name), and macOS (APFS, HFS+) ignores both case and how an
-/// accent is encoded (`é` vs `e` + combining accent). So the name is folded wider than either:
-/// decomposed, lowercased, then uppercased (which also merges `σ`/`ς`, `k`/Kelvin sign and the
-/// like), then recomposed (NFC). Folding too much only over-claims (two such variants can't
-/// download at once, also on a case-sensitive Linux folder), which is harmless. The parent is
-/// resolved (`canonicalize`: real case on Windows, links followed), so two spellings of one
-/// folder share keys; a folder that can't be resolved is kept as given.
-fn same_file_key(p: &std::path::Path) -> PathBuf {
-    match p.file_name() {
-        Some(name) => {
-            let key = fold_file_name(&name.to_string_lossy());
-            match p.parent() {
-                Some(parent) => std::fs::canonicalize(parent)
-                    .unwrap_or_else(|_| parent.to_path_buf())
-                    .join(key),
-                None => PathBuf::from(key),
-            }
-        }
-        None => p.to_path_buf(),
+/// Two ways of comparing a path that names a file, so that two paths that may be one file on
+/// some system are seen as the same: they [`overlap`](FileKey::overlaps) when either way agrees.
+/// - `folded`: the name decomposed, lowercased, uppercased and recomposed (NFC). This merges what
+///   macOS (APFS, HFS+) merges, case and how an accent is encoded (`é` vs `e` + combining
+///   accent), and more (`σ`/`ς`, `k`/Kelvin sign).
+/// - `upper`: the name uppercased character by character with nothing reordered, as NTFS
+///   compares names (normalizing first can reorder combining marks NTFS would not).
+///
+/// Over-matching only over-claims (two such variants can't download at once, also on a
+/// case-sensitive Linux folder), which is harmless. The parent is resolved (`canonicalize`:
+/// real case on Windows, links followed), so two spellings of one folder share keys; a folder
+/// that can't be resolved is kept as given.
+#[derive(Debug, Clone, PartialEq)]
+struct FileKey {
+    folded: PathBuf,
+    upper: PathBuf,
+}
+
+impl FileKey {
+    fn overlaps(&self, other: &FileKey) -> bool {
+        self.folded == other.folded || self.upper == other.upper
     }
 }
 
-/// See [`same_file_key`].
+/// See [`FileKey`].
+fn same_file_key(p: &std::path::Path) -> FileKey {
+    let Some(name) = p.file_name() else {
+        return FileKey {
+            folded: p.to_path_buf(),
+            upper: p.to_path_buf(),
+        };
+    };
+    let name = name.to_string_lossy();
+    let parent = match p.parent() {
+        Some(parent) => std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf()),
+        None => PathBuf::new(),
+    };
+    FileKey {
+        folded: parent.join(fold_file_name(&name)),
+        upper: parent.join(name.to_uppercase()),
+    }
+}
+
+/// See [`FileKey`].
 fn fold_file_name(name: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     let decomposed: String = name.nfd().collect();
@@ -1228,7 +1248,7 @@ fn claim_part(dest: &std::path::Path) -> Result<PartClaim, String> {
 fn claim_part_at(dest: &std::path::Path, path: PathBuf) -> Result<PartClaim, String> {
     let key = same_file_key(&path);
     let mut held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-    if held.contains(&key) {
+    if held.iter().any(|k| k.overlaps(&key)) {
         return Err(format!("{} is already downloading", file_label(dest)));
     }
     held.push(key.clone());
@@ -1240,7 +1260,8 @@ fn claim_part_at(dest: &std::path::Path, path: PathBuf) -> Result<PartClaim, Str
 /// in between. Returns whether a file was removed.
 fn remove_unclaimed_part(path: &std::path::Path) -> bool {
     let held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-    if held.contains(&same_file_key(path)) {
+    let key = same_file_key(path);
+    if held.iter().any(|k| k.overlaps(&key)) {
         return false;
     }
     let removed = std::fs::remove_file(path).is_ok();
@@ -4551,6 +4572,8 @@ async fn collection_apply(
         let mut failed_count = 0usize;
         // Finished downloads waiting to be placed under the lock (their rows are filled then).
         let mut pending: Vec<PendingPlace> = Vec::new();
+        // (row, row of the pending download of the same file) for a set naming one file twice.
+        let mut duplicates: Vec<(usize, usize)> = Vec::new();
 
         for (i, (m, t)) in coll.mods.iter().zip(&targets).enumerate() {
             let _ = emitter.emit(
@@ -4607,7 +4630,13 @@ async fn collection_apply(
                             n.to_string_lossy().to_lowercase() == resolved.filename.to_lowercase()
                         })
                     };
-                    if path_taken(&dest) || pending.iter().any(same_name) {
+                    if path_taken(&dest) {
+                        rows.push(present_row(&m.tech_name, &resolved.filename));
+                        continue;
+                    }
+                    // Settled once that download is placed (or isn't): see `settle_duplicates`.
+                    if let Some(p) = pending.iter().find(|p| same_name(p)) {
+                        duplicates.push((rows.len(), p.row));
                         rows.push(present_row(&m.tech_name, &resolved.filename));
                         continue;
                     }
@@ -4615,7 +4644,10 @@ async fn collection_apply(
                         // A different name the claim treats as the same file as one of this
                         // set's own downloads: never reported as present.
                         let key = same_file_key(&dest);
-                        if let Some(p) = pending.iter().find(|p| same_file_key(&p.dest) == key) {
+                        if let Some(p) = pending
+                            .iter()
+                            .find(|p| same_file_key(&p.dest).overlaps(&key))
+                        {
                             rows.push(fail_row(
                                 &m.tech_name,
                                 format!(
@@ -4692,7 +4724,7 @@ async fn collection_apply(
             install_recheck(&root, dest)
         });
         installed_count += placed;
-        failed_count += place_failed;
+        failed_count += place_failed + settle_duplicates(&mut rows, &duplicates);
 
         // The loadout lists the whole collection; applying it activates the ones you have,
         // and it completes automatically once you fetch the rest and rescan. Not saved when
@@ -4770,6 +4802,21 @@ fn place_pending(
         }
     }
     (installed, failed)
+}
+
+/// A row that shares its file with another row's download is `present` only if that download
+/// was placed (or found already there); when it failed, so does this row, with the same reason.
+/// Returns how many rows failed.
+fn settle_duplicates(rows: &mut [ApplyRow], duplicates: &[(usize, usize)]) -> usize {
+    let mut failed = 0;
+    for &(row, of) in duplicates {
+        if rows[of].status == "failed" {
+            let detail = rows[of].detail.clone().unwrap_or_default();
+            rows[row] = fail_row(&rows[row].tech_name, detail);
+            failed += 1;
+        }
+    }
+    failed
 }
 
 fn present_row(tech_name: &str, filename: &str) -> ApplyRow {
@@ -6688,10 +6735,20 @@ mod tests {
         let _sigma = super::claim_part(&mods.join("FS25_\u{3c3}.zip")).unwrap();
         assert!(super::claim_part(&mods.join("FS25_\u{3c2}.zip")).is_err());
         assert!(super::claim_part(&mods.join("FS25_\u{3a3}.zip")).is_err());
-        // Two spellings of one folder share keys.
-        std::fs::create_dir_all(&mods).unwrap();
-        let other_spelling = mods.join(".").join("FS25_Foo.zip");
-        assert!(super::claim_part(&other_spelling).is_err());
+        // Two spellings of one folder share keys: another case on Windows, a link elsewhere.
+        #[cfg(windows)]
+        let alias = base.join("MODS");
+        #[cfg(unix)]
+        let alias = {
+            let a = base.join("mods-link");
+            std::os::unix::fs::symlink(&mods, &a).unwrap();
+            a
+        };
+        assert_ne!(alias, mods);
+        assert!(super::claim_part(&alias.join("FS25_Foo.zip")).is_err());
+        // NTFS compares names by uppercasing each character, without reordering accents.
+        let _ypo = super::claim_part(&mods.join("FS25_A\u{345}\u{301}.zip")).unwrap();
+        assert!(super::claim_part(&mods.join("FS25_A\u{399}\u{301}.zip")).is_err());
         // APFS also treats the two ways of writing an accent as one name.
         let _cafe = super::claim_part(&mods.join("FS25_Caf\u{e9}.zip")).unwrap();
         assert!(super::claim_part(&mods.join("FS25_Cafe\u{301}.zip")).is_err());
@@ -6728,6 +6785,28 @@ mod tests {
         assert!(!dest.exists());
         assert!(!part_path.exists());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_set_naming_one_file_twice_reports_both_rows_as_that_download_ended() {
+        let row = |status: &str, detail: Option<&str>| super::ApplyRow {
+            tech_name: "FS25_Dup".into(),
+            filename: Some("FS25_Dup.zip".into()),
+            status: status.into(),
+            verdict: None,
+            detail: detail.map(str::to_string),
+        };
+        let mut rows = vec![
+            row("failed", Some(super::LIBRARY_BUSY)),
+            row("present", None),
+            row("installed", None),
+            row("present", None),
+        ];
+        let failed = super::settle_duplicates(&mut rows, &[(1, 0), (3, 2)]);
+        assert_eq!(failed, 1);
+        assert_eq!(rows[1].status, "failed");
+        assert_eq!(rows[1].detail.as_deref(), Some(super::LIBRARY_BUSY));
+        assert_eq!(rows[3].status, "present");
     }
 
     #[test]
