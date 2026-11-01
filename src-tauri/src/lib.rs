@@ -3033,7 +3033,7 @@ fn fences_with(
     user_dir: Option<&std::path::Path>,
     app_data: Option<&std::path::Path>,
 ) -> Result<Fences, String> {
-    let others = with_organized_roots(conn, known_mods_folders(conn, extra))
+    let others = with_layout_owners(conn, known_mods_folders(conn, extra))
         .map_err(|e| archive_list_unreadable(&e))?;
     let mine = key_path(&layout.mods);
     let mut other_mods: Vec<PathBuf> = Vec::new();
@@ -3137,14 +3137,22 @@ fn other_archives(
     Ok(v)
 }
 
-/// `known` plus every folder Silo has organized mods for (`db::organized_roots`): a folder it
-/// only followed through FS25's override never joins the known list, but its layout is still
-/// on disk. An unreadable library list is an error.
-fn with_organized_roots(
+/// `known` plus every other folder Silo has a layout for: each folder it has organized mods
+/// for (`db::organized_roots`) and each folder with a stored archive choice (`archive_root:<its
+/// key>`). A folder Silo only followed through FS25's override never joins the known list, but
+/// its layout is still on disk. An unreadable library or setting list is an error.
+fn with_layout_owners(
     conn: &rusqlite::Connection,
     mut known: Vec<PathBuf>,
 ) -> Result<Vec<PathBuf>, String> {
     known.extend(db::organized_roots(conn)?.into_iter().map(PathBuf::from));
+    for (k, _) in db::app_settings_with_prefix(conn, relocate::ARCHIVE_SETTING_PREFIX)? {
+        if let Some(owner) = k.strip_prefix(relocate::ARCHIVE_SETTING_PREFIX) {
+            if !owner.is_empty() {
+                known.push(PathBuf::from(owner));
+            }
+        }
+    }
     Ok(known)
 }
 
@@ -3199,7 +3207,7 @@ fn mods_folder_check(
     known: &[PathBuf],
 ) -> Result<Option<FolderProblem>, String> {
     let mine = key_path(mods);
-    let known = with_organized_roots(conn, known.to_vec())?;
+    let known = with_layout_owners(conn, known.to_vec())?;
     let archives = other_archives(conn, mods, &known)?;
     let mut others: Vec<&PathBuf> = known.iter().filter(|k| key_path(k) != mine).collect();
     let mut seen = HashSet::new();
@@ -3320,6 +3328,9 @@ struct Space {
     largest: u64,
     /// Free on the new archive's drive (unknown never blocks).
     free: Option<u64>,
+    /// The largest mod that isn't `relink_kept`: with kept hardlinks, the move's peak is all
+    /// of them plus one other mod's copy in flight.
+    largest_unkept: u64,
     /// Active zips whose hardlink a move keeps as their standalone copy, because a new link
     /// into the new archive might be a copy (`LinkPolicy::can_only_copy`): on one drive their
     /// old bytes stay used. From `relocate::relink_cost`.
@@ -3376,10 +3387,13 @@ fn move_problems(f: MoveFacts) -> Vec<String> {
     }
     v.extend(f.collisions);
     let s = f.space;
-    let mut needed = if s.archive_same_drive {
-        s.largest + s.relink_kept
-    } else {
-        s.bytes
+    // On one drive a kept hardlink's bytes stay used once its mod is moved, so the peak is every
+    // kept mod plus the largest other one in flight; a kept mod's own copy is already in that
+    // sum.
+    let mut needed = match (s.archive_same_drive, s.relink_kept) {
+        (false, _) => s.bytes,
+        (true, 0) => s.largest,
+        (true, kept) => kept + s.largest_unkept,
     };
     let mods_needed = if s.mods_same_drive {
         needed += s.relink_copied;
@@ -3468,6 +3482,11 @@ fn check_move(
             bytes,
             largest: sizes.iter().copied().max().unwrap_or(0),
             free,
+            largest_unkept: if relink_kept > 0 {
+                cost.largest_unkept
+            } else {
+                0
+            },
             relink_kept,
             relink_copied,
             mods_same_drive: organize::known_same_mount(&mods_mount, &new_mount),
@@ -7206,10 +7225,18 @@ mod tests {
             mods: d.clone(),
             archive: mine.clone(),
         };
-        // X isn't known and isn't in use: only its stored archive choice names it.
+        // X isn't known and isn't in use: only its stored archive choice names it — both as a
+        // mods folder and by its archive.
         let f = super::fences_with(&conn, &layout, &[], None, None).unwrap();
-        assert!(f.other_mods.is_empty());
+        assert_eq!(f.other_mods, vec![super::key_path(&x)]);
         assert_eq!(f.other_archives, vec![super::key_path(&b)]);
+        assert!(
+            has(
+                &fence_problems(&layout, &x, &f),
+                "overlaps another mods folder Silo knows"
+            ),
+            "X itself can't become D's archive"
+        );
         let problems = fence_problems(&layout, &b, &f);
         assert!(
             has(&problems, "Another mods folder already uses that archive."),
@@ -7489,6 +7516,7 @@ mod tests {
             bytes: 10 << 30,
             largest: 2 << 30,
             free,
+            largest_unkept: 2 << 30,
             relink_kept: 0,
             relink_copied: 0,
             mods_same_drive: true,
@@ -7571,6 +7599,13 @@ mod tests {
             p[0].starts_with("Not enough free space: needs 6.4 GB"),
             "{p:?}"
         );
+        // One kept 10 GB mod and nothing else: only its new copy is new, so 12 GB is enough.
+        assert!(move_problems(facts(Space {
+            largest: gb(10),
+            largest_unkept: 0,
+            ..with(gb(10), 0, true, Some(gb(12)), None)
+        }))
+        .is_empty());
         // A copy into a mods folder on the same drive counts on that drive too.
         let p = move_problems(facts(with(0, gb(3), true, Some(gb(4)), None)));
         assert!(

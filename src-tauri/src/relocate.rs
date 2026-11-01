@@ -532,16 +532,22 @@ pub struct RelinkCost {
     /// Active folder mods whose entry is missing or a symlink to the archived copy: made again,
     /// a full copy where a folder link may not work (`organize::dir_link_may_copy`).
     pub copied_dirs: u64,
+    /// The largest mod in `rows` (active or not) that isn't counted in `kept`.
+    pub largest_unkept: u64,
 }
 
 /// `RelinkCost` of the active mods in `rows`, with their mods-folder entries in `mods` and
 /// archived copies in `archive` — the same cases `repoint` tells apart. Read-only.
 pub fn relink_cost(mods: &Path, archive: &Path, rows: &[OrganizedRow]) -> RelinkCost {
     let mut cost = RelinkCost::default();
-    for row in rows.iter().filter(|r| r.active) {
-        let link = mods.join(&row.file_name);
+    for row in rows {
         let src = organize::archive_path(archive, &row.category, &row.file_name);
         let size = size_of(&src);
+        if !row.active {
+            cost.largest_unkept = cost.largest_unkept.max(size);
+            continue;
+        }
+        let link = mods.join(&row.file_name);
         let dir = row.kind == "dir";
         let made_again = match link.symlink_metadata() {
             Err(_) => true,
@@ -549,10 +555,12 @@ pub fn relink_cost(mods: &Path, archive: &Path, rows: &[OrganizedRow]) -> Relink
             Ok(m) => {
                 if !dir && m.is_file() && same_file(&link, &src) {
                     cost.kept += size;
+                    continue;
                 }
                 false
             }
         };
+        cost.largest_unkept = cost.largest_unkept.max(size);
         match (made_again, dir) {
             (true, true) => cost.copied_dirs += size,
             (true, false) => cost.copied_zips += size,
@@ -2667,6 +2675,12 @@ mod tests {
             kept: size("FS25_Linked"),
             copied_zips: size("FS25_Missing"),
             copied_dirs: size_of(&f.old.join("Tools/FS25_Dir")),
+            largest_unkept: ["FS25_Missing", "FS25_Copied", "FS25_Parked"]
+                .iter()
+                .map(|t| size(t))
+                .chain([size_of(&f.old.join("Tools/FS25_Dir"))])
+                .max()
+                .unwrap(),
         };
         assert!(want.copied_dirs > 0);
         assert_eq!(relink_cost(&f.mods, &f.old, &rows), want);
