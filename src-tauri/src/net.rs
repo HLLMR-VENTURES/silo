@@ -31,7 +31,7 @@ use ureq::http::Uri;
 use ureq::typestate::{AgentScope, WithBody, WithoutBody};
 use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
 use ureq::unversioned::transport::{
-    ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport,
+    ConnectionDetails, Connector, NextTimeout, RustlsConnector, TcpConnector, Transport,
 };
 use ureq::{Agent, RequestBuilder, ResponseExt};
 use url::{Host, Url};
@@ -57,18 +57,24 @@ const STRING_LIMIT: u64 = 10 * 1024 * 1024;
 /// A response from one of Silo's agents.
 pub type Response = ureq::http::Response<ureq::Body>;
 
-/// An agent config with connect / per-read / per-write timeouts and an optional overall cap, so
-/// a silent or stalled server makes the request fail instead of hanging forever. No proxy from
-/// the environment, and 4xx/5xx come back as responses (see the module docs).
+/// An agent config with a connect timeout and either an overall cap (`overall`) or, without
+/// one, per-read / per-write timeouts (`read`), so a silent or stalled server makes the request
+/// fail instead of hanging forever. As in ureq 2, which set the socket timeouts to whatever was
+/// left of the overall deadline when there was one and used `timeout_read` / `timeout_write`
+/// only when there wasn't. `capped`: the requests get an overall cap (here or per request, as
+/// `get_guarded` does). No proxy from the environment, and 4xx/5xx come back as responses (see
+/// the module docs).
 fn agent_config(
     connect: Duration,
     read: Duration,
     overall: Option<Duration>,
+    capped: bool,
 ) -> ConfigBuilder<AgentScope> {
+    let idle = (!capped).then_some(read);
     Agent::config_builder()
         .timeout_connect(Some(connect))
-        .timeout_per_read(Some(read))
-        .timeout_per_write(Some(read))
+        .timeout_per_read(idle)
+        .timeout_per_write(idle)
         .timeout_global(overall)
         .user_agent(USER_AGENT)
         .proxy(None)
@@ -88,7 +94,7 @@ fn agent_with(config: Config, public_only: bool) -> Agent {
 /// Build an agent with [`agent_config`]'s timeouts, following no redirects.
 pub(crate) fn build_agent(connect: Duration, read: Duration, overall: Option<Duration>) -> Agent {
     agent_with(
-        agent_config(connect, read, overall)
+        agent_config(connect, read, overall, overall.is_some())
             .max_redirects(0)
             .build(),
         false,
@@ -111,7 +117,7 @@ pub(crate) fn build_guarded_agent(
     read: Duration,
     overall: Option<Duration>,
 ) -> GuardedAgent {
-    let config = agent_config(connect, read, None)
+    let config = agent_config(connect, read, None, overall.is_some())
         .https_only(true)
         .max_redirects(0)
         .build();
@@ -124,7 +130,7 @@ pub(crate) fn build_guarded_agent(
 /// `api()`'s agent with these timeouts: follows up to [`API_MAX_REDIRECTS`] redirects.
 fn build_api_agent(connect: Duration, read: Duration, overall: Option<Duration>) -> Agent {
     agent_with(
-        agent_config(connect, read, overall)
+        agent_config(connect, read, overall, overall.is_some())
             .max_redirects(API_MAX_REDIRECTS)
             // For "(redirected from …)" in a status error's text, as ureq 2 wrote it.
             .save_redirect_history(true)
@@ -284,15 +290,24 @@ fn lookup_within(netloc: &str, timeout: NextTimeout) -> Result<Vec<SocketAddr>, 
     }
 }
 
-/// ureq's own connector, called once per address so the connect budget is one absolute
-/// deadline across all of them, as in ureq 2. ureq 3's own loop splits the budget between
-/// addresses up front and doesn't recheck it after a refused or unreachable address, so a host
-/// whose addresses each refuse slowly could take several times the budget.
+/// TCP then TLS, built from ureq's own connectors, so that address fallback covers the TCP
+/// connect alone, as ureq 2's `connect_host` did. ureq 3's own TCP loop splits the budget
+/// between addresses up front and doesn't recheck it after a refused or unreachable address,
+/// so a host whose addresses each refuse slowly could take several times the budget; here
+/// [`connect_each`] keeps one absolute deadline. TLS then runs once, on the connection that
+/// was made, within what is left of the same connect budget (ureq 3 counts the handshake as
+/// part of connecting).
+///
+/// No proxy step: every Silo agent has `proxy(None)`, so ureq's SOCKS / CONNECT connectors
+/// would only pass through.
 ///
 /// An I/O failure while connecting (refused, unreachable, reset during the TLS handshake) is
 /// reported as [`ConnectFailed`], ureq 2's "Connection Failed". Other errors pass through.
 #[derive(Debug, Default)]
-struct SiloConnector(DefaultConnector);
+struct SiloConnector {
+    tcp: TcpConnector,
+    tls: RustlsConnector,
+}
 
 impl Connector<()> for SiloConnector {
     type Out = Box<dyn Transport>;
@@ -300,34 +315,51 @@ impl Connector<()> for SiloConnector {
     fn connect(
         &self,
         details: &ConnectionDetails,
-        chained: Option<()>,
+        _chained: Option<()>,
     ) -> Result<Option<Self::Out>, ureq::Error> {
+        use ureq::unversioned::transport::time::{Duration as Budget, Instant as Clock};
         // ureq's clock (tests inside ureq inject one); a real request always has an exact time.
         let now = || match (details.current_time)() {
-            ureq::unversioned::transport::time::Instant::Exact(t) => t,
+            Clock::Exact(t) => t,
             _ => Instant::now(),
         };
-        connect_each(&details.addrs, details.timeout, &now, |addr, timeout| {
-            let mut one = details.resolver.empty();
-            one.push(addr);
-            let single = ConnectionDetails {
-                uri: details.uri,
-                addrs: one,
-                config: details.config,
-                request_level: details.request_level,
-                resolver: details.resolver,
-                now: (details.current_time)(),
-                timeout,
-                current_time: details.current_time.clone(),
-                run_connector: details.run_connector.clone(),
-                register_shutdown: details.register_shutdown.clone(),
-            };
-            self.0.connect(&single, chained)
-        })
-        .map_err(|e| match e {
+        let with = |addrs: ResolvedSocketAddrs, timeout: NextTimeout| ConnectionDetails {
+            uri: details.uri,
+            addrs,
+            config: details.config,
+            request_level: details.request_level,
+            resolver: details.resolver,
+            now: (details.current_time)(),
+            timeout,
+            current_time: details.current_time.clone(),
+            run_connector: details.run_connector.clone(),
+            register_shutdown: details.register_shutdown.clone(),
+        };
+        let tagged = |e: ureq::Error| match e {
             ureq::Error::Io(source) => ConnectFailed::error(source),
             e => e,
+        };
+        let start = now();
+        let tcp = connect_each(&details.addrs, details.timeout, &now, |addr, timeout| {
+            let mut one = details.resolver.empty();
+            one.push(addr);
+            Connector::<()>::connect(&self.tcp, &with(one, timeout), None)?
+                .ok_or(ureq::Error::ConnectionFailed)
         })
+        .map_err(tagged)?;
+        let mut left = details.timeout;
+        if !left.after.is_not_happening() {
+            let rest = (start + *left.after).saturating_duration_since(now());
+            if rest.is_zero() {
+                return Err(ureq::Error::Timeout(left.reason));
+            }
+            left.after = Budget::Exact(rest.max(MIN_ATTEMPT));
+        }
+        let tls = self
+            .tls
+            .connect(&with(details.addrs.clone(), left), Some(tcp))
+            .map_err(tagged)?;
+        Ok(tls.map(|t| Box::new(t) as Box<dyn Transport>))
     }
 }
 
@@ -1244,16 +1276,11 @@ mod tests {
                 Some(Duration::from_secs(10)),
                 "{name}"
             );
-            assert_eq!(
-                c.timeout_per_read(),
-                Some(Duration::from_secs(30)),
-                "{name}"
-            );
-            assert_eq!(
-                c.timeout_per_write(),
-                Some(Duration::from_secs(30)),
-                "{name}"
-            );
+            // ureq 2: reads and writes wait for whatever is left of the overall cap when
+            // there is one; `timeout_read` / `timeout_write` (30 s) only without one.
+            let idle = (name == "download").then_some(Duration::from_secs(30));
+            assert_eq!(c.timeout_per_read(), idle, "{name}");
+            assert_eq!(c.timeout_per_write(), idle, "{name}");
         }
         assert_eq!(api().config().max_redirects(), API_MAX_REDIRECTS);
         assert_eq!(
@@ -2053,5 +2080,58 @@ mod tests {
         );
         assert!(matches!(res, Err(ureq::Error::Tls(_))), "{res:?}");
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn a_capped_request_waits_past_the_read_timeout_within_its_cap() {
+        // ureq 2 gave a request with an overall cap the rest of that cap for each read, not the
+        // 30 s `timeout_read`; here 500 ms "read" and a 3 s cap, the server answering after 1 s.
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let Some(mut s) = accept_within(&listener, Instant::now() + Duration::from_secs(5))
+            else {
+                return;
+            };
+            let _ = read_request(&mut s);
+            std::thread::sleep(Duration::from_secs(1));
+            let _ = s.write_all(answer("200 OK", "", "late").as_bytes());
+        });
+        let capped = build_agent(
+            Duration::from_millis(500),
+            Duration::from_millis(500),
+            Some(Duration::from_secs(3)),
+        );
+        let body = capped
+            .get(&format!("http://{addr}/"))
+            .call_checked()
+            .unwrap()
+            .into_string()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(body, "late");
+    }
+
+    #[test]
+    fn https_works_end_to_end_through_silo_connector() {
+        // TCP from `connect_each`, then rustls on top: a real handshake against a public host.
+        // Needs the network: runs only with SILO_NET_TESTS set.
+        if std::env::var_os("SILO_NET_TESTS").is_none() {
+            return;
+        }
+        let resp = api()
+            .get("https://api.github.com/zen")
+            .call_checked()
+            .unwrap();
+        assert!(!resp.into_string().unwrap().is_empty());
+        let resp = get_guarded(
+            guarded_api(),
+            "https://github.com/HLLMR-VENTURES/silo",
+            &public_https,
+            None,
+        )
+        .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
     }
 }
