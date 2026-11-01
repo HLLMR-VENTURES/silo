@@ -296,11 +296,18 @@ fn stale_link_probes_are_swept_and_fresh_ones_and_mods_are_kept() {
     let old_sym = mods.join(".silo-symlink-probe-1-0.link");
     let fresh = mods.join(".silo-hardlink-probe-1-1.link");
     let mine = mods.join("FS25_A.zip");
-    for p in [&old, &old_sym, &fresh, &mine] {
+    // Probe-like names that aren't probes (#394): data in it, or not a name a probe makes.
+    let holds_data = mods.join(".silo-hardlink-probe-1-2.link");
+    let notes = mods.join(".silo-hardlink-probe-notes.txt");
+    let legacy = mods.join(".silo-hardlink-probe");
+    for p in [&old, &old_sym, &fresh] {
+        std::fs::write(p, b"").unwrap();
+    }
+    for p in [&mine, &holds_data, &notes, &legacy] {
         std::fs::write(p, b"x").unwrap();
     }
     let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-    for p in [&old, &old_sym, &mine] {
+    for p in [&old, &old_sym, &mine, &holds_data, &notes, &legacy] {
         std::fs::File::options()
             .write(true)
             .open(p)
@@ -312,6 +319,7 @@ fn stale_link_probes_are_swept_and_fresh_ones_and_mods_are_kept() {
     assert!(!old.exists() && !old_sym.exists(), "stale probes removed");
     assert!(fresh.exists(), "a probe running right now is kept");
     assert!(mine.exists(), "never anything else");
+    assert!(holds_data.exists() && notes.exists() && legacy.exists());
     let _ = std::fs::remove_dir_all(&base);
 }
 
