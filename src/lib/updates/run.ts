@@ -86,6 +86,19 @@ async function checkLinked(
 }
 
 /**
+ * What the Updates list does when Silo links mods to their catalog entries in the background
+ * (#402): check again now, again once the check that's running ends, or nothing (no check has
+ * run yet, and the first one sees the links).
+ */
+export function recheckOnLink(s: {
+  checking: boolean;
+  checked: boolean;
+}): "now" | "after" | "no" {
+  if (s.checking) return "after";
+  return s.checked ? "now" : "no";
+}
+
+/**
  * Check the library: one catalog request for every mod (GitHub and ModHub alike), then each
  * linked GitHub repo directly.
  * @param mods the library

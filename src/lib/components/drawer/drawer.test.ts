@@ -245,11 +245,11 @@ describe("drawer lookups", () => {
     await settle();
     expect(screen.getByText(/Not in Silo's catalog/)).toBeInTheDocument();
     expect(catalogDetailByTech).toHaveBeenCalledTimes(1);
-    // Another file linked: nothing to reload.
-    linked(["C:/mods/FS25_Other.zip"]);
+    // Another mod linked: nothing to reload.
+    linked(["FS25_Other"]);
     await settle();
     expect(catalogDetailByTech).toHaveBeenCalledTimes(1);
-    // This one: the drawer asks again and shows the entry.
+    // This mod (a link holds for every copy of its bytes): the drawer asks again.
     vi.mocked(catalogCheckUpdates).mockImplementationOnce(() =>
       Promise.resolve([
         {
@@ -261,7 +261,7 @@ describe("drawer lookups", () => {
         },
       ]),
     );
-    linked([path]);
+    linked(["FS25_FieldToDoList"]);
     await settle();
     expect(catalogDetailByTech).toHaveBeenCalledTimes(2);
     expect(catalogCheckUpdates).toHaveBeenCalledTimes(2);

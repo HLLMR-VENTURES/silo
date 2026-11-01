@@ -136,7 +136,7 @@ async fn scan_mods(
         // Only with the user's leave to send mod names to the catalog (the startup update
         // check): the backfill asks about some of them (#402).
         if link_catalog == Some(true) {
-            spawn_alias_backfill(app, &result.mods);
+            spawn_alias_backfill(app, backfill_zips(&result.mods));
         }
         Ok::<_, String>(result)
     })
@@ -148,7 +148,7 @@ async fn scan_mods(
 /// the next scan.
 const ALIAS_BACKFILL_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Held while a catalog-link backfill runs, so two never look at the same files at once.
+/// Held while a catalog-link backfill runs, so two never run at once.
 static ALIAS_BACKFILL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The library zips in `mods` (from a scan) as the catalog-link backfill takes them.
@@ -166,21 +166,18 @@ fn backfill_zips(mods: &[scan::ModEntry]) -> Vec<aliasbackfill::LibraryZip> {
 }
 
 /// Link the zips in `zips` that Silo installed under another name before catalog links were
-/// recorded at install (#402; see `aliasbackfill`). Waits for a backfill already running when
-/// `wait`, otherwise leaves the files to it. Never fails: problems are logged. Tells the window
-/// which files were linked (`catalog:linked`, their paths), so a drawer showing one reloads.
-fn backfill_catalog_links(app: &tauri::AppHandle, zips: &[aliasbackfill::LibraryZip], wait: bool) {
+/// recorded at install (#402; see `aliasbackfill`). Leaves the files to a run already going (it
+/// or a later one takes them). Never fails: problems are logged. Tells the window which mods were
+/// linked (`catalog:linked`, their techNames: a link is for the name and bytes, so every copy of
+/// those bytes is linked), so a drawer showing one and the Updates list ask again.
+fn backfill_catalog_links(app: &tauri::AppHandle, zips: &[aliasbackfill::LibraryZip]) {
     if zips.is_empty() {
         return;
     }
-    let _running = if wait {
-        ALIAS_BACKFILL.lock().unwrap_or_else(|e| e.into_inner())
-    } else {
-        match ALIAS_BACKFILL.try_lock() {
-            Ok(g) => g,
-            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return,
-        }
+    let _running = match ALIAS_BACKFILL.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
     };
     let ran = (|| -> Result<Vec<String>, String> {
         let conn = db::open(&db_path(app)?)?;
@@ -193,11 +190,15 @@ fn backfill_catalog_links(app: &tauri::AppHandle, zips: &[aliasbackfill::Library
         let out = aliasbackfill::run(&conn, zips, &catalog, provenance::sha256_file, || {
             library_write_within(ALIAS_BACKFILL_WAIT)
         });
-        let linked: Vec<String> = out
-            .iter()
-            .filter(|(_, o)| matches!(o, aliasbackfill::Outcome::Linked(_)))
-            .map(|(p, _)| p.to_string_lossy().into_owned())
-            .collect();
+        let mut linked: Vec<String> = Vec::new();
+        for (path, outcome) in &out {
+            let tech = zips.iter().find(|z| &z.path == path).map(|z| &z.tech_name);
+            if let (aliasbackfill::Outcome::Linked(_), Some(t)) = (outcome, tech) {
+                if !linked.contains(t) {
+                    linked.push(t.clone());
+                }
+            }
+        }
         if !out.is_empty() {
             log::info!(
                 "[catalog] link backfill looked at {} mods, linked {}",
@@ -216,14 +217,13 @@ fn backfill_catalog_links(app: &tauri::AppHandle, zips: &[aliasbackfill::Library
     }
 }
 
-/// After a scan, run the catalog-link backfill on the blocking pool without holding up the
-/// scan's answer. Skipped while another run is going (it covers these files or the next does).
-fn spawn_alias_backfill(app: tauri::AppHandle, mods: &[scan::ModEntry]) {
-    let zips = backfill_zips(mods);
+/// Run the catalog-link backfill on the blocking pool without holding up the caller (a scan or
+/// an update check): its links arrive through `catalog:linked`.
+fn spawn_alias_backfill(app: tauri::AppHandle, zips: Vec<aliasbackfill::LibraryZip>) {
     if zips.is_empty() {
         return;
     }
-    tauri::async_runtime::spawn_blocking(move || backfill_catalog_links(&app, &zips, false));
+    tauri::async_runtime::spawn_blocking(move || backfill_catalog_links(&app, &zips));
 }
 
 /// What a scan reads, and the one folder whose `organized` manifest it may rewrite.
@@ -2444,11 +2444,11 @@ async fn catalog_check_updates(
 ) -> Result<Vec<CatalogUpdate>, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<CatalogUpdate>, String> {
         let base = siloapi_base(&app)?;
-        // An update check of the library (not the drawer's own) first links the zips Silo
-        // installed under another name before it kept catalog links (#402), so this check
-        // already finds them.
+        // An update check of the library (not the drawer's own) also links the zips Silo
+        // installed under another name before it kept catalog links (#402). It runs beside this
+        // check, not before it; the Updates list asks again for the mods it links.
         if link_catalog == Some(true) {
-            backfill_catalog_links(&app, &local_zips(&mods), true);
+            spawn_alias_backfill(app.clone(), local_zips(&mods));
         }
         // A zip Silo installed from a catalog entry under another name is looked up as that
         // entry (#386); a file is hashed only when an alias of its size is recorded for its name.

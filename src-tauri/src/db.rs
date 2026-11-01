@@ -1129,6 +1129,19 @@ pub fn forget_catalog_alias(
     Ok(())
 }
 
+/// The mods the user left out of update checks (#333). An error when that can't be read, so a
+/// caller that must leave them out never takes "none".
+pub fn skip_update_names(conn: &Connection) -> Result<HashSet<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT tech_name FROM curation WHERE skip_updates != 0")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<HashSet<_>>>()
+        .map_err(|e| e.to_string())
+}
+
 /// What the catalog-link backfill (#402) noted about one version of a library file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AliasCheck {
@@ -2104,6 +2117,30 @@ mod tests {
             "the links are kept"
         );
         assert_eq!(alias_check(&conn, "m/FS25_X.zip").unwrap(), None);
+    }
+
+    #[test]
+    fn the_mods_left_out_of_update_checks_are_listed() {
+        let path = temp_db("skip_names");
+        let conn = open(&path).unwrap();
+        let row = |name: &str, skip: bool| CurationRow {
+            tech_name: name.into(),
+            favorite: !skip,
+            hidden: false,
+            broken: false,
+            rating: 0,
+            note: None,
+            skip_updates: skip,
+        };
+        set_curation(&conn, &row("FS25_A", true)).unwrap();
+        set_curation(&conn, &row("FS25_B", false)).unwrap();
+        let names = skip_update_names(&conn).unwrap();
+        assert_eq!(names, HashSet::from(["FS25_A".to_string()]));
+        conn.execute_batch("DROP TABLE curation").unwrap();
+        assert!(
+            skip_update_names(&conn).is_err(),
+            "unreadable is an error, not none"
+        );
     }
 
     #[test]

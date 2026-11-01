@@ -50,6 +50,7 @@
     revealInFolder,
     checkModUpdate,
     catalogCheckUpdates,
+    onCatalogLinked,
     downloadUpdate,
     appBusy,
     forceQuit,
@@ -121,6 +122,7 @@
     checkBlockedReason,
     installBlockedReason,
     recheckRow,
+    recheckOnLink,
     runUpdateCheck,
     updateAll,
     updateAllSummary,
@@ -2155,6 +2157,20 @@
       updateChecking = false;
       updateProgress = null;
     }
+    if (recheckAfterLink) {
+      recheckAfterLink = false;
+      void checkAllUpdates(true);
+    }
+  }
+
+  /** Silo linked mods to their catalog entries while a check ran (#402): check once more after. */
+  let recheckAfterLink = false;
+
+  /** Mods Silo just linked to their catalog entries (#402) get checked again. */
+  function onCatalogLinkedMods() {
+    const when = recheckOnLink({ checking: updateChecking, checked: updateCheckedAt != null });
+    if (when === "now") void checkAllUpdates(true);
+    else if (when === "after") recheckAfterLink = true;
   }
 
   /** "Couldn't check" → Try again: that mod's linked repo only. */
@@ -3515,6 +3531,7 @@
     let unlisten: (() => void) | undefined;
     let focusUnlisten: (() => void) | undefined;
     let moveUnlisten: (() => void) | undefined;
+    let linkedUnlisten: (() => void) | undefined;
     let closeUnlisten: (() => void) | undefined;
     // Suppress the WebView's built-in right-click menu (reload/inspect junk) app-wide,
     // but keep the native cut/copy/paste menu inside editable fields. Our own row menu
@@ -3535,6 +3552,7 @@
         scanOp?.progress(p.done, p.total);
       });
       moveUnlisten = await archiveMove.listen();
+      linkedUnlisten = await onCatalogLinked(onCatalogLinkedMods).catch(() => undefined);
       try {
         const rows = await getCuration();
         curationSaved.load(rows.map((r) => [r.techName, r] as const));
@@ -3666,6 +3684,7 @@
       void deepLinks.then((stop) => stop());
       focusUnlisten?.();
       moveUnlisten?.();
+      linkedUnlisten?.();
       closeUnlisten?.();
       window.removeEventListener("contextmenu", onCtx);
     };

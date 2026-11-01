@@ -141,8 +141,8 @@
   $effect(() => {
     let stop: (() => void) | null = null;
     let gone = false;
-    void onCatalogLinked((paths) => {
-      if (paths.includes(untrack(() => mod.path))) linked++;
+    void onCatalogLinked((names) => {
+      if (names.includes(untrack(() => mod.techName))) linked++;
     })
       .then((un) => (gone ? un() : (stop = un)))
       .catch(() => {});

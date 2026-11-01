@@ -23,6 +23,7 @@ import {
 import {
   checkBlockedReason,
   installBlockedReason,
+  recheckOnLink,
   recheckRow,
   runUpdateCheck,
   updateAll,
@@ -595,5 +596,14 @@ describe("automatic update checks (opt-in)", () => {
       get.mockRestore();
       set.mockRestore();
     }
+  });
+});
+
+describe("checking again when Silo links mods to the catalog (#402)", () => {
+  it("checks now after a check, once more after a running one, and not before any", () => {
+    expect(recheckOnLink({ checking: false, checked: true })).toBe("now");
+    expect(recheckOnLink({ checking: true, checked: true })).toBe("after");
+    expect(recheckOnLink({ checking: true, checked: false })).toBe("after");
+    expect(recheckOnLink({ checking: false, checked: false })).toBe("no");
   });
 });

@@ -24,16 +24,17 @@
 //! is an install's (`catalogalias::record`), made under the library lock.
 //!
 //! When it runs: it sends some mod names (and, for those, their versions) to the catalog, so only
-//! with the user's leave to check for updates: after a library scan when the startup update
-//! check is on, and at the start of an update check of the library (so that check already finds
-//! the links). Off the UI thread, one run at a time (a scan during a run leaves its files to that
-//! run or a later one; an update check waits for it). Each version of a file (its path, size and
-//! modified time, as the scan cache keys it) is decided once: then it isn't hashed or looked up
-//! again until the file changes. A failed or offline lookup, a busy library, or a file that can't
-//! be read or changes meanwhile decides nothing, so that file is tried again next time, behind
-//! files not tried yet; a hash already taken is kept for it. A run hashes and looks up at most
-//! `MAX_HASHED` files; the rest wait for the next run. Nothing here is shown to the user as an
-//! error; it's only logged.
+//! with the user's leave to check for updates, and never for a mod left out of update checks:
+//! after a library scan when the startup update check is on, and beside an update check of the
+//! library. Off the UI thread, in the background, one run at a time (a run asked for while one
+//! is going is skipped; a later one takes its files). The window hears which mods were linked
+//! (`catalog:linked`), and the drawer and the Updates list ask again. Each version of a file (its
+//! path, size and modified time, as the scan cache keys it) is decided once: then it isn't hashed
+//! or looked up again until the file changes. A failed or offline lookup, a busy library, or a
+//! file that can't be read or changes meanwhile decides nothing, so that file is tried again
+//! next time, behind files not tried yet; a hash already taken is kept for it. A run stops at its
+//! `Limits` (files hashed, manifest requests, time); the rest wait for the next run. Nothing here
+//! is shown to the user as an error; it's only logged.
 
 use crate::catalogalias::{self, Link};
 use crate::db;
@@ -44,6 +45,57 @@ use std::path::{Path, PathBuf};
 
 /// The most files one run hashes and looks up.
 pub const MAX_HASHED: usize = 25;
+
+/// How much one run may do: files hashed, manifest requests, and time (checked between files
+/// and before each request, so a run ends within about one request's timeout of it).
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub max_hashed: usize,
+    pub max_manifests: usize,
+    pub time: std::time::Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            max_hashed: MAX_HASHED,
+            max_manifests: 10,
+            time: std::time::Duration::from_secs(60),
+        }
+    }
+}
+
+/// What's left of a run's `Limits`.
+struct Budget {
+    until: std::time::Instant,
+    manifests: std::cell::Cell<usize>,
+}
+
+impl Budget {
+    fn new(limits: &Limits) -> Self {
+        Budget {
+            until: std::time::Instant::now() + limits.time,
+            manifests: std::cell::Cell::new(limits.max_manifests),
+        }
+    }
+
+    fn out_of_time(&self) -> bool {
+        std::time::Instant::now() >= self.until
+    }
+
+    /// Take one manifest request, if the run has one left.
+    fn take_manifest(&self) -> bool {
+        let left = self.manifests.get();
+        if left == 0 || self.out_of_time() {
+            return false;
+        }
+        self.manifests.set(left - 1);
+        true
+    }
+}
+
+/// Why a file waits for the next run when this one has done all it may.
+const BUDGET_USED: &str = "this run has done all it may; the next one goes on";
 
 /// The most listing pages read (100 entries each); a longer listing is a failed lookup.
 const MAX_LIST_PAGES: u32 = 20;
@@ -179,10 +231,10 @@ struct Pending<'a> {
     noted: Option<db::AliasCheck>,
 }
 
-/// Look up the zips in `zips` that need it (see the module notes) and record the links found.
-/// `hash` gives a file's whole-file SHA-256; `lock` takes the library lock for a record. Never
-/// fails: what couldn't be done is logged and tried again after the next scan. Returns what it
-/// made of each zip it looked at.
+/// Look up the zips in `zips` that need it (see the module notes) and record the links found,
+/// within the default `Limits`. `hash` gives a file's whole-file SHA-256; `lock` takes the
+/// library lock for a record. Never fails: what couldn't be done is logged and tried again on
+/// a later run. Returns what it made of each zip it looked at.
 pub fn run<G>(
     conn: &Connection,
     zips: &[LibraryZip],
@@ -190,10 +242,35 @@ pub fn run<G>(
     hash: impl Fn(&Path) -> Result<String, String>,
     lock: impl Fn() -> Result<G, String>,
 ) -> Vec<(PathBuf, Outcome)> {
+    run_with(conn, zips, catalog, hash, lock, Limits::default())
+}
+
+/// `run` within `limits`.
+pub fn run_with<G>(
+    conn: &Connection,
+    zips: &[LibraryZip],
+    catalog: &impl Catalog,
+    hash: impl Fn(&Path) -> Result<String, String>,
+    lock: impl Fn() -> Result<G, String>,
+    limits: Limits,
+) -> Vec<(PathBuf, Outcome)> {
+    let budget = Budget::new(&limits);
     let mut out = Vec::new();
+    // Mods the user left out of update checks (#333) aren't asked about either.
+    let skipped = match db::skip_update_names(conn) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                "[catalog] link backfill skipped: couldn't read which mods to leave out: {e}"
+            );
+            return out;
+        }
+    };
     let mut pending = Vec::new();
     for z in zips {
-        if catalogalias::zip_tech_name(&z.path).as_deref() != Some(z.tech_name.as_str()) {
+        if catalogalias::zip_tech_name(&z.path).as_deref() != Some(z.tech_name.as_str())
+            || skipped.contains(&z.tech_name)
+        {
             continue;
         }
         let noted = match db::alias_check(conn, &path_key(z)) {
@@ -244,8 +321,8 @@ pub fn run<G>(
     if named.is_empty() {
         return out;
     }
-    if named.len() > MAX_HASHED {
-        let later = named.split_off(MAX_HASHED);
+    if named.len() > limits.max_hashed {
+        let later = named.split_off(limits.max_hashed);
         retry_all(
             later.iter().map(|(p, _)| p.zip),
             "left for the next scan",
@@ -265,8 +342,10 @@ pub fn run<G>(
     for (p, by_name) in named {
         let (outcome, sha) = if known.contains(&p.zip.tech_name) {
             (Outcome::InCatalog, None)
+        } else if budget.out_of_time() {
+            (Outcome::Retry(BUDGET_USED.to_string()), None)
         } else {
-            check_bytes(conn, &p, &by_name, &entries, catalog, &hash, &lock)
+            check_bytes(conn, &p, &by_name, &entries, catalog, &hash, &lock, &budget)
         };
         settle(conn, p.zip, outcome, sha.as_deref(), &mut out);
     }
@@ -276,6 +355,7 @@ pub fn run<G>(
 /// Hash the zip (or take the hash noted on an earlier try) and link it when exactly one entry
 /// lists its bytes and that entry downloads a file with its name. Returns the outcome and the
 /// hash, when it was taken.
+#[allow(clippy::too_many_arguments)]
 fn check_bytes<G>(
     conn: &Connection,
     p: &Pending,
@@ -284,18 +364,26 @@ fn check_bytes<G>(
     catalog: &impl Catalog,
     hash: &impl Fn(&Path) -> Result<String, String>,
     lock: &impl Fn() -> Result<G, String>,
+    budget: &Budget,
 ) -> (Outcome, Option<String>) {
     let z = p.zip;
+    let noted_sha = p.noted.as_ref().and_then(|n| n.sha256.clone());
+    // A file that can't be read, or isn't what the scan saw, waits behind the rest next time
+    // (any hash noted for this version is kept).
+    let not_now = |why: String| {
+        note(conn, z, noted_sha.as_deref(), false);
+        (Outcome::Retry(why), None)
+    };
     if let Err(why) = unchanged(z) {
-        return (Outcome::Retry(why), None);
+        return not_now(why);
     }
-    let sha = match p.noted.as_ref().and_then(|n| n.sha256.clone()) {
+    let sha = match noted_sha.clone() {
         Some(h) => h,
         None => {
             let taken = hash(&z.path).map(|h| h.to_ascii_lowercase());
             // Hashed as the scan saw it, not mid-change.
             if let Err(why) = unchanged(z) {
-                return (Outcome::Retry(why), None);
+                return not_now(why);
             }
             // Noted now, so a try that fails from here on doesn't hash the file again, and the
             // file waits behind the rest next time.
@@ -306,7 +394,7 @@ fn check_bytes<G>(
             }
         }
     };
-    let outcome = match_bytes(conn, z, &sha, by_name, entries, catalog, lock);
+    let outcome = match_bytes(conn, z, &sha, by_name, entries, catalog, lock, budget);
     if !outcome.decided() && p.noted.is_some() {
         // A retry with a hash noted earlier: it waits behind the rest next time too.
         note(conn, z, Some(&sha), false);
@@ -315,6 +403,7 @@ fn check_bytes<G>(
 }
 
 /// What the catalog says about the bytes `sha` of the zip `z`.
+#[allow(clippy::too_many_arguments)]
 fn match_bytes<G>(
     conn: &Connection,
     z: &LibraryZip,
@@ -323,6 +412,7 @@ fn match_bytes<G>(
     entries: &[Entry],
     catalog: &impl Catalog,
     lock: &impl Fn() -> Result<G, String>,
+    budget: &Budget,
 ) -> Outcome {
     match catalogalias::recorded_entry(conn, &z.tech_name, sha) {
         Ok(Some(_)) => return Outcome::AlreadyLinked,
@@ -344,6 +434,9 @@ fn match_bytes<G>(
         for &entry in by_name {
             if entry.lists_latest(sha) {
                 continue;
+            }
+            if !budget.take_manifest() {
+                return Outcome::Retry(BUDGET_USED.to_string());
             }
             match catalog.archive_sha256(&entry.id, version) {
                 Ok(Some(h)) if h.eq_ignore_ascii_case(sha) => add_once(&mut matched, entry),
@@ -1079,6 +1172,124 @@ mod tests {
         let out = backfill(&conn, &[scanned(&file, Some("1.0"))], &fake, &Cell::new(0));
         assert_eq!(out[0].1, Outcome::NoMatch);
         assert!(!catalogalias::has_any(&conn, "FS25_FieldToDoList").unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn files_the_scan_couldnt_read_dont_hold_up_the_rest() {
+        let (dir, conn) = setup("starve_meta");
+        let mut entries = Vec::new();
+        let mut zips = Vec::new();
+        for i in 0..=MAX_HASHED {
+            let name = format!("FS25_File{i:02}.zip");
+            let file = write_zip(&dir, &name, format!("bytes {i}").as_bytes());
+            let mut zip = scanned(&file, None);
+            if i < MAX_HASHED {
+                // The scan couldn't read its size or time (it lists those as 0).
+                zip.size = 0;
+                zip.mtime_ms = 0;
+            }
+            zips.push(zip);
+            entries.push(Entry {
+                id: format!("cat-{i}"),
+                tech_name: Some(format!("FS25_Entry{i}")),
+                archive_sha256: Some(sha(format!("bytes {i}").as_bytes())),
+                download_urls: vec![format!(
+                    "https://github.com/o/r/releases/download/v1/{name}"
+                )],
+            });
+        }
+        let fake = Fake::with(entries);
+        let hashed = Cell::new(0);
+        let out = backfill(&conn, &zips, &fake, &hashed);
+        assert!(
+            out.iter().all(|(_, o)| matches!(o, Outcome::Retry(_))),
+            "{out:?}"
+        );
+        let out = backfill(&conn, &zips, &fake, &hashed);
+        let last = &zips[MAX_HASHED].path;
+        let got = out.iter().find(|(p, _)| p == last).map(|(_, o)| o.clone());
+        assert_eq!(got, Some(Outcome::Linked(format!("cat-{MAX_HASHED}"))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_mod_left_out_of_update_checks_is_never_asked_about() {
+        let (dir, conn) = setup("skip");
+        let file = write_zip(&dir, "FS25_FieldToDoList.zip", b"build one");
+        db::set_curation(
+            &conn,
+            &db::CurationRow {
+                tech_name: "FS25_FieldToDoList".into(),
+                favorite: false,
+                hidden: false,
+                broken: false,
+                rating: 0,
+                note: None,
+                skip_updates: true,
+            },
+        )
+        .unwrap();
+        let fake = Fake::with(vec![todo(Some(b"build one"))]);
+        let hashed = Cell::new(0);
+        let out = backfill(&conn, &[scanned(&file, Some("1"))], &fake, &hashed);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(fake.asked(), 0, "no name, no version sent");
+        assert_eq!(hashed.get(), 0);
+        assert!(!catalogalias::has_any(&conn, "FS25_FieldToDoList").unwrap());
+        // When that can't be read, nothing is asked at all.
+        conn.execute_batch("DROP TABLE curation").unwrap();
+        let out = backfill(&conn, &[scanned(&file, Some("1"))], &fake, &hashed);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(fake.asked(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_run_stops_at_its_request_and_time_limits_and_the_next_goes_on() {
+        let (dir, conn) = setup("budget");
+        // Two older builds, each needing its own manifest request.
+        let mut entries = Vec::new();
+        let mut zips = Vec::new();
+        let mut fake = Fake::default();
+        for i in 0..2 {
+            let name = format!("FS25_Old{i}.zip");
+            let file = write_zip(&dir, &name, format!("old {i}").as_bytes());
+            zips.push(scanned(&file, Some("1.0")));
+            entries.push(Entry {
+                id: format!("cat-{i}"),
+                tech_name: Some(format!("FS25_Entry{i}")),
+                archive_sha256: Some(sha(b"newer")),
+                download_urls: vec![format!(
+                    "https://github.com/o/r/releases/download/v2/{name}"
+                )],
+            });
+            fake = fake.build(&format!("cat-{i}"), "1.0", format!("old {i}").as_bytes());
+        }
+        fake.entries = entries;
+        let hash = crate::provenance::sha256_file;
+        let one = Limits {
+            max_manifests: 1,
+            ..Limits::default()
+        };
+        let out = run_with(&conn, &zips, &fake, hash, || Ok(()), one);
+        assert_eq!(out[0].1, Outcome::Linked("cat-0".into()));
+        assert!(matches!(out[1].1, Outcome::Retry(_)), "{out:?}");
+        assert_eq!(fake.asked_builds.borrow().len(), 1);
+        // No time left: nothing is hashed or asked, and nothing is settled.
+        let none = Limits {
+            time: std::time::Duration::ZERO,
+            ..Limits::default()
+        };
+        let out = run_with(&conn, &zips, &fake, hash, || Ok(()), none);
+        assert!(matches!(out[0].1, Outcome::Retry(_)), "{out:?}");
+        assert_eq!(fake.asked_builds.borrow().len(), 1);
+        // The next run goes on with the file left.
+        let out = run_with(&conn, &zips, &fake, hash, || Ok(()), one);
+        assert_eq!(
+            out,
+            [(zips[1].path.clone(), Outcome::Linked("cat-1".into()))]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

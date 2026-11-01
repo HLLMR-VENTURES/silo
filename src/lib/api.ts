@@ -359,9 +359,10 @@ export function scanMods(
   return invoke<ScanResult>("scan_mods", { roots: roots ?? null, linkCatalog });
 }
 
-/** Silo linked these library files (paths) to their catalog entries in the background (#402). */
+/** Silo linked library mods (these techNames) to their catalog entries in the background
+ *  (#402). A link is for a file name and its bytes, so it holds for every copy of them. */
 export function onCatalogLinked(
-  handler: (paths: string[]) => void,
+  handler: (techNames: string[]) => void,
 ): Promise<UnlistenFn> {
   return listen<string[]>("catalog:linked", (e) => handler(e.payload));
 }
