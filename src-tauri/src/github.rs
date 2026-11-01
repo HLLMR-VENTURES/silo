@@ -147,24 +147,102 @@ pub fn latest_release(owner: &str, repo: &str, token: Option<&str>) -> Result<Re
 }
 
 /// Compare a release tag against the installed version, tolerating a leading `v`
-/// and `.`/`-`/`+` separators.
+/// and `.`/`-`/`_` separators. Semver-style suffixes count the way semver says: `+build`
+/// metadata is ignored, and a `-prerelease` with a word in it sorts before the same version
+/// without one (`1.2.3-rc.1` < `1.2.3`). All-numeric versions (`1.0.0.0`, `1-2-4`) compare
+/// part by part, as they always have.
 pub fn is_newer(latest_tag: &str, current: &str) -> bool {
-    let norm = |s: &str| {
-        s.trim_start_matches(['v', 'V'])
-            .split(['.', '-', '+', '_'])
-            .filter_map(|p| p.parse::<u64>().ok())
-            .collect::<Vec<u64>>()
-    };
-    let a = norm(latest_tag);
-    let b = norm(current);
-    for i in 0..a.len().max(b.len()) {
-        let x = a.get(i).copied().unwrap_or(0);
-        let y = b.get(i).copied().unwrap_or(0);
+    let (a_core, a_pre) = split_version(latest_tag);
+    let (b_core, b_pre) = split_version(current);
+    for i in 0..a_core.len().max(b_core.len()) {
+        let x = a_core.get(i).copied().unwrap_or(0);
+        let y = b_core.get(i).copied().unwrap_or(0);
         if x != y {
             return x > y;
         }
     }
-    false
+    match (a_pre, b_pre) {
+        (None, Some(_)) => true, // the release, over its own prerelease
+        (Some(a), Some(b)) => prerelease_cmp(a, b) == std::cmp::Ordering::Greater,
+        _ => false,
+    }
+}
+
+/// A version's numeric parts and its `-prerelease` suffix, with any `+build` metadata dropped.
+/// A suffix of numbers only (`1.0.0-2`) is more version parts, not a prerelease, and a version
+/// that starts with a word has none (`release-1.2`). Parts that aren't numbers are skipped, as
+/// they always were.
+fn split_version(s: &str) -> (Vec<u64>, Option<&str>) {
+    let s = s.trim().trim_start_matches(['v', 'V']);
+    let s = s.split_once('+').map_or(s, |(v, _build)| v);
+    let numeric = |part: &str| {
+        part.bytes()
+            .all(|b| b.is_ascii_digit() || b == b'.' || b == b'_' || b == b'-')
+    };
+    let cut = match s.split_once('-') {
+        // A dotted version (`1.2.3-…`): semver, so everything after the first `-` is the
+        // prerelease (`1.2.3-1-alpha` is prerelease 1-alpha, `1.2.3-1` prerelease 1).
+        Some((first, rest)) if first.contains('.') => (!rest.is_empty()).then_some(first.len()),
+        // `-`-separated numbers (`1-2-4-rc.1`): the prerelease starts at the first part with a
+        // word in it (rc.1), and the parts before it are the version (1.2.4).
+        _ => {
+            let mut at = 0;
+            let mut cut = None;
+            for part in s.split('-') {
+                if at > 0 && !numeric(part) {
+                    cut = Some(at - 1);
+                    break;
+                }
+                at += part.len() + 1;
+            }
+            cut
+        }
+    };
+    let (core, pre) = match cut {
+        Some(i) => (&s[..i], Some(&s[i + 1..])),
+        None => (s, None),
+    };
+    let nums = core
+        .split(['.', '-', '_'])
+        .filter_map(|p| p.parse::<u64>().ok())
+        .collect();
+    (nums, pre)
+}
+
+/// A non-empty run of ASCII digits (of any length).
+fn is_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Semver prerelease order: dot-separated identifiers left to right, numbers numerically and
+/// below words, words by ASCII; when one runs out first, the shorter sorts lower.
+fn prerelease_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ai = a.split('.');
+    let mut bi = b.split('.');
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let o = match (is_digits(x), is_digits(y)) {
+                    // Numerically without parsing, so no number is too big: fewer digits
+                    // (leading zeros aside) is smaller, then digit by digit.
+                    (true, true) => {
+                        let (x, y) = (x.trim_start_matches('0'), y.trim_start_matches('0'));
+                        x.len().cmp(&y.len()).then_with(|| x.cmp(y))
+                    }
+                    (true, false) => Ordering::Less,
+                    (false, true) => Ordering::Greater,
+                    (false, false) => x.cmp(y),
+                };
+                if o != Ordering::Equal {
+                    return o;
+                }
+            }
+        }
+    }
 }
 
 /// Check a repo and compare to the installed version.
@@ -203,6 +281,79 @@ pub struct PollResult {
     /// The scopes GitHub actually granted (space-separated), from the token response.
     pub scope: Option<String>,
     pub error: Option<String>,
+}
+
+/// Orders sign-ins against Disconnect. A sign-in takes a ticket when it starts (a device flow:
+/// when its code is requested) and may store its token only while no sign-out has happened
+/// since; both run under one lock, so a sign-in the user approved just before clicking
+/// Disconnect can't land after it, however late its poll runs.
+pub struct SignOutGate(std::sync::Mutex<GateState>);
+
+struct GateState {
+    sign_outs: u64,
+    /// Device codes handed out, with the ticket each was issued under (newest last).
+    flows: Vec<(String, u64)>,
+}
+
+/// Device codes remembered at once; older ones are long expired (GitHub's last 15 minutes).
+const MAX_FLOWS: usize = 8;
+
+impl SignOutGate {
+    pub const fn new() -> Self {
+        Self(std::sync::Mutex::new(GateState {
+            sign_outs: 0,
+            flows: Vec::new(),
+        }))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Note when a sign-in starts.
+    pub fn ticket(&self) -> u64 {
+        self.lock().sign_outs
+    }
+
+    /// Remember the ticket a device flow started under, for its polls.
+    pub fn remember_flow(&self, device_code: &str, ticket: u64) {
+        let mut g = self.lock();
+        g.flows.retain(|(c, _)| c != device_code);
+        g.flows.push((device_code.to_string(), ticket));
+        let excess = g.flows.len().saturating_sub(MAX_FLOWS);
+        g.flows.drain(..excess);
+    }
+
+    /// The ticket a device flow started under; None for a code from before a sign-out (or one
+    /// Silo never issued).
+    pub fn flow_ticket(&self, device_code: &str) -> Option<u64> {
+        let g = self.lock();
+        g.flows
+            .iter()
+            .find(|(c, _)| c == device_code)
+            .map(|(_, t)| *t)
+    }
+
+    /// Run `store` only if no sign-out happened since `ticket`; None (and nothing ran) when one
+    /// did.
+    pub fn store_if_current<T>(&self, ticket: u64, store: impl FnOnce() -> T) -> Option<T> {
+        let g = self.lock();
+        (g.sign_outs == ticket).then(store)
+    }
+
+    /// Sign out: every sign-in already started loses its right to store, then `clear` runs.
+    pub fn sign_out<T>(&self, clear: impl FnOnce() -> T) -> T {
+        let mut g = self.lock();
+        g.sign_outs += 1;
+        g.flows.clear();
+        clear()
+    }
+}
+
+impl Default for SignOutGate {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Step 1: request a device + user code for the given OAuth App client id.
@@ -587,13 +738,29 @@ pub fn star_state(owner: &str, repo: &str, token: &str) -> Result<bool, String> 
     present_check(api_url(&["user", "starred", owner, repo])?.as_str(), token)
 }
 
-/// GET /repos/{owner}/{repo}/subscription — 200 watching, 404 not.
+/// GET /repos/{owner}/{repo}/subscription — 404 not watching. A 200 is a subscription record,
+/// which also exists when the user set the repo to Ignore on github.com, so read its flags.
 pub fn watch_state(owner: &str, repo: &str, token: &str) -> Result<bool, String> {
     check_repo(owner, repo)?;
-    present_check(
-        api_url(&["repos", owner, repo, "subscription"])?.as_str(),
-        token,
-    )
+    let url = api_url(&["repos", owner, repo, "subscription"])?;
+    match crate::net::api()
+        .get(url.as_str())
+        .set("Accept", "application/vnd.github+json")
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+    {
+        Ok(resp) => {
+            let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+            Ok(watching_from(&v))
+        }
+        Err(ureq::Error::Status(404, _)) => Ok(false),
+        Err(e) => Err(gh_err(e)),
+    }
+}
+
+/// Whether a subscription record means "watching": subscribed and not ignored.
+fn watching_from(v: &serde_json::Value) -> bool {
+    v["subscribed"].as_bool().unwrap_or(false) && !v["ignored"].as_bool().unwrap_or(false)
 }
 
 /// PUT/DELETE /user/starred/{owner}/{repo}. Needs `public_repo` (OAuth) or a PAT with
@@ -1218,6 +1385,126 @@ mod tests {
         assert!(!is_newer("1.0.0.0", "1.0.0.0"));
         assert!(!is_newer("1.0", "1.0.0.1"));
         assert!(is_newer("v8.1.0.3", "8.1.0.2"));
+    }
+
+    #[test]
+    fn version_compare_dotted_numeric_unchanged() {
+        assert!(!is_newer("1.0.0.0", "1.0.0.1"));
+        assert!(is_newer("1.0.0.1", "1.0.0.0"));
+        assert!(!is_newer("1.0.0", "1.0.0.0")); // missing parts count as 0
+        assert!(!is_newer("1.0.0.0", "1.0.0"));
+        assert!(is_newer("1.10.0.0", "1.9.0.0")); // numerically, not as text
+        assert!(is_newer("V1.0.0.1", "1.0.0.0"));
+        assert!(is_newer("1_0_1", "1.0.0")); // `_` still separates
+                                             // Undotted, all-numeric hyphenated versions are still version parts, as before.
+        assert!(is_newer("v1-2-4", "1.2.3"));
+        assert!(is_newer("1-2-4", "1-2-3"));
+        assert!(!is_newer("1-2-3", "1.2.3"));
+        // Mixed: hyphen-separated numbers, then a prerelease.
+        assert!(is_newer("1-2-4-rc.1", "1.2.3"));
+        assert!(is_newer("1-2-3", "1-2-3-rc.1"));
+        assert!(!is_newer("1-2-3-rc.1", "1.2.3"));
+        assert!(is_newer("1-2-3-rc.2", "1.2.3-rc.1"));
+        // A dotted version keeps semver's whole prerelease, hyphens and all.
+        assert!(is_newer("1.2.3", "1.2.3-1-alpha"));
+        assert!(!is_newer("1.2.3-1-alpha", "1.2.3"));
+        assert!(is_newer("1.2.3-1-beta", "1.2.3-1-alpha"));
+        assert!(is_newer("1.2.3-1-alpha", "1.2.2"));
+        // A leading word is skipped, as before.
+        assert!(is_newer("release-1.3", "1.2"));
+        assert!(!is_newer("release-1.2", "1.2"));
+        assert!(!is_newer("", "1.0.0.0"));
+        assert!(is_newer("1.0.0.0", ""));
+    }
+
+    #[test]
+    fn version_compare_prerelease_and_build() {
+        // A prerelease is older than its release.
+        assert!(is_newer("v1.2.3", "1.2.3-rc.1"));
+        assert!(!is_newer("1.2.3-rc.1", "1.2.3"));
+        // ...but newer than the version before.
+        assert!(is_newer("1.2.3-rc.1", "1.2.2"));
+        assert!(!is_newer("1.2.2", "1.2.3-rc.1"));
+        // Prereleases order among themselves the semver way.
+        assert!(is_newer("1.2.3-rc.2", "1.2.3-rc.1"));
+        assert!(is_newer("1.2.3-rc.10", "1.2.3-rc.9"));
+        assert!(is_newer("1.2.3-rc", "1.2.3-beta"));
+        assert!(is_newer("1.2.3-alpha.1", "1.2.3-alpha"));
+        assert!(is_newer("1.2.3-alpha.2", "1.2.3-alpha.1"));
+        // Numeric prereleases on a dotted version too.
+        assert!(is_newer("1.2.3", "1.2.3-1"));
+        assert!(!is_newer("1.2.3-1", "1.2.3"));
+        assert!(is_newer("1.0.0-2", "1.0.0-1"));
+        assert!(is_newer("1.2.3-alpha", "1.2.3-1"));
+        assert!(!is_newer("1.2.3-rc.10", "1.2.3-rc.010"));
+        assert!(!is_newer("1.2.3-rc.1", "1.2.3-rc.1"));
+        // Numeric identifiers bigger than any integer type still sort below words, and by value.
+        let huge = "1.2.3-rc.18446744073709551616";
+        assert!(is_newer("1.2.3-rc.a", huge));
+        assert!(is_newer("1.2.3-rc.18446744073709551617", huge));
+        assert!(!is_newer(huge, "1.2.3-rc.18446744073709551617"));
+        assert!(is_newer(huge, "1.2.3-rc.9"));
+        // Build metadata is ignored.
+        assert!(!is_newer("1.2.3+build.7", "1.2.3"));
+        assert!(!is_newer("1.2.3", "1.2.3+build.7"));
+        assert!(!is_newer("1.2.3+b2", "1.2.3+b1"));
+        assert!(is_newer("1.2.4+b1", "1.2.3+b9"));
+        assert!(is_newer("1.2.3", "1.2.3-rc.1+b5"));
+        assert!(!is_newer("v1.2.3-rc.1+b5", "1.2.3"));
+    }
+
+    #[test]
+    fn a_device_flow_keeps_the_ticket_it_started_under() {
+        let gate = SignOutGate::new();
+        gate.remember_flow("code-1", gate.ticket());
+        // A sign-out forgets its flows: a poll that only runs afterwards finds no ticket.
+        gate.sign_out(|| ());
+        assert_eq!(gate.flow_ticket("code-1"), None);
+        // Remembered under a ticket from before the sign-out: storing is refused.
+        let stale = 0;
+        gate.remember_flow("code-2", stale);
+        assert_eq!(gate.store_if_current(stale, || ()), None);
+        // A new flow after the sign-out works; unknown codes have no ticket.
+        gate.remember_flow("code-3", gate.ticket());
+        let t = gate.flow_ticket("code-3").unwrap();
+        assert_eq!(gate.store_if_current(t, || "stored"), Some("stored"));
+        assert_eq!(gate.flow_ticket("never-issued"), None);
+        // Only the newest few are kept.
+        for i in 0..20 {
+            gate.remember_flow(&format!("c{i}"), gate.ticket());
+        }
+        assert!(gate.flow_ticket("c19").is_some());
+        assert!(gate.flow_ticket("c0").is_none());
+    }
+
+    #[test]
+    fn a_sign_out_beats_a_sign_in_that_started_before_it() {
+        let gate = SignOutGate::new();
+        let before = gate.ticket();
+        assert_eq!(gate.store_if_current(before, || "stored"), Some("stored"));
+        gate.sign_out(|| ());
+        assert_eq!(gate.store_if_current(before, || "stored"), None);
+        // A sign-in started after the sign-out stores normally.
+        let after = gate.ticket();
+        assert_eq!(gate.store_if_current(after, || "stored"), Some("stored"));
+    }
+
+    #[test]
+    fn ignored_subscription_is_not_watching() {
+        use serde_json::json;
+        assert!(watching_from(
+            &json!({ "subscribed": true, "ignored": false })
+        ));
+        assert!(!watching_from(
+            &json!({ "subscribed": false, "ignored": true })
+        ));
+        assert!(!watching_from(
+            &json!({ "subscribed": true, "ignored": true })
+        ));
+        assert!(!watching_from(
+            &json!({ "subscribed": false, "ignored": false })
+        ));
+        assert!(!watching_from(&json!({})));
     }
 
     // ── Update identity guard ──

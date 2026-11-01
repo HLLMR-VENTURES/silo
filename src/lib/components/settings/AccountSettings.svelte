@@ -9,8 +9,9 @@
   import SettingsCard from "./SettingsCard.svelte";
   import { ACCOUNTS_SECTION_ID } from "./sections";
 
-  // When the OS keychain is unavailable, connecting an account falls back to storing the
-  // token in the local DB unencrypted — warn before the user connects rather than silently.
+  // When the OS keychain is unavailable, connecting either fails (a locked or refusing store)
+  // or, with no keychain service at all, stores the token in the local DB unencrypted — warn
+  // before the user connects rather than silently.
   let keychainOk = $state(true);
   onMount(async () => {
     try {
@@ -24,9 +25,10 @@
 <SettingsCard id={ACCOUNTS_SECTION_ID} title="GitHub account">
   {#if !keychainOk}
     <div class="keychain-warn">
-      <Icon name="problem" size={14} /> This computer has no secure password store Silo can use, so your
-      GitHub sign-in would be saved <strong>unencrypted</strong> on this computer. Connect only if
-      you're comfortable with that. Disconnecting removes it.
+      <Icon name="problem" size={14} /> Silo can't use this computer's secure password store right
+      now. If it's locked, unlock it before connecting. If this computer has none, your GitHub
+      sign-in is saved <strong>unencrypted</strong> on this computer, so connect only if you're
+      comfortable with that. Disconnecting removes it.
     </div>
   {/if}
   <GitHubAuth />

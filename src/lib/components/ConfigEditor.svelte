@@ -29,6 +29,8 @@
   /** The last save failed (the game is running…): shown above the form, which stays. */
   let saveError = $state<string | null>(null);
   let saved = $state(false);
+  /** A save is out: Save stays off, so a double-click can't write twice (and push out a backup). */
+  let saving = $state(false);
   let open = $state(true);
   const uid = $props.id();
   const fieldId = (i: number) => `${uid}-f${i}`;
@@ -63,22 +65,27 @@
   }
 
   async function save() {
-    const edits = fields
-      .filter((f) => (vals[f.path] ?? "") !== (orig[f.path] ?? ""))
-      .map((f) => ({
-        path: f.path,
-        value: f.kind === "select" ? inFileCase(vals[f.path] ?? "", fileVals[f.path]) : (vals[f.path] ?? ""),
-      }));
-    if (edits.length === 0 || badNumber) return;
+    if (saving) return;
+    const edited = fields.filter((f) => (vals[f.path] ?? "") !== (orig[f.path] ?? ""));
+    if (edited.length === 0 || badNumber) return;
+    // The values as sent: an edit made while the write is out stays unsaved (and Save comes back).
+    const sent = Object.fromEntries(edited.map((f) => [f.path, vals[f.path] ?? ""]));
+    const edits = edited.map((f) => ({
+      path: f.path,
+      value: f.kind === "select" ? inFileCase(sent[f.path], fileVals[f.path]) : sent[f.path],
+    }));
     saveError = null;
+    saving = true;
     try {
       await setConfig(path, edits);
-      orig = { ...vals };
+      orig = { ...orig, ...sent };
       for (const e of edits) fileVals[e.path] = e.value;
       saved = true;
       setTimeout(() => (saved = false), 1800);
     } catch (e) {
       saveError = inlineError(e, "Saving the settings file");
+    } finally {
+      saving = false;
     }
   }
 </script>
@@ -138,7 +145,9 @@
   {#snippet footer()}
     <span class="ms-saved" role="status">{#if saved}Saved <Icon name="check" size={13} />{/if}</span>
     <Button onclick={() => (open = false)}>Close</Button>
-    <Button variant="primary" onclick={save} disabled={loading || !!error || !dirty || badNumber}>Save changes</Button>
+    <Button variant="primary" onclick={save} loading={saving} disabled={saving || loading || !!error || !dirty || badNumber}
+      >Save changes</Button
+    >
   {/snippet}
 </Dialog>
 

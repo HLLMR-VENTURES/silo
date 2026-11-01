@@ -47,7 +47,7 @@
     /** Opened from the keyboard: move focus to the title once the details are in. */
     takeFocus?: boolean;
     gh: { connected: boolean; canWrite: boolean };
-    installed: Set<string>;
+    installed: ReadonlySet<string>;
     /** Tech names with a known newer version. */
     updates?: ReadonlySet<string>;
     onClose: () => void;

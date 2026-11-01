@@ -3,12 +3,13 @@
 //   await refreshGithub();                 // githubAuth.status
 //   void startDeviceFlow(write, gist);     // githubAuth.flow shows the code while it waits
 //   cancelDeviceFlow();                    // stops polling; an answer already on its way is ignored
+//   await disconnectGithub();              // cancels any sign-in, then forgets the token
 //   $effect(() => attachGithubView());     // GitHubAuth.svelte while mounted
 // One timer at a time: each flow has a generation number, and a poll result (or the start call's
 // result) that comes back for an older generation is dropped, so nothing re-arms after a cancel.
 // When the flow finishes while no GitHubAuth view is mounted, a toast says how it went.
 
-import { ghDevicePoll, ghDeviceStart, ghStatus, openExternal } from "../api";
+import { ghDevicePoll, ghDeviceStart, ghLogout, ghStatus, openExternal } from "../api";
 import type { GhStatus } from "../types";
 import { toast } from "../ui/toasts.svelte";
 import { inlineError, reportError, success } from "./notify.svelte";
@@ -64,12 +65,19 @@ export function deviceFlowActive(): boolean {
   return githubAuth.flow !== null;
 }
 
-/** Re-read the connection status from the backend. */
+/** Bumped by every status read; an answer for an older read is dropped. */
+let statusRead = 0;
+
+/** Re-read the connection status from the backend. When reads overlap, the last one started wins. */
 export async function refreshGithub(): Promise<void> {
+  const read = ++statusRead;
   try {
-    githubAuth.status = await ghStatus();
-    setGithubConnected(!!githubAuth.status.user);
+    const status = await ghStatus();
+    if (read !== statusRead) return; // a newer read (e.g. after Disconnect) is on its way
+    githubAuth.status = status;
+    setGithubConnected(!!status.user);
   } catch (e) {
+    if (read !== statusRead) return;
     githubAuth.message = inlineError(e, "Checking your GitHub connection");
   }
 }
@@ -108,10 +116,11 @@ async function poll(gen: number, deviceCode: string, seconds: number): Promise<v
   if (gen !== generation) return;
   switch (r.status) {
     case "ok": {
-      generation++; // done: nothing of this flow may run again
+      const done = ++generation; // done: nothing of this flow may run again
       githubAuth.flow = null;
       githubAuth.message = null;
       await refreshGithub();
+      if (done !== generation) return; // disconnected (or restarted) meanwhile: no "Connected" toast
       if (views === 0) {
         const who = githubAuth.status.user;
         success(who ? `Connected to GitHub as ${who}` : "Connected to GitHub");
@@ -162,6 +171,22 @@ export function cancelDeviceFlow(): void {
   generation++;
   stopTimer();
   githubAuth.flow = null;
+}
+
+/**
+ * Disconnect the GitHub account. A sign-in still waiting is cancelled first, so a code approved
+ * on github.com afterwards can't reconnect the account. A failure (e.g. the credential store kept
+ * the token) shows beside the controls, and the status is re-read either way.
+ */
+export async function disconnectGithub(): Promise<void> {
+  cancelDeviceFlow();
+  githubAuth.message = null;
+  try {
+    await ghLogout();
+  } catch (e) {
+    githubAuth.message = inlineError(e, "Disconnecting GitHub");
+  }
+  await refreshGithub();
 }
 
 /** Test helper: back to the initial state with no timer and no views. */

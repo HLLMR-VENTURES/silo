@@ -18,6 +18,8 @@ import {
   progressPct,
   sourceChip,
   verifiedAuthorLogin,
+  withInstalledAs,
+  zipStem,
 } from "./browse";
 import { AppError } from "./errors";
 import type { BrowseMod, ModSourceOption } from "./types";
@@ -209,5 +211,22 @@ describe("browseColumns", () => {
     expect(browseColumns(480)).toBe(2);
     expect(browseColumns(1240)).toBe(5);
     expect(browseColumns(1880)).toBe(7);
+  });
+});
+
+describe("installed under another name", () => {
+  it("names a zip's mod by its file name", () => {
+    expect(zipStem("FS25_FieldToDoList.zip")).toBe("FS25_FieldToDoList");
+    expect(zipStem("FS25_X.ZIP")).toBe("FS25_X");
+    expect(zipStem("FS25_X")).toBe("FS25_X");
+  });
+
+  it("counts a techName as installed only while the file it went in as is", () => {
+    const installed = new Set(["FS25_FieldToDoList"]);
+    const seen = withInstalledAs(installed, { FS25_ToDo: "FS25_FieldToDoList" });
+    expect(seen.has("FS25_ToDo")).toBe(true);
+    expect(seen.has("FS25_FieldToDoList")).toBe(true);
+    expect(withInstalledAs(new Set(), { FS25_ToDo: "FS25_FieldToDoList" }).has("FS25_ToDo")).toBe(false);
+    expect(withInstalledAs(installed, {})).toBe(installed);
   });
 });

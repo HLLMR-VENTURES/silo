@@ -105,6 +105,25 @@ export function browseColumns(width: number): number {
   return Math.max(1, Math.floor((width + BROWSE_GAP) / (BROWSE_CARD_MIN_W + BROWSE_GAP)));
 }
 
+/** An installed zip's mod name: its file name without `.zip` (the name FS25 and the library use). */
+export function zipStem(filename: string): string {
+  return filename.replace(/\.zip$/i, "");
+}
+
+/**
+ * The library names as Browse should see them: `installed`, plus the catalog techName of each
+ * mod installed this session under a different file name (`installedAs`: techName → the
+ * library name it went in as), while that file is still in the library.
+ */
+export function withInstalledAs(
+  installed: ReadonlySet<string>,
+  installedAs: Readonly<Record<string, string>>,
+): ReadonlySet<string> {
+  const extra = Object.entries(installedAs).filter(([, name]) => installed.has(name));
+  if (extra.length === 0) return installed;
+  return new Set([...installed, ...extra.map(([tech]) => tech)]);
+}
+
 /** Bytes downloaded so far for one install, and the total when the server sent one. */
 export interface InstallProgressEntry {
   done: number;

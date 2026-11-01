@@ -18,6 +18,7 @@
   import { displayVersion } from "../../format";
   import {
     droppedBuildFor,
+    isModHubPage,
     normVersion,
     sourceLabel,
     versionChange,
@@ -91,7 +92,6 @@
     s.ready.length + s.modhub.length + s.checkYourself.length + s.failed.length,
   );
   const n = (count: number) => formatCount(count);
-  const isModHubPage = (url: string | null | undefined) => !!url && /farming-simulator\.com/i.test(url);
 
   // Up to date and Not tracked start collapsed (this view visit).
   let openUpToDate = $state(false);

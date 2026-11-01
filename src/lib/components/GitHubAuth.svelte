@@ -3,11 +3,12 @@
   // and its polling live there, so leaving Settings mid-sign-in doesn't stop it.
   import Icon from "../ui/Icon.svelte";
   import { inlineError } from "../state/notify.svelte";
-  import { ghSetClientId, ghSetPat, ghLogout, openExternal } from "../api";
+  import { ghSetClientId, ghSetPat, openExternal } from "../api";
   import { GITHUB_NEW_OAUTH_APP_URL, GITHUB_NEW_PAT_URL } from "../links";
   import {
     attachGithubView,
     cancelDeviceFlow,
+    disconnectGithub,
     githubAuth,
     refreshGithub,
     startDeviceFlow,
@@ -56,12 +57,8 @@
   }
 
   async function disconnect() {
-    try {
-      await ghLogout();
-      await refresh();
-    } catch (e) {
-      githubAuth.message = inlineError(e, "Disconnecting GitHub");
-    }
+    await disconnectGithub();
+    clientIdInput = githubAuth.status.clientId ?? "";
   }
 </script>
 

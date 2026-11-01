@@ -32,6 +32,7 @@ import {
   browseMods,
   ghDevicePoll,
   ghDeviceStart,
+  installRemoteMod,
   onInstallProgress,
   siloapiModDetail,
 } from "../api";
@@ -190,6 +191,28 @@ describe("Browse cards", () => {
     // Verified author only on the claimed card; Verified build is its own badge.
     expect(screen.getAllByText("Verified author")).toHaveLength(1);
     expect(screen.getAllByText("Verified build")).toHaveLength(1);
+  });
+
+  it("reports and finds a mod by the file it installed as, when that isn't the techName", async () => {
+    // The catalog's FS25_ToDo ships FS25_FieldToDoList.zip: installed under that name.
+    vi.mocked(browseMods).mockResolvedValueOnce({
+      mods: [mod("t", { techName: "FS25_ToDo", sources: [gh] })],
+      total: 1,
+    });
+    vi.mocked(installRemoteMod).mockResolvedValueOnce("FS25_FieldToDoList.zip");
+    const onInstalled = vi.fn();
+    const onFindInLibrary = vi.fn();
+    const { rerender } = render(ModBrowser, props({ onInstalled, onFindInLibrary }));
+    await settle();
+    await fireEvent.click(screen.getByRole("button", { name: "Install: Mod t" }));
+    await settle();
+    expect(onInstalled).toHaveBeenCalledWith("FS25_FieldToDoList.zip");
+    expect(toasts.map((t) => t.message)).toContain("Installed Mod t as FS25_FieldToDoList.");
+    // Once the rescan lists it, the card shows it as in the library and finds the real row.
+    await rerender({ installed: new Set(["FS25_FieldToDoList"]) });
+    await settle();
+    await fireEvent.click(screen.getByRole("button", { name: "Show in library: Mod t" }));
+    expect(onFindInLibrary).toHaveBeenCalledWith("FS25_FieldToDoList");
   });
 
   it("offers Open on ModHub for an index-only mod", async () => {
