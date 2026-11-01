@@ -69,8 +69,21 @@ fn distrust_key(key: &str) -> String {
     format!("{key}:keychain_distrusted")
 }
 
+/// Whether the keychain copy is distrusted. A marker Silo can't read counts as set, so a
+/// database read error never brings a distrusted copy back.
 fn keychain_distrusted(conn: &Connection, key: &str) -> bool {
-    db::get_app_setting(conn, &distrust_key(key)).is_some()
+    setting(conn, &distrust_key(key)).map_or(true, |v| v.is_some())
+}
+
+/// Read a setting, telling "no row" apart from "couldn't read" (`db::get_app_setting` returns
+/// None for both). For the reads that decide whether a token may be used or counts as gone.
+fn setting(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+    use rusqlite::OptionalExtension;
+    conn.query_row("SELECT value FROM app_setting WHERE key = ?1", [key], |r| {
+        r.get(0)
+    })
+    .optional()
+    .map_err(|e| e.to_string())
 }
 
 /// Set or clear the marker. Clearing one that isn't set writes nothing, so it can't fail.
@@ -100,15 +113,7 @@ fn fingerprint(value: &str) -> String {
 /// Whether `row` is the value a disconnect revoked. A marker Silo can't read counts as a match,
 /// so a database read error never brings a revoked token back.
 fn row_revoked(conn: &Connection, key: &str, row: &str) -> bool {
-    use rusqlite::OptionalExtension;
-    let marker: Result<Option<String>, _> = conn
-        .query_row(
-            "SELECT value FROM app_setting WHERE key = ?1",
-            [revoked_key(key)],
-            |r| r.get(0),
-        )
-        .optional();
-    match marker {
+    match setting(conn, &revoked_key(key)) {
         Ok(None) => false,
         Ok(Some(f)) => f == fingerprint(row),
         Err(_) => true,
@@ -186,13 +191,17 @@ fn get_with(conn: &Connection, key: &str, keychain: Option<&keyring::Entry>) -> 
         }
     }
     let e = keychain?;
-    if keychain_distrusted(conn, key) {
-        if matches!(e.delete_credential(), Ok(()) | Err(keyring::Error::NoEntry)) {
-            let _ = set_distrust(conn, key, false);
+    match setting(conn, &distrust_key(key)) {
+        Ok(None) => e.get_password().ok(),
+        Ok(Some(_)) => {
+            if matches!(e.delete_credential(), Ok(()) | Err(keyring::Error::NoEntry)) {
+                let _ = set_distrust(conn, key, false);
+            }
+            None
         }
-        return None;
+        // Can't tell: don't use it (and don't delete what may be a trusted copy).
+        Err(_) => None,
     }
-    e.get_password().ok()
 }
 
 /// Shown when the keychain refused to store a token on a machine that has one.
@@ -391,7 +400,9 @@ fn clear_with(
     keychain: Option<&keyring::Entry>,
     missing: impl Fn() -> bool,
 ) -> Result<Removal, String> {
-    let row = db::get_app_setting(conn, key);
+    // A row Silo can't read can be neither revoked nor counted as gone: nothing is touched,
+    // and the caller keeps the account signed out.
+    let row = setting(conn, key)?;
     let Some(e) = keychain else {
         return Ok(Removal {
             keychain_kept: false,
@@ -431,7 +442,10 @@ fn drop_row(conn: &Connection, key: &str, row: Option<&str>) -> Result<bool, Str
         Ok(()) => Ok(false),
         Err(e) => {
             log::warn!("{key}: couldn't delete it from the database: {e}");
-            revoked.map(|()| true).map_err(|_| e)
+            match (row, revoked) {
+                (Some(_), Ok(())) => Ok(true),
+                _ => Err(e),
+            }
         }
     }
 }
@@ -468,12 +482,13 @@ fn keychain_copy(e: &keyring::Entry) -> KeychainCopy {
 /// `get` does). No row, no VACUUM: saving a token doesn't rewrite the database every time.
 /// With the row gone, a revocation naming it has nothing left to guard (best effort).
 fn clear_fallback(conn: &Connection, key: &str) -> Result<(), String> {
-    if db::get_app_setting(conn, key).is_none() {
-        return Ok(());
+    let deleted = conn
+        .execute("DELETE FROM app_setting WHERE key = ?1", [key])
+        .map_err(|e| e.to_string())?;
+    if deleted > 0 {
+        let _ = set_revoked(conn, key, None);
+        db::vacuum(conn);
     }
-    db::set_app_setting(conn, key, None)?;
-    let _ = set_revoked(conn, key, None);
-    db::vacuum(conn);
     Ok(())
 }
 
@@ -1197,6 +1212,31 @@ mod tests {
         .unwrap();
         let e = store_with(&conn, KEY, "account-b", None, NO_KEYCHAIN);
         assert!(matches!(e, Err(SaveError { changed: false, .. })));
+    }
+
+    #[test]
+    fn a_disconnect_that_cant_read_the_row_claims_nothing() {
+        // A database whose app_setting table can't be read: the disconnect errs (the caller
+        // stays signed out) instead of reporting the row gone or revoked.
+        let broken = Connection::open_in_memory().unwrap();
+        let k = FakeKeychain::with(|s| s.stored = Some("tok".into()));
+        assert!(clear_with(&broken, KEY, Some(&k.entry()), KEYCHAIN_WORKS).is_err());
+        assert!(clear_with(&broken, KEY, None, KEYCHAIN_WORKS).is_err());
+        // A row that wasn't revoked and won't delete is an error, never "kept, revoked".
+        let conn = mem_db();
+        refuse_row_delete(&conn);
+        db::set_app_setting(&conn, KEY, Some("tok")).unwrap();
+        assert!(drop_row(&conn, KEY, None).is_err());
+        assert_eq!(drop_row(&conn, KEY, Some("tok")), Ok(true));
+    }
+
+    #[test]
+    fn an_unreadable_distrust_marker_keeps_the_keychain_copy_unused() {
+        let broken = Connection::open_in_memory().unwrap();
+        let k = FakeKeychain::with(|s| s.stored = Some("tok".into()));
+        assert!(keychain_distrusted(&broken, KEY));
+        assert_eq!(get_with(&broken, KEY, Some(&k.entry())), None);
+        assert_eq!(k.stored().as_deref(), Some("tok"), "not deleted on a guess");
     }
 
     #[test]

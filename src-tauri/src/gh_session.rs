@@ -13,8 +13,9 @@
 //!
 //! **Signed out.** After a Disconnect, no stored token is used until a sign-in commits, even if
 //! removing it from storage failed. A file beside the database (the marker, see
-//! [`Session::use_marker`]) keeps that across restarts whenever storage couldn't be cleaned up,
-//! or a failed sign-in may have left a different token behind.
+//! [`Session::use_marker`]) keeps that across restarts: it's written before a Disconnect or a
+//! sign-in touches storage, and removed only once storage is consistent again, so a crash, a
+//! failed cleanup or a half-saved sign-in all leave the account signed out on the next run.
 
 use std::path::PathBuf;
 use std::sync::{Condvar, Mutex, MutexGuard};
@@ -29,6 +30,14 @@ pub const NOT_SENT: &str = "Silo didn't send this to GitHub: the account was dis
 
 /// Why a sign-in didn't finish: a newer one, a cancel or a Disconnect replaced it.
 pub const SUPERSEDED: &str = "This sign-in was cancelled or replaced by a newer one.";
+
+/// A sign-in couldn't write the marker before saving, so it saved nothing.
+const MARK_FAILED: &str = "Silo couldn't save your GitHub sign-in, because it couldn't write a \
+     file beside its database";
+
+/// A sign-in saved everything but couldn't remove the marker an earlier Disconnect left.
+const UNMARK_FAILED: &str = "Silo saved your GitHub sign-in but couldn't remove a leftover \
+     file beside its database, so it stays disconnected. Connect again";
 
 pub struct Session {
     state: Mutex<State>,
@@ -147,6 +156,8 @@ pub fn admit_optional<'s>(token: Option<&Bearer<'s>>) -> Option<Admitted<'s>> {
 /// [`SignOut::finish`] clears storage; dropping it unfinished still ends the session.
 pub struct SignOut<'s> {
     gate: &'s Session,
+    /// The marker was written when the Disconnect started.
+    marked: bool,
     done: bool,
 }
 
@@ -161,18 +172,18 @@ impl Drop for SignOut<'_> {
 
 impl SignOut<'_> {
     /// Wait for the requests already admitted (each is bounded by the HTTP agent's timeouts),
-    /// mark the account signed out on disk, then run `clear` under the lock. `clear` is told
-    /// whether the marker was written, and returns whether storage is now clean (the token
-    /// can't be read back and the account details are gone) along with its result; when it is,
-    /// the marker is removed again. Then the session ends: a token read before is never sent,
-    /// and no stored token is used until a sign-in commits.
+    /// then run `clear` under the lock. `clear` is told whether the marker was written (when the
+    /// Disconnect started), and returns whether storage is now clean (the token can't be read
+    /// back and the account details are gone) along with its result; when it is, the marker is
+    /// removed again. Then the session ends: a token read before is never sent, and no stored
+    /// token is used until a sign-in commits.
     pub fn finish<T>(mut self, clear: impl FnOnce(bool) -> (bool, T)) -> T {
         let gate = self.gate;
+        let marked = self.marked;
         let mut g = gate.lock();
         while g.in_flight > 0 {
             g = gate.idle.wait(g).unwrap_or_else(|e| e.into_inner());
         }
-        let marked = Session::write_marker(&g);
         // Ends the session even if `clear` panics.
         struct End<'a>(MutexGuard<'a, State>);
         impl Drop for End<'_> {
@@ -184,7 +195,7 @@ impl SignOut<'_> {
         let end = End(g);
         let (clean, out) = clear(marked);
         if clean {
-            Session::remove_marker(&end.0);
+            let _ = Session::remove_marker(&end.0);
         }
         out
     }
@@ -222,23 +233,35 @@ impl Session {
         g.marker = Some(path);
     }
 
-    fn write_marker(g: &State) -> bool {
-        match &g.marker {
-            Some(p) => std::fs::write(p, b"signed out\n")
-                .map_err(|e| log::warn!("GitHub: couldn't write the signed-out marker: {e}"))
-                .is_ok(),
-            None => false,
+    /// Write the marker. Ok(true) when written, Ok(false) when there's no marker path (only
+    /// before startup set it, and in tests).
+    fn write_marker(g: &State) -> Result<bool, String> {
+        let Some(p) = &g.marker else {
+            return Ok(false);
+        };
+        std::fs::write(p, b"signed out\n").map_err(|e| {
+            log::warn!("GitHub: couldn't write the signed-out marker: {e}");
+            e.to_string()
+        })?;
+        Ok(true)
+    }
+
+    fn remove_marker(g: &State) -> Result<(), String> {
+        let Some(p) = &g.marker else {
+            return Ok(());
+        };
+        match std::fs::remove_file(p) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => {
+                log::warn!("GitHub: couldn't remove the signed-out marker: {e}");
+                Err(e.to_string())
+            }
         }
     }
 
-    fn remove_marker(g: &State) {
-        if let Some(p) = &g.marker {
-            match std::fs::remove_file(p) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => log::warn!("GitHub: couldn't remove the signed-out marker: {e}"),
-            }
-        }
+    fn marker_exists(g: &State) -> bool {
+        g.marker.as_ref().is_some_and(|p| p.exists())
     }
 
     fn end_sign_out(g: &mut State) {
@@ -392,10 +415,13 @@ impl Session {
 
     /// Store a sign-in's token, only if `attempt` is still the newest and no Disconnect is
     /// running; None (and `store` didn't run) otherwise. Runs under the lock, so a Disconnect
-    /// or a newer attempt is ordered entirely before or after it. Once `store` ran, tokens read
-    /// before are stale (the session moves on). On Ok the account is signed in again; on a
-    /// failure that may have changed the token, it's signed out (on disk too) instead of being
-    /// left half-switched.
+    /// or a newer attempt is ordered entirely before or after it.
+    ///
+    /// The marker is written first (or nothing is stored), so a crash or a failure halfway
+    /// leaves the account signed out on the next run, never half-switched. Once `store` ran,
+    /// tokens read before are stale (the session moves on). On Ok, with the marker removed, the
+    /// account is signed in. On a failure that may have changed the token it's signed out (the
+    /// marker stays); on one that changed nothing, everything is as it was.
     pub fn commit<T>(
         &self,
         attempt: u64,
@@ -405,20 +431,32 @@ impl Session {
         if g.attempt != attempt || g.closing > 0 {
             return None;
         }
-        let r = store();
-        g.session += 1;
         g.attempt += 1; // this attempt is done
         g.flow = None;
+        let marked_before = Self::marker_exists(&g);
+        if let Err(e) = Self::write_marker(&g) {
+            return Some(Err(format!("{MARK_FAILED} ({e}).")));
+        }
+        let r = store();
+        g.session += 1;
         Some(match r {
-            Ok(v) => {
-                g.signed_out = false;
-                Self::remove_marker(&g);
-                Ok(v)
+            Ok(v) => match Self::remove_marker(&g) {
+                Ok(()) => {
+                    g.signed_out = false;
+                    Ok(v)
+                }
+                Err(e) => {
+                    g.signed_out = true;
+                    Err(format!("{UNMARK_FAILED} ({e})."))
+                }
+            },
+            Err(e) if e.token_changed => {
+                g.signed_out = true;
+                Err(e.message)
             }
             Err(e) => {
-                if e.token_changed {
-                    g.signed_out = true;
-                    Self::write_marker(&g);
+                if !marked_before {
+                    let _ = Self::remove_marker(&g);
                 }
                 Err(e.message)
             }
@@ -428,13 +466,17 @@ impl Session {
     /// Start a Disconnect, first thing in the command: from here nothing is admitted, and every
     /// sign-in already out (or begun before it ends) loses its right to store. Finish it with
     /// [`SignOut::finish`].
+    /// The marker is written here, so even a crash before the Disconnect finishes leaves the
+    /// account signed out on the next run.
     pub fn begin_sign_out(&self) -> SignOut<'_> {
         let mut g = self.lock();
         g.closing += 1;
         g.attempt += 1;
         g.flow = None;
+        let marked = Self::write_marker(&g) == Ok(true);
         SignOut {
             gate: self,
+            marked,
             done: false,
         }
     }
@@ -695,6 +737,64 @@ mod tests {
     }
 
     #[test]
+    fn a_disconnect_interrupted_before_it_finished_holds_after_a_restart() {
+        // Started (a request still admitted keeps it waiting), then Silo exits.
+        let path = marker_path("interrupted");
+        let gate = Session::new();
+        gate.use_marker(path.clone());
+        let b = stored(&gate, "tok");
+        let _admitted = b.admit().unwrap();
+        let so = gate.begin_sign_out();
+        assert!(path.exists(), "marked before waiting");
+        std::mem::forget(so); // the process ends here
+        let next = Session::new();
+        next.use_marker(path.clone());
+        assert!(next.signed_out());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_sign_in_marks_before_it_stores() {
+        let path = marker_path("before-store");
+        let gate = Session::new();
+        gate.use_marker(path.clone());
+        let attempt = gate.begin();
+        let seen = gate.commit(attempt, || {
+            // A crash here (token half-written) leaves the marker behind.
+            Ok::<_, StoreFailed>(path.exists())
+        });
+        assert_eq!(seen, Some(Ok(true)));
+        assert!(!path.exists(), "removed once everything was stored");
+        // No marker can be written: nothing is stored.
+        let blocked = std::env::temp_dir()
+            .join(format!("silo_gh_no_dir_{}", std::process::id()))
+            .join("marker");
+        let gate = Session::new();
+        gate.use_marker(blocked);
+        let attempt = gate.begin();
+        let r = gate.commit(attempt, || -> Result<(), StoreFailed> {
+            panic!("store must not run")
+        });
+        assert!(r.unwrap().unwrap_err().starts_with(MARK_FAILED));
+    }
+
+    #[test]
+    fn a_sign_in_that_cant_remove_an_old_marker_stays_signed_out() {
+        // The marker path is a directory, so removing it as a file fails.
+        let path = marker_path("is-a-dir");
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        let gate = Session::new();
+        gate.use_marker(path.clone());
+        assert!(gate.signed_out());
+        let attempt = gate.begin();
+        // Writing fails too (it's a directory): nothing is stored, still signed out.
+        assert!(gate.commit(attempt, ok).unwrap().is_err());
+        assert!(gate.signed_out());
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
     fn a_half_switched_sign_in_holds_after_a_restart() {
         let path = marker_path("half");
         let gate = Session::new();
@@ -705,13 +805,22 @@ mod tests {
         let next = Session::new();
         next.use_marker(path.clone());
         assert!(next.signed_out());
-        // A failed store that changed nothing leaves no marker.
-        let _ = std::fs::remove_file(&path);
+        // A failed store that changed nothing leaves things as they were: no marker when there
+        // was none, the marker when there was one.
         let attempt = gate.begin();
         gate.commit(attempt, ok).unwrap().unwrap();
+        assert!(!path.exists());
         let attempt = gate.begin();
         assert!(gate.commit(attempt, || failed(false)).unwrap().is_err());
         assert!(!path.exists());
+        assert!(!gate.signed_out());
+        gate.begin_sign_out().finish(|_| (false, ()));
+        assert!(path.exists());
+        let attempt = gate.begin();
+        assert!(gate.commit(attempt, || failed(false)).unwrap().is_err());
+        assert!(path.exists());
+        assert!(gate.signed_out());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

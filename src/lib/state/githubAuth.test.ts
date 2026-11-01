@@ -9,10 +9,11 @@ vi.mock("../api", async (importOriginal) => ({
   ghDevicePoll: vi.fn(),
   ghDeviceCancel: vi.fn(),
   ghLogout: vi.fn(),
+  ghSetPat: vi.fn(),
   openExternal: vi.fn(() => Promise.resolve()),
   logFrontendError: vi.fn(() => Promise.resolve()),
 }));
-import { ghDeviceCancel, ghDevicePoll, ghDeviceStart, ghLogout, ghStatus, openExternal } from "../api";
+import { ghDeviceCancel, ghDevicePoll, ghDeviceStart, ghLogout, ghSetPat, ghStatus, openExternal } from "../api";
 import type { PollResult } from "../types";
 import { dismissToast, toasts } from "../ui/toasts.svelte";
 import { activity, clearActivity } from "./activity.svelte";
@@ -23,6 +24,7 @@ import {
   githubAuth,
   pollArmed,
   resetGithubAuth,
+  saveGithubPat,
   startDeviceFlow,
 } from "./githubAuth.svelte";
 
@@ -311,6 +313,50 @@ describe("disconnecting GitHub", () => {
     await flush();
     expect(githubAuth.status.user).toBeNull();
     expect(toasts.some((t) => /Connected to GitHub/.test(t.message))).toBe(false);
+  });
+
+  it("a Disconnect clicked while a token is being saved reaches the backend after it", async () => {
+    const order: string[] = [];
+    let answerPat!: (login: string) => void;
+    vi.mocked(ghSetPat).mockImplementation(() => {
+      order.push("pat");
+      return new Promise((r) => (answerPat = r));
+    });
+    vi.mocked(ghLogout).mockImplementation(async () => {
+      order.push("logout");
+    });
+    vi.mocked(ghStatus).mockResolvedValue(disconnected);
+    const saving = saveGithubPat("ghp_x");
+    const disconnecting = disconnectGithub();
+    await flush();
+    expect(order).toEqual(["pat"]); // Disconnect waits its turn
+    answerPat("octocat");
+    await saving;
+    await disconnecting;
+    expect(order).toEqual(["pat", "logout"]);
+    expect(githubAuth.status.user).toBeNull();
+  });
+
+  it("a sign-in clicked after Disconnect starts only once Disconnect answered, and a failed one doesn't block the next", async () => {
+    let answerLogout!: () => void;
+    vi.mocked(ghLogout).mockReturnValueOnce(new Promise((r) => (answerLogout = () => r())));
+    vi.mocked(ghStatus).mockResolvedValue(disconnected);
+    vi.mocked(ghDevicePoll).mockResolvedValue(answer("pending"));
+    const disconnecting = disconnectGithub();
+    const starting = startDeviceFlow();
+    await flush();
+    expect(ghDeviceStart).not.toHaveBeenCalled();
+    answerLogout();
+    await disconnecting;
+    await starting;
+    expect(ghDeviceStart).toHaveBeenCalledTimes(1);
+    expect(githubAuth.flow).not.toBeNull();
+    // A save that fails still lets the next change through.
+    vi.mocked(ghSetPat).mockRejectedValueOnce("bad token");
+    await expect(saveGithubPat("x")).rejects.toBe("bad token");
+    vi.mocked(ghLogout).mockResolvedValue();
+    await disconnectGithub();
+    expect(ghLogout).toHaveBeenCalledTimes(2);
   });
 
   it("shows the backend's reason when the credential store kept the token", async () => {
