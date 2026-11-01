@@ -125,6 +125,7 @@
     fileStamps,
     heldRefresh,
     holdRefresh,
+    refreshTargets,
     sameStamps,
     linkRefresh,
     mergeRows,
@@ -2212,11 +2213,12 @@
       heldLinkRefresh = holdRefresh(heldLinkRefresh, gen, names);
       return;
     }
-    const want = new Set(names);
-    const subset = mods.filter(
-      (m) => want.has(m.techName) && !cur(m.techName).skipUpdates,
-    );
+    // Only mods still checked for updates, and not updated since the last scan that worked
+    // (the library would still show the old file); the rest are dropped from this refresh.
+    const leftOut = (t: string) => cur(t).skipUpdates || installedUnscanned.has(t);
+    const subset = refreshTargets(names, mods, leftOut);
     if (subset.length === 0) return;
+    const want = new Set(subset.map((m) => m.techName));
     const asked = fileStamps(subset);
     updateChecking = true;
     try {
@@ -2228,8 +2230,9 @@
       if (gen !== updateFolderGen || res.catalogError) return;
       // The library changed under it (an install's scan, say): its answer is for older files,
       // so it's asked again once nothing is busy, never put in.
-      if (!sameStamps(asked, fileStamps(mods.filter((m) => want.has(m.techName))))) {
-        heldLinkRefresh = holdRefresh(heldLinkRefresh, gen, names);
+      const now = refreshTargets([...want], mods, leftOut);
+      if (!sameStamps(asked, fileStamps(now))) {
+        heldLinkRefresh = holdRefresh(heldLinkRefresh, gen, [...want]);
         return;
       }
       updateResults = mergeRows(updateResults, res.rows, want);
@@ -2274,7 +2277,13 @@
     updateResults = updateResults.map((r) =>
       r.techName === row.techName ? { ...r, hasUpdate: false, current: r.latest } : r,
     );
+    // The library still shows the old file until a scan reads the new one (#402).
+    installedUnscanned.add(row.techName);
   }
+
+  /** Mods updated since the last scan that worked: the library's entry is still the old file,
+   *  so a link refresh (#402) leaves their rows alone until a scan reads the new one. */
+  const installedUnscanned = new Set<string>();
 
   /** A failed install turns its row into the error, with Try again and Copy details there. */
   function markInstallFailed(row: UpdateRow, e: unknown) {
@@ -3535,6 +3544,7 @@
       const r = await scanMods(roots.length ? roots : undefined, autoCheckEnabled());
       result = r;
       mods = r.mods;
+      installedUnscanned.clear();
       libraryScanned = true;
       scanFailed = false;
       activeSet = new Set(r.mods.filter((m) => m.active).map((m) => m.techName));
@@ -3556,7 +3566,8 @@
       // Filesystem-level check (Rust): files at a managed name that aren't Silo's projection.
       void refreshForeignFiles();
       // Privacy: a scan never sends the library to the catalog. Catalog calls happen only
-      // when the user asks (Browse, a mod's details, Updates, integrity check).
+      // when the user asks (Browse, a mod's details, Updates, integrity check), or with the
+      // startup update check on, the catalog-link backfill after the scan (#402).
       // NOTE: the update check is NOT auto-run on launch — on a large library the burst of
       // scan + catalog-tags + a whole-library update pass all landing at once could jank the
       // window right after it opened. The "Needs update" toggle runs it on demand instead.

@@ -29,6 +29,7 @@ import {
   linkRefresh,
   mergeRows,
   recheckRow,
+  refreshTargets,
   sameStamps,
   runUpdateCheck,
   updateAll,
@@ -658,6 +659,32 @@ describe("checking again when Silo links mods to the catalog (#402)", () => {
       held: null,
     });
     expect(heldRefresh(held, 2, false)).toEqual({ run: null, held: null });
+  });
+
+  it("asks about, and compares, the same mods: never one left out meanwhile", () => {
+    const lib = [
+      { techName: "A", path: "A.zip", size: 1, mtimeMs: 1, version: "1" },
+      { techName: "B", path: "B.zip", size: 1, mtimeMs: 1, version: "1" },
+    ];
+    let skipB = false;
+    const leftOut = (t: string) => skipB && t === "B";
+    // Held for A and B; B is left out before it runs.
+    skipB = true;
+    const asked = refreshTargets(["A", "B"], lib, leftOut);
+    expect(asked.map((m) => m.techName)).toEqual(["A"]);
+    // Nothing changed: the answer is put in (one request, no re-asking).
+    const want = asked.map((m) => m.techName);
+    expect(
+      sameStamps(
+        fileStamps(asked),
+        fileStamps(refreshTargets(want, lib, leftOut)),
+      ),
+    ).toBe(true);
+    // A mod updated since the last scan that worked is left out too.
+    const installed = new Set(["A"]);
+    expect(refreshTargets(["A", "B"], lib, (t) => installed.has(t))).toEqual([
+      lib[1],
+    ]);
   });
 
   it("tells when the library's files changed under a refresh", () => {

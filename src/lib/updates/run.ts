@@ -151,6 +151,20 @@ export function heldRefresh(
   return busy ? { run: null, held } : { run: held.names, held: null };
 }
 
+/**
+ * The library entries a link refresh asks about: those of `names` not `leftOut` (left out of
+ * update checks, or updated since the last scan that worked). The same rule picks the entries
+ * its answer is compared with, so a mod left out meanwhile never makes the two differ.
+ */
+export function refreshTargets<M extends { techName: string }>(
+  names: string[],
+  mods: M[],
+  leftOut: (techName: string) => boolean,
+): M[] {
+  const want = new Set(names);
+  return mods.filter((m) => want.has(m.techName) && !leftOut(m.techName));
+}
+
 /** Which file each of `mods` is (path, size, modified time, version), by techName. */
 export function fileStamps(
   mods: {
