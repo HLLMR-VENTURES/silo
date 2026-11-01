@@ -85,6 +85,14 @@ junction = "1.4.1"
 # Read the Steam client folder (HKCU\Software\Valve\Steam\SteamPath) so a Steam client on any
 # drive is found (gamelaunch::steam_roots). Microsoft's crate, already in the tree via hyper-util.
 windows-registry = "0.6"
+# MoveFileExW without MOVEFILE_REPLACE_EXISTING: a rename that never replaces a file
+# (paths::rename_no_replace). Already in the tree (mio, tauri) with this feature enabled.
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+# renameat2(RENAME_NOREPLACE) on Linux, renamex_np(RENAME_EXCL) on macOS: a rename that never
+# replaces a file (paths::rename_no_replace). Already in the tree via many crates.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.dev]
 # Faster incremental dev builds; the heavy work is I/O-bound anyway.

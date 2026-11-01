@@ -347,8 +347,8 @@ fn verify(src: &Path, dst: &Path, kind: &str, check: Check) -> Result<bool, Stri
 }
 
 /// Put a verified temp copy at `dst` without ever replacing anything there. Zips: hardlink the
-/// temp to `dst` (fails if `dst` exists), then drop the temp; on a filesystem without hardlinks,
-/// check `dst` is absent right before the rename. Folders: check, then rename.
+/// temp to `dst` (fails if `dst` exists), then drop the temp. On a filesystem without hardlinks,
+/// and for folders, `paths::rename_no_replace`, which fails rather than replace `dst`.
 fn place(tmp: &Path, dst: &Path, kind: &str) -> Result<(), String> {
     let taken = || {
         format!(
@@ -364,13 +364,14 @@ fn place(tmp: &Path, dst: &Path, kind: &str) -> Result<(), String> {
                 return Ok(());
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(taken()),
-            Err(_) => {} // no hardlinks on this filesystem: check + rename below
+            Err(_) => {} // no hardlinks on this filesystem: no-replace rename below
         }
     }
-    if exists(dst) {
-        return Err(taken());
+    match crate::paths::rename_no_replace(tmp, dst) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(taken()),
+        Err(e) => return Err(format!("place: {e}")),
     }
-    std::fs::rename(tmp, dst).map_err(|e| format!("place: {e}"))?;
     crate::fslog::moved("place", tmp, dst);
     Ok(())
 }

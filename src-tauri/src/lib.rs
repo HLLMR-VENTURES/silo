@@ -1143,6 +1143,12 @@ async fn install_remote_mod(
         // The filename comes from the catalog — validate it's a plain basename so a
         // hostile response can't redirect the write outside the mods folder.
         paths::safe_file_name(&resolved.filename)?;
+        // The user picked this exact mod, so a file named differently from the catalog's
+        // techName still installs, under its own name (never renamed; the game names the mod
+        // after the zip). Only noted in the log. A shared set refuses it instead.
+        if let Some(note) = browse_name_note(&resolved.filename, resolved.tech_name.as_deref()) {
+            log::info!("{note}");
+        }
         let dest = root.join(&resolved.filename);
         if path_taken(&dest) {
             return Err(already_in_library(&dest));
@@ -1165,6 +1171,7 @@ async fn install_remote_mod(
         )?;
         // A finished download waits out a busy spell instead of being thrown away.
         let _write = library_write_within(PLACE_WAIT)?;
+        install_recheck(&root, &dest)?;
         place_part(part.path(), &dest)?;
         Ok(resolved.filename)
     })
@@ -1173,15 +1180,44 @@ async fn install_remote_mod(
     .map_err(error::AppError::from)
 }
 
+/// The log line for a Browse install whose file isn't named after the catalog's techName, or
+/// `None` when it is (or the catalog has no techName). The install goes ahead either way.
+fn browse_name_note(filename: &str, tech_name: Option<&str>) -> Option<String> {
+    let tech = tech_name.filter(|t| !t.trim().is_empty())?;
+    siloapi::check_download_name(filename, tech).err()?;
+    Some(format!(
+        "[install] catalog techName {tech} downloads as {filename}; installed under that name"
+    ))
+}
+
+const MODS_FOLDER_CHANGED: &str =
+    "Your mods folder changed while this downloaded, so Silo didn't add it. Install it again.";
+
+/// What `install_remote_mod` checks again once it holds the library lock: the user may have
+/// switched mods folder while the download ran, and the mod must not land in the old one.
+fn install_recheck(root: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+    ensure_library_write(dest)?;
+    still_a_mods_folder(root, &mods_roots())
+}
+
+/// `Ok` while `root` is still one of the current mods folders.
+fn still_a_mods_folder(root: &std::path::Path, mods_roots: &[PathBuf]) -> Result<(), String> {
+    if mods_roots.iter().any(|m| modsroot::same_folder(m, root)) {
+        Ok(())
+    } else {
+        Err(MODS_FOLDER_CHANGED.to_string())
+    }
+}
+
 /// Downloads whose `.zip.part` is in use, by `same_file_key`. Downloads run outside the
 /// library lock, so two at once for the same file must not share (and corrupt) one part file.
-static PARTS_IN_FLIGHT: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+static PARTS_IN_FLIGHT: std::sync::Mutex<Vec<FileKey>> = std::sync::Mutex::new(Vec::new());
 
 /// A download's claim on its part file. Dropping it removes whatever part is left
 /// (a failed or abandoned download) and frees the name.
 pub struct PartClaim {
     path: PathBuf,
-    key: PathBuf,
+    key: FileKey,
 }
 
 impl PartClaim {
@@ -1198,20 +1234,54 @@ impl Drop for PartClaim {
     }
 }
 
-/// Paths that name the same file compare equal: on Windows file names are case-insensitive,
-/// so the name is lowercased (the parent is kept as given; callers join names onto one root).
-fn same_file_key(p: &std::path::Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        if let Some(name) = p.file_name() {
-            let lower = name.to_string_lossy().to_lowercase();
-            return match p.parent() {
-                Some(parent) => parent.join(lower),
-                None => PathBuf::from(lower),
-            };
-        }
+/// Two ways of comparing a path that names a file, so that two paths that may be one file on
+/// some system are seen as the same: they [`overlap`](FileKey::overlaps) when either way agrees.
+/// - `folded`: the name decomposed, lowercased, uppercased and recomposed (NFC). This merges what
+///   macOS (APFS, HFS+) merges, case and how an accent is encoded (`é` vs `e` + combining
+///   accent), and more (`σ`/`ς`, `k`/Kelvin sign).
+/// - `upper`: the name uppercased character by character with nothing reordered, as NTFS
+///   compares names (normalizing first can reorder combining marks NTFS would not).
+///
+/// Over-matching only over-claims (two such variants can't download at once, also on a
+/// case-sensitive Linux folder), which is harmless. The parent is resolved (`canonicalize`:
+/// real case on Windows, links followed), so two spellings of one folder share keys; a folder
+/// that can't be resolved is kept as given.
+#[derive(Debug, Clone, PartialEq)]
+struct FileKey {
+    folded: PathBuf,
+    upper: PathBuf,
+}
+
+impl FileKey {
+    fn overlaps(&self, other: &FileKey) -> bool {
+        self.folded == other.folded || self.upper == other.upper
     }
-    p.to_path_buf()
+}
+
+/// See [`FileKey`].
+fn same_file_key(p: &std::path::Path) -> FileKey {
+    let Some(name) = p.file_name() else {
+        return FileKey {
+            folded: p.to_path_buf(),
+            upper: p.to_path_buf(),
+        };
+    };
+    let name = name.to_string_lossy();
+    let parent = match p.parent() {
+        Some(parent) => std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf()),
+        None => PathBuf::new(),
+    };
+    FileKey {
+        folded: parent.join(fold_file_name(&name)),
+        upper: parent.join(name.to_uppercase()),
+    }
+}
+
+/// See [`FileKey`].
+fn fold_file_name(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let decomposed: String = name.nfd().collect();
+    decomposed.to_lowercase().to_uppercase().nfc().collect()
 }
 
 /// Claim the part file a download of `dest` streams into, refusing while another download
@@ -1224,7 +1294,7 @@ fn claim_part(dest: &std::path::Path) -> Result<PartClaim, String> {
 fn claim_part_at(dest: &std::path::Path, path: PathBuf) -> Result<PartClaim, String> {
     let key = same_file_key(&path);
     let mut held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-    if held.contains(&key) {
+    if held.iter().any(|k| k.overlaps(&key)) {
         return Err(format!("{} is already downloading", file_label(dest)));
     }
     held.push(key.clone());
@@ -1236,7 +1306,8 @@ fn claim_part_at(dest: &std::path::Path, path: PathBuf) -> Result<PartClaim, Str
 /// in between. Returns whether a file was removed.
 fn remove_unclaimed_part(path: &std::path::Path) -> bool {
     let held = PARTS_IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-    if held.contains(&same_file_key(path)) {
+    let key = same_file_key(path);
+    if held.iter().any(|k| k.overlaps(&key)) {
         return false;
     }
     let removed = std::fs::remove_file(path).is_ok();
@@ -1265,13 +1336,11 @@ const DOWNLOAD_GONE: &str = "The download disappeared before Silo could add it. 
 
 /// Move a finished download into the library at `dest`, never replacing anything there.
 /// Hardlink then drop the part (the link fails if `dest` exists). Only when the link fails
-/// because the filesystem can't hardlink (`no_hardlink_support`) does it fall back to
-/// checking `dest` is free and renaming. A taken `dest` removes the part and refuses.
+/// because the filesystem can't hardlink (`no_hardlink_support`, e.g. a cloud-synced folder)
+/// does it fall back to `paths::rename_no_replace`, a rename that fails rather than replace
+/// `dest`. A taken `dest` removes the part and refuses.
 ///
-/// Call under the library lock, which keeps Silo's own writes out. The fallback still has a
-/// small window between the check and the rename in which another program could create
-/// `dest`; on Windows the rename would then replace it. Hardlink-capable filesystems (the
-/// usual case) have no such window.
+/// Call under the library lock, which keeps Silo's own writes out.
 fn place_part(part: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
     place_part_with(part, dest, |a, b| std::fs::hard_link(a, b))?;
     fslog::moved("install", part, dest);
@@ -1300,13 +1369,13 @@ fn place_part_with(
             return Ok(());
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return refuse(),
-        Err(e) if no_hardlink_support(&e) => {} // check + rename below
+        Err(e) if no_hardlink_support(&e) => {} // no-replace rename below
         Err(e) => return Err(io_err(e)),
     }
-    if path_taken(dest) {
-        return refuse();
+    match paths::rename_no_replace(part, dest) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => refuse(),
+        other => other.map_err(io_err),
     }
-    std::fs::rename(part, dest).map_err(io_err)
 }
 
 /// A hardlink error that means "this filesystem / pair of folders can't hardlink", as
@@ -4566,6 +4635,8 @@ async fn collection_apply(
         let mut failed_count = 0usize;
         // Finished downloads waiting to be placed under the lock (their rows are filled then).
         let mut pending: Vec<PendingPlace> = Vec::new();
+        // (row, row of the pending download of the same file) for a set naming one file twice.
+        let mut duplicates: Vec<(usize, usize)> = Vec::new();
 
         for (i, (m, t)) in coll.mods.iter().zip(&targets).enumerate() {
             let _ = emitter.emit(
@@ -4607,20 +4678,51 @@ async fn collection_apply(
 
             match siloapi::resolve_download(&base, cid, t.download_source.as_deref()) {
                 Ok(resolved) => {
-                    if let Err(e) = paths::safe_file_name(&resolved.filename) {
+                    // A plain basename, named after the mod this set asks for (never renamed).
+                    if let Err(e) = paths::safe_file_name(&resolved.filename).and_then(|_| {
+                        siloapi::check_download_name(&resolved.filename, &m.tech_name)
+                    }) {
                         rows.push(fail_row(&m.tech_name, e));
                         failed_count += 1;
                         continue;
                     }
                     let dest = root.join(&resolved.filename);
-                    // Already there, or another mod in this collection downloads the same file.
-                    let key = same_file_key(&dest);
-                    if path_taken(&dest) || pending.iter().any(|p| same_file_key(&p.dest) == key) {
+                    // Already there, or another mod in this collection downloads that very file.
+                    let same_name = |p: &PendingPlace| {
+                        p.dest.file_name().is_some_and(|n| {
+                            n.to_string_lossy().to_lowercase() == resolved.filename.to_lowercase()
+                        })
+                    };
+                    if path_taken(&dest) {
                         rows.push(present_row(&m.tech_name, &resolved.filename));
                         continue;
                     }
-                    // Taken only by another download running right now (e.g. from Browse).
+                    // Settled once that download is placed (or isn't): see `settle_duplicates`.
+                    if let Some(p) = pending.iter().find(|p| same_name(p)) {
+                        duplicates.push((rows.len(), p.row));
+                        rows.push(present_row(&m.tech_name, &resolved.filename));
+                        continue;
+                    }
                     let Ok(part) = claim_part(&dest) else {
+                        // A different name the claim treats as the same file as one of this
+                        // set's own downloads: never reported as present.
+                        let key = same_file_key(&dest);
+                        if let Some(p) = pending
+                            .iter()
+                            .find(|p| same_file_key(&p.dest).overlaps(&key))
+                        {
+                            rows.push(fail_row(
+                                &m.tech_name,
+                                format!(
+                                    "Its file name can't be told apart from {} in this set. \
+                                     Install it on its own afterwards.",
+                                    file_label(&p.dest)
+                                ),
+                            ));
+                            failed_count += 1;
+                            continue;
+                        }
+                        // Taken only by another download running right now (e.g. from Browse).
                         rows.push(ApplyRow {
                             tech_name: m.tech_name.clone(),
                             filename: Some(resolved.filename.clone()),
@@ -4661,7 +4763,12 @@ async fn collection_apply(
                     }
                 }
                 // No direct download (ModHub gates it) — leave it for the user.
-                Err(_) => rows.push(gated_row(&m.tech_name)),
+                Err(siloapi::ResolveError::Gated(_)) => rows.push(gated_row(&m.tech_name)),
+                // Anything else is a failure, with its cause, not a site restriction.
+                Err(siloapi::ResolveError::Operational(e)) => {
+                    rows.push(fail_row(&m.tech_name, e));
+                    failed_count += 1;
+                }
             }
         }
 
@@ -4675,9 +4782,12 @@ async fn collection_apply(
             }
         }
         let locked = lock.as_ref().map(|_| ()).map_err(String::clone);
-        let (placed, place_failed) = place_pending(&mut rows, pending, locked);
+        // The mods folder may have been switched while the downloads ran.
+        let (placed, place_failed) = place_pending(&mut rows, pending, locked, |dest| {
+            install_recheck(&root, dest)
+        });
         installed_count += placed;
-        failed_count += place_failed;
+        failed_count += place_failed + settle_duplicates(&mut rows, &duplicates);
 
         // The loadout lists the whole collection; applying it activates the ones you have,
         // and it completes automatically once you fetch the rest and rescan. Not saved when
@@ -4723,18 +4833,20 @@ struct PendingPlace {
 
 /// Fill in the rows of finished collection downloads: placed (`installed`, with its verdict),
 /// `present` (the file appeared meanwhile; theirs is kept), or `failed`. `locked` is whether
-/// the library lock is held; without it every pending row fails with that reason. Each part
-/// not placed is removed as its claim drops. Returns (installed, failed).
+/// the library lock is held; without it every pending row fails with that reason. `recheck`
+/// is asked again for each destination under the lock (`install_recheck`); a refusal fails
+/// that row. Each part not placed is removed as its claim drops. Returns (installed, failed).
 fn place_pending(
     rows: &mut [ApplyRow],
     pending: Vec<PendingPlace>,
     locked: Result<(), String>,
+    recheck: impl Fn(&std::path::Path) -> Result<(), String>,
 ) -> (usize, usize) {
     let (mut installed, mut failed) = (0, 0);
     for p in pending {
         let row = &mut rows[p.row];
-        if let Err(e) = &locked {
-            *row = fail_row(&row.tech_name, e.clone());
+        if let Err(e) = locked.clone().and_then(|()| recheck(&p.dest)) {
+            *row = fail_row(&row.tech_name, e);
             failed += 1;
         } else if path_taken(&p.dest) {
             // Appeared while we downloaded (another install): keep theirs.
@@ -4753,6 +4865,21 @@ fn place_pending(
         }
     }
     (installed, failed)
+}
+
+/// A row that shares its file with another row's download is `present` only if that download
+/// was placed (or found already there); when it failed, so does this row, with the same reason.
+/// Returns how many rows failed.
+fn settle_duplicates(rows: &mut [ApplyRow], duplicates: &[(usize, usize)]) -> usize {
+    let mut failed = 0;
+    for &(row, of) in duplicates {
+        if rows[of].status == "failed" {
+            let detail = rows[of].detail.clone().unwrap_or_default();
+            rows[row] = fail_row(&rows[row].tech_name, detail);
+            failed += 1;
+        }
+    }
+    failed
 }
 
 fn present_row(tech_name: &str, filename: &str) -> ApplyRow {
@@ -6697,6 +6824,25 @@ mod tests {
     }
 
     #[test]
+    fn the_rename_fallback_never_replaces_a_file_that_appears_after_the_link_attempt() {
+        use std::io::{Error, ErrorKind};
+        let base = temp_base("place_race");
+        let dest = base.join("mods").join("FS25_Race.zip");
+        let part = dest.with_extension("zip.part");
+        std::fs::write(&part, b"download").unwrap();
+        // The link fails for lack of support, and meanwhile another program creates `dest`.
+        let racer = |_: &Path, d: &Path| {
+            std::fs::write(d, b"user's only copy").unwrap();
+            Err(Error::from(ErrorKind::Unsupported))
+        };
+        let err = super::place_part_with(&part, &dest, racer).unwrap_err();
+        assert_eq!(err, "FS25_Race.zip is already in your library");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"user's only copy");
+        assert!(!part.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn a_busy_library_fails_the_pending_downloads_and_removes_their_parts() {
         let base = temp_base("place_pending_busy");
         let dest = base.join("mods").join("FS25_Wait.zip");
@@ -6716,8 +6862,12 @@ mod tests {
             dest: dest.clone(),
             verdict: "verified".into(),
         }];
-        let (installed, failed) =
-            super::place_pending(&mut rows, pending, Err(super::LIBRARY_BUSY.to_string()));
+        let (installed, failed) = super::place_pending(
+            &mut rows,
+            pending,
+            Err(super::LIBRARY_BUSY.to_string()),
+            |_| Ok(()),
+        );
         assert_eq!((installed, failed), (0, 1));
         assert_eq!(rows[0].status, "failed");
         assert_eq!(rows[0].detail.as_deref(), Some(super::LIBRARY_BUSY));
@@ -6726,13 +6876,133 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[cfg(windows)]
     #[test]
-    fn claims_ignore_case_on_windows() {
+    fn claims_ignore_case_on_every_system() {
+        // macOS (APFS) ignores case as Windows does; on Linux this only over-claims.
         let base = temp_base("claim_case");
         let mods = base.join("mods");
         let _first = super::claim_part(&mods.join("FS25_Foo.zip")).unwrap();
         assert!(super::claim_part(&mods.join("fs25_foo.zip")).is_err());
+        assert!(
+            super::claim_part_at(&mods.join("FS25_FOO.zip"), mods.join("FS25_FOO.zip.part"))
+                .is_err()
+        );
+        // NTFS uppercases, so both lowercase sigmas are one name.
+        let _sigma = super::claim_part(&mods.join("FS25_\u{3c3}.zip")).unwrap();
+        assert!(super::claim_part(&mods.join("FS25_\u{3c2}.zip")).is_err());
+        assert!(super::claim_part(&mods.join("FS25_\u{3a3}.zip")).is_err());
+        // Two spellings of one folder share keys: another case on Windows, a link elsewhere.
+        #[cfg(windows)]
+        let alias = base.join("MODS");
+        #[cfg(unix)]
+        let alias = {
+            let a = base.join("mods-link");
+            std::os::unix::fs::symlink(&mods, &a).unwrap();
+            a
+        };
+        assert_ne!(alias, mods);
+        assert!(super::claim_part(&alias.join("FS25_Foo.zip")).is_err());
+        // NTFS compares names by uppercasing each character, without reordering accents.
+        let _ypo = super::claim_part(&mods.join("FS25_A\u{345}\u{301}.zip")).unwrap();
+        assert!(super::claim_part(&mods.join("FS25_A\u{399}\u{301}.zip")).is_err());
+        // APFS also treats the two ways of writing an accent as one name.
+        let _cafe = super::claim_part(&mods.join("FS25_Caf\u{e9}.zip")).unwrap();
+        assert!(super::claim_part(&mods.join("FS25_Cafe\u{301}.zip")).is_err());
+        assert!(super::claim_part(&mods.join("fs25_CAFE\u{301}.zip")).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn collection_downloads_are_not_placed_once_their_mods_folder_was_switched_away() {
+        let base = temp_base("place_pending_switched");
+        let dest = base.join("mods").join("FS25_Moved.zip");
+        let part = super::claim_part(&dest).unwrap();
+        std::fs::write(part.path(), b"done").unwrap();
+        let part_path = part.path().to_path_buf();
+        let mut rows = vec![super::ApplyRow {
+            tech_name: "FS25_Moved".into(),
+            filename: Some("FS25_Moved.zip".into()),
+            status: "installed".into(),
+            verdict: None,
+            detail: None,
+        }];
+        let pending = vec![super::PendingPlace {
+            row: 0,
+            part,
+            dest: dest.clone(),
+            verdict: "verified".into(),
+        }];
+        let (installed, failed) = super::place_pending(&mut rows, pending, Ok(()), |_| {
+            Err(super::MODS_FOLDER_CHANGED.to_string())
+        });
+        assert_eq!((installed, failed), (0, 1));
+        assert_eq!(rows[0].status, "failed");
+        assert_eq!(rows[0].detail.as_deref(), Some(super::MODS_FOLDER_CHANGED));
+        assert!(!dest.exists());
+        assert!(!part_path.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_set_naming_one_file_twice_reports_both_rows_as_that_download_ended() {
+        let row = |status: &str, detail: Option<&str>| super::ApplyRow {
+            tech_name: "FS25_Dup".into(),
+            filename: Some("FS25_Dup.zip".into()),
+            status: status.into(),
+            verdict: None,
+            detail: detail.map(str::to_string),
+        };
+        let mut rows = vec![
+            row("failed", Some(super::LIBRARY_BUSY)),
+            row("present", None),
+            row("installed", None),
+            row("present", None),
+        ];
+        let failed = super::settle_duplicates(&mut rows, &[(1, 0), (3, 2)]);
+        assert_eq!(failed, 1);
+        assert_eq!(rows[1].status, "failed");
+        assert_eq!(rows[1].detail.as_deref(), Some(super::LIBRARY_BUSY));
+        assert_eq!(rows[3].status, "present");
+    }
+
+    #[test]
+    fn browse_installs_a_differently_named_file_under_its_own_name_and_notes_it() {
+        // Browse: allowed, only noted (the catalog's `FS25_ToDo` ships `FS25_FieldToDoList.zip`).
+        let note = super::browse_name_note("FS25_FieldToDoList.zip", Some("FS25_ToDo")).unwrap();
+        assert!(
+            note.contains("FS25_ToDo") && note.contains("FS25_FieldToDoList.zip"),
+            "{note}"
+        );
+        assert_eq!(
+            super::browse_name_note("FS25_ToDo.zip", Some("fs25_todo")),
+            None
+        );
+        assert_eq!(super::browse_name_note("FS25_X.zip", None), None);
+        assert_eq!(super::browse_name_note("FS25_X.zip", Some("  ")), None);
+        // A shared set: the same file is refused, since the saved set could never turn it on.
+        assert!(
+            crate::siloapi::check_download_name("FS25_FieldToDoList.zip", "FS25_ToDo").is_err()
+        );
+    }
+
+    #[test]
+    fn an_install_is_not_placed_once_its_mods_folder_was_switched_away() {
+        let base = temp_base("install_recheck");
+        let (a, b) = (base.join("A"), base.join("B"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        assert_eq!(
+            super::still_a_mods_folder(&a, std::slice::from_ref(&a)),
+            Ok(())
+        );
+        assert_eq!(
+            super::still_a_mods_folder(&a, std::slice::from_ref(&b)),
+            Err(super::MODS_FOLDER_CHANGED.to_string())
+        );
+        assert_eq!(
+            super::still_a_mods_folder(&a, &[]),
+            Err(super::MODS_FOLDER_CHANGED.to_string())
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
