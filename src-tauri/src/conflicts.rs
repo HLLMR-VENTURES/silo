@@ -188,18 +188,25 @@ fn labels(parsed: &[Parsed], idxs: &[usize]) -> Involved {
     (out, techs)
 }
 
-/// The distinct mods in a collision, split into (maps, non-map mods), by tech name.
+/// The distinct mods in a collision, split into (maps, non-map mods). Distinct by tech name, as
+/// [`labels`] counts them: a tech name seen twice (say a zip and a folder) counts once, by its
+/// first entry.
 fn maps_and_others(parsed: &[Parsed], idxs: &[usize]) -> (usize, usize) {
-    let mut maps: Vec<&str> = Vec::new();
-    let mut others: Vec<&str> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    let (mut maps, mut others) = (0, 0);
     for &i in idxs {
         let Some(p) = parsed.get(i) else { continue };
-        let list = if p.md.is_map { &mut maps } else { &mut others };
-        if !list.contains(&p.tech_name.as_str()) {
-            list.push(&p.tech_name);
+        if seen.contains(&p.tech_name.as_str()) {
+            continue;
+        }
+        seen.push(&p.tech_name);
+        if p.md.is_map {
+            maps += 1;
+        } else {
+            others += 1;
         }
     }
-    (maps.len(), others.len())
+    (maps, others)
 }
 
 /// How many mods take part in a collision once it loads: distinct non-map mods, plus one for
@@ -894,6 +901,13 @@ mod tests {
         assert_eq!(participants(&p, &[2, 3]), 2);
         assert_eq!(participants(&p, &[2, 2]), 1);
         assert_eq!(participants(&p, &[]), 0);
+        // One tech name both as a map and not (two copies of a mod) is still one mod.
+        let twin = vec![
+            parsed_map("Map A", "FS25_MapA"),
+            parsed("Map A", "FS25_MapA"),
+        ];
+        assert_eq!(participants(&twin, &[0, 1]), 1);
+        assert_eq!(participants(&twin, &[1, 0]), 1);
         // Only collisions involving a map say when they matter.
         assert_eq!(map_condition(&p, &[2, 3]), "");
         assert!(map_condition(&p, &[0, 2, 4]).contains("play on that map"));
