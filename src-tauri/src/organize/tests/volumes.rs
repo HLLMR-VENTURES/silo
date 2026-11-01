@@ -290,7 +290,7 @@ fn a_probe_name_already_taken_moves_on_to_the_next() {
 }
 
 #[test]
-fn stale_link_probes_are_swept_and_fresh_ones_and_mods_are_kept() {
+fn stale_link_probes_are_logged_and_never_removed() {
     let (base, mods, _archive) = probe_dirs("sweep");
     let old = mods.join(".silo-hardlink-probe-1-0.link");
     let old_sym = mods.join(".silo-symlink-probe-1-0.link");
@@ -315,18 +315,17 @@ fn stale_link_probes_are_swept_and_fresh_ones_and_mods_are_kept() {
             .set_modified(hour_ago)
             .unwrap();
     }
-    sweep_link_probes(&mods, std::time::Duration::from_secs(600));
-    assert!(!old.exists() && !old_sym.exists(), "stale probes removed");
-    assert!(fresh.exists(), "a probe running right now is kept");
-    assert!(mine.exists(), "never anything else");
-    assert!(holds_data.exists() && notes.exists() && legacy.exists());
+    log_stale_link_probes(&mods, std::time::Duration::from_secs(600));
+    // Nothing is removed by its name (#394): not even an empty, probe-shaped, stale file.
+    for p in [&old, &old_sym, &fresh, &mine, &holds_data, &notes, &legacy] {
+        assert!(p.exists(), "{} kept", p.display());
+    }
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// A crash's folder probe (`dir_links_between`) is swept only while empty; a folder with
-/// anything in it, or under another name, is never touched.
+/// A crash's folder probe (`dir_links_between`) is left in place too, empty or not.
 #[test]
-fn stale_folder_probes_are_swept_only_while_empty() {
+fn stale_folder_probes_are_left_in_place() {
     let (base, _mods, archive) = probe_dirs("sweepdir");
     let empty = archive.join(".silo-symlink-probe-dir-1-0");
     let full = archive.join(".silo-symlink-probe-dir-1-1");
@@ -335,8 +334,8 @@ fn stale_folder_probes_are_swept_only_while_empty() {
         std::fs::create_dir_all(d).unwrap();
     }
     std::fs::write(full.join("keep.txt"), b"x").unwrap();
-    sweep_link_probes(&archive, std::time::Duration::ZERO);
-    assert!(!empty.exists());
+    log_stale_link_probes(&archive, std::time::Duration::ZERO);
+    assert!(empty.exists());
     assert!(full.join("keep.txt").exists());
     assert!(category.exists());
     let _ = std::fs::remove_dir_all(&base);

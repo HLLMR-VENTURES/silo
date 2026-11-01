@@ -1197,7 +1197,7 @@ fn recover_interrupted_updates() -> update::Recovery {
     };
     // Link probes a crash left behind (a probe running right now is younger than this).
     for dir in [&active.layout.mods, &active.layout.archive] {
-        organize::sweep_link_probes(dir, std::time::Duration::from_secs(600));
+        organize::log_stale_link_probes(dir, std::time::Duration::from_secs(600));
     }
     let r = settle_layout(&active.layout);
     log_recovery(&r);
