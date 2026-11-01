@@ -126,6 +126,8 @@ fn build_api_agent(connect: Duration, read: Duration, overall: Option<Duration>)
     agent_with(
         agent_config(connect, read, overall)
             .max_redirects(API_MAX_REDIRECTS)
+            // For "(redirected from …)" in a status error's text, as ureq 2 wrote it.
+            .save_redirect_history(true)
             .build(),
         false,
     )
@@ -279,9 +281,13 @@ fn lookup_within(netloc: &str, timeout: NextTimeout) -> Result<Vec<SocketAddr>, 
     }
 }
 
-/// ureq's own connector, with an I/O failure while connecting (refused, unreachable, reset
-/// during the TLS handshake) reported as [`ConnectFailed`], ureq 2's "Connection Failed".
-/// Everything else, timeouts included, passes through unchanged.
+/// ureq's own connector, called once per address so the connect budget is one absolute
+/// deadline across all of them, as in ureq 2. ureq 3's own loop splits the budget between
+/// addresses up front and doesn't recheck it after a refused or unreachable address, so a host
+/// whose addresses each refuse slowly could take several times the budget.
+///
+/// An I/O failure while connecting (refused, unreachable, reset during the TLS handshake) is
+/// reported as [`ConnectFailed`], ureq 2's "Connection Failed". Other errors pass through.
 #[derive(Debug, Default)]
 struct SiloConnector(DefaultConnector);
 
@@ -293,11 +299,77 @@ impl Connector<()> for SiloConnector {
         details: &ConnectionDetails,
         chained: Option<()>,
     ) -> Result<Option<Self::Out>, ureq::Error> {
-        self.0.connect(details, chained).map_err(|e| match e {
+        // ureq's clock (tests inside ureq inject one); a real request always has an exact time.
+        let now = || match (details.current_time)() {
+            ureq::unversioned::transport::time::Instant::Exact(t) => t,
+            _ => Instant::now(),
+        };
+        connect_each(&details.addrs, details.timeout, &now, |addr, timeout| {
+            let mut one = details.resolver.empty();
+            one.push(addr);
+            let single = ConnectionDetails {
+                uri: details.uri,
+                addrs: one,
+                config: details.config,
+                request_level: details.request_level,
+                resolver: details.resolver,
+                now: (details.current_time)(),
+                timeout,
+                current_time: details.current_time.clone(),
+                run_connector: details.run_connector.clone(),
+                register_shutdown: details.register_shutdown.clone(),
+            };
+            self.0.connect(&single, chained)
+        })
+        .map_err(|e| match e {
             ureq::Error::Io(source) => ConnectFailed::error(source),
             e => e,
         })
     }
+}
+
+/// Try `attempt` on each address in turn until one connects, within one deadline (`timeout`
+/// from the first attempt). As in ureq 2 (`connect_host`): with more than one address, each
+/// attempt gets half the time left; a failed attempt (an I/O error or its own timeout) moves
+/// on to the next address; once the deadline has passed, it is a timeout with `timeout`'s
+/// reason. Any other error ends it.
+fn connect_each<T>(
+    addrs: &[SocketAddr],
+    timeout: NextTimeout,
+    now: &dyn Fn() -> Instant,
+    mut attempt: impl FnMut(SocketAddr, NextTimeout) -> Result<T, ureq::Error>,
+) -> Result<T, ureq::Error> {
+    use ureq::unversioned::transport::time::Duration as Budget;
+    let deadline = (!timeout.after.is_not_happening()).then(|| now() + *timeout.after);
+    let expired = || ureq::Error::Timeout(timeout.reason);
+    let multiple = addrs.len() > 1;
+    let mut last = None;
+    for &addr in addrs {
+        let mut this = timeout;
+        if let Some(d) = deadline {
+            let left = d.saturating_duration_since(now());
+            if left.is_zero() {
+                return Err(expired());
+            }
+            let share = if multiple { left / 2 } else { left };
+            // Never zero: ureq reads a zero budget as "one second".
+            this.after = Budget::Exact(share.max(Duration::from_millis(1)));
+        }
+        match attempt(addr, this) {
+            Ok(v) => return Ok(v),
+            Err(e @ (ureq::Error::Io(_) | ureq::Error::Timeout(_))) => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    if deadline.is_some_and(|d| now() >= d) {
+        return Err(expired());
+    }
+    Err(last.unwrap_or_else(|| {
+        ureq::Error::Io(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "no address to connect to",
+        ))
+    }))
 }
 
 /// A connection that couldn't be made (ureq 2's "Connection Failed"). Carried in
@@ -373,6 +445,8 @@ pub enum HttpError {
 #[derive(Debug)]
 pub struct StatusError {
     url: String,
+    /// The URL first asked for, when `api()` followed redirects to `url`.
+    redirected_from: Option<String>,
     resp: Response,
 }
 
@@ -423,6 +497,7 @@ impl HttpError {
             resp.status().as_u16(),
             Box::new(StatusError {
                 url: url.into(),
+                redirected_from: None,
                 resp,
             }),
         )
@@ -458,7 +533,14 @@ impl std::fmt::Display for HttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             // ureq 2's wording: "<url>: status code 404".
-            HttpError::Status(code, s) => write!(f, "{}: status code {code}", s.url),
+            // ureq 2's wording: "<url>: status code 404 (redirected from <first url>)".
+            HttpError::Status(code, s) => {
+                write!(f, "{}: status code {code}", s.url)?;
+                if let Some(first) = &s.redirected_from {
+                    write!(f, " (redirected from {first})")?;
+                }
+                Ok(())
+            }
             HttpError::Transport(t) => {
                 if let Some(u) = &t.url {
                     write!(f, "{u}: ")?;
@@ -484,7 +566,15 @@ fn checked(url: Option<String>, r: Result<Response, ureq::Error>) -> Result<Resp
     match r {
         Ok(resp) if resp.status().as_u16() >= 400 => {
             let url = resp.get_uri().to_string();
-            Err(HttpError::status(url, resp))
+            let redirected_from = resp
+                .get_redirect_history()
+                .filter(|h| h.len() > 1)
+                .map(|h| h[0].to_string());
+            let mut e = HttpError::status(url, resp);
+            if let HttpError::Status(_, s) = &mut e {
+                s.redirected_from = redirected_from;
+            }
+            Err(e)
         }
         Ok(resp) => Ok(resp),
         Err(e) => Err(HttpError::transport(url, e)),
@@ -584,7 +674,28 @@ pub trait RespExt {
     /// The body parsed as JSON. No size limit, as in ureq 2.
     fn into_json<T: serde::de::DeserializeOwned>(self) -> io::Result<T>;
     /// The body as a reader. No size limit: callers bound what they read.
-    fn into_reader(self) -> ureq::BodyReader<'static>;
+    fn into_reader(self) -> BodyRead;
+}
+
+/// A response body as a reader (see [`RespExt::into_reader`]). A timeout while reading is an
+/// `io::ErrorKind::TimedOut` error, as ureq 2 gave; ureq 3's reader reports it as `Other`
+/// wrapping `ureq::Error::Timeout`.
+pub struct BodyRead(ureq::BodyReader<'static>);
+
+impl Read for BodyRead {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf).map_err(|e| {
+            let timed_out = e
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<ureq::Error>())
+                .is_some_and(|u| matches!(u, ureq::Error::Timeout(_)));
+            if timed_out {
+                io::Error::new(io::ErrorKind::TimedOut, e.to_string())
+            } else {
+                e
+            }
+        })
+    }
 }
 
 impl RespExt for Response {
@@ -616,9 +727,9 @@ impl RespExt for Response {
         })
     }
 
-    fn into_reader(self) -> ureq::BodyReader<'static> {
+    fn into_reader(self) -> BodyRead {
         // `limit(u64::MAX)`: ureq's `Body::into_reader` is documented as unlimited; say so.
-        self.into_body().into_with_config().limit(u64::MAX).reader()
+        BodyRead(self.into_body().into_with_config().limit(u64::MAX).reader())
     }
 }
 
@@ -1640,6 +1751,8 @@ mod tests {
         server.join().unwrap();
         let err = res.unwrap_err();
         assert!(err.to_string().contains("timeout"), "{err}");
+        // ureq 2's kind, so code that checks for `TimedOut` (and `into_json`) still sees it.
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
         assert!(took < Duration::from_secs(5), "took {took:?}");
     }
 
@@ -1740,5 +1853,188 @@ mod tests {
             1,
             "the body is sent once only"
         );
+    }
+
+    #[test]
+    fn writes_redirected_with_307_or_308_fail_without_resending() {
+        // DELETE, an empty PUT and a JSON PATCH: ureq 3 won't repeat any of them at the new
+        // location (ureq 2 returned the 3xx as a success); Silo reports a failure.
+        for status in ["307 Temporary Redirect", "308 Permanent Redirect"] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let moved = || answer(status, &format!("Location: http://{addr}/new\r\n"), "");
+            let server = serve(listener, vec![moved(), moved(), moved()]);
+            let agent =
+                build_api_agent(Duration::from_millis(500), Duration::from_millis(500), None);
+            let url = format!("http://{addr}/x");
+            let results = [
+                agent.delete(&url).call_checked().map(drop),
+                agent
+                    .put(&url)
+                    .header("Content-Length", "0")
+                    .send_empty_checked()
+                    .map(drop),
+                agent
+                    .patch(&url)
+                    .send_json_checked(serde_json::json!({ "a": 1 }))
+                    .map(drop),
+            ];
+            for r in results {
+                let e = r.unwrap_err();
+                assert!(
+                    matches!(&e, HttpError::Transport(t) if matches!(t.error(), ureq::Error::RedirectFailed)),
+                    "{status}: {e}"
+                );
+            }
+            let got = server.join().unwrap();
+            assert_eq!(got.len(), 3, "{status}: one request each, none resent");
+            assert!(got.iter().all(|r| r.contains(" /x ")), "{got:?}");
+        }
+    }
+
+    #[test]
+    fn a_status_after_a_redirect_names_both_urls() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve(
+            listener,
+            vec![
+                answer("301 Moved", &format!("Location: http://{addr}/new\r\n"), ""),
+                answer("404 Not Found", "", ""),
+            ],
+        );
+        let agent = build_api_agent(Duration::from_millis(500), Duration::from_millis(500), None);
+        let e = agent
+            .get(&format!("http://{addr}/old"))
+            .call_checked()
+            .unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            format!("http://{addr}/new: status code 404 (redirected from http://{addr}/old)")
+        );
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    /// A clock tests move by hand.
+    struct FakeClock(std::cell::Cell<Instant>);
+
+    impl FakeClock {
+        fn new() -> Self {
+            FakeClock(std::cell::Cell::new(Instant::now()))
+        }
+        fn now(&self) -> Instant {
+            self.0.get()
+        }
+        fn advance(&self, d: Duration) {
+            self.0.set(self.0.get() + d);
+        }
+    }
+
+    fn budget(after: Option<Duration>) -> NextTimeout {
+        use ureq::unversioned::transport::time::Duration as B;
+        NextTimeout {
+            after: after.map_or(B::NotHappening, B::Exact),
+            reason: ureq::Timeout::Connect,
+            per_read: None,
+            per_write: None,
+        }
+    }
+
+    fn addrs(n: usize) -> Vec<SocketAddr> {
+        (1..=n)
+            .map(|i| format!("140.82.112.{i}:443").parse().unwrap())
+            .collect()
+    }
+
+    fn refused() -> ureq::Error {
+        ureq::Error::Io(io::Error::new(io::ErrorKind::ConnectionRefused, "refused"))
+    }
+
+    #[test]
+    fn slow_refusals_share_one_connect_deadline() {
+        // Sixteen addresses that each refuse after 2 s, with a 10 s budget: ureq 3's own loop
+        // gives every one of them ~5 s and so takes ~32 s; Silo's stops at the deadline.
+        let clock = FakeClock::new();
+        let start = clock.now();
+        let mut given = Vec::new();
+        let res: Result<(), _> = connect_each(
+            &addrs(16),
+            budget(Some(Duration::from_secs(10))),
+            &|| clock.now(),
+            |_, t| {
+                given.push(*t.after);
+                clock.advance((*t.after).min(Duration::from_secs(2)));
+                Err(refused())
+            },
+        );
+        let spent = clock.now() - start;
+        // The budget, plus at most the 1 ms floor per attempt.
+        assert!(
+            spent <= Duration::from_secs(10) + Duration::from_millis(16),
+            "spent {spent:?}"
+        );
+        assert!(
+            matches!(res, Err(ureq::Error::Timeout(ureq::Timeout::Connect))),
+            "{res:?}"
+        );
+        // ureq 2's split: half of what's left, every time.
+        assert_eq!(given[0], Duration::from_secs(5));
+        assert_eq!(given[1], Duration::from_millis(4000));
+        assert!(given.windows(2).all(|w| w[1] <= w[0]), "{given:?}");
+    }
+
+    #[test]
+    fn a_later_address_can_still_connect() {
+        let clock = FakeClock::new();
+        let mut tried = Vec::new();
+        let res = connect_each(
+            &addrs(3),
+            budget(Some(Duration::from_secs(10))),
+            &|| clock.now(),
+            |a, _| {
+                tried.push(a);
+                if tried.len() < 3 {
+                    clock.advance(Duration::from_millis(100));
+                    Err(refused())
+                } else {
+                    Ok(a)
+                }
+            },
+        );
+        assert_eq!(res.unwrap(), addrs(3)[2]);
+        assert_eq!(tried, addrs(3));
+        // Every address refusing at once: the last refusal, not a timeout.
+        let res: Result<(), _> = connect_each(
+            &addrs(3),
+            budget(Some(Duration::from_secs(10))),
+            &|| clock.now(),
+            |_, _| Err(refused()),
+        );
+        assert!(matches!(res, Err(ureq::Error::Io(_))), "{res:?}");
+        // A single address gets the whole budget; with no budget, none is set.
+        let res = connect_each(
+            &addrs(1),
+            budget(Some(Duration::from_secs(10))),
+            &|| clock.now(),
+            |_, t| Ok(*t.after),
+        );
+        assert_eq!(res.unwrap(), Duration::from_secs(10));
+        let res = connect_each(&addrs(2), budget(None), &|| clock.now(), |_, t| {
+            Ok(t.after.is_not_happening())
+        });
+        assert!(res.unwrap());
+        // Any other error (a TLS failure, say) ends it at once.
+        let mut calls = 0;
+        let res: Result<(), _> = connect_each(
+            &addrs(3),
+            budget(Some(Duration::from_secs(10))),
+            &|| clock.now(),
+            |_, _| {
+                calls += 1;
+                Err(ureq::Error::Tls("bad certificate"))
+            },
+        );
+        assert!(matches!(res, Err(ureq::Error::Tls(_))), "{res:?}");
+        assert_eq!(calls, 1);
     }
 }
