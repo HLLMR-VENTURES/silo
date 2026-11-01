@@ -942,6 +942,69 @@ fn flatten_lists_an_entry_differing_from_a_kept_mods_zip_only_in_case() {
     }
 }
 
+/// A kept mod's zip renamed to other casing, beside a hardlink of it whose name differs only in
+/// how its accent is encoded: both names could be the entry, so Silo can't tell which and lists
+/// both, never hiding the other one (#410). (Skipped where the twin can't be made: APFS treats
+/// the two names as one.)
+#[test]
+fn flatten_hides_neither_name_when_two_could_be_a_kept_mods_zip() {
+    for twin_first in [false, true] {
+        let base = temp_dir_for(&format!("flatten_kept_accent_twin_{twin_first}"));
+        let conn = db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&base);
+        let cat = base.join(ARCHIVE).join("Vehicles");
+        std::fs::create_dir_all(&cat).unwrap();
+        let tech = "FS25_Caf\u{e9}";
+        let file = format!("{tech}.zip");
+        db::upsert_organized(
+            &conn,
+            &key,
+            &OrganizedRow {
+                tech_name: tech.into(),
+                file_name: file.clone(),
+                kind: "zip".into(),
+                category: "Vehicles".into(),
+                subcategory: None,
+                active: true,
+            },
+        )
+        .unwrap();
+        let flat = base.join(&file);
+        std::fs::write(&flat, b"PK\x03\x04 the archived build").unwrap();
+        let (size, mtime) = file_stats(&flat).unwrap();
+        db::record_projection(&conn, &key, &file, size, mtime);
+        // The archived zip, cut short, under other casing; and its hardlink, the accent decomposed.
+        let (renamed, twin) = ("fs25_caf\u{e9}.zip", "fs25_cafe\u{301}.zip");
+        let (first, second) = if twin_first {
+            (twin, renamed)
+        } else {
+            (renamed, twin)
+        };
+        std::fs::write(cat.join(first), b"PK\x03\x04 the arch").unwrap();
+        if std::fs::hard_link(cat.join(first), cat.join(second)).is_err()
+            || std::fs::read_dir(&cat).unwrap().count() != 2
+        {
+            drop(conn);
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+
+        let rep = flatten(&conn, &Layout::default_for(&base));
+
+        for name in [renamed, twin] {
+            assert!(
+                rep.errors
+                    .contains(&format!("{UNRECOGNIZED} {name}. Nothing was deleted.")),
+                "{twin_first} {name:?}: {:?}",
+                rep.errors
+            );
+        }
+        assert!(flat.is_file());
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
 /// What counts as inside a mod's archive entry: the entry itself; a folder mod's files below it;
 /// nothing below a zip mod's entry; never a name that only starts the same, or another spelling.
 #[test]
@@ -989,6 +1052,13 @@ fn spelled_on_disk_finds_the_listed_name_of_the_same_entry() {
     let expect = folds_case(&cat).then(|| zip.clone());
     assert_eq!(spelled_on_disk(&base, &asked), expect);
     assert_eq!(spelled_on_disk(&base, &cat.join("FS25_Bar.zip")), None);
+    // Two listed names that could both be it (a hardlink whose name differs only in how its
+    // accent is encoded): neither is chosen.
+    let cafe = cat.join("caf\u{e9}.zip");
+    std::fs::write(&cafe, b"PK").unwrap();
+    if std::fs::hard_link(&cafe, cat.join("cafe\u{301}.zip")).is_ok() {
+        assert_eq!(spelled_on_disk(&base, &cat.join("CAF\u{c9}.zip")), None);
+    }
     assert_eq!(spelled_on_disk(&cat, &base.join("x.zip")), None);
     let _ = std::fs::remove_dir_all(&base);
 }

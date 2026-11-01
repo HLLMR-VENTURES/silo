@@ -449,29 +449,36 @@ pub(crate) fn in_archive_entry(path: &Path, entry: &Path, is_dir: bool) -> bool 
 /// `entry` (a path under `archive`) spelled as its folders list it. A name listed exactly is
 /// itself, even beside one that differs only in case (a case-sensitive folder: two entries). A
 /// name not listed but found anyway (NTFS and APFS ignore case and, on APFS, how an accent is
-/// encoded) is the listed name that differs only that way and is the same entry on disk
-/// (`scratch::entry_number`, never following a link). `None` when a part can't be listed or
-/// found.
+/// encoded) is the one listed name that differs only that way and is the same entry on disk
+/// (`scratch::entry_number`, never following a link). When more than one listed name could be
+/// it (hardlinks whose names differ only that way), Silo can't tell which, so `None`, as when a
+/// part can't be listed or found: the caller then matches the recorded spelling only, so no
+/// other file is ever taken for the entry.
 pub(crate) fn spelled_on_disk(archive: &Path, entry: &Path) -> Option<PathBuf> {
     let mut cur = archive.to_path_buf();
     for part in entry.strip_prefix(archive).ok()?.components() {
         let name = part.as_os_str();
         let listed: Vec<std::ffi::OsString> = std::fs::read_dir(&cur)
             .ok()?
-            .filter_map(|e| e.ok().map(|e| e.file_name()))
-            .collect();
+            .map(|e| e.map(|e| e.file_name()))
+            .collect::<std::io::Result<_>>()
+            .ok()?;
         if listed.iter().any(|n| n == name) {
             cur.push(name);
             continue;
         }
         let found = crate::scratch::entry_number(&cur.join(name))?;
         let wanted = name.to_string_lossy();
-        let spelled = listed.into_iter().find(|n| {
+        let mut candidates = listed.into_iter().filter(|n| {
             let n_str = n.to_string_lossy();
             (crate::fold_file_name(&n_str) == crate::fold_file_name(&wanted)
                 || n_str.to_uppercase() == wanted.to_uppercase())
                 && crate::scratch::entry_number(&cur.join(n)) == Some(found)
-        })?;
+        });
+        let spelled = candidates.next()?;
+        if candidates.next().is_some() {
+            return None;
+        }
         cur.push(spelled);
     }
     Some(cur)
