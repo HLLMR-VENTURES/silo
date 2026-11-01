@@ -25,6 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Saving a mod's settings or a game settings form changes only the values you edited. Before,
+  every other value in the file was rewritten too, so a line break or tab stored in one turned
+  into a space, and a value Silo couldn't read was saved empty. (#354)
+- Typing a value for a game setting stored as an empty tag (`<name/>`) now saves it. Before,
+  the editor said "Saved" and nothing changed; a setting that isn't in the file now shows an
+  error instead. (#354)
+- A savegame whose `careerSavegame.xml` is cut off or damaged now shows as unreadable in
+  **Mod sets → Savegames**, and **Use this save's mods** is off for it. Before, it listed only the
+  mods read before the damage (or none), and using it switched to that partial set. (#354)
+- The raw XML editor no longer saves an attribute without quotes (`value=5`), the same attribute
+  twice, or an entity like `&nbsp;` that the game can't read. (#354)
+- Text written as CDATA in a savegame, game settings file or store item is now read instead of
+  being skipped. (#354)
 - Fewer false conflict warnings. Two maps no longer show as a **Problem** or **Review** for
   adding the same brand, shop category, control action or fill type: the game loads only the map
   your savegame uses, so they never meet. A map still conflicts with a non-map mod that adds the
@@ -59,6 +72,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Moving a mod to another drive (Organize, Flatten) now writes the copy to disk before deleting
   the original, so a power cut right after the move can't lose the mod. (#343)
 - Folder mods can no longer make Silo read files outside the mod's own folder.
+- Turning on a mod whose name in your mods folder is taken by a different build now tells you
+  so, by file name, instead of quietly skipping it. And if Silo closed between putting a mod in
+  your mods folder and noting it as on, turning it on again now marks it on (and parking a mod
+  that's already gone marks it off). (#356)
+- **A different build is in your mods folder** now compares each file only with the copy Silo
+  filed for that mod. Before, a second file of the same name in another category, or a file you
+  put in the archive yourself, could be listed there, and then **Use this version** answered
+  "Not a Silo-managed mod". (#356)
+- The integrity check no longer reports **Modified**, with no changed files listed, for a mod
+  zip whose file names start with `././`. (#356)
+- Resuming a paused archive move now compares a folder mod's files byte for byte before
+  deleting the original. Before, an edit made while the move was paused that kept every file's
+  size was deleted with the original. (#356)
+- Moving your archive now stops with "Silo can't read …" when one of its category folders can't
+  be opened, instead of moving the rest and leaving that folder's unrecorded mods behind in an
+  archive Silo no longer looks at. (#356)
 - Mod downloads, updates and catalog images now check every redirect, not just the first
   address: Silo won't follow one to plain `http` or to an address on your own network, and it
   refuses a web address whose name points at your own network. GitHub downloads work as
@@ -81,6 +110,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Update checks** now treat a prerelease such as `1.2.3-rc.1` as older than `1.2.3`, and ignore
   build tags such as `+build.5`. (#349)
 - A repository set to **Ignore** on GitHub no longer shows as watched. (#349)
+- A category change, or a **Hide**, **Flag**, **Check for updates**, rating or note change, that
+  Silo couldn't save now goes back on screen and says so. Before, it stayed as if saved: Organize
+  could file the mod under a category that was never stored, and the change quietly went away on
+  the next start. Two quick category picks for one mod are now saved in the order you made them.
+  A note that didn't save stays in the field, and leaving the field tries again. (#358)
+- Favorite, Hide or Skip updates on a selection no longer overwrites a note, rating or flag you
+  saved in the mod's details while it ran. (#358)
+- A failed integrity **Re-check** now says what went wrong, instead of showing the old verdict as
+  if it had been confirmed. (#358)
+- The settings editors (game settings, a savegame's settings) no longer mark an edit made while a
+  save is running as saved, and **Save changes** is off until that save is done, so a double-click
+  can't write twice and push out one of your backup copies. (#358)
+- In a mod's settings, saving one file no longer throws away unsaved changes in the mod's other
+  files, and a mod with more than one settings file no longer mixes up their fields. (#358)
+- After you switch mods folders, the previous folder's "you dropped an update" results and its
+  **Use this version** offers no longer show up against the new one. (#358)
+- A library scan that fails no longer goes on to file loose mods using the previous scan's list.
+  (#358)
+- **Find the problem mod**: **Start** stays off while Silo files your loose mods first, so a
+  second click can't open a second "File N mods" dialog. (#358)
+- **Open a shared set**: pressing Enter in the link field while a download runs no longer opens
+  another set, and a set you've replaced can no longer put its conflict warnings on the one shown.
+  (#358)
+- **Restart to update** can no longer start the install twice from a quick double-click. (#358)
+- **Open on ModHub** is only offered for pages on farming-simulator.com itself, not for any link
+  that mentions the name. (#358)
 
 ### Security
 

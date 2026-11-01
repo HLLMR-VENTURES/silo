@@ -229,12 +229,31 @@ export function versionChange(row: Pick<UpdateRow, "current" | "latest">): strin
   return row.current ? `${normVersion(row.current)} → ${to}` : to;
 }
 
+/**
+ * Is this a page on ModHub (farming-simulator.com)? Read as a URL and judged by its host, so a
+ * link that only mentions the name elsewhere (another site's path or query, or a look-alike host
+ * such as farming-simulator.com.example.net) isn't labelled ModHub (#358).
+ * @param url the page link, if any
+ */
+export function isModHubPage(url: string | null | undefined): boolean {
+  if (!url) return false;
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:") return false;
+  const host = u.hostname.toLowerCase();
+  return host === "farming-simulator.com" || host.endsWith(".farming-simulator.com");
+}
+
 /** The source chip's words: "GitHub", "ModHub", or the source as given. */
 export function sourceLabel(row: Pick<UpdateRow, "source" | "pageUrl">): string | null {
   const s = row.source?.toLowerCase();
   if (s === "github") return "GitHub";
   if (s === "modhub") return "ModHub";
-  if (!s && row.pageUrl && /farming-simulator\.com/i.test(row.pageUrl)) return "ModHub";
+  if (!s && isModHubPage(row.pageUrl)) return "ModHub";
   return row.source ?? null;
 }
 

@@ -72,6 +72,9 @@
 
   let phase = $state<Phase>("intro");
   let working = $state<string | null>(null); // in-flight action label
+  // onPrepare is running (its dialog, then filing loose mods): Start stays off, so a second click
+  // can't open a second "File N mods" dialog (#358). Not a `working` label: its dialog speaks.
+  let preparing = $state(false);
   let error = $state<string | null>(null);
 
   let current = $state<string[]>([]); // working pool, set once bisection begins
@@ -97,6 +100,7 @@
   }
 
   async function begin() {
+    if (working || preparing) return;
     if (recoveryPending) {
       error = BISECT_RESTORE_FIRST;
       return;
@@ -114,7 +118,13 @@
       }
       if (onPrepare) {
         working = null; // its dialog speaks for itself
-        const ready = await onPrepare();
+        preparing = true;
+        let ready: boolean;
+        try {
+          ready = await onPrepare();
+        } finally {
+          preparing = false;
+        }
         if (destroyed) return abandon();
         if (!ready) return; // declined or refused (said so): nothing was saved
         working = "Saving your current mod set…";
@@ -289,7 +299,7 @@
 
   /** The ✕: after a round was applied, stopping loses the rounds played, so ask first. */
   async function stop() {
-    if (working) return;
+    if (working || preparing) return;
     if (started && round > 0 && (phase === "await-launch" || phase === "verdict" || phase === "error")) {
       const ok = await ask({
         title: "Stop finding the problem mod?",
@@ -302,7 +312,7 @@
   }
 
   function exitUnchanged() {
-    if (working) return;
+    if (working || preparing) return;
     onBisecting(false);
     onExit();
   }
@@ -329,7 +339,7 @@
         <p class="stepper tnum">Round {round} of about {about}</p>
       {/if}
     </div>
-    <button class="x" use:tooltip={cancelLabel} aria-label={cancelLabel} onclick={() => void stop()} disabled={!!working}><Icon name="close" /></button>
+    <button class="x" use:tooltip={cancelLabel} aria-label={cancelLabel} onclick={() => void stop()} disabled={!!working || preparing}><Icon name="close" /></button>
   </div>
 
   <div role="status" aria-live="polite">
@@ -362,8 +372,8 @@
       <div class="err">{BISECT_RESTORE_FIRST}</div>
     {/if}
     <div class="actions">
-      <button class="btn ghost" onclick={exitUnchanged} disabled={!!working}>Not now</button>
-      <button class="btn primary" onclick={begin} disabled={!!working || recoveryPending}>Start</button>
+      <button class="btn ghost" onclick={exitUnchanged} disabled={!!working || preparing}>Not now</button>
+      <button class="btn primary" onclick={begin} disabled={!!working || preparing || recoveryPending}>Start</button>
     </div>
   {:else if phase === "await-launch"}
     {#if step?.kind === "split"}
