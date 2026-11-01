@@ -698,6 +698,15 @@ pub(crate) fn replace_zip_link(
     let tmp = relink_tmp(link);
     let _ = remove_path(&tmp);
     make_link(dst, &tmp, "zip", policy)?;
+    // A new entry that reaches no file (the copy went while it was linked) never replaces the
+    // working one.
+    if !std::fs::metadata(&tmp).is_ok_and(|m| m.is_file()) {
+        let _ = remove_path(&tmp);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the new copy of the mod isn't there",
+        ));
+    }
     std::fs::rename(&tmp, link).inspect_err(|_| {
         let _ = remove_path(&tmp);
     })?;
