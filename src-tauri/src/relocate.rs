@@ -541,13 +541,19 @@ fn rename_or_copy(
     copy_verify_place(env, src, dst, kind, abort).map(|()| Placed::Copied)
 }
 
-/// Write a rename's folder entries to disk before anything relies on it (an unrecord, the
-/// switch at the end of the move): every folder above where it landed (the move may have made
-/// some of them) and the folder it left, or that folder's nearest existing parent when it isn't
-/// there (never made, for a mod recorded but not renamed yet; or tidied away). Nothing inside
-/// the mod changed, so no file is flushed.
-fn flush_rename(placed: &Path, left: &Path) -> std::io::Result<()> {
-    for dir in placed.ancestors().skip(1) {
+/// Write a rename and its re-link to disk before anything relies on them (an unrecord, a
+/// dropped link note, the switch at the end of the move). Checked (`organize::sync_dir_checked`,
+/// errors on Windows too): the folder the mod landed in and the one above it (a category Silo
+/// made there), the folder it left (or its nearest existing parent when that isn't there:
+/// never made, for a mod recorded but not renamed yet, or tidied away), and the mods folder
+/// (its link). Folders further up as for a copy (`make_durable`). Nothing inside the mod
+/// changed, so no file is flushed.
+fn flush_rename(placed: &Path, left: &Path, mods: &Path) -> std::io::Result<()> {
+    let mut above = placed.ancestors().skip(1);
+    for dir in above.by_ref().take(2) {
+        organize::sync_dir_checked(dir)?;
+    }
+    for dir in above {
         organize::sync_dir(dir)?;
     }
     if let Some(dir) = left
@@ -555,14 +561,14 @@ fn flush_rename(placed: &Path, left: &Path) -> std::io::Result<()> {
         .skip(1)
         .find(|d| d.symlink_metadata().is_ok())
     {
-        organize::sync_dir(dir)?;
+        organize::sync_dir_checked(dir)?;
     }
-    Ok(())
+    organize::sync_dir_checked(mods)
 }
 
 /// `Env::flush` as a step error.
 fn flushed(env: &Env, placed: &Path, left: &Path) -> Result<(), StepErr> {
-    (env.flush)(placed, left).map_err(|e| {
+    (env.flush)(placed, left, env.mods).map_err(|e| {
         StepErr::Failed(format!(
             "move: Silo couldn't write the move of {} to disk: {e}. Check that drive, then resume.",
             placed.display()
@@ -685,6 +691,7 @@ fn mend_renamed_links(env: &Env, marker: &mut MoveMarker) -> Vec<String> {
     // note goes. One that can't be re-pointed yet is kept.
     let notes = std::mem::take(&mut marker.relinking);
     let noted = notes.len();
+    let mut relinked = Vec::new();
     for note in notes {
         let Some(row) = rows.iter().find(|r| r.tech_name == note.tech_name) else {
             continue;
@@ -737,9 +744,21 @@ fn mend_renamed_links(env: &Env, marker: &mut MoveMarker) -> Vec<String> {
         let mut policy = LinkPolicy::new(&layout)
             .with_journal(&journal)
             .with_room_check(&room);
-        if let Err(e) = relink_entry(env, row, &link, &here, &gone, &mut policy) {
-            errors.push(format!("{}: {}", row.tech_name, failed(e)));
-            marker.relinking.push(note);
+        match relink_entry(env, row, &link, &here, &gone, &mut policy) {
+            Ok(()) => relinked.push(note),
+            Err(e) => {
+                errors.push(format!("{}: {}", row.tech_name, failed(e)));
+                marker.relinking.push(note);
+            }
+        }
+    }
+    // A note goes only once its new link is on disk.
+    if !relinked.is_empty() {
+        if let Err(e) = organize::sync_dir_checked(env.mods) {
+            errors.push(format!(
+                "relink: Silo couldn't write the mods folder's links to disk: {e}. Check that drive, then resume."
+            ));
+            marker.relinking.extend(relinked);
         }
     }
     if marker.relinking.len() != noted {
@@ -1202,7 +1221,7 @@ struct Env<'a> {
     /// The no-replace rename (`paths::rename_no_replace`; tests inject failures).
     rename: fn(&Path, &Path) -> std::io::Result<()>,
     /// Writes a rename to disk (`flush_rename`; tests inject failures).
-    flush: fn(&Path, &Path) -> std::io::Result<()>,
+    flush: fn(&Path, &Path, &Path) -> std::io::Result<()>,
 }
 
 impl Env<'_> {
@@ -2152,9 +2171,10 @@ fn run_locked(
     marker.pause_reason = None;
     marker.errors.clear();
     save_marker(env.conn, env.mods_key, &marker)?;
-    // Relink temps an earlier run left are cleared first (only those proven redundant), so the
-    // space a finished one holds is free before the mend may need it.
-    scratch::sweep_where(&env.journal(), &|e| e.role == scratch::Role::RelinkTmp);
+    // What an earlier run left is cleared first (only what the journal proves redundant; an
+    // only copy set aside is put back), so the mend sees every copy and has the space a finished
+    // temp held. Then the mend, before anything can pause the move.
+    sweep_scratch(&env, &marker);
     let unmended = mend_renamed_links(&env, &mut marker);
     if !unmended.is_empty() {
         marker.errors.extend(unmended);
@@ -2164,7 +2184,6 @@ fn run_locked(
         marker.pause_reason = Some(reason);
         return pause(&env, marker);
     }
-    sweep_scratch(&env, &marker);
 
     if marker.direction == Direction::Forward {
         let rows = db::load_organized(env.conn, env.mods_key);
@@ -5110,7 +5129,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
-    fn flush_fails(_: &Path, _: &Path) -> std::io::Result<()> {
+    fn flush_fails(_: &Path, _: &Path, _: &Path) -> std::io::Result<()> {
         Err(std::io::Error::other("disk gone"))
     }
 
@@ -5809,7 +5828,10 @@ mod tests {
         let f = fx("renameflushgone");
         let placed = zip_at(&f.old, "FS25_A");
         std::fs::write(&placed, b"PK").unwrap();
-        flush_rename(&placed, &f.new.join("Tools").join("FS25_A.zip")).unwrap();
+        flush_rename(&placed, &f.new.join("Tools").join("FS25_A.zip"), &f.mods).unwrap();
+        // A folder it must flush and can't open is an error, on Windows too.
+        let nowhere = f.base.join("nowhere").join("Tools").join("FS25_A.zip");
+        assert!(flush_rename(&nowhere, &placed, &f.mods).is_err());
         let _ = std::fs::remove_dir_all(&f.base);
     }
 
@@ -5859,6 +5881,37 @@ mod tests {
                 );
                 assert!(old.exists() && new.exists(), "{tag}: both kept");
             }
+            let _ = std::fs::remove_dir_all(&f.base);
+        }
+    }
+
+    /// An active zip's only copy, set aside by a crash mid-delete after its new copy was lost,
+    /// with its mods-folder entry missing too: the sweep puts the copy back before the mend
+    /// looks, so the mend links it (paused at once) and Resume moves it again (run through).
+    #[test]
+    fn the_only_copy_set_aside_is_put_back_before_the_mend_links_it() {
+        for (tag, request) in [("onlycopylink1", PAUSE), ("onlycopylink2", 0)] {
+            let f = fx(tag);
+            let a = add_zip(&f, "FS25_A", true);
+            let flat = f.mods.join("FS25_A.zip");
+            let mut m = marker(&f);
+            let (src, dst) = (zip_at(&f.old, "FS25_A"), zip_at(&f.new, "FS25_A"));
+            copy_verify_place(&env(&f), &src, &dst, "zip", &|| false).unwrap();
+            env(&f).record(&mut m, &a.tech_name).unwrap();
+            let old_name = recorded_old(&f, &src, &dst, "zip");
+            std::fs::rename(&src, &old_name).unwrap();
+            std::fs::remove_file(&dst).unwrap(); // the new copy is lost
+            m.paused = true;
+            save_marker(&f.conn, &f.key, &m).unwrap();
+            let out = run_on(&f, Op::Resume, one_drive, request).unwrap();
+            match out {
+                Some(m) => {
+                    assert!(m.errors.is_empty(), "{tag}: {:?}", m.errors);
+                    assert!(same_file(&flat, &src), "{tag}: linked to the copy put back");
+                }
+                None => assert!(same_file(&flat, &dst), "{tag}: moved, and linked"),
+            }
+            assert!(!old_name.exists(), "{tag}");
             let _ = std::fs::remove_dir_all(&f.base);
         }
     }

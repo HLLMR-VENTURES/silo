@@ -331,6 +331,38 @@ pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
     }
 }
 
+/// [`sync_dir`], but on Windows too a folder that can't be opened or flushed is an error (a
+/// filesystem that can't flush folders at all is let through, as on unix): where a later step
+/// relies on a rename being on disk (an archive move's renames, #401).
+pub(crate) fn sync_dir_checked(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        sync_dir(dir)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const ERROR_INVALID_FUNCTION: i32 = 1;
+        const ERROR_NOT_SUPPORTED: i32 = 50;
+        let d = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)?;
+        match d.sync_all() {
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED)
+                ) =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
+    }
+}
+
 /// Copy the folder `src` to `dst`, every file flushed to disk (see [`copy_file_synced`]).
 pub(super) fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
