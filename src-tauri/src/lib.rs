@@ -5626,25 +5626,119 @@ fn launch_profile_mismatch(active: Option<&std::path::Path>, expected: Option<&s
     }
 }
 
+/// How many of a paused move's unreachable mods Play's question names before "and N more".
+const UNREACHABLE_NAMED: usize = 8;
+
+/// Pure: Play's question when a paused archive move left `mods` (sorted techNames, at least
+/// one) without an entry FS25 can open (#415).
+fn unreachable_message(mods: &[String]) -> String {
+    let (who, them) = match mods {
+        [one] => (one.clone(), "it"),
+        [a, b] => (format!("{a} and {b}"), "them"),
+        _ => {
+            let shown = mods[..mods.len().min(UNREACHABLE_NAMED)].join(", ");
+            let more = mods.len().saturating_sub(UNREACHABLE_NAMED);
+            let list = if more > 0 {
+                format!("{shown} and {more} more")
+            } else {
+                shown
+            };
+            (format!("{} mods ({list})", mods.len()), "them")
+        }
+    };
+    format!(
+        "The paused library move left {who} without a working link in your mods folder, so \
+         Farming Simulator 25 would start without {them}. Resume the move from the notice at \
+         the top: it mends the links, or says what to check."
+    )
+}
+
+/// Pure: Play's archive-move gate, for every launch (Play, guided bisection, a `-profile`
+/// start). `moving`: a move holds the library lock or is copying (`move_in_progress`): refused,
+/// pause it first, even with `play_anyway`. `unreachable`: what a paused move left FS25 unable
+/// to open (`relocate::unreachable_mods`; empty without a move), or why Silo couldn't look.
+/// Either of those asks first (`MOVE_LINKS_BROKEN`) unless `play_anyway`. A paused move with
+/// nothing to name plays as before (#415).
+fn move_play_gate(
+    moving: bool,
+    unreachable: Result<Vec<String>, String>,
+    play_anyway: bool,
+) -> Result<(), error::AppError> {
+    if moving {
+        return Err(error::AppError::new(
+            error::code::MOVE_RUNNING,
+            "Silo is moving your library archive. Pause the move to play.",
+        ));
+    }
+    let message = match unreachable {
+        _ if play_anyway => return Ok(()),
+        Ok(mods) if mods.is_empty() => return Ok(()),
+        Ok(mods) => unreachable_message(&mods),
+        Err(e) => format!(
+            "Silo couldn't check whether the paused library move left mods without a working \
+             link in your mods folder ({e}). Resume the move from the notice at the top first, \
+             or play anyway."
+        ),
+    };
+    Err(error::AppError::new(
+        error::code::MOVE_LINKS_BROKEN,
+        message,
+    ))
+}
+
+/// The active mods an unfinished (paused) archive move of the published mods folder — or a
+/// blocked folder's own move — left FS25 unable to open (`relocate::unreachable_mods`). Empty
+/// with no move. Reads the marker from the DB, not the published layout, so a move that paused
+/// or crashed since the last publish is seen as it is.
+fn paused_move_unreachable(db: &std::path::Path) -> Result<Vec<String>, String> {
+    let (active, blocked) = modsroot::published();
+    let Some(mods) = launch_mods_folder(active, blocked) else {
+        return Ok(Vec::new());
+    };
+    Ok(unreachable_in(&db::open(db)?, &mods))
+}
+
+/// Pure: the mods folder FS25 is started on, as published: the active one, or a blocked
+/// folder's (whose own unfinished move is still shown). `None` before there is one.
+fn launch_mods_folder(
+    active: Option<modsroot::Active>,
+    blocked: Option<modsroot::Blocked>,
+) -> Option<PathBuf> {
+    match (active, blocked) {
+        (Some(a), _) => Some(a.layout.mods),
+        (None, Some(b)) => Some(b.mods),
+        (None, None) => None,
+    }
+}
+
+/// `relocate::unreachable_mods` for the unfinished move of the mods folder `mods`, as the DB
+/// records it; empty when it has none.
+fn unreachable_in(conn: &rusqlite::Connection, mods: &std::path::Path) -> Vec<String> {
+    let key = modsroot::canonical_key(mods);
+    let Some(marker) = relocate::load_marker(conn, &key) else {
+        return Vec::new();
+    };
+    relocate::unreachable_mods(mods, &marker, &db::load_organized(conn, &key))
+}
+
 /// Start FS25. `check_profile`: refuse unless the FS25 profile that would start is
 /// `expected_profile` (the one the app shows; `None` = the main profile), so Play never starts
-/// a profile the app didn't show (#387). Left out (guided bisection), no such check.
+/// a profile the app didn't show (#387). Left out (guided bisection), no such check. Refused
+/// while an archive move runs; while a paused one left active mods FS25 can't open, refused
+/// with `MOVE_LINKS_BROKEN` (naming them) unless `play_anyway` (#415, `move_play_gate`).
 #[tauri::command]
 async fn launch_game(
+    app: tauri::AppHandle,
     expected_profile: Option<String>,
     check_profile: Option<bool>,
+    play_anyway: Option<bool>,
 ) -> Result<(), error::AppError> {
     if profile::active() {
         return Err(
             "The demo profile can't start the game: FS25 would load your real mods.".into(),
         );
     }
-    if relocate::is_running() {
-        return Err(error::AppError::new(
-            error::code::MOVE_RUNNING,
-            "Silo is moving your library archive. Pause the move to play.",
-        ));
-    }
+    let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         // The mods folder's FS25 profile, when it's on (#387): FS25 then starts on that folder.
         // Read and launched under the resolution lock, so no folder switch publishes in between:
@@ -5655,19 +5749,38 @@ async fn launch_game(
         // Before the mods folder is first resolved it isn't known yet, and the main profile
         // would start with the wrong mods.
         if !modsroot::resolved() {
-            return Err(STILL_LOADING.to_string());
+            return Err(STILL_LOADING.into());
         }
+        // A running move first (no need to look at the mods then), then what a paused one left.
+        let moving = move_in_progress();
+        let unreachable = if moving || play_anyway.unwrap_or(false) {
+            Ok(Vec::new())
+        } else {
+            paused_move_unreachable(&db)
+        };
+        if let Ok(mods) = &unreachable {
+            if !mods.is_empty() {
+                log::warn!(
+                    "play: the paused archive move left {} mod(s) unreachable: {}",
+                    mods.len(),
+                    mods.join(", ")
+                );
+            }
+        }
+        move_play_gate(moving, unreachable, play_anyway.unwrap_or(false))?;
         let game_profile = gameprofile::active();
         if check_profile.unwrap_or(false)
             && launch_profile_mismatch(game_profile.as_deref(), expected_profile.as_deref())
         {
-            return Err(PROFILE_CHANGED.to_string());
+            return Err(PROFILE_CHANGED.into());
         }
-        gamelaunch::launch(game_profile.as_deref())
+        if play_anyway.unwrap_or(false) {
+            log::warn!("play: Play anyway, past the paused archive move's link check");
+        }
+        gamelaunch::launch(game_profile.as_deref()).map_err(error::AppError::from)
     })
     .await
-    .map_err(|e| e.to_string())?
-    .map_err(error::AppError::from)
+    .map_err(|e| error::AppError::from(e.to_string()))?
 }
 
 /// Write text to a user-chosen path (used by the diagnostics report export). Confined to a
@@ -10654,6 +10767,60 @@ mod tests {
         assert!(prof.starts_with(crate::logscan::LAST_SEEN_KEY));
     }
 
+    /// Play looks at the published mods folder's move (a blocked folder's too), from the DB.
+    #[test]
+    fn plays_check_reads_the_mods_folders_own_move_from_the_db() {
+        let base = std::env::temp_dir().join(format!("silo_play_gate_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mods = base.join("mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        let active = crate::modsroot::Active {
+            layout: crate::organize::Layout {
+                mods: mods.clone(),
+                archive: mods.join("archive"),
+            },
+            move_to: None,
+        };
+        let blocked = crate::modsroot::Blocked {
+            reason: "blocked".into(),
+            cause: crate::modsroot::BlockCause::Overlap,
+            mods: base.join("other"),
+            conflict: None,
+            moving: None,
+        };
+        assert_eq!(super::launch_mods_folder(None, None), None);
+        assert_eq!(
+            super::launch_mods_folder(Some(active.clone()), Some(blocked.clone())),
+            Some(mods.clone())
+        );
+        assert_eq!(
+            super::launch_mods_folder(None, Some(blocked)),
+            Some(base.join("other"))
+        );
+        let conn = crate::db::open(&base.join("silo.db")).unwrap();
+        let key = crate::modsroot::canonical_key(&mods);
+        let row = crate::db::OrganizedRow {
+            tech_name: "FS25_A".into(),
+            file_name: "FS25_A.zip".into(),
+            kind: "zip".into(),
+            category: "Tools".into(),
+            subcategory: None,
+            active: true,
+        };
+        crate::db::upsert_organized(&conn, &key, &row).unwrap();
+        // No move: nothing to name, even with the entry missing.
+        assert!(super::unreachable_in(&conn, &mods).is_empty());
+        let mut m = crate::relocate::MoveMarker::new(mods.join("archive"), base.join("hdd"));
+        m.paused = true;
+        m.moved.push("FS25_A".into());
+        crate::relocate::save_marker(&conn, &key, &m).unwrap();
+        assert_eq!(super::unreachable_in(&conn, &mods), vec!["FS25_A"]);
+        std::fs::write(mods.join("FS25_A.zip"), b"PK").unwrap();
+        assert!(super::unreachable_in(&conn, &mods).is_empty());
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn play_starts_only_the_profile_the_app_shows() {
         let p = std::path::Path::new("/f/prof");
@@ -10663,6 +10830,51 @@ mod tests {
         assert!(super::launch_profile_mismatch(Some(p), None));
         assert!(super::launch_profile_mismatch(None, Some("/f/prof")));
         assert!(super::launch_profile_mismatch(Some(p), Some("/f/other")));
+    }
+
+    /// Play's archive-move gate (#415): a running move refuses even "Play anyway"; a paused
+    /// move that left mods FS25 can't open asks first, naming them, unless "Play anyway"; a
+    /// paused move with nothing listed (or no move) plays as before.
+    #[test]
+    fn play_asks_first_while_a_paused_move_left_mods_unreachable() {
+        use super::move_play_gate as gate;
+        let none: Result<Vec<String>, String> = Ok(vec![]);
+        let one = || Ok(vec!["FS25_A".to_string()]);
+        for anyway in [false, true] {
+            let e = gate(true, one(), anyway).unwrap_err();
+            assert_eq!(e.code, super::error::code::MOVE_RUNNING, "{anyway}");
+            assert_eq!(
+                gate(true, none.clone(), anyway).unwrap_err().code,
+                "MOVE_RUNNING"
+            );
+            assert_eq!(gate(false, none.clone(), anyway), Ok(()));
+        }
+        let e = gate(false, one(), false).unwrap_err();
+        assert_eq!(e.code, super::error::code::MOVE_LINKS_BROKEN);
+        assert!(e.message.contains("FS25_A"), "{}", e.message);
+        assert!(e.message.contains("Resume"), "{}", e.message);
+        assert_eq!(gate(false, one(), true), Ok(()));
+        // Silo couldn't look: it asks too, rather than starting FS25 blind.
+        let e = gate(false, Err("database is locked".into()), false).unwrap_err();
+        assert_eq!(e.code, super::error::code::MOVE_LINKS_BROKEN);
+        assert!(e.message.contains("database is locked"), "{}", e.message);
+        assert_eq!(gate(false, Err("x".into()), true), Ok(()));
+    }
+
+    #[test]
+    fn the_unreachable_mods_message_names_them_and_counts_the_rest() {
+        let names = |n: usize| (1..=n).map(|i| format!("FS25_M{i:02}")).collect::<Vec<_>>();
+        let one = super::unreachable_message(&names(1));
+        assert!(one.contains("left FS25_M01 without"), "{one}");
+        assert!(one.contains("without it"), "{one}");
+        let two = super::unreachable_message(&names(2));
+        assert!(two.contains("FS25_M01 and FS25_M02"), "{two}");
+        assert!(two.contains("without them"), "{two}");
+        let many = super::unreachable_message(&names(12));
+        assert!(many.contains("12 mods"), "{many}");
+        assert!(many.contains("FS25_M08"), "{many}");
+        assert!(!many.contains("FS25_M09"), "{many}");
+        assert!(many.contains("and 4 more"), "{many}");
     }
 
     #[test]

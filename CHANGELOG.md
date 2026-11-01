@@ -47,6 +47,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Play** no longer starts the game without warning while a paused library archive move has
+  left some of your active mods without a working link in your mods folder (for example after
+  Silo stopped partway through moving them). Play, and a **Find the problem mod** test round,
+  now name those mods and ask you to resume the move first, which mends the links or says what
+  to check, with **Play anyway** if you'd rather start now. A paused move that left every mod
+  reachable plays as before, and Play is still off while a move is running. (#415)
 - Mod downloads and updates no longer delete files just by their name. Each download now gets a
   file name of its own, and Silo only removes one it noted making that no download is still
   using. Silo also keeps only its own update backups to three per mod: backups it didn't note

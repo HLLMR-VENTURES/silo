@@ -1192,6 +1192,27 @@ fn reaches_the_copy(link: &Path, kind: &str) -> Result<(), String> {
     }
 }
 
+/// The mods of `marker`'s unfinished move that FS25 couldn't open from the mods folder `mods`
+/// now (#415): each active mod the move has touched (`moved`, or a link noted before a rename,
+/// `relinking`) whose entry is missing, reaches nothing, or reaches the wrong kind of thing.
+/// What a paused move lists as links it couldn't mend, and, after a crash, what Resume hasn't
+/// mended yet. Only looks (one `metadata` per touched mod); sorted, each named once.
+pub fn unreachable_mods(mods: &Path, marker: &MoveMarker, rows: &[OrganizedRow]) -> Vec<String> {
+    let touched = |tech: &str| {
+        marker.moved.iter().any(|t| t == tech)
+            || marker.relinking.iter().any(|n| n.tech_name == tech)
+    };
+    let mut out: Vec<String> = rows
+        .iter()
+        .filter(|r| r.active && touched(&r.tech_name))
+        .filter(|r| reaches_the_copy(&mods.join(&r.file_name), &r.kind).is_err())
+        .map(|r| r.tech_name.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// A file for a zip, a folder for a folder mod.
 fn right_kind(m: &std::fs::Metadata, kind: &str) -> bool {
     if kind == "dir" {
@@ -6000,5 +6021,87 @@ mod tests {
             assert!(load_marker(&f.conn, &f.key).unwrap().relinking.is_empty());
             let _ = std::fs::remove_dir_all(&f.base);
         }
+    }
+
+    /// Play's check (#415): only an active mod the move touched (moved, or a link noted before
+    /// a rename) whose mods-folder entry FS25 can't open is named: missing, reaching nothing, or
+    /// reaching the wrong kind of thing. A hardlink or a copy, an untouched mod, and an inactive
+    /// one are left out.
+    #[test]
+    fn unreachable_mods_names_only_touched_active_mods_whose_entry_fails() {
+        let f = fx("unreach");
+        let mut m = marker(&f);
+        let mut rows = Vec::new();
+        let mut add = |tech: &str, kind: &str, active: bool, moved: bool, noted: bool| {
+            let file = if kind == "dir" {
+                tech.to_string()
+            } else {
+                format!("{tech}.zip")
+            };
+            if moved {
+                m.moved.push(tech.into());
+            }
+            if noted {
+                m.relinking.push(LinkNote {
+                    tech_name: tech.into(),
+                    target: f.old.join("Tools").join(&file),
+                });
+            }
+            rows.push(row(tech, &file, kind, active));
+            f.mods.join(file)
+        };
+        // Missing entries.
+        add("FS25_Missing", "zip", true, true, false);
+        add("FS25_NotedMissing", "zip", true, false, true);
+        add("FS25_Untouched", "zip", true, false, false);
+        add("FS25_Inactive", "zip", false, true, false);
+        // An entry FS25 can open: a copy (or a hardlink) of the right kind.
+        std::fs::write(add("FS25_Copy", "zip", true, true, false), b"PK").unwrap();
+        std::fs::create_dir_all(add("FS25_Folder", "dir", true, true, false)).unwrap();
+        // The wrong kind: a file where a folder mod should be.
+        std::fs::write(add("FS25_Wrong", "dir", true, true, false), b"x").unwrap();
+        // A folder link (a junction, if symlinks need Developer Mode) to a folder that's gone.
+        let gone = f.base.join("gone");
+        std::fs::create_dir_all(&gone).unwrap();
+        let dangling = add("FS25_Dangling", "dir", true, true, false);
+        organize::link_dir_native(&gone, &dangling).unwrap();
+        std::fs::remove_dir(&gone).unwrap();
+        assert_eq!(
+            unreachable_mods(&f.mods, &m, &rows),
+            vec![
+                "FS25_Dangling",
+                "FS25_Missing",
+                "FS25_NotedMissing",
+                "FS25_Wrong"
+            ]
+        );
+        // Nothing touched: nothing to name.
+        assert!(unreachable_mods(&f.mods, &marker(&f), &rows).is_empty());
+        let _ = std::fs::remove_dir_all(&f.base);
+    }
+
+    /// After a crash between a rename and its re-link, before any Resume, and after a Resume
+    /// that couldn't mend it, Play's check names the mod; once mended, nothing.
+    #[test]
+    fn unreachable_mods_follows_a_crashed_rename_until_it_is_mended() {
+        let f = fx("unreachcrash");
+        let Some((src, _, _)) = crashed_with_unrecognizable_link(&f) else {
+            let _ = std::fs::remove_dir_all(&f.base);
+            return;
+        };
+        let rows = db::load_organized(&f.conn, &f.key);
+        let crashed = load_marker(&f.conn, &f.key).unwrap();
+        assert_eq!(unreachable_mods(&f.mods, &crashed, &rows), vec!["FS25_D"]);
+        // One copy in each archive: the mend can't tell which to reach, and pauses.
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("modDesc.xml"), b"<modDesc/>").unwrap();
+        let paused = resume_paused_at_once(&f);
+        assert_eq!(paused.errors.len(), 1, "{:?}", paused.errors);
+        assert_eq!(unreachable_mods(&f.mods, &paused, &rows), vec!["FS25_D"]);
+        std::fs::remove_dir_all(&src).unwrap();
+        let paused = resume_paused_at_once(&f);
+        assert!(paused.errors.is_empty(), "{:?}", paused.errors);
+        assert!(unreachable_mods(&f.mods, &paused, &rows).is_empty());
+        let _ = std::fs::remove_dir_all(&f.base);
     }
 }
