@@ -868,12 +868,17 @@ fn unresolved_old(env: &Env, a: &Path, b: &Path) -> Result<(), StepErr> {
         .into_iter()
         .filter(|e| e.role == scratch::Role::MoveOld && (e.from == a || e.from == b))
         .map(|e| e.path)
-        .filter(|p| p.symlink_metadata().is_ok())
+        .filter(|p| scratch::may_hold(p))
         .collect();
     match kept.first() {
         None => Ok(()),
+        // Its folder can't be reached: the kept copy can't be checked, so nothing counts as done.
+        Some(k) if !exists(k) => Err(StepErr::Failed(format!(
+            "move: Silo kept an earlier copy of this mod at {}, but that folder can't be reached right now. Reconnect it, then resume.",
+            k.display()
+        ))),
         Some(k) => Err(StepErr::Failed(format!(
-            "move: Silo kept an earlier copy of this mod at {} because the copy at {} no longer              matches it. Check both, keep the right one under the mod's name, then resume.",
+            "move: Silo kept an earlier copy of this mod at {} because the copy at {} no longer matches it. Check both, keep the right one under the mod's name, then resume.",
             k.display(),
             if exists(b) { b } else { a }.display()
         ))),
@@ -3048,6 +3053,20 @@ mod tests {
             !src.exists(),
             "the damaged copy wasn't moved back over the name"
         );
+        // The old archive goes out of reach: the kept copy still stops the move.
+        let aside = f.base.join("archive-aside");
+        std::fs::rename(&f.old, &aside).unwrap();
+        let out = run_with(&f, Op::Resume, &|| false).unwrap().unwrap();
+        assert!(
+            out.errors
+                .iter()
+                .any(|e| e.contains(&old_name.display().to_string())),
+            "{:?}",
+            out.errors
+        );
+        assert!(setting(&f).is_none(), "never finished");
+        std::fs::rename(&aside, &f.old).unwrap();
+        assert_eq!(std::fs::read(&old_name).unwrap(), b"PK FS25_A");
         // The user keeps the right one under the mod's name: the cancel then finishes.
         std::fs::rename(&old_name, &src).unwrap();
         std::fs::remove_file(&dst).unwrap();

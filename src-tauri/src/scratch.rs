@@ -396,14 +396,20 @@ pub(crate) fn sweep_where(
     out
 }
 
+/// Whether a recorded scratch path may still hold something: it's there, or its folder can't be
+/// reached right now (so whether it's there can't be told).
+pub(crate) fn may_hold(path: &Path) -> bool {
+    path.symlink_metadata().is_ok() || !path.parent().is_some_and(|d| d.symlink_metadata().is_ok())
+}
+
 fn sweep_one(e: &Entry) -> Swept {
     let Ok(meta) = e.path.symlink_metadata() else {
         // Missing — unless its folder can't be reached right now.
-        let reachable = e
-            .path
-            .parent()
-            .is_some_and(|d| d.symlink_metadata().is_ok());
-        return if reachable { Swept::Gone } else { Swept::Kept };
+        return if may_hold(&e.path) {
+            Swept::Kept
+        } else {
+            Swept::Gone
+        };
     };
     let link = meta.file_type().is_symlink();
     let removed = match e.role {
