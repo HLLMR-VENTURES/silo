@@ -14,6 +14,7 @@
     countsLine,
     groupLogMods,
     lastRunMeta,
+    sampleWhere,
     lastRunVerdict,
     logModDetails,
     logTimeLabel,
@@ -325,10 +326,10 @@
       class="sample"
       class:open
       aria-expanded={open}
-      aria-label={`line ${m.sampleLine}, the log line for ${title}`}
+      aria-label={`${sampleWhere(m)}, the log line for ${title}`}
       onclick={() => toggleLine(m.modName)}
     >
-      <span class="line-no tnum">line {m.sampleLine}</span>
+      <span class="line-no tnum">{sampleWhere(m)}</span>
       <span class="line-text">{m.sample}</span>
     </button>
     {#if tone !== "muted"}

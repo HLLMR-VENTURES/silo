@@ -59,7 +59,9 @@ function conflict(over: Partial<Conflict>): Conflict {
 describe("Conflicts", () => {
   const list: Conflict[] = [
     conflict({ id: "u" }),
-    conflict({ id: "s", severity: "warning", kind: "script", name: "util.lua" }),
+    // A shared script file name is only ever a note now (#352: each mod's scripts load apart),
+    // so the Review row is a fill type.
+    conflict({ id: "s", severity: "warning", kind: "fillType", name: "ROCKS" }),
     conflict({
       id: "m",
       severity: "info",
@@ -79,7 +81,7 @@ describe("Conflicts", () => {
     expect(screen.getByText("Problem")).toBeInTheDocument();
     expect(screen.getByText("Review")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Two mods claim the same exclusive slot" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Two mods ship a script with the same file name" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Two mods define the same fill type" })).toBeInTheDocument();
     // Raw wire words never show.
     expect(screen.queryByText("critical")).toBeNull();
     expect(screen.queryByText("More than one map is active")).toBeNull();
@@ -99,12 +101,23 @@ describe("Conflicts", () => {
     render(ConflictsPanel, { conflicts: list, activeCount: 40, onOpen, onPark, showNotes: true });
     await user.click(screen.getAllByRole("button", { name: "Seeder B" })[0]);
     expect(onOpen).toHaveBeenCalledWith("FS25_SeederB");
-    // Two clashes (exclusive slot, script) get a menu; the maps note doesn't.
+    // Two clashes (exclusive slot, fill type) get a menu; the maps note doesn't.
     const menus = screen.getAllByRole("button", { name: "Park one…" });
     expect(menus).toHaveLength(2);
     await user.click(menus[0]);
     await user.click(await screen.findByRole("menuitem", { name: "Park Seeder A" }));
     expect(onPark).toHaveBeenCalledWith("FS25_SeederA");
+  });
+
+  it("a shared script name is a note: hidden until Show notes, not counted to review (#352)", async () => {
+    const user = userEvent.setup();
+    const script = conflict({ id: "lua", severity: "info", kind: "script", name: "main.lua" });
+    render(ConflictsPanel, { conflicts: [list[0], script], activeCount: 40 });
+    const head = screen.getByRole("heading", { level: 3 });
+    expect(head).toHaveTextContent("1 problem · 0 to review · 1 note hidden");
+    expect(screen.queryByRole("heading", { name: "Two mods ship a script with the same file name" })).toBeNull();
+    await user.click(screen.getByRole("switch", { name: "Show notes" }));
+    expect(screen.getByRole("heading", { name: "Two mods ship a script with the same file name" })).toBeInTheDocument();
   });
 
   it("only notes: says nothing needs doing", () => {
@@ -161,7 +174,7 @@ describe("Problems", () => {
 });
 
 function report(crashed: boolean, mods: LogReport["mods"]): LogReport {
-  return { engineVersion: "1.4.0.0", modCount: 3, cleanExit: !crashed, crashed, mods, unattributed: 2, totalFindings: 9, groundPileCap: null, groundPileDisabled: [], fillTypeCap: null, droppedFillTypes: [] };
+  return { engineVersion: "1.4.0.0", modCount: 3, cleanExit: !crashed, crashed, mods, unattributed: 2, totalFindings: 9, groundPileCap: null, groundPileDisabled: [], fillTypeCap: null, droppedFillTypes: [], truncated: false };
 }
 
 const lookup = (t: string) =>

@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fewer false conflict warnings. Two maps no longer show as a **Problem** or **Review** for
+  adding the same brand, shop category, control action or fill type: the game loads only the map
+  your savegame uses, so they never meet. A map still conflicts with a non-map mod that adds the
+  same thing. (#352)
+- Two mods that each ship a script with the same file name (`main.lua`, say) are now a **Note**,
+  not something to review. The game keeps each mod's scripts apart, so the name alone doesn't
+  make them clash. (#352)
 - A mod set switch that fails (an unplugged library drive, say) no longer leaves the Library,
   **Play** and the multiplayer share list showing the new set while the game loads the old one.
   Silo reads your mods folder again before it lets go, and when nothing changed it doesn't save a
@@ -56,6 +63,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address: Silo won't follow one to plain `http` or to an address on your own network, and it
   refuses a web address whose name points at your own network. GitHub downloads work as
   before. (#348)
+- A very large `log.txt` (from a mod that throws an error every frame, say) no longer makes Silo
+  slow or run out of memory. **Last run** reads the start of the log and its last 64 MB, where
+  the mod list and the crash are, and says so when it had to skip the middle. (#351)
+- A mod with an absurdly long list of materials or ground-pile types no longer keeps
+  **Conflicts** busy for hours: such a list is now treated as unreadable, like a broken file.
+  (#351)
+- A mod packed with oversized script files no longer slows down scanning your library. (#351)
 - **Connecting GitHub** no longer quietly saves your token in Silo's database when your system's
   credential store refuses it (for example while it's locked). Silo now says the store couldn't
   save it, and only uses the database on systems that have no credential store at all. (#349)
