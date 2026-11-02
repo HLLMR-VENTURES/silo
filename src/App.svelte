@@ -49,6 +49,7 @@
     revealInFolder,
     checkModUpdate,
     catalogCheckUpdates,
+    onCatalogLinked,
     downloadUpdate,
     appBusy,
     forceQuit,
@@ -121,7 +122,16 @@
     checkBlockedReason,
     installBlockedReason,
     recheckRow,
+    fileStamps,
+    heldRefresh,
+    holdRefresh,
+    refreshTargets,
+    releaseInstalled,
+    sameStamps,
+    linkRefresh,
+    mergeRows,
     runUpdateCheck,
+    type HeldRefresh,
     updateAll,
     updateAllSummary,
     type ExplainedError,
@@ -2119,7 +2129,6 @@
   }
 
   const updateCheckDeps = {
-    catalog: catalogCheckUpdates,
     checkRepo: checkModUpdate,
     explain: explainUpdateError,
   };
@@ -2128,7 +2137,9 @@
   /** Bumped when the mods folder changes: a check of the old folder still running mustn't land. */
   let updateFolderGen = 0;
 
-  async function checkAllUpdates(quiet = false) {
+  /** `link`: also link older installs under another name to their catalog entry, in the
+   *  background (#402). A check that follows such links doesn't. */
+  async function checkAllUpdates(quiet = false, link = true) {
     if (!quiet) go("updates");
     if (updateChecking || updateCheckBlocked) return;
     updateChecking = true;
@@ -2137,9 +2148,11 @@
     const checkable = mods.filter((m) => !cur(m.techName).skipUpdates);
     const asked = new Set(checkable.map((m) => m.techName));
     const gen = updateFolderGen;
+    runningCheck = { gen, asked };
     try {
       const res = await runUpdateCheck(checkable, repoMap, {
         ...updateCheckDeps,
+        catalog: (asks) => catalogCheckUpdates(asks, link),
         onProgress: (done, total) => {
           if (gen === updateFolderGen) updateProgress = { done, total };
         },
@@ -2154,6 +2167,79 @@
     } finally {
       updateChecking = false;
       updateProgress = null;
+      runningCheck = null;
+    }
+  }
+
+  /** The check running now: its folder generation and the mods it asks about (#402). */
+  let runningCheck: { gen: number; asked: ReadonlySet<string> } | null = null;
+
+  /** Rows owed a refresh because Silo linked their mods while a check couldn't start (#402). */
+  let heldLinkRefresh = $state.raw<HeldRefresh | null>(null);
+
+  /** Mods Silo just linked to their catalog entries (#402): their rows are checked again, when a
+   *  check the user allowed asked about them in this folder. */
+  function onCatalogLinkedMods(linked: string[]) {
+    const r = linkRefresh({
+      linked,
+      gen: updateFolderGen,
+      running: runningCheck,
+      lastAsked: updateCheckedTechs,
+      // A refresh of other linked mods running counts as busy too.
+      blocked: !!updateCheckBlocked || updateChecking || scanning || scanGate.pending,
+    });
+    if (r.when === "now") void refreshLinked(r.names, updateFolderGen);
+    else if (r.when === "after") {
+      heldLinkRefresh = holdRefresh(heldLinkRefresh, updateFolderGen, r.names);
+    }
+  }
+
+  // A refresh held back meanwhile, once nothing keeps a check from starting, and only in the
+  // folder it was for.
+  $effect(() => {
+    const h = heldRefresh(
+      heldLinkRefresh,
+      updateFolderGen,
+      // A scan running or waiting (after an install, say) may be about to show newer files.
+      updateChecking || !!updateCheckBlocked || scanning || scanGate.pending,
+    );
+    if (h.held !== heldLinkRefresh) heldLinkRefresh = h.held;
+    if (h.run) void refreshLinked(h.run, updateFolderGen);
+  });
+
+  /** Check just these mods again (they were just linked, #402) and put their rows in. This
+   *  check links nothing itself. */
+  async function refreshLinked(names: string[], gen: number) {
+    if (gen !== updateFolderGen) return;
+    if (updateChecking || updateCheckBlocked || scanning || scanGate.pending) {
+      heldLinkRefresh = holdRefresh(heldLinkRefresh, gen, names);
+      return;
+    }
+    // Only mods still checked for updates, and not updated since the last scan that worked
+    // (the library would still show the old file); the rest are dropped from this refresh.
+    const leftOut = (t: string) => cur(t).skipUpdates || installedUnscanned.has(t);
+    const subset = refreshTargets(names, mods, leftOut);
+    if (subset.length === 0) return;
+    const want = new Set(subset.map((m) => m.techName));
+    const asked = fileStamps(subset);
+    updateChecking = true;
+    try {
+      const res = await runUpdateCheck(subset, repoMap, {
+        ...updateCheckDeps,
+        catalog: (asks) => catalogCheckUpdates(asks, false),
+      });
+      // Another folder's rows, or a failed request: the rows stay as they were.
+      if (gen !== updateFolderGen || res.catalogError) return;
+      // The library changed under it (an install's scan, say): its answer is for older files,
+      // so it's asked again once nothing is busy, never put in.
+      const now = refreshTargets([...want], mods, leftOut);
+      if (!sameStamps(asked, fileStamps(now))) {
+        heldLinkRefresh = holdRefresh(heldLinkRefresh, gen, [...want]);
+        return;
+      }
+      updateResults = mergeRows(updateResults, res.rows, want);
+    } finally {
+      updateChecking = false;
     }
   }
 
@@ -2193,7 +2279,15 @@
     updateResults = updateResults.map((r) =>
       r.techName === row.techName ? { ...r, hasUpdate: false, current: r.latest } : r,
     );
+    // The library still shows the old file until a scan started after this reads the new one.
+    installedUnscanned.set(row.techName, ++installSeq);
   }
+
+  /** Mods updated that no scan started since has read yet (by the update's number): the
+   *  library's entry is still the old file, so a link refresh (#402) leaves their rows alone. */
+  const installedUnscanned = new Map<string, number>();
+  /** Counts updates installed, to tell which ones a scan started after. */
+  let installSeq = 0;
 
   /** A failed install turns its row into the error, with Try again and Copy details there. */
   function markInstallFailed(row: UpdateRow, e: unknown) {
@@ -2860,6 +2954,7 @@
     for (const t of dropToasts.splice(0)) t.dismiss();
     // The last update check was of the other folder's files (and one still running is too).
     updateFolderGen++;
+    heldLinkRefresh = null;
     updateResults = [];
     updateCheckedAt = null;
     updateCatalogError = null;
@@ -3445,12 +3540,17 @@
     scanOp = op;
     scanning = true;
     scansStarted++;
+    // Updates installed before this point are on disk for this scan to read (#402).
+    const scanFrom = installSeq;
     progress = { done: 0, total: 0 };
     let scanned = false;
     try {
-      const r = await scanMods(roots.length ? roots : undefined);
+      // Linking older installs to the catalog (#402) asks it about mod names: only when the
+      // user lets Silo check for updates at startup.
+      const r = await scanMods(roots.length ? roots : undefined, autoCheckEnabled());
       result = r;
       mods = r.mods;
+      releaseInstalled(installedUnscanned, scanFrom);
       libraryScanned = true;
       scanFailed = false;
       activeSet = new Set(r.mods.filter((m) => m.active).map((m) => m.techName));
@@ -3472,7 +3572,8 @@
       // Filesystem-level check (Rust): files at a managed name that aren't Silo's projection.
       void refreshForeignFiles();
       // Privacy: a scan never sends the library to the catalog. Catalog calls happen only
-      // when the user asks (Browse, a mod's details, Updates, integrity check).
+      // when the user asks (Browse, a mod's details, Updates, integrity check), or with the
+      // startup update check on, the catalog-link backfill after the scan (#402).
       // NOTE: the update check is NOT auto-run on launch — on a large library the burst of
       // scan + catalog-tags + a whole-library update pass all landing at once could jank the
       // window right after it opened. The "Needs update" toggle runs it on demand instead.
@@ -3513,6 +3614,7 @@
     let unlisten: (() => void) | undefined;
     let focusUnlisten: (() => void) | undefined;
     let moveUnlisten: (() => void) | undefined;
+    let linkedUnlisten: (() => void) | undefined;
     let closeUnlisten: (() => void) | undefined;
     // Suppress the WebView's built-in right-click menu (reload/inspect junk) app-wide,
     // but keep the native cut/copy/paste menu inside editable fields. Our own row menu
@@ -3533,6 +3635,7 @@
         scanOp?.progress(p.done, p.total);
       });
       moveUnlisten = await archiveMove.listen();
+      linkedUnlisten = await onCatalogLinked(onCatalogLinkedMods).catch(() => undefined);
       try {
         const rows = await getCuration();
         curationSaved.load(rows.map((r) => [r.techName, r] as const));
@@ -3664,6 +3767,7 @@
       void deepLinks.then((stop) => stop());
       focusUnlisten?.();
       moveUnlisten?.();
+      linkedUnlisten?.();
       closeUnlisten?.();
       window.removeEventListener("contextmenu", onCtx);
     };

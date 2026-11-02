@@ -105,7 +105,7 @@ pub const AUTO_SNAPSHOTS_KEPT: i64 = 5;
 ///
 /// Keep migrations additive where possible so an older Silo can still read the file; when one
 /// can't be, the version gate in `open` is what protects the user.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 fn newer_schema(found: i64) -> String {
     format!(
@@ -165,6 +165,7 @@ fn migrate(conn: &mut Connection) -> Result<(), String> {
             1 => migrate_1_to_2(&tx)?,
             2 => migrate_2_to_3(&tx)?,
             3 => migrate_3_to_4(&tx)?,
+            4 => migrate_4_to_5(&tx)?,
             other => return Err(format!("no migration from database version {other}")),
         }
         tx.pragma_update(None, "user_version", v + 1)
@@ -288,6 +289,29 @@ fn migrate_3_to_4(tx: &Connection) -> Result<(), String> {
              download_url      TEXT,
              created_at        INTEGER NOT NULL,
              PRIMARY KEY (tech_name, archive_sha256)
+         );",
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Version 5 = `alias_check` (#402): what the catalog-link backfill noted about each library zip,
+/// keyed by path with the size and modified time it saw (as the scan cache is). `decided` = that
+/// version of the file is settled and isn't hashed or looked up again; a changed file has another
+/// size or time and is looked at once more. `sha256` keeps the hash once taken, so a lookup that
+/// failed is retried without hashing the file again. `unnamed_ms` is when the catalog last said it
+/// has no entry with the file's techName, so the next runs hash it without asking again (for a
+/// day). `attempted_ms` orders retries behind files never looked at. Rows for files the scan no longer has are dropped with `prune_alias_checks`.
+/// Additive.
+fn migrate_4_to_5(tx: &Connection) -> Result<(), String> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS alias_check (
+             path         TEXT PRIMARY KEY,
+             size         INTEGER NOT NULL,
+             mtime_ms     INTEGER NOT NULL,
+             sha256       TEXT,
+             unnamed_ms   INTEGER,
+             decided      INTEGER NOT NULL DEFAULT 0,
+             attempted_ms INTEGER NOT NULL
          );",
     )
     .map_err(|e| e.to_string())
@@ -1116,6 +1140,116 @@ pub fn forget_catalog_alias(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// The mods the user left out of update checks (#333). An error when that can't be read, so a
+/// caller that must leave them out never takes "none".
+pub fn skip_update_names(conn: &Connection) -> Result<HashSet<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT tech_name FROM curation WHERE skip_updates != 0")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<HashSet<_>>>()
+        .map_err(|e| e.to_string())
+}
+
+/// What the catalog-link backfill (#402) noted about one version of a library file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AliasCheck {
+    pub size: u64,
+    pub mtime_ms: u64,
+    /// The file's whole-file SHA-256 at that size and time, once taken (lowercase hex).
+    pub sha256: Option<String>,
+    /// When the catalog last said it has no entry with the file's techName (unix milliseconds).
+    pub unnamed_ms: Option<i64>,
+    /// Settled: not looked at again until the file changes.
+    pub decided: bool,
+    /// When it was last looked at (unix milliseconds).
+    pub attempted_ms: i64,
+}
+
+/// What the catalog-link backfill noted about the file at `path`, for whatever version of it it
+/// last saw.
+pub fn alias_check(conn: &Connection, path: &str) -> Result<Option<AliasCheck>, String> {
+    conn.query_row(
+        "SELECT size, mtime_ms, sha256, unnamed_ms, decided, attempted_ms
+         FROM alias_check WHERE path = ?1",
+        [path],
+        |r| {
+            Ok(AliasCheck {
+                size: r.get::<_, i64>(0)? as u64,
+                mtime_ms: r.get::<_, i64>(1)? as u64,
+                sha256: r.get(2)?,
+                unnamed_ms: r.get(3)?,
+                decided: r.get(4)?,
+                attempted_ms: r.get(5)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+/// Save what the catalog-link backfill noted about the file at `path`, replacing what it noted
+/// for an earlier version of the file.
+pub fn note_alias_check(conn: &Connection, path: &str, check: &AliasCheck) -> Result<(), String> {
+    put_alias_check(conn, path, check)
+}
+
+/// The latest try the catalog-link backfill noted for any file, if any.
+pub fn last_alias_attempt(conn: &Connection) -> Result<Option<i64>, String> {
+    conn.query_row("SELECT MAX(attempted_ms) FROM alias_check", [], |r| {
+        r.get(0)
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// `note_alias_check` for several files in one transaction (one wait for the database, not one
+/// per file).
+pub fn note_alias_checks(conn: &Connection, checks: &[(String, AliasCheck)]) -> Result<(), String> {
+    if checks.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    for (path, check) in checks {
+        put_alias_check(&tx, path, check)?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn put_alias_check(conn: &Connection, path: &str, check: &AliasCheck) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO alias_check(path, size, mtime_ms, sha256, unnamed_ms, decided, attempted_ms)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(path) DO UPDATE SET
+             size = excluded.size, mtime_ms = excluded.mtime_ms, sha256 = excluded.sha256,
+             unnamed_ms = excluded.unnamed_ms, decided = excluded.decided,
+             attempted_ms = excluded.attempted_ms",
+        rusqlite::params![
+            path,
+            check.size as i64,
+            check.mtime_ms as i64,
+            check.sha256.as_deref().map(str::to_ascii_lowercase),
+            check.unnamed_ms,
+            check.decided,
+            check.attempted_ms
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Drop the backfill's notes for files the scan cache no longer has (removed or moved), so the
+/// table stays the size of the library.
+/// @returns how many were dropped
+pub fn prune_alias_checks(conn: &Connection) -> Result<usize, String> {
+    conn.execute(
+        "DELETE FROM alias_check WHERE path NOT IN (SELECT path FROM mod_cache)",
+        [],
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Replace all tags for a mod.
@@ -1979,11 +2113,13 @@ mod tests {
             let conn = open(&path).unwrap();
             set_source(&conn, "FS25_A", Some("https://example.com/a")).unwrap();
             // Wind it back to a v3 file, as Silo 1.0.x left it.
-            conn.execute_batch("DROP TABLE catalog_alias; PRAGMA user_version = 3;")
-                .unwrap();
+            conn.execute_batch(
+                "DROP TABLE alias_check; DROP TABLE catalog_alias; PRAGMA user_version = 3;",
+            )
+            .unwrap();
         }
         let conn = open(&path).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 4);
+        assert_eq!(schema_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(load_sources(&conn).len(), 1, "the library is kept");
         assert!(catalog_aliases(&conn, "FS25_FieldToDoList")
             .unwrap()
@@ -2016,6 +2152,123 @@ mod tests {
         assert!(catalog_aliases(&conn, "FS25_fieldtodolist")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn migrating_to_v5_adds_alias_checks_and_keeps_the_library() {
+        let path = temp_db("v4_to_v5");
+        {
+            let conn = open(&path).unwrap();
+            set_source(&conn, "FS25_A", Some("https://example.com/a")).unwrap();
+            record_catalog_alias(
+                &conn,
+                &CatalogAliasRow {
+                    tech_name: "FS25_FieldToDoList".into(),
+                    archive_sha256: "abcd".into(),
+                    size: 10,
+                    catalog_id: "cat-todo".into(),
+                    catalog_tech_name: Some("FS25_ToDo".into()),
+                    download_url: None,
+                },
+            )
+            .unwrap();
+            // Wind it back to a v4 file, as Silo with #388 left it.
+            conn.execute_batch("DROP TABLE alias_check; PRAGMA user_version = 4;")
+                .unwrap();
+        }
+        let conn = open(&path).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 5);
+        assert_eq!(load_sources(&conn).len(), 1, "the library is kept");
+        assert_eq!(
+            catalog_aliases(&conn, "FS25_FieldToDoList").unwrap().len(),
+            1,
+            "the links are kept"
+        );
+        assert_eq!(alias_check(&conn, "m/FS25_X.zip").unwrap(), None);
+    }
+
+    #[test]
+    fn the_mods_left_out_of_update_checks_are_listed() {
+        let path = temp_db("skip_names");
+        let conn = open(&path).unwrap();
+        let row = |name: &str, skip: bool| CurationRow {
+            tech_name: name.into(),
+            favorite: !skip,
+            hidden: false,
+            broken: false,
+            rating: 0,
+            note: None,
+            skip_updates: skip,
+        };
+        set_curation(&conn, &row("FS25_A", true)).unwrap();
+        set_curation(&conn, &row("FS25_B", false)).unwrap();
+        let names = skip_update_names(&conn).unwrap();
+        assert_eq!(names, HashSet::from(["FS25_A".to_string()]));
+        conn.execute_batch("DROP TABLE curation").unwrap();
+        assert!(
+            skip_update_names(&conn).is_err(),
+            "unreadable is an error, not none"
+        );
+    }
+
+    #[test]
+    fn an_alias_check_round_trips_and_is_pruned_with_the_scan_cache() {
+        let path = temp_db("alias_check");
+        let mut conn = open(&path).unwrap();
+        let first = AliasCheck {
+            size: 10,
+            mtime_ms: 5,
+            sha256: Some("ABCD".into()),
+            unnamed_ms: Some(50),
+            decided: false,
+            attempted_ms: 100,
+        };
+        note_alias_check(&conn, "m/FS25_X.zip", &first).unwrap();
+        let got = alias_check(&conn, "m/FS25_X.zip").unwrap().unwrap();
+        assert_eq!(
+            got.sha256.as_deref(),
+            Some("abcd"),
+            "the hash is kept lowercase"
+        );
+        assert_eq!(
+            (got.size, got.mtime_ms, got.decided, got.attempted_ms),
+            (10, 5, false, 100)
+        );
+        assert_eq!(alias_check(&conn, "m/FS25_Y.zip").unwrap(), None);
+        // A newer version of the file replaces the note for the older one.
+        let next = AliasCheck {
+            size: 11,
+            mtime_ms: 6,
+            sha256: None,
+            unnamed_ms: None,
+            decided: true,
+            attempted_ms: 200,
+        };
+        note_alias_check(&conn, "m/FS25_X.zip", &next).unwrap();
+        assert_eq!(
+            alias_check(&conn, "m/FS25_X.zip").unwrap(),
+            Some(next.clone())
+        );
+        // Several at once, in one transaction.
+        let many: Vec<(String, AliasCheck)> = ["m/A.zip", "m/B.zip"]
+            .iter()
+            .map(|p| (p.to_string(), first.clone()))
+            .collect();
+        note_alias_checks(&conn, &many).unwrap();
+        assert!(alias_check(&conn, "m/B.zip").unwrap().is_some());
+        note_alias_checks(&conn, &[]).unwrap();
+        assert_eq!(last_alias_attempt(&conn).unwrap(), Some(200));
+        conn.execute(
+            "DELETE FROM alias_check WHERE path IN ('m/A.zip', 'm/B.zip')",
+            [],
+        )
+        .unwrap();
+        // Notes for files the scan cache no longer has are dropped; the rest stay.
+        note_alias_check(&conn, "m/FS25_Gone.zip", &first).unwrap();
+        upsert_many(&mut conn, &[("m/FS25_X.zip".into(), 6, 11, "{}".into())]).unwrap();
+        assert_eq!(prune_alias_checks(&conn).unwrap(), 1);
+        assert_eq!(alias_check(&conn, "m/FS25_X.zip").unwrap(), Some(next));
+        assert_eq!(alias_check(&conn, "m/FS25_Gone.zip").unwrap(), None);
     }
 
     #[test]

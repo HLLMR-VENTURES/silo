@@ -8,7 +8,14 @@ import { tick } from "svelte";
 import ModDetail from "../ModDetail.svelte";
 import DrawerHarness from "./__tests__/DrawerHarness.svelte";
 import { setVerdict } from "../../provenanceCache.svelte";
-import { catalogCheckUpdates, catalogDetailByTech, revealInFolder, scanLog, setCuration } from "../../api";
+import {
+  catalogCheckUpdates,
+  catalogDetailByTech,
+  onCatalogLinked,
+  revealInFolder,
+  scanLog,
+  setCuration,
+} from "../../api";
 import type { Conflict, CurationRow, LogReport, ModEntry } from "../../types";
 
 vi.mock("../../api", async (importOriginal) => ({
@@ -20,6 +27,7 @@ vi.mock("../../api", async (importOriginal) => ({
   guessRepo: vi.fn(() => Promise.resolve(null)),
   revealInFolder: vi.fn(() => Promise.resolve()),
   setCuration: vi.fn(() => Promise.resolve()),
+  onCatalogLinked: vi.fn(() => Promise.resolve(() => {})),
 }));
 
 beforeAll(() => {
@@ -219,6 +227,77 @@ describe("drawer lookups", () => {
     expect(catalogCheckUpdates).toHaveBeenCalledWith([
       { techName: "FS25_FieldToDoList", version: "1.0.0.0", path: "C:/mods/FS25_FieldToDoList.zip" },
     ]);
+  });
+
+  it("asks the catalog again when Silo links the shown file to its entry meanwhile (#402)", async () => {
+    let linked!: (paths: string[]) => void;
+    vi.mocked(onCatalogLinked).mockImplementation((h) => {
+      linked = h;
+      return Promise.resolve(() => {});
+    });
+    vi.mocked(catalogDetailByTech).mockClear();
+    vi.mocked(catalogCheckUpdates).mockClear();
+    const path = "C:/mods/FS25_FieldToDoList.zip";
+    render(
+      ModDetail,
+      props(entry(26, { path, techName: "FS25_FieldToDoList" })),
+    );
+    await settle();
+    expect(screen.getByText(/Not in Silo's catalog/)).toBeInTheDocument();
+    expect(catalogDetailByTech).toHaveBeenCalledTimes(1);
+    // Another mod linked: nothing to reload.
+    linked(["FS25_Other"]);
+    await settle();
+    expect(catalogDetailByTech).toHaveBeenCalledTimes(1);
+    // This mod (a link holds for every copy of its bytes): the drawer asks again.
+    vi.mocked(catalogCheckUpdates).mockImplementationOnce(() =>
+      Promise.resolve([
+        {
+          techName: "FS25_FieldToDoList",
+          latest: "1.0.0.0",
+          hasUpdate: false,
+          downloadUrl: null,
+          source: "github",
+        },
+      ]),
+    );
+    linked(["FS25_FieldToDoList"]);
+    await settle();
+    expect(catalogDetailByTech).toHaveBeenCalledTimes(2);
+    expect(catalogCheckUpdates).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(/Not in Silo's catalog/)).toBeNull();
+    vi.mocked(onCatalogLinked).mockImplementation(() =>
+      Promise.resolve(() => {}),
+    );
+  });
+
+  it("doesn't ask the catalog again for a linked mod left out of update checks (#402)", async () => {
+    let linked!: (names: string[]) => void;
+    vi.mocked(onCatalogLinked).mockImplementation((h) => {
+      linked = h;
+      return Promise.resolve(() => {});
+    });
+    vi.mocked(catalogDetailByTech).mockClear();
+    vi.mocked(catalogCheckUpdates).mockClear();
+    const mod = entry(27, {
+      path: "C:/mods/FS25_FieldToDoList.zip",
+      techName: "FS25_FieldToDoList",
+    });
+    const p = props(mod);
+    const { rerender } = render(ModDetail, p);
+    await settle();
+    // Left out while the link was being looked up; then the link arrives.
+    await rerender({ ...p, curation: { ...p.curation, skipUpdates: true } });
+    await settle();
+    vi.mocked(catalogDetailByTech).mockClear();
+    vi.mocked(catalogCheckUpdates).mockClear();
+    linked(["FS25_FieldToDoList"]);
+    await settle();
+    expect(catalogDetailByTech).not.toHaveBeenCalled();
+    expect(catalogCheckUpdates).not.toHaveBeenCalled();
+    vi.mocked(onCatalogLinked).mockImplementation(() =>
+      Promise.resolve(() => {}),
+    );
   });
 
   it("says when the catalog couldn't check the mod, instead of 'not in the catalog' (#386)", async () => {
