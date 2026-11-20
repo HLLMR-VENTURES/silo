@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-11-20
+
 ### Changed
 
 - **Updates → Check these yourself** now shows the version you have next to each mod (when the mod
@@ -1399,7 +1401,8 @@ First public beta.
   game-install discovery. Automatic mods-folder detection covers Windows and macOS;
   on Linux (Proton) the mods folder is set manually for now.
 
-[Unreleased]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.5...HEAD
+[Unreleased]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.6...HEAD
+[1.0.6]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.3...v1.0.4
 [0.1.0]: https://github.com/HLLMR-VENTURES/silo/releases/tag/v0.1.0
