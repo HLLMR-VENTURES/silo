@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Silo's built-in SQLite is updated to 3.54.1, which fixes CVE-2026-119375 (RUSTSEC-2026-0459):
+  a database opened with a mismatched `-wal` file could return stale bytes from memory. Silo
+  opens only its own database in its app-data folder, so this needed someone with write access
+  there. (#458)
+
 ## [1.0.5] - 2026-11-03
 
 The library database upgrades to version 6. Before upgrading, Silo tries to save a copy of the
