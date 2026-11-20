@@ -54,8 +54,11 @@ export function checkYourselfList(
   const answered = new Set(
     autoResults.filter((r) => typeof r.hasUpdate === "boolean").map((r) => r.techName),
   );
+  // One row per mod: with more than one copy, the last one, as the update check reads it
+  // (runUpdateCheck), so its version is the one compared and the rows' keys stay unique.
+  const byTech = new Map(mods.map((m) => [m.techName, m]));
   const out: CheckYourselfRow[] = [];
-  for (const m of mods) {
+  for (const m of byTech.values()) {
     const s = sources[m.techName];
     if (!s || answered.has(m.techName)) continue;
     out.push({

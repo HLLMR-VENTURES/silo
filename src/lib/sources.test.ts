@@ -46,6 +46,15 @@ describe("checkYourselfList", () => {
     expect(list.map((r) => r.version)).toEqual(["1.2.0.0", null]);
   });
 
+  it("lists a mod with more than one copy once, with the copy the update check reads", () => {
+    const pages = { A: src("A", "https://a.example/x") };
+    const one = (version: string | null) => ({ techName: "A", title: "Alpha", version });
+    expect(checkYourselfList([one("1.0"), one("2.0")], pages, [])).toMatchObject([{ techName: "A", version: "2.0" }]);
+    expect(checkYourselfList([one("2.0"), one("1.0")], pages, [])).toMatchObject([{ techName: "A", version: "1.0" }]);
+    // The chosen copy names no version: none is borrowed from the other copy.
+    expect(checkYourselfList([one("2.0"), one(null)], pages, [])).toMatchObject([{ techName: "A", version: null }]);
+  });
+
   it("counts a failed check with no catalog match as no answer", () => {
     const list = checkYourselfList(
       [mod("A")],

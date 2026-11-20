@@ -9,8 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Updates → Check these yourself** now shows the version you have next to each mod, so you can
-  compare it with the page you open without looking the mod up in the Library. (#457)
+- **Updates → Check these yourself** now shows the version you have next to each mod (when the mod
+  names one), so you can compare it with the page you open without looking the mod up in the
+  Library. A mod you have more than one copy of is listed once, with the copy the update check
+  reads. (#457)
 
 ### Security
 
