@@ -9,6 +9,8 @@ export interface CheckYourselfRow {
   url: string;
   host: string;
   lastChecked: number | null;
+  /** The version you have, to compare with the page (#457); null when the mod names none. */
+  version: string | null;
 }
 
 /**
@@ -45,7 +47,7 @@ export function checkedDate(secs: number): string {
  * @param autoResults rows from the automatic update check
  */
 export function checkYourselfList(
-  mods: { techName: string; title?: string | null }[],
+  mods: { techName: string; title?: string | null; version?: string | null }[],
   sources: Record<string, SourceRow>,
   autoResults: UpdateRow[],
 ): CheckYourselfRow[] {
@@ -62,6 +64,7 @@ export function checkYourselfList(
       url: s.url,
       host: sourceHost(s.url),
       lastChecked: s.lastChecked ?? null,
+      version: m.version?.trim() || null,
     });
   }
   const when = (r: CheckYourselfRow) => r.lastChecked ?? -1;

@@ -262,8 +262,10 @@
             <li class="row">
               <div class="main">
                 <div class="name">{c.title}</div>
-                <div class="detail">
-                  {c.host} · {c.lastChecked ? `last checked ${checkedDate(c.lastChecked)}` : "not checked yet"}
+                <div class="detail tnum">
+                  {c.version ? `You have ${displayVersion(c.version)} · ` : ""}{c.host} · {c.lastChecked
+                    ? `last checked ${checkedDate(c.lastChecked)}`
+                    : "not checked yet"}
                 </div>
               </div>
               <div class="acts">

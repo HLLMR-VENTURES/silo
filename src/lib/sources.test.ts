@@ -33,8 +33,17 @@ describe("checkYourselfList", () => {
       [auto("B", { hasUpdate: false, latest: "1.0" })],
     );
     expect(list).toEqual([
-      { techName: "A", title: "Alpha", url: "https://a.example/x", host: "a.example", lastChecked: null },
+      { techName: "A", title: "Alpha", url: "https://a.example/x", host: "a.example", lastChecked: null, version: null },
     ]);
+  });
+
+  it("carries the version you have, so the page can be compared with it (#457)", () => {
+    const list = checkYourselfList(
+      [{ techName: "A", title: "Alpha", version: " 1.2.0.0 " }, { techName: "B", title: "Bravo", version: "" }],
+      { A: src("A", "https://a.example/x"), B: src("B", "https://b.example/y") },
+      [],
+    );
+    expect(list.map((r) => r.version)).toEqual(["1.2.0.0", null]);
   });
 
   it("counts a failed check with no catalog match as no answer", () => {
