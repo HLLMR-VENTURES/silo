@@ -7,12 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-11-20
+
 ### Changed
 
 - **Updates → Check these yourself** now shows the version you have next to each mod (when the mod
   names one), so you can compare it with the page you open without looking the mod up in the
   Library. A mod you have more than one copy of is listed once, with the copy the update check
   reads. (#457)
+
+### Fixed
+
+From updated libraries:
+
+- Silo's log folder no longer grows past its five log files when logs rotate within the same
+  second (tauri-plugin-log 2.10.2).
+- On macOS, when Silo restarts itself after an update, it no longer jumps in front of the app
+  you're using (Tauri 2.12.6). This applies to updates from 1.0.6 on: the restart into 1.0.6 is
+  still done by 1.0.5.
+- On macOS, a reply from Silo's catalog or GitHub is no longer lost when the system rejects a
+  timeout change on a connection that's closing (ureq 3.5.2).
 
 ### Security
 
@@ -1399,7 +1413,8 @@ First public beta.
   game-install discovery. Automatic mods-folder detection covers Windows and macOS;
   on Linux (Proton) the mods folder is set manually for now.
 
-[Unreleased]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.5...HEAD
+[Unreleased]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.6...HEAD
+[1.0.6]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.3...v1.0.4
 [0.1.0]: https://github.com/HLLMR-VENTURES/silo/releases/tag/v0.1.0
