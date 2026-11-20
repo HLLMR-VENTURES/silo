@@ -6,7 +6,7 @@ authors = ["HLLMR Ventures LLC"]
 license = "MIT"
 repository = "https://github.com/HLLMR-VENTURES/silo"
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.77"
 
 # The library holds all logic so it's unit-testable without a running app and
 # reusable by a future CLI. main.rs is a thin entry point.
