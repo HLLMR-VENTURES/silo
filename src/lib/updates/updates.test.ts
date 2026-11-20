@@ -87,7 +87,7 @@ describe("groupUpdates", () => {
     row("Z_Gone", { hasUpdate: true, assetUrl: "https://x/z.zip" }),
   ];
   const yourself: CheckYourselfRow[] = [
-    { techName: "E_Page", title: "E_Page", url: "https://example.com/e", host: "example.com", lastChecked: null },
+    { techName: "E_Page", title: "E_Page", url: "https://example.com/e", host: "example.com", lastChecked: null, version: null },
   ];
 
   it("sorts rows into their sections", () => {

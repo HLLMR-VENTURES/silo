@@ -87,6 +87,19 @@ describe("UpdatesPanel", () => {
     expect(screen.queryByText(/Not tracked/)).toBeNull();
   });
 
+  it("Check these yourself shows the version you have, when the mod names one (#457)", () => {
+    setup({
+      checkYourself: [
+        { techName: "A", title: "Alpha", url: "https://a.example/x", host: "a.example", lastChecked: null, version: "v1.2.0.0" },
+        { techName: "B", title: "Bravo", url: "https://b.example/y", host: "b.example", lastChecked: null, version: null },
+      ],
+    });
+    const rows = within(screen.getByRole("region", { name: /Check these yourself/ })).getAllByRole("listitem");
+    expect(rows[0]).toHaveTextContent("You have 1.2.0.0 · a.example · not checked yet");
+    expect(rows[1]).toHaveTextContent("b.example · not checked yet");
+    expect(rows[1]).not.toHaveTextContent("You have");
+  });
+
   it("Update all and per-row Update call back; a failed row offers Try again and Copy details", async () => {
     const a = row("AutoDrive", { assetUrl: "https://x/a.zip" });
     const b = row("Courseplay", { assetUrl: "https://x/b.zip" });

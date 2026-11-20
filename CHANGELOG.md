@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Updates → Check these yourself** now shows the version you have next to each mod (when the mod
+  names one), so you can compare it with the page you open without looking the mod up in the
+  Library. A mod you have more than one copy of is listed once, with the copy the update check
+  reads. (#457)
+
 ### Security
 
 - Silo's built-in SQLite is updated to 3.54.1, which fixes CVE-2026-119375 (RUSTSEC-2026-0459):
