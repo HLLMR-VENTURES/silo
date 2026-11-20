@@ -55,7 +55,7 @@ dirs = "5"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 image_dds = "0.7"
 base64 = "0.22"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 ureq = { version = "3.5", features = ["json"] }
 # URL parsing for the outbound-request SSRF guard (already in the tree via tauri).
 url = "2"
