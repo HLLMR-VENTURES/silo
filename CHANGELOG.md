@@ -25,9 +25,8 @@ From updated libraries:
 - On macOS, when Silo restarts itself after an update, it no longer jumps in front of the app
   you're using (Tauri 2.12.6). This applies to updates from 1.0.6 on: the restart into 1.0.6 is
   still done by 1.0.5.
-- Connections to Silo's catalog, GitHub and update server try the server's other addresses
-  after a "network is down" error, and on macOS a response is no longer lost when the system
-  rejects a timeout change on a connection that's closing (ureq 3.5.2).
+- On macOS, a reply from Silo's catalog or GitHub is no longer lost when the system rejects a
+  timeout change on a connection that's closing (ureq 3.5.2).
 
 ### Security
 
