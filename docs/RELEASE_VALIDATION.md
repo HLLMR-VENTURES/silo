@@ -6,6 +6,36 @@ gap between the RC protocol and visible proof it ran.
 
 ---
 
+## v1.0.6 — 2026-11-21 (SQLite 3.54.1 security fix, installed version in Check these yourself)
+
+Validated by hand (not an HLLMRD run). No database change. The first release run failed only at Apple notarization ("A required agreement is missing or has expired"); the owner accepted Apple's updated agreement and the failed jobs were re-run (attempt 2), with no change to the source. Published 2026-11-21 14:53:54Z on the owner's instruction.
+
+### Artifact identity
+| Field | Value |
+|---|---|
+| Version | 1.0.6 |
+| Source | Tag `v1.0.6` (annotated, pushed by the owner as HLLMR) on `dcc2532`, the merge of #465; main's CI green on it |
+| Release run | [44838573588](https://github.com/HLLMR-VENTURES/silo/actions/runs/44838573588), attempt 2: guard passed, owner approved the `release` environment, all 4 builds + sbom + checksums green |
+| Release | draft id 453302261, prerelease=false, published as Latest; `/releases/latest` → v1.0.6 |
+| Assets | 19 (as 1.0.5) |
+| Installers | `SHA256SUMS.txt` SHA-256 `0386efd4fe35d0702fd619ae70b931cf9dee5dff26c553fe96a8c3758264c32b`; `Silo_1.0.6_x64-setup.exe` SHA-256 `898749b791d99ea30fd3b66cf3fefd90adb93f1ee0c202786c5e1d3a70f20bff`; `latest.json` SHA-256 `d4db69d7ac3b03378426bee19f4fcd09e0681b0649793b7b0834e04e287057de` |
+
+### Checks
+| Check | Result |
+|---|---|
+| macOS signing and notarization | both mac legs (attempt 2): "Set up macOS signing and notarization" and "Verify macOS signature and notarization" passed |
+| Windows Authenticode | `Get-AuthenticodeSignature` on the setup `.exe` and on the installed `silo.exe`: Valid, `CN=David Hellmer, O=David Hellmer, L=Grand Prairie, S=tx, C=US`, Microsoft timestamp |
+| Updater manifest | `latest.json` version 1.0.6; 11/11 platform entries. Every bundle's minisign signature verified against the `pubkey` in `tauri.conf.json` (key id match, file and trusted-comment signatures): NSIS, MSI, AppImage, deb, rpm, both `.app.tar.gz`. After publish, both `HLLMR-VENTURES/silo` and the old `HLLMR/silo` `releases/latest/download/latest.json` serve 1.0.6 with 11 platforms |
+| Checksums | every downloadable bundle (setup `.exe`, `.msi`, both `.dmg`, AppImage, deb, rpm, both `.app.tar.gz`) matches `SHA256SUMS.txt` |
+| Provenance | `gh attestation verify --repo HLLMR-VENTURES/silo --format json` on the setup `.exe`: 2 attestations, source `refs/tags/v1.0.6` at `dcc2532fc841be86288f2243e0a0440a5d8b794b`, signer `release.yml@refs/tags/v1.0.6` |
+| Upgrade over 1.0.5 | the released setup `.exe` installed over 1.0.5 on the owner's PC; `silo.exe` reports 1.0.6; launched to "All good" (checked over DevTools), then stopped with `Stop-Process` (a window close reached the single-instance helper window, not the app); `mods/` size+mtime baseline (762 entries): 0 differences; game settings hashes unchanged; `silo://` handler registry export identical; DB `user_version` 6 (unchanged), every table's row count unchanged (739 cached mods, 736 organized). DB copy kept outside the repo before installing |
+| Local gate (release branch) | `npm ci`; vitest 1294 passed; svelte-check 0 errors, 0 warnings; `cargo fmt --check`; clippy `--locked -D warnings`; `cargo test --locked` 1058 passed; `cargo audit` clean (SQLite advisory RUSTSEC-2026-0459 gone); `tauri build` produced the NSIS and MSI bundles (stopping only at the expected missing private key) |
+| RC test (before tagging) | in an isolated build (its own identifier and app data): Updates → Check these yourself showed "You have 1.2.3.4 · example.com · not checked yet" for a test mod the catalog doesn't know. The owner's real mods, settings, DB and handler unchanged throughout |
+| Not done | clean install; in-app update 1.0.5 → 1.0.6 not yet observed; macOS and Linux installs on real machines by us (#417 asks for testers) |
+
+---
+
+
 ## v1.0.5 — 2026-11-04 (database schema v6, Remove from library)
 
 Validated by hand (not an HLLMRD run). The release candidate was first tested on the owner's PC; that test found the silent permanent delete on a drive without a Recycle Bin (#442), fixed in #443 before tagging. Published 2026-11-04 12:45:16Z on the owner's instruction.
