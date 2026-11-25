@@ -3378,24 +3378,26 @@
     });
   }
 
-  // Only the newest answer about the game install lands (#461): a slow detection started
-  // before a choice must not put the old install back.
-  const gameLatest = latestOnly<{ info: GameInfo | null; choice: string | null }>();
+  // Every read or change of the game install runs after the one before it ends (#461), so
+  // each shows the install and choice as they stand once it's done: a detection begun before a
+  // choice can't put the old install back, nor a choice be lost behind a detection.
+  let gameQueue: Promise<unknown> = Promise.resolve();
   /**
    * Run `get` (a detection, or a change of the chosen game), then show the install it gives and
    * the stored choice together. A change of install re-checks conflicts: their base game lists
    * come from the install.
    */
-  async function updateGame(get: () => Promise<GameInfo | null>): Promise<void> {
-    const before = gameInfo?.installDir ?? null;
-    await gameLatest.run(
-      async () => ({ info: await get(), choice: await gameChoice() }),
-      (g) => {
-        gameInfo = g.info;
-        gameChoicePath = g.choice;
-      },
-    );
-    if ((gameInfo?.installDir ?? null) !== before) void runConflictCheck();
+  function updateGame(get: () => Promise<GameInfo | null>): Promise<void> {
+    const run = gameQueue.then(async () => {
+      const before = gameInfo?.installDir ?? null;
+      const info = await get();
+      const choice = await gameChoice();
+      gameInfo = info;
+      gameChoicePath = choice;
+      if ((info?.installDir ?? null) !== before) void runConflictCheck();
+    });
+    gameQueue = run.catch(() => {});
+    return run;
   }
 
   /** Settings → Game → Choose the game… (#461, Windows): use the exe the user picks. */

@@ -564,11 +564,11 @@ impl GameData {
         }
     }
 
-    /// [`load`](Self::load) once per install, for the game Silo detects now: its DLCs rarely
+    /// [`load`](Self::load) once per install folder (`None`: no install): its DLCs rarely
     /// change while Silo is open, but choosing another install (#461) reads that one's.
-    pub fn cached() -> &'static GameData {
+    pub fn cached(dir: Option<&Path>) -> &'static GameData {
         static DATA: crate::gamelaunch::PerInstall<GameData> = crate::gamelaunch::PerInstall::new();
-        DATA.get(GameData::load)
+        DATA.get(dir, GameData::load)
     }
 }
 

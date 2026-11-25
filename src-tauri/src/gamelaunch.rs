@@ -149,19 +149,14 @@ impl<T: Send + Sync + 'static> PerInstall<T> {
         }
     }
 
-    /// The value for the install [`detect`] finds now (`None`: no install), loaded by `load` the
-    /// first time that install is seen.
-    pub fn get(&'static self, load: impl FnOnce(Option<&Path>) -> T) -> &'static T {
-        let dir = detect().map(|g| PathBuf::from(g.install_dir));
-        self.get_for(dir, load)
-    }
-
-    /// [`get`](Self::get) for a given install folder.
-    fn get_for(
+    /// The value for the install folder `dir` (`None`: no install), loaded by `load` the first
+    /// time that folder is seen.
+    pub fn get(
         &'static self,
-        dir: Option<PathBuf>,
+        dir: Option<&Path>,
         load: impl FnOnce(Option<&Path>) -> T,
     ) -> &'static T {
+        let dir = dir.map(Path::to_path_buf);
         let mut seen = self
             .seen
             .lock()
@@ -241,6 +236,24 @@ pub fn is_fs25_process(name: &str, cmd: &[String], exe: Option<&str>) -> bool {
 /// Two passes: a name-only snapshot of all processes, then — only for the few whose name could
 /// be FS25 — the command line and exe path (a cross-process read per process on Windows).
 pub fn fs25_running() -> bool {
+    any_process(is_fs25_process)
+}
+
+/// True for the FS25 game itself (or a Proton/Wine host running it): [`is_fs25_process`] without
+/// the dedicated server, which isn't a second copy of the game. Pure.
+pub fn is_fs25_client_process(name: &str, cmd: &[String], exe: Option<&str>) -> bool {
+    !name.to_ascii_lowercase().starts_with("dedicatedserver") && is_fs25_process(name, cmd, exe)
+}
+
+/// True if the FS25 game itself is running (not just its dedicated server): what decides whether
+/// Play may start a copy of the game (#461).
+pub fn fs25_client_running() -> bool {
+    any_process(is_fs25_client_process)
+}
+
+/// Whether any running process passes `judge` (name, command line, exe path), in the two passes
+/// [`fs25_running`] describes.
+fn any_process(judge: fn(&str, &[String], Option<&str>) -> bool) -> bool {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let mut sys = System::new();
     sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
@@ -267,7 +280,7 @@ pub fn fs25_running() -> bool {
             .map(|s| s.to_string_lossy().into_owned())
             .collect();
         let exe = p.exe().map(|e| e.to_string_lossy());
-        is_fs25_process(&p.name().to_string_lossy(), &cmd, exe.as_deref())
+        judge(&p.name().to_string_lossy(), &cmd, exe.as_deref())
     })
 }
 
@@ -527,7 +540,7 @@ pub fn launch(profile: Option<&Path>) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     if let Some(info) = detect().filter(|i| i.store == Store::Standalone) {
         let (exe, dir) = (PathBuf::from(&info.exe), PathBuf::from(&info.install_dir));
-        return start_once(|| {
+        return start_once(fs25_client_running, || {
             spawn_exe(&exe, &[], &dir).map_err(|e| {
                 format!(
                     "Couldn't start Farming Simulator 25 ({}): {e}",
@@ -541,8 +554,10 @@ pub fn launch(profile: Option<&Path>) -> Result<(), String> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let since = last.map(|t| t.elapsed());
-        // The process list only when Silo started the game directly: Steam handles its own.
-        if let Some(why) = since.and_then(|s| steam_launch_refusal(Some(s), fs25_running())) {
+        // The process list only when Silo started the game directly: Steam handles its own. The
+        // game itself only: a dedicated server running beside it is no reason to refuse Play.
+        if let Some(why) = since.and_then(|s| steam_launch_refusal(Some(s), fs25_client_running()))
+        {
             return Err(why.into());
         }
     }
@@ -710,17 +725,22 @@ fn launch_profile(dir: &Path) -> Result<(), String> {
             dir.display()
         ));
     }
-    start_once(|| launch_profile_now(dir))
+    start_once(fs25_running, || launch_profile_now(dir))
 }
 
 /// Run `start` (a direct start of the game) unless [`direct_launch_refusal`] says not to now,
-/// checked against the process list right before it, under one lock so two Plays can't both
-/// pass. A start that went out is remembered for [`DIRECT_LAUNCH_HOLD`].
-fn start_once(start: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+/// checked against `running` (the process list) right before it, under one lock so two Plays
+/// can't both pass. A start that went out is remembered for [`DIRECT_LAUNCH_HOLD`]. A profile
+/// launch (#387) keeps its conservative check (the dedicated server too); a chosen game (#461)
+/// checks for the game itself.
+fn start_once(
+    running: fn() -> bool,
+    start: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     let mut last = LAST_DIRECT_LAUNCH
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(why) = direct_launch_refusal(fs25_running(), last.map(|t| t.elapsed())) {
+    if let Some(why) = direct_launch_refusal(running(), last.map(|t| t.elapsed())) {
         return Err(why.into());
     }
     let started = start();
@@ -1042,17 +1062,31 @@ mod tests {
     #[test]
     fn values_read_from_the_game_load_once_per_install() {
         static V: PerInstall<String> = PerInstall::new();
-        let a = V.get_for(Some(PathBuf::from("E:/FS25")), |d| format!("{d:?}"));
-        let again = V.get_for(Some(PathBuf::from("E:/FS25")), |_| -> String {
+        let a = V.get(Some(Path::new("E:/FS25")), |d| format!("{d:?}"));
+        let again = V.get(Some(Path::new("E:/FS25")), |_| -> String {
             unreachable!("loaded once")
         });
         assert!(std::ptr::eq(a, again));
         // Another install (a chosen DVD copy) gets its own.
-        assert_eq!(
-            V.get_for(Some(PathBuf::from("F:/DVD")), |_| "dvd".into()),
-            "dvd"
-        );
-        assert_eq!(V.get_for(None, |d| format!("{}", d.is_none())), "true");
+        assert_eq!(V.get(Some(Path::new("F:/DVD")), |_| "dvd".into()), "dvd");
+        assert_eq!(V.get(None, |d| format!("{}", d.is_none())), "true");
+    }
+
+    #[test]
+    fn a_dedicated_server_isnt_a_running_copy_of_the_game() {
+        let dvd = Some(r"E:\Farming Simulator 2025\FarmingSimulator2025.exe");
+        assert!(is_fs25_client_process("FarmingSimulator2025.exe", &[], dvd));
+        assert!(is_fs25_client_process(
+            "FarmingSimulator2025Game.exe",
+            &[],
+            None
+        ));
+        let server =
+            Some(r"E:\SteamLibrary\steamapps\common\Farming Simulator 25\dedicatedServer.exe");
+        // It still counts for moving files (fs25_running), not for starting the game.
+        assert!(is_fs25_process("dedicatedServer.exe", &[], server));
+        assert!(!is_fs25_client_process("dedicatedServer.exe", &[], server));
+        assert!(!is_fs25_client_process("DedicatedServer.exe", &[], None));
     }
 
     #[test]

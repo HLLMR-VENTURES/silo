@@ -163,12 +163,12 @@ impl GameData {
         })
     }
 
-    /// [`load`](Self::load) once per install, for the game Silo detects now: choosing another
+    /// [`load`](Self::load) once per install folder (`None`: no install): choosing another
     /// install (#461) reads that one's lists and DLCs.
-    pub fn cached() -> Option<&'static GameData> {
+    pub fn cached(dir: Option<&std::path::Path>) -> Option<&'static GameData> {
         static DATA: crate::gamelaunch::PerInstall<Option<GameData>> =
             crate::gamelaunch::PerInstall::new();
-        DATA.get(GameData::load).as_ref()
+        DATA.get(dir, GameData::load).as_ref()
     }
 
     /// The fill types known for certain to exist: the base list and the mods' declared lists.
