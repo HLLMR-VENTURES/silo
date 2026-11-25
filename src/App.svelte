@@ -42,6 +42,9 @@
     backupSavegame,
     detectConflicts,
     detectGame,
+    pickGameExe,
+    setGameChoice,
+    clearGameChoice,
     modsWithSettings,
     getTags,
     setTags,
@@ -296,6 +299,7 @@
   import { crashNoticeModel, likelyCulprit, type CrashCulprit } from "./lib/diagnose/crashNotice";
   import { severityLabel } from "./lib/diagnose/conflictCopy";
   import { latestOnly } from "./lib/diagnose/latest";
+  import { gameUpdater } from "./lib/gameState";
   import { libraryReadState } from "./lib/components/shell/status";
   import PlayButton, { type PlayMenuItem } from "./lib/components/shell/PlayButton.svelte";
   import type { StatusStripItem } from "./lib/components/shell/StatusStrip.svelte";
@@ -791,6 +795,8 @@
     };
   });
   let gameInfo = $state<GameInfo | null>(null);
+  /** The game exe the user chose (#461), whether or not it's still there. */
+  let gameChoicePath = $state<string | null>(null);
   let settingsModsSet = $state<Set<string>>(new Set());
   let settingsMod = $state<{ techName: string; title: string } | null>(null);
 
@@ -817,6 +823,8 @@
       crashWatch.afterLaunch(); // look at the log when the game exits
     } catch (e) {
       reportError(e, "Launching the game");
+      // A chosen game (#461) that's gone refuses Play: show it so in Settings and on Play.
+      if (gameChoicePath) void updateGame(detectGame).catch(() => {});
     }
   }
 
@@ -3370,6 +3378,37 @@
     });
   }
 
+  // The game install and the chosen exe (#461), one update at a time (`gameUpdater`). A change
+  // of install re-checks conflicts: their base game lists come from the install.
+  const updateGame = gameUpdater(
+    ({ install, choice }, installChanged) => {
+      gameInfo = install;
+      gameChoicePath = choice;
+      if (installChanged) void runConflictCheck();
+    },
+    () => gameInfo?.installDir ?? null,
+  );
+
+  /** Settings → Game → Choose the game… (#461, Windows): use the exe the user picks. */
+  async function chooseGame() {
+    const path = await pickGameExe();
+    if (!path) return;
+    try {
+      await updateGame(() => setGameChoice(path));
+    } catch (e) {
+      reportError(e, "Choosing the game");
+    }
+  }
+
+  /** Forget the chosen game exe (#461): Silo looks in Steam libraries again. */
+  async function forgetGame() {
+    try {
+      await updateGame(clearGameChoice);
+    } catch (e) {
+      reportError(e, "Using the Steam install");
+    }
+  }
+
   async function pointGameHere() {
     try {
       await applyModsStatus(await pointGameAtModsRoot());
@@ -3862,7 +3901,7 @@
         await loadSources();
         await setStore.load();
         await loadSavegames();
-        gameInfo = await detectGame();
+        await updateGame(detectGame);
         userDir = await userDirPath();
         appVer = await appVersion();
         // Fire-and-forget: never let a slow/absent update endpoint delay startup.
@@ -3936,6 +3975,8 @@
         focusUnlisten = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
           // Back from the game (or anywhere): did the last run crash? A cheap stat first.
           if (focused) void crashWatch.check();
+          // A chosen game (#461) on a drive that was unplugged, or moved: show what's there now.
+          if (focused && gameChoicePath) void updateGame(detectGame).catch(() => {});
           if (
             focused &&
             focusRescanAllowed({
@@ -4789,6 +4830,9 @@
             onUseGameFolder={useGameFolder}
             onSwitchModsFolder={switchModsFolder}
             onSetGameProfile={setGameProfileOn}
+            gameChoice={gameChoicePath}
+            onChooseGame={isWindowsPlatform() ? chooseGame : undefined}
+            onForgetGame={forgetGame}
           />
         {/snippet}
         {#snippet libraryTab()}
