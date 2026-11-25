@@ -42,6 +42,10 @@
     backupSavegame,
     detectConflicts,
     detectGame,
+    gameChoice,
+    pickGameExe,
+    setGameChoice,
+    clearGameChoice,
     modsWithSettings,
     getTags,
     setTags,
@@ -791,6 +795,8 @@
     };
   });
   let gameInfo = $state<GameInfo | null>(null);
+  /** The game exe the user chose (#461), whether or not it's still there. */
+  let gameChoicePath = $state<string | null>(null);
   let settingsModsSet = $state<Set<string>>(new Set());
   let settingsMod = $state<{ techName: string; title: string } | null>(null);
 
@@ -3370,6 +3376,28 @@
     });
   }
 
+  /** Settings → Game → Choose the game… (#461, Windows): use the exe the user picks. */
+  async function chooseGame() {
+    const path = await pickGameExe();
+    if (!path) return;
+    try {
+      gameInfo = await setGameChoice(path);
+      gameChoicePath = path;
+    } catch (e) {
+      reportError(e, "Choosing the game");
+    }
+  }
+
+  /** Forget the chosen game exe (#461): Silo looks in Steam libraries again. */
+  async function forgetGame() {
+    try {
+      gameInfo = await clearGameChoice();
+      gameChoicePath = null;
+    } catch (e) {
+      reportError(e, "Using the Steam install");
+    }
+  }
+
   async function pointGameHere() {
     try {
       await applyModsStatus(await pointGameAtModsRoot());
@@ -3863,6 +3891,7 @@
         await setStore.load();
         await loadSavegames();
         gameInfo = await detectGame();
+        gameChoicePath = await gameChoice();
         userDir = await userDirPath();
         appVer = await appVersion();
         // Fire-and-forget: never let a slow/absent update endpoint delay startup.
@@ -4789,6 +4818,9 @@
             onUseGameFolder={useGameFolder}
             onSwitchModsFolder={switchModsFolder}
             onSetGameProfile={setGameProfileOn}
+            gameChoice={gameChoicePath}
+            onChooseGame={isWindowsPlatform() ? chooseGame : undefined}
+            onForgetGame={forgetGame}
           />
         {/snippet}
         {#snippet libraryTab()}

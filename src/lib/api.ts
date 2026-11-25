@@ -976,6 +976,30 @@ export function bisectSnapshotClear(): Promise<void> {
 export function detectGame(): Promise<GameInfo | null> {
   return invoke<GameInfo | null>("detect_game");
 }
+/** The game exe the user chose (#461), whether or not it's still there; null when Silo finds the
+ *  game itself. */
+export function gameChoice(): Promise<string | null> {
+  return invoke<string | null>("game_choice");
+}
+/** Ask for FS25's exe (a DVD or GIANTS-shop install, #461). Null if cancelled. */
+export async function pickGameExe(): Promise<string | null> {
+  const path = await open({
+    multiple: false,
+    directory: false,
+    title: "Choose FarmingSimulator2025.exe",
+    filters: [{ name: "Farming Simulator 25", extensions: ["exe"] }],
+  });
+  return !path || Array.isArray(path) ? null : path;
+}
+/** Use `path` as the game (#461, Windows): refused unless it's FS25's exe with the game's data
+ *  beside it. Returns the install it makes (inside a Steam library, still the Steam install). */
+export function setGameChoice(path: string): Promise<GameInfo | null> {
+  return invoke<GameInfo | null>("set_game_choice", { path });
+}
+/** Forget the chosen game exe (#461): Silo looks in Steam libraries again. */
+export function clearGameChoice(): Promise<GameInfo | null> {
+  return invoke<GameInfo | null>("clear_game_choice");
+}
 
 /** Start FS25. `expectedProfile`: the FS25 profile the app shows (null = the main one); the
  *  launch is refused if Silo would start another (#387). Left out: no such check. While a paused

@@ -3,9 +3,12 @@
 //! is simply starting FS25 — via Steam when it's a Steam install, so it's tracked
 //! properly. On macOS the game is a `.app` bundle and may also come from the Mac App
 //! Store or GIANTS directly (installed in `/Applications`); those launch with `open -a`.
+//! On Windows the user can choose the game's exe (#461, a DVD or GIANTS-shop install Steam
+//! doesn't know); one outside every Steam library is started directly.
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
 /// FS25 on Steam.
 const APP_ID: &str = "2300320";
@@ -18,8 +21,10 @@ const EXES: &[&str] = &[EXE_WINDOWS];
 /// `.exe`. The extensionless name is kept in case a native build ever ships.
 #[cfg(all(unix, not(target_os = "macos")))]
 const EXES: &[&str] = &[EXE_WINDOWS, "FarmingSimulator2025"];
-#[cfg(any(not(target_os = "macos"), test))]
 const EXE_WINDOWS: &str = "FarmingSimulator2025.exe";
+/// The game's data archive, next to the exe in every install: how a chosen exe is told from a
+/// file that only has the name.
+const DATA_ARCHIVE: &str = "dataS.gar";
 
 /// Bundle id of the macOS build (the App Store sandbox container is named after it).
 #[cfg(target_os = "macos")]
@@ -31,7 +36,8 @@ const MAC_BUNDLE_ID: &str = "com.giants-software.fs25";
 pub enum Store {
     /// Inside a Steam library: launch via `steam://rungameid/<appid>`.
     Steam,
-    /// Mac App Store / GIANTS-direct `.app`: launch the bundle itself.
+    /// Mac App Store / GIANTS-direct `.app`, or on Windows an exe the user chose outside every
+    /// Steam library: launch it itself.
     Standalone,
 }
 
@@ -43,6 +49,80 @@ pub struct GameInfo {
     pub exe: String,
     pub install_dir: String,
     pub store: Store,
+    /// The install is the exe the user chose (#461), not one Silo found.
+    pub chosen: bool,
+}
+
+/// The app setting holding the game exe the user chose (#461).
+pub const CHOICE_KEY: &str = "game_exe";
+
+/// The game exe the user chose, as last read from or written to [`CHOICE_KEY`].
+static CHOICE: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// Publish the user's choice of game exe (or none), so [`detect`] uses it.
+pub fn set_choice(exe: Option<PathBuf>) {
+    if let Ok(mut g) = CHOICE.write() {
+        *g = exe;
+    }
+}
+
+/// The game exe the user chose, if any (whether or not it's still there).
+pub fn choice() -> Option<PathBuf> {
+    CHOICE.read().ok().and_then(|g| g.clone())
+}
+
+/// Why `exe` can't be the game, or `None` when it can: it must be named
+/// `FarmingSimulator2025.exe`, exist, and have the game's `dataS.gar` beside it. `exists` is
+/// injected so this unit-tests without a real install.
+pub fn choice_problem(exe: &Path, exists: impl Fn(&Path) -> bool) -> Option<&'static str> {
+    let named = exe
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(EXE_WINDOWS));
+    if !named {
+        return Some(
+            "Choose FarmingSimulator2025.exe, in the folder Farming Simulator 25 is installed in.",
+        );
+    }
+    if !exists(exe) {
+        return Some("That file isn't there anymore.");
+    }
+    match exe.parent() {
+        Some(dir) if exists(&dir.join(DATA_ARCHIVE)) => None,
+        _ => Some("That folder doesn't look like a Farming Simulator 25 install: the game's dataS.gar isn't next to the file."),
+    }
+}
+
+/// Pure: the install the chosen `exe` makes. It's the Steam install when its folder is one of
+/// `steam_dirs` (Steam's FS25 install folders), so Play still goes through Steam; anywhere else
+/// it's started directly.
+#[cfg(any(not(target_os = "macos"), test))]
+fn chosen_install(exe: &Path, steam_dirs: &[PathBuf]) -> GameInfo {
+    let dir = exe.parent().unwrap_or(exe);
+    let store = if steam_dirs.iter().any(|d| same_folder(d, dir)) {
+        Store::Steam
+    } else {
+        Store::Standalone
+    };
+    GameInfo {
+        app_id: APP_ID.to_string(),
+        exe: exe.to_string_lossy().into_owned(),
+        install_dir: dir.to_string_lossy().into_owned(),
+        store,
+        chosen: true,
+    }
+}
+
+/// Two Windows folder paths name the same folder: case, slash direction and a trailing slash
+/// aside (Steam's `libraryfolders.vdf` gives `E:/SteamLibrary`, a file dialog `E:\SteamLibrary`).
+#[cfg(any(not(target_os = "macos"), test))]
+fn same_folder(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| {
+        p.to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    };
+    norm(a) == norm(b)
 }
 
 /// Cheap, name-only pre-filter: could a process with this name be FS25 (or a host for it)?
@@ -208,16 +288,24 @@ fn steam_install_dirs() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Locate the FS25 install across all Steam libraries.
+/// Locate the FS25 install: on Windows the exe the user chose, while it's still a valid game exe
+/// (#461); otherwise the first across all Steam libraries.
 #[cfg(not(target_os = "macos"))]
 pub fn detect() -> Option<GameInfo> {
-    steam_install_dirs().into_iter().find_map(|install| {
+    let steam_dirs = steam_install_dirs();
+    if cfg!(windows) {
+        if let Some(exe) = choice().filter(|e| choice_problem(e, |p| p.is_file()).is_none()) {
+            return Some(chosen_install(&exe, &steam_dirs));
+        }
+    }
+    steam_dirs.into_iter().find_map(|install| {
         let exe = find_game_exe(&install, EXES, |p| p.is_file())?;
         Some(GameInfo {
             app_id: APP_ID.to_string(),
             exe: exe.to_string_lossy().into_owned(),
             install_dir: install.to_string_lossy().into_owned(),
             store: Store::Steam,
+            chosen: false,
         })
     })
 }
@@ -259,6 +347,7 @@ pub fn detect() -> Option<GameInfo> {
         exe: app.to_string_lossy().into_owned(),
         install_dir: install_dir.to_string_lossy().into_owned(),
         store,
+        chosen: false,
     })
 }
 
@@ -340,8 +429,9 @@ fn pick_mac_install(steam_dirs: &[PathBuf], bundles: &[PathBuf]) -> Option<(Path
 }
 
 /// Launch FS25: through Steam (`steam://rungameid/<appid>`), or — for a macOS App Store /
-/// GIANTS-direct install — by opening the detected `.app` bundle. Guided bisection uses
-/// this same entry point.
+/// GIANTS-direct install — by opening the detected `.app` bundle, or — for an exe chosen
+/// outside Steam on Windows (#461) — by starting it directly, one start at a time
+/// ([`start_once`]). Guided bisection uses this same entry point.
 ///
 /// With `profile` (an FS25 profile folder, #387, Windows only: see `gameprofile::unsupported_reason`)
 /// the game executable is started directly with `-profile "<dir>"`, so FS25 uses that folder's
@@ -357,6 +447,18 @@ pub fn launch(profile: Option<&Path>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     if let Some(info) = detect().filter(|i| i.store == Store::Standalone) {
         return open_mac_app(&info.exe);
+    }
+    #[cfg(not(target_os = "macos"))]
+    if let Some(info) = detect().filter(|i| i.store == Store::Standalone) {
+        let (exe, dir) = (PathBuf::from(&info.exe), PathBuf::from(&info.install_dir));
+        return start_once(|| {
+            spawn_exe(&exe, &[], &dir).map_err(|e| {
+                format!(
+                    "Couldn't start Farming Simulator 25 ({}): {e}",
+                    exe.display()
+                )
+            })
+        });
     }
     let url = format!("steam://rungameid/{APP_ID}");
     open_url(&url)
@@ -382,10 +484,11 @@ pub fn profile_args(dir: &Path) -> Vec<String> {
 }
 
 /// Pure: the plan for starting FS25 on profile `dir`, given the detected install. A Steam
-/// install with a game executable: run it directly. Otherwise the Steam URL fallback.
+/// install, or a game exe the user chose (#461, Windows), with an executable: run it directly.
+/// Otherwise the Steam URL fallback.
 pub fn profile_launch_plan(info: Option<&GameInfo>, dir: &Path) -> LaunchPlan {
     match info {
-        Some(i) if i.store == Store::Steam && !i.exe.is_empty() => LaunchPlan::Exe {
+        Some(i) if (i.store == Store::Steam || i.chosen) && !i.exe.is_empty() => LaunchPlan::Exe {
             program: PathBuf::from(&i.exe),
             args: profile_args(dir),
             cwd: PathBuf::from(&i.install_dir),
@@ -462,30 +565,31 @@ pub fn windows_command_line(args: &[String]) -> String {
         .join(" ")
 }
 
-/// How long after a profile launch another one is refused: the new process can take a moment to
-/// show up in the process list, and Steam no longer stands between two clicks on Play.
-pub const PROFILE_LAUNCH_HOLD: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long after a direct start (a profile launch, #387, or a game exe chosen outside Steam,
+/// #461) another one is refused: the new process can take a moment to show up in the process
+/// list, and Steam no longer stands between two clicks on Play.
+pub const DIRECT_LAUNCH_HOLD: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub const ALREADY_RUNNING: &str = "Farming Simulator 25 is already running.";
 pub const JUST_STARTED: &str = "Farming Simulator 25 is starting. Give it a moment.";
 
-/// When the last profile launch was started (one at a time: the lock is held through the spawn).
-static LAST_PROFILE_LAUNCH: std::sync::Mutex<Option<std::time::Instant>> =
+/// When the last direct start went out (one at a time: the lock is held through the spawn).
+static LAST_DIRECT_LAUNCH: std::sync::Mutex<Option<std::time::Instant>> =
     std::sync::Mutex::new(None);
 
-/// True for [`PROFILE_LAUNCH_HOLD`] after a profile launch: the game may be starting without
+/// True for [`DIRECT_LAUNCH_HOLD`] after a direct start: the game may be starting without
 /// showing in the process list yet, so writes to its files wait as they do while it runs.
-pub fn profile_launch_pending() -> bool {
-    LAST_PROFILE_LAUNCH
+pub fn direct_launch_pending() -> bool {
+    LAST_DIRECT_LAUNCH
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .is_some_and(|t| t.elapsed() < PROFILE_LAUNCH_HOLD)
+        .is_some_and(|t| t.elapsed() < DIRECT_LAUNCH_HOLD)
 }
 
-/// Pure: why a profile launch must not start now. The game started directly (not through Steam)
+/// Pure: why a direct start must not go out now. The game started directly (not through Steam)
 /// could otherwise run twice: when it's already running, or when it was started `since` ago,
-/// within [`PROFILE_LAUNCH_HOLD`], and may not be in the process list yet.
-pub fn profile_launch_refusal(
+/// within [`DIRECT_LAUNCH_HOLD`], and may not be in the process list yet.
+pub fn direct_launch_refusal(
     running: bool,
     since: Option<std::time::Duration>,
 ) -> Option<&'static str> {
@@ -493,13 +597,13 @@ pub fn profile_launch_refusal(
         return Some(ALREADY_RUNNING);
     }
     since
-        .filter(|d| *d < PROFILE_LAUNCH_HOLD)
+        .filter(|d| *d < DIRECT_LAUNCH_HOLD)
         .map(|_| JUST_STARTED)
 }
 
 /// Start FS25 on profile `dir`. Refuses a folder that isn't there (an unplugged drive): FS25
 /// would start a new, empty profile there instead of the user's setup. One launch at a time,
-/// checked against the process list right before the spawn ([`profile_launch_refusal`]).
+/// checked against the process list right before the spawn ([`direct_launch_refusal`]).
 fn launch_profile(dir: &Path) -> Result<(), String> {
     if let Some(why) = crate::gameprofile::UNSUPPORTED {
         return Err(why.into());
@@ -510,13 +614,20 @@ fn launch_profile(dir: &Path) -> Result<(), String> {
             dir.display()
         ));
     }
-    let mut last = LAST_PROFILE_LAUNCH
+    start_once(|| launch_profile_now(dir))
+}
+
+/// Run `start` (a direct start of the game) unless [`direct_launch_refusal`] says not to now,
+/// checked against the process list right before it, under one lock so two Plays can't both
+/// pass. A start that went out is remembered for [`DIRECT_LAUNCH_HOLD`].
+fn start_once(start: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    let mut last = LAST_DIRECT_LAUNCH
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(why) = profile_launch_refusal(fs25_running(), last.map(|t| t.elapsed())) {
+    if let Some(why) = direct_launch_refusal(fs25_running(), last.map(|t| t.elapsed())) {
         return Err(why.into());
     }
-    let started = launch_profile_now(dir);
+    let started = start();
     if started.is_ok() {
         *last = Some(std::time::Instant::now());
     }
@@ -539,9 +650,15 @@ fn launch_profile_now(dir: &Path) -> Result<(), String> {
         std::env::var("SILO_DEBUG_FS25_EXE").ok(),
         cfg!(debug_assertions),
     );
+    let steam = !matches!(&info, Some(i) if i.store == Store::Standalone);
     match profile_launch_plan(info.as_ref(), dir) {
         LaunchPlan::Exe { program, args, cwd } => match spawn_exe(&program, &args, &cwd) {
             Ok(()) => Ok(()),
+            // A game chosen outside Steam (#461): Steam can't start it, so say why.
+            Err(e) if !steam => Err(format!(
+                "Couldn't start Farming Simulator 25 ({}): {e}",
+                program.display()
+            )),
             Err(e) => {
                 log::warn!(
                     "couldn't start {} directly ({e}); asking Steam instead",
@@ -725,7 +842,72 @@ mod tests {
             exe: exe.into(),
             install_dir: install.into(),
             store: Store::Steam,
+            chosen: false,
         }
+    }
+
+    #[test]
+    fn a_chosen_exe_must_be_the_game_with_its_data_beside_it() {
+        let install = Path::new(r"E:\Farming Simulator 2025");
+        let exe = install.join("FarmingSimulator2025.exe");
+        let data = install.join("dataS.gar");
+        let both = |p: &Path| p == exe || p == data;
+        assert_eq!(choice_problem(&exe, both), None);
+        // Case doesn't matter on Windows.
+        let upper = install.join("FARMINGSIMULATOR2025.EXE");
+        assert_eq!(choice_problem(&upper, |p| p == upper || p == data), None);
+        // Another program, the game's inner exe, or a folder: not the game.
+        for other in ["steam.exe", "FarmingSimulator2025Game.exe", ""] {
+            let p = install.join(other);
+            assert!(
+                choice_problem(&p, |_| true).is_some_and(|w| w.contains("Choose")),
+                "{other}"
+            );
+        }
+        // Gone (an unplugged drive), or no dataS.gar beside it (a copy of just the exe).
+        assert!(choice_problem(&exe, |p| p == data).is_some_and(|w| w.contains("isn't there")));
+        assert!(choice_problem(&exe, |p| p == exe).is_some_and(|w| w.contains("dataS.gar")));
+    }
+
+    #[test]
+    fn a_chosen_exe_in_a_steam_library_stays_the_steam_install() {
+        let steam = vec![PathBuf::from(
+            "E:/SteamLibrary/steamapps/common/Farming Simulator 25",
+        )];
+        let in_steam = Path::new(
+            r"e:\steamlibrary\steamapps\common\Farming Simulator 25\FarmingSimulator2025.exe",
+        );
+        let picked = chosen_install(in_steam, &steam);
+        assert_eq!(picked.store, Store::Steam);
+        assert!(picked.chosen);
+        assert_eq!(
+            picked.install_dir,
+            r"e:\steamlibrary\steamapps\common\Farming Simulator 25"
+        );
+        let dvd = Path::new(r"E:\Farming Simulator 2025\FarmingSimulator2025.exe");
+        let picked = chosen_install(dvd, &steam);
+        assert_eq!(picked.store, Store::Standalone);
+        assert_eq!(picked.exe, dvd.to_string_lossy());
+        assert_eq!(picked.install_dir, r"E:\Farming Simulator 2025");
+        assert!(same_folder(Path::new("E:/Lib/"), Path::new(r"e:\lib")));
+        assert!(!same_folder(Path::new("E:/Lib"), Path::new(r"E:\Lib2")));
+    }
+
+    #[test]
+    fn a_profile_launch_runs_a_chosen_exe_outside_steam() {
+        let dvd = chosen_install(
+            Path::new(r"E:\Farming Simulator 2025\FarmingSimulator2025.exe"),
+            &[],
+        );
+        let dir = Path::new(r"F:\FS25 Profiles\smoke");
+        assert_eq!(
+            profile_launch_plan(Some(&dvd), dir),
+            LaunchPlan::Exe {
+                program: PathBuf::from(r"E:\Farming Simulator 2025\FarmingSimulator2025.exe"),
+                args: vec!["-profile".into(), r"F:\FS25 Profiles\smoke".into()],
+                cwd: PathBuf::from(r"E:\Farming Simulator 2025"),
+            }
+        );
     }
 
     #[test]
@@ -768,19 +950,16 @@ mod tests {
     #[test]
     fn a_profile_launch_never_starts_the_game_twice() {
         use std::time::Duration;
-        assert_eq!(profile_launch_refusal(false, None), None);
-        assert_eq!(profile_launch_refusal(true, None), Some(ALREADY_RUNNING));
+        assert_eq!(direct_launch_refusal(false, None), None);
+        assert_eq!(direct_launch_refusal(true, None), Some(ALREADY_RUNNING));
         // Just started, maybe not in the process list yet: held.
         assert_eq!(
-            profile_launch_refusal(false, Some(Duration::from_secs(1))),
+            direct_launch_refusal(false, Some(Duration::from_secs(1))),
             Some(JUST_STARTED)
         );
+        assert_eq!(direct_launch_refusal(false, Some(DIRECT_LAUNCH_HOLD)), None);
         assert_eq!(
-            profile_launch_refusal(false, Some(PROFILE_LAUNCH_HOLD)),
-            None
-        );
-        assert_eq!(
-            profile_launch_refusal(true, Some(PROFILE_LAUNCH_HOLD * 3)),
+            direct_launch_refusal(true, Some(DIRECT_LAUNCH_HOLD * 3)),
             Some(ALREADY_RUNNING)
         );
     }

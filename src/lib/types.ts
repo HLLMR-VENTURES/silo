@@ -218,8 +218,11 @@ export interface GameInfo {
   /** The executable; on macOS, the `.app` bundle. */
   exe: string;
   installDir: string;
-  /** `steam` launches via Steam; `standalone` (macOS App Store / GIANTS) opens the bundle. */
+  /** `steam` launches via Steam; `standalone` (macOS App Store / GIANTS, or on Windows a game
+   *  exe chosen outside Steam) starts it directly. */
   store: "steam" | "standalone";
+  /** The install is the game exe the user chose (#461), not one Silo found. */
+  chosen: boolean;
 }
 
 export interface SettingsField {

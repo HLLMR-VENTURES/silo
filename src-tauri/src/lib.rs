@@ -5880,10 +5880,77 @@ async fn detect_conflicts(
 // Off the main thread: detection walks Steam libraries and, on macOS, may shell out to
 // Spotlight (`mdfind`); launch re-detects to pick Steam vs. the `.app` bundle.
 #[tauri::command]
-async fn detect_game() -> Result<Option<gamelaunch::GameInfo>, String> {
-    tauri::async_runtime::spawn_blocking(gamelaunch::detect)
-        .await
-        .map_err(|e| e.to_string())
+async fn detect_game(app: tauri::AppHandle) -> Result<Option<gamelaunch::GameInfo>, String> {
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        // The user's choice of game exe (#461) first, so detection never runs before it's read.
+        load_game_choice(&db::open(&db)?);
+        Ok(gamelaunch::detect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Publish the game exe the user chose (#461), as stored, for [`gamelaunch::detect`].
+fn load_game_choice(conn: &rusqlite::Connection) {
+    gamelaunch::set_choice(
+        db::get_app_setting(conn, gamelaunch::CHOICE_KEY)
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from),
+    );
+}
+
+/// The game exe the user chose (#461), whether or not it's still there; `None` when Silo finds
+/// the game itself.
+#[tauri::command]
+async fn game_choice(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(db::get_app_setting(&db::open(&db)?, gamelaunch::CHOICE_KEY))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Use `path` as the game (#461, Windows): it must be FS25's exe with the game's data beside it
+/// ([`gamelaunch::choice_problem`]). Stored and published; returns the install it makes. Inside
+/// a Steam library it's still the Steam install, so Play goes through Steam.
+#[tauri::command]
+async fn set_game_choice(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<Option<gamelaunch::GameInfo>, String> {
+    if !cfg!(windows) {
+        return Err("Choosing the game is only needed, and offered, on Windows.".into());
+    }
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let exe = PathBuf::from(path.trim());
+        if let Some(why) = gamelaunch::choice_problem(&exe, |p| p.is_file()) {
+            return Err(why.to_string());
+        }
+        let conn = db::open(&db)?;
+        db::set_app_setting(&conn, gamelaunch::CHOICE_KEY, Some(&exe.to_string_lossy()))?;
+        gamelaunch::set_choice(Some(exe.clone()));
+        log::info!("game: using the chosen exe {}", exe.display());
+        Ok(gamelaunch::detect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Forget the game exe the user chose (#461): Silo looks for the game in Steam libraries again.
+#[tauri::command]
+async fn clear_game_choice(app: tauri::AppHandle) -> Result<Option<gamelaunch::GameInfo>, String> {
+    let db = db_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        db::set_app_setting(&db::open(&db)?, gamelaunch::CHOICE_KEY, None)?;
+        gamelaunch::set_choice(None);
+        log::info!("game: chosen exe forgotten; looking in Steam libraries");
+        Ok(gamelaunch::detect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 const PROFILE_CHANGED: &str =
@@ -6117,7 +6184,7 @@ impl Drop for RemoveAdmission {
 /// the library write lock.
 fn admit_removal() -> Result<RemoveAdmission, String> {
     // The process list first: reading it takes a moment, and Play shouldn't wait on it.
-    if gamelaunch::fs25_running() || gamelaunch::profile_launch_pending() {
+    if gamelaunch::fs25_running() || gamelaunch::direct_launch_pending() {
         return Err(REMOVE_GAME_RUNNING.into());
     }
     let gate = launch_gate();
@@ -7815,7 +7882,7 @@ async fn set_config(path: String, edits: Vec<xmlconfig::Edit>) -> Result<(), Str
         let _profile = game_files_guard();
         // Checked under the guard, which a launch holds while it starts the game: a write never
         // lands just after a launch it waited behind (#387).
-        config_write_refusal(gamelaunch::fs25_running() || gamelaunch::profile_launch_pending())?;
+        config_write_refusal(gamelaunch::fs25_running() || gamelaunch::direct_launch_pending())?;
         let user = gameprofile::user_dir(gameprofile::Place::GameConfig).ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let roots = [user];
         let p = std::path::Path::new(&path);
@@ -7857,7 +7924,7 @@ async fn save_mod_settings(path: String, edits: Vec<settings_form::Edit>) -> Res
         let _profile = game_files_guard();
         // Checked under the guard, which a launch holds while it starts the game: a write never
         // lands just after a launch it waited behind (#387).
-        config_write_refusal(gamelaunch::fs25_running() || gamelaunch::profile_launch_pending())?;
+        config_write_refusal(gamelaunch::fs25_running() || gamelaunch::direct_launch_pending())?;
         let user = gameprofile::user_dir(gameprofile::Place::ModSettings).ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let roots = [user];
         let p = std::path::Path::new(&path);
@@ -7876,7 +7943,7 @@ async fn save_mod_settings_raw(path: String, content: String) -> Result<(), Stri
         let _profile = game_files_guard();
         // Checked under the guard, which a launch holds while it starts the game: a write never
         // lands just after a launch it waited behind (#387).
-        config_write_refusal(gamelaunch::fs25_running() || gamelaunch::profile_launch_pending())?;
+        config_write_refusal(gamelaunch::fs25_running() || gamelaunch::direct_launch_pending())?;
         let user = gameprofile::user_dir(gameprofile::Place::ModSettings).ok_or_else(|| "Silo couldn't find Farming Simulator 25's user folder. Start the game once, then try again.".to_string())?;
         let p = std::path::Path::new(&path);
         ensure_override_kept(&user, p, None, &content)?;
@@ -8247,6 +8314,9 @@ pub fn run() {
         backup_savegame,
         detect_conflicts,
         detect_game,
+        game_choice,
+        set_game_choice,
+        clear_game_choice,
         launch_game,
         save_text,
         diagnostics_bundle,
@@ -8355,6 +8425,8 @@ pub fn run() {
                         // Under the library lock too: a status refresh may already have resolved
                         // it and a write be under way.
                         let _ = refresh_mods_root(&conn);
+                        // The game exe the user chose (#461), for detection outside the UI.
+                        load_game_choice(&conn);
                         log::info!("library layout resolved at startup");
                     }
                     Err(e) => {

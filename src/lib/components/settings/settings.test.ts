@@ -178,6 +178,67 @@ describe("ModsFolderSettings", () => {
     onSwitchModsFolder: vi.fn(),
   };
 
+  const dvd = {
+    appId: "2300320",
+    exe: "E:/Farming Simulator 2025/FarmingSimulator2025.exe",
+    installDir: "E:/Farming Simulator 2025",
+    store: "standalone" as const,
+    chosen: true,
+  };
+
+  it("offers Choose the game… when the install isn't found, where it's offered (#461)", async () => {
+    const user = userEvent.setup();
+    const onChooseGame = vi.fn();
+    const { unmount } = render(ModsFolderSettings, { ...base, modsStatus: null, onChooseGame });
+    expect(screen.getByText(/install not found/)).toBeInTheDocument();
+    expect(screen.getByText(/Installed from DVD or the GIANTS shop/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Choose the game…" }));
+    expect(onChooseGame).toHaveBeenCalledOnce();
+    // Nothing chosen yet: nothing to go back from.
+    expect(screen.queryByRole("button", { name: "Use the Steam install" })).toBeNull();
+    unmount();
+    // Not offered (macOS, Linux): no button, no hint.
+    render(ModsFolderSettings, { ...base, modsStatus: null });
+    expect(screen.queryByRole("button", { name: "Choose the game…" })).toBeNull();
+    expect(screen.queryByText(/Installed from DVD/)).toBeNull();
+  });
+
+  it("says a chosen game is started directly, or through Steam, and can go back (#461)", async () => {
+    const user = userEvent.setup();
+    const onForgetGame = vi.fn();
+    const props = { ...base, modsStatus: null, onChooseGame: vi.fn(), onForgetGame };
+    const { unmount } = render(ModsFolderSettings, { ...props, gameInfo: dvd, gameChoice: dvd.exe });
+    // Shown with the system's separators (`displayPath`).
+    expect(screen.getByText(/^E:.Farming Simulator 2025$/)).toBeInTheDocument();
+    expect(screen.getByText(/Play starts it directly, not through Steam/)).toBeInTheDocument();
+    expect(screen.queryByText(/isn't there anymore/)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Use the Steam install" }));
+    expect(onForgetGame).toHaveBeenCalledOnce();
+    unmount();
+    const steam = { ...dvd, store: "steam" as const, installDir: "E:/SteamLibrary/steamapps/common/Farming Simulator 25" };
+    render(ModsFolderSettings, { ...props, gameInfo: steam, gameChoice: steam.exe });
+    expect(screen.getByText(/in a Steam library, so Play starts it through Steam/)).toBeInTheDocument();
+  });
+
+  it("says when the chosen game is gone and what Silo uses meanwhile (#461)", () => {
+    const steam = {
+      appId: "2300320",
+      exe: "C:/Steam/steamapps/common/Farming Simulator 25/FarmingSimulator2025.exe",
+      installDir: "C:/Steam/steamapps/common/Farming Simulator 25",
+      store: "steam" as const,
+      chosen: false,
+    };
+    const props = { ...base, modsStatus: null, onChooseGame: vi.fn(), onForgetGame: vi.fn() };
+    const { unmount } = render(ModsFolderSettings, { ...props, gameInfo: steam, gameChoice: dvd.exe });
+    expect(screen.getByText(/isn't there anymore.*Silo is using the Steam install meanwhile/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use the Steam install" })).toBeInTheDocument();
+    unmount();
+    render(ModsFolderSettings, { ...props, gameInfo: null, gameChoice: dvd.exe });
+    expect(screen.getByText(/install not found/)).toBeInTheDocument();
+    expect(screen.queryByText(/meanwhile/)).toBeNull();
+    expect(screen.getByText(/isn't there anymore/)).toBeInTheDocument();
+  });
+
   it("offers to launch FS25 with the folder's profile and says what it changes (#387)", async () => {
     const user = userEvent.setup();
     const onSetGameProfile = vi.fn();
