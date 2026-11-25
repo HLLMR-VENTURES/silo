@@ -12,8 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Two libraries Silo is built with are updated for new advisories: `url` 2.5.9
   ([RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592)) and `cookie` 0.18.3
   ([RUSTSEC-2026-0594](https://rustsec.org/advisories/RUSTSEC-2026-0594)). Neither could be
-  triggered through Silo: it refuses any link that isn't plain `https` before the affected `url`
-  code would run, and it doesn't include the affected `cookie` code at all. (#469)
+  triggered through Silo: the links it downloads from are checked before the affected `url` code
+  runs, and that check rejects the nested `blob:` links the advisory is about. The affected `cookie`
+  code, for encrypted cookies, isn't built into Silo at all. (#469)
 
 ## [1.0.6] - 2026-11-20
 
