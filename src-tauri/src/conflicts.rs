@@ -472,11 +472,12 @@ pub struct GameLists<'a> {
 }
 
 impl GameLists<'static> {
-    /// The lists for the game Silo detects, read once per run.
+    /// The lists for the game Silo detects now (found once for both), read once per install.
     pub fn cached() -> Self {
+        let dir = crate::gamelaunch::detect().map(|g| std::path::PathBuf::from(g.install_dir));
         GameLists {
-            heights: heighttypes::GameData::cached(),
-            fills: filltypes::GameData::cached(),
+            heights: heighttypes::GameData::cached(dir.as_deref()),
+            fills: filltypes::GameData::cached(dir.as_deref()),
         }
     }
 }

@@ -2,8 +2,10 @@
   // Settings → Mods folder: the folder Silo manages (and FS25 loads), other folders Silo knows,
   // and where the game is installed.
   //   <ModsFolderSettings {roots} {modsStatus} {gameInfo} {lockReason} {scanning} {moveUnfinished}
-  //     {onChangeModsFolder} {onUseGameFolder} {onSwitchModsFolder} {onSetGameProfile} />
+  //     {onChangeModsFolder} {onUseGameFolder} {onSwitchModsFolder} {onSetGameProfile}
+  //     {gameChoice} {onChooseGame} {onForgetGame} />
   // A folder that is `<profile>/mods` also gets "Launch FS25 with this folder's profile" (#387).
+  // On Windows the Game card can point Silo at FS25's exe (#461: a DVD or GIANTS-shop install).
   import Button from "../../ui/Button.svelte";
   import Switch from "../../ui/Switch.svelte";
   import type { ModsRootStatus } from "../../api";
@@ -28,6 +30,12 @@
     onSwitchModsFolder: (path: string) => void;
     /** Turn "Launch FS25 with this folder's profile" on or off. */
     onSetGameProfile?: (on: boolean) => void;
+    /** The game exe the user chose (#461), whether or not it's still there; null when none. */
+    gameChoice?: string | null;
+    /** Pick FS25's exe (Windows only: left out elsewhere, and the button with it). */
+    onChooseGame?: () => void;
+    /** Forget the chosen exe and look in Steam libraries again. */
+    onForgetGame?: () => void;
   }
 
   let {
@@ -41,7 +49,13 @@
     onUseGameFolder,
     onSwitchModsFolder,
     onSetGameProfile,
+    gameChoice = null,
+    onChooseGame,
+    onForgetGame,
   }: Props = $props();
+
+  /** A chosen exe Silo isn't using: it's gone, or no longer looks like the game. */
+  const choiceMissing = $derived(!!gameChoice && !gameInfo?.chosen);
 
   const profile = $derived(modsStatus?.gameProfile ?? null);
 
@@ -164,8 +178,33 @@
   {#if folders.error?.which === "gameInstall"}<p class="hint">{folders.error.msg}</p>{/if}
   {#if gameInfo}
     <p class="path">{displayPath(gameInfo.installDir)}</p>
+    {#if gameInfo.chosen}
+      <p class="hint">
+        Chosen in Silo. {gameInfo.store === "steam"
+          ? "It's in a Steam library, so Silo starts it as it starts a Steam install."
+          : "Play starts it directly, not through Steam."}
+      </p>
+    {/if}
   {:else}
     <p class="path muted">Farming Simulator 25 install not found. The Play button is hidden.</p>
+    {#if onChooseGame}
+      <p class="hint">Installed from DVD or the GIANTS shop? Choose its FarmingSimulator2025.exe.</p>
+    {/if}
+  {/if}
+  {#if choiceMissing && gameChoice}
+    <p class="hint">
+      The game you chose isn't there anymore, or doesn't look like Farming Simulator 25: {displayPath(
+        gameChoice,
+      )}{gameInfo ? ". Silo is using the Steam install meanwhile." : "."}
+    </p>
+  {/if}
+  {#if onChooseGame}
+    <div class="btnrow">
+      <Button size="sm" onclick={onChooseGame}>Choose the game…</Button>
+      {#if gameChoice && onForgetGame}
+        <Button size="sm" variant="ghost" onclick={onForgetGame}>Use the Steam install</Button>
+      {/if}
+    </div>
   {/if}
 </SettingsCard>
 

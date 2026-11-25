@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Settings → Mods folder → Game → Choose the game…** (Windows): if Farming Simulator 25 was
+  installed from DVD or the GIANTS shop, Silo didn't find it and hid **Play**. Now you can choose
+  its `FarmingSimulator2025.exe` (Silo checks the game's `dataS.gar` is next to it), and Play
+  starts it directly. A copy in a Steam library is still started the way Silo starts a Steam
+  install. If the file you chose goes missing, Silo says so when you come back to it and uses the
+  Steam install meanwhile, or refuses Play when there's none; **Use the Steam install** goes back
+  to finding the game in Steam. Thanks to @LAWI-Game for reporting it. (#461)
+
 ### Security
 
 - Two libraries Silo is built with are updated for new advisories: `url` 2.5.9
