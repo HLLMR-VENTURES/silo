@@ -42,7 +42,6 @@
     backupSavegame,
     detectConflicts,
     detectGame,
-    gameChoice,
     pickGameExe,
     setGameChoice,
     clearGameChoice,
@@ -300,6 +299,7 @@
   import { crashNoticeModel, likelyCulprit, type CrashCulprit } from "./lib/diagnose/crashNotice";
   import { severityLabel } from "./lib/diagnose/conflictCopy";
   import { latestOnly } from "./lib/diagnose/latest";
+  import { gameUpdater } from "./lib/gameState";
   import { libraryReadState } from "./lib/components/shell/status";
   import PlayButton, { type PlayMenuItem } from "./lib/components/shell/PlayButton.svelte";
   import type { StatusStripItem } from "./lib/components/shell/StatusStrip.svelte";
@@ -3378,27 +3378,16 @@
     });
   }
 
-  // Every read or change of the game install runs after the one before it ends (#461), so
-  // each shows the install and choice as they stand once it's done: a detection begun before a
-  // choice can't put the old install back, nor a choice be lost behind a detection.
-  let gameQueue: Promise<unknown> = Promise.resolve();
-  /**
-   * Run `get` (a detection, or a change of the chosen game), then show the install it gives and
-   * the stored choice together. A change of install re-checks conflicts: their base game lists
-   * come from the install.
-   */
-  function updateGame(get: () => Promise<GameInfo | null>): Promise<void> {
-    const run = gameQueue.then(async () => {
-      const before = gameInfo?.installDir ?? null;
-      const info = await get();
-      const choice = await gameChoice();
-      gameInfo = info;
+  // The game install and the chosen exe (#461), one update at a time (`gameUpdater`). A change
+  // of install re-checks conflicts: their base game lists come from the install.
+  const updateGame = gameUpdater(
+    ({ install, choice }, installChanged) => {
+      gameInfo = install;
       gameChoicePath = choice;
-      if ((info?.installDir ?? null) !== before) void runConflictCheck();
-    });
-    gameQueue = run.catch(() => {});
-    return run;
-  }
+      if (installChanged) void runConflictCheck();
+    },
+    () => gameInfo?.installDir ?? null,
+  );
 
   /** Settings → Game → Choose the game… (#461, Windows): use the exe the user picks. */
   async function chooseGame() {

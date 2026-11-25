@@ -240,9 +240,13 @@ pub fn fs25_running() -> bool {
 }
 
 /// True for the FS25 game itself (or a Proton/Wine host running it): [`is_fs25_process`] without
-/// the dedicated server, which isn't a second copy of the game. Pure.
+/// the dedicated server, which isn't a second copy of the game. That's the `dedicatedServer`
+/// manager and the game it runs in server mode (an argument `-server`). Pure.
 pub fn is_fs25_client_process(name: &str, cmd: &[String], exe: Option<&str>) -> bool {
-    !name.to_ascii_lowercase().starts_with("dedicatedserver") && is_fs25_process(name, cmd, exe)
+    let server_mode = cmd.iter().any(|a| a.eq_ignore_ascii_case("-server"));
+    !name.to_ascii_lowercase().starts_with("dedicatedserver")
+        && !server_mode
+        && is_fs25_process(name, cmd, exe)
 }
 
 /// True if the FS25 game itself is running (not just its dedicated server): what decides whether
@@ -1087,6 +1091,40 @@ mod tests {
         assert!(is_fs25_process("dedicatedServer.exe", &[], server));
         assert!(!is_fs25_client_process("dedicatedServer.exe", &[], server));
         assert!(!is_fs25_client_process("DedicatedServer.exe", &[], None));
+        // The game the server runs, in server mode: natively, under Wine, or Linux-truncated.
+        let game = r"E:\SteamLibrary\steamapps\common\Farming Simulator 25\x64\FarmingSimulator2025Game.exe";
+        let server_cmd = vec![game.to_string(), "-server".to_string()];
+        assert!(is_fs25_process(
+            "FarmingSimulator2025Game.exe",
+            &server_cmd,
+            Some(game)
+        ));
+        assert!(!is_fs25_client_process(
+            "FarmingSimulator2025Game.exe",
+            &server_cmd,
+            Some(game)
+        ));
+        assert!(!is_fs25_client_process(
+            "wine64-preloader",
+            &server_cmd,
+            None
+        ));
+        assert!(!is_fs25_client_process(
+            "FarmingSimulato",
+            &server_cmd,
+            None
+        ));
+        // The game with other arguments is still the game.
+        let profile_cmd = vec![
+            game.to_string(),
+            "-profile".to_string(),
+            r"F:\P".to_string(),
+        ];
+        assert!(is_fs25_client_process(
+            "FarmingSimulator2025Game.exe",
+            &profile_cmd,
+            Some(game)
+        ));
     }
 
     #[test]

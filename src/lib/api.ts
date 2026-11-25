@@ -973,13 +973,15 @@ export function bisectSnapshotClear(): Promise<void> {
   return invoke("bisect_snapshot_clear");
 }
 
-export function detectGame(): Promise<GameInfo | null> {
-  return invoke<GameInfo | null>("detect_game");
+/** The game install Silo would use and the exe the user chose (#461), read together. */
+export interface GameState {
+  install: GameInfo | null;
+  /** The chosen exe, whether or not it's still there; null when Silo finds the game itself. */
+  choice: string | null;
 }
-/** The game exe the user chose (#461), whether or not it's still there; null when Silo finds the
- *  game itself. */
-export function gameChoice(): Promise<string | null> {
-  return invoke<string | null>("game_choice");
+
+export function detectGame(): Promise<GameState> {
+  return invoke<GameState>("detect_game");
 }
 /** Ask for FS25's exe (a DVD or GIANTS-shop install, #461). Null if cancelled. */
 export async function pickGameExe(): Promise<string | null> {
@@ -993,12 +995,12 @@ export async function pickGameExe(): Promise<string | null> {
 }
 /** Use `path` as the game (#461, Windows): refused unless it's FS25's exe with the game's data
  *  beside it. Returns the install it makes (inside a Steam library, still the Steam install). */
-export function setGameChoice(path: string): Promise<GameInfo | null> {
-  return invoke<GameInfo | null>("set_game_choice", { path });
+export function setGameChoice(path: string): Promise<GameState> {
+  return invoke<GameState>("set_game_choice", { path });
 }
 /** Forget the chosen game exe (#461): Silo looks in Steam libraries again. */
-export function clearGameChoice(): Promise<GameInfo | null> {
-  return invoke<GameInfo | null>("clear_game_choice");
+export function clearGameChoice(): Promise<GameState> {
+  return invoke<GameState>("clear_game_choice");
 }
 
 /** Start FS25. `expectedProfile`: the FS25 profile the app shows (null = the main one); the

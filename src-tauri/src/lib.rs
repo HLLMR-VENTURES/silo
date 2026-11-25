@@ -5880,15 +5880,35 @@ async fn detect_conflicts(
 // Off the main thread: detection walks Steam libraries and, on macOS, may shell out to
 // Spotlight (`mdfind`); launch re-detects to pick Steam vs. the `.app` bundle.
 #[tauri::command]
-async fn detect_game(app: tauri::AppHandle) -> Result<Option<gamelaunch::GameInfo>, String> {
+async fn detect_game(app: tauri::AppHandle) -> Result<GameState, String> {
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         // The user's choice of game exe (#461) first, so detection never runs before it's read.
-        load_game_choice(&db::open(&db)?);
-        Ok(gamelaunch::detect())
+        match db::open(&db) {
+            Ok(conn) => load_game_choice(&conn),
+            Err(e) => log::warn!("game: couldn't read the chosen exe, keeping the last one: {e}"),
+        }
+        Ok(game_state())
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// The game install Silo would use and the exe the user chose (#461), read together, so the app
+/// shows the two as they are at the same moment.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GameState {
+    install: Option<gamelaunch::GameInfo>,
+    /// The chosen exe, whether or not it's still there; `None` when Silo finds the game itself.
+    choice: Option<String>,
+}
+
+fn game_state() -> GameState {
+    GameState {
+        install: gamelaunch::detect(),
+        choice: gamelaunch::choice().map(|p| p.to_string_lossy().into_owned()),
+    }
 }
 
 /// Held while the chosen game exe (#461) is read from or written to the database and published,
@@ -5901,37 +5921,22 @@ fn game_choice_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Publish the game exe the user chose (#461), as stored, for [`gamelaunch::detect`].
+/// Publish the game exe the user chose (#461), as stored, for [`gamelaunch::detect`]. A failed
+/// read keeps the choice last published: it never turns into "nothing chosen".
 fn load_game_choice(conn: &rusqlite::Connection) {
     let _choice = game_choice_lock();
-    gamelaunch::set_choice(
-        db::get_app_setting(conn, gamelaunch::CHOICE_KEY)
-            .filter(|s| !s.trim().is_empty())
-            .map(PathBuf::from),
-    );
-}
-
-/// The game exe the user chose (#461), whether or not it's still there; `None` when Silo finds
-/// the game itself.
-#[tauri::command]
-async fn game_choice(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let db = db_path(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        Ok(db::get_app_setting(&db::open(&db)?, gamelaunch::CHOICE_KEY))
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    match db::try_get_app_setting(conn, gamelaunch::CHOICE_KEY) {
+        Ok(v) => gamelaunch::set_choice(v.filter(|s| !s.trim().is_empty()).map(PathBuf::from)),
+        Err(e) => log::warn!("game: couldn't read the chosen exe, keeping the last one: {e}"),
+    }
 }
 
 /// Use `path` as the game (#461, Windows): it must be FS25's exe with the game's data beside it
 /// ([`gamelaunch::choice_problem`], a name-and-neighbour check, not proof of what the file is).
-/// Stored and published; returns the install it makes. Inside a Steam library it's still the
-/// Steam install, started as Silo starts a Steam install.
+/// Stored and published; returns the install it makes, with the choice. Inside a Steam library
+/// it's still the Steam install, started as Silo starts a Steam install.
 #[tauri::command]
-async fn set_game_choice(
-    app: tauri::AppHandle,
-    path: String,
-) -> Result<Option<gamelaunch::GameInfo>, String> {
+async fn set_game_choice(app: tauri::AppHandle, path: String) -> Result<GameState, String> {
     if !cfg!(windows) {
         return Err("Choosing the game is only needed, and offered, on Windows.".into());
     }
@@ -5948,7 +5953,7 @@ async fn set_game_choice(
             gamelaunch::set_choice(Some(exe.clone()));
         }
         log::info!("game: using the chosen exe {}", exe.display());
-        Ok(gamelaunch::detect())
+        Ok(game_state())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -5956,7 +5961,7 @@ async fn set_game_choice(
 
 /// Forget the game exe the user chose (#461): Silo looks for the game in Steam libraries again.
 #[tauri::command]
-async fn clear_game_choice(app: tauri::AppHandle) -> Result<Option<gamelaunch::GameInfo>, String> {
+async fn clear_game_choice(app: tauri::AppHandle) -> Result<GameState, String> {
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db::open(&db)?;
@@ -5966,7 +5971,7 @@ async fn clear_game_choice(app: tauri::AppHandle) -> Result<Option<gamelaunch::G
             gamelaunch::set_choice(None);
         }
         log::info!("game: chosen exe forgotten; looking in Steam libraries");
-        Ok(gamelaunch::detect())
+        Ok(game_state())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -8333,7 +8338,6 @@ pub fn run() {
         backup_savegame,
         detect_conflicts,
         detect_game,
-        game_choice,
         set_game_choice,
         clear_game_choice,
         launch_game,
