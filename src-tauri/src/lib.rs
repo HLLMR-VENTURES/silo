@@ -5891,8 +5891,19 @@ async fn detect_game(app: tauri::AppHandle) -> Result<Option<gamelaunch::GameInf
     .map_err(|e| e.to_string())?
 }
 
+/// Held while the chosen game exe (#461) is read from or written to the database and published,
+/// so a read can't publish an older choice over a newer one written meanwhile.
+static GAME_CHOICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn game_choice_lock() -> std::sync::MutexGuard<'static, ()> {
+    GAME_CHOICE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Publish the game exe the user chose (#461), as stored, for [`gamelaunch::detect`].
 fn load_game_choice(conn: &rusqlite::Connection) {
+    let _choice = game_choice_lock();
     gamelaunch::set_choice(
         db::get_app_setting(conn, gamelaunch::CHOICE_KEY)
             .filter(|s| !s.trim().is_empty())
@@ -5913,8 +5924,9 @@ async fn game_choice(app: tauri::AppHandle) -> Result<Option<String>, String> {
 }
 
 /// Use `path` as the game (#461, Windows): it must be FS25's exe with the game's data beside it
-/// ([`gamelaunch::choice_problem`]). Stored and published; returns the install it makes. Inside
-/// a Steam library it's still the Steam install, so Play goes through Steam.
+/// ([`gamelaunch::choice_problem`], a name-and-neighbour check, not proof of what the file is).
+/// Stored and published; returns the install it makes. Inside a Steam library it's still the
+/// Steam install, started as Silo starts a Steam install.
 #[tauri::command]
 async fn set_game_choice(
     app: tauri::AppHandle,
@@ -5930,8 +5942,11 @@ async fn set_game_choice(
             return Err(why.to_string());
         }
         let conn = db::open(&db)?;
-        db::set_app_setting(&conn, gamelaunch::CHOICE_KEY, Some(&exe.to_string_lossy()))?;
-        gamelaunch::set_choice(Some(exe.clone()));
+        {
+            let _choice = game_choice_lock();
+            db::set_app_setting(&conn, gamelaunch::CHOICE_KEY, Some(&exe.to_string_lossy()))?;
+            gamelaunch::set_choice(Some(exe.clone()));
+        }
         log::info!("game: using the chosen exe {}", exe.display());
         Ok(gamelaunch::detect())
     })
@@ -5944,8 +5959,12 @@ async fn set_game_choice(
 async fn clear_game_choice(app: tauri::AppHandle) -> Result<Option<gamelaunch::GameInfo>, String> {
     let db = db_path(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        db::set_app_setting(&db::open(&db)?, gamelaunch::CHOICE_KEY, None)?;
-        gamelaunch::set_choice(None);
+        let conn = db::open(&db)?;
+        {
+            let _choice = game_choice_lock();
+            db::set_app_setting(&conn, gamelaunch::CHOICE_KEY, None)?;
+            gamelaunch::set_choice(None);
+        }
         log::info!("game: chosen exe forgotten; looking in Steam libraries");
         Ok(gamelaunch::detect())
     })

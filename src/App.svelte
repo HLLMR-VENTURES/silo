@@ -823,6 +823,8 @@
       crashWatch.afterLaunch(); // look at the log when the game exits
     } catch (e) {
       reportError(e, "Launching the game");
+      // A chosen game (#461) that's gone refuses Play: show it so in Settings and on Play.
+      if (gameChoicePath) void updateGame(detectGame).catch(() => {});
     }
   }
 
@@ -3376,13 +3378,32 @@
     });
   }
 
+  // Only the newest answer about the game install lands (#461): a slow detection started
+  // before a choice must not put the old install back.
+  const gameLatest = latestOnly<{ info: GameInfo | null; choice: string | null }>();
+  /**
+   * Run `get` (a detection, or a change of the chosen game), then show the install it gives and
+   * the stored choice together. A change of install re-checks conflicts: their base game lists
+   * come from the install.
+   */
+  async function updateGame(get: () => Promise<GameInfo | null>): Promise<void> {
+    const before = gameInfo?.installDir ?? null;
+    await gameLatest.run(
+      async () => ({ info: await get(), choice: await gameChoice() }),
+      (g) => {
+        gameInfo = g.info;
+        gameChoicePath = g.choice;
+      },
+    );
+    if ((gameInfo?.installDir ?? null) !== before) void runConflictCheck();
+  }
+
   /** Settings → Game → Choose the game… (#461, Windows): use the exe the user picks. */
   async function chooseGame() {
     const path = await pickGameExe();
     if (!path) return;
     try {
-      gameInfo = await setGameChoice(path);
-      gameChoicePath = path;
+      await updateGame(() => setGameChoice(path));
     } catch (e) {
       reportError(e, "Choosing the game");
     }
@@ -3391,8 +3412,7 @@
   /** Forget the chosen game exe (#461): Silo looks in Steam libraries again. */
   async function forgetGame() {
     try {
-      gameInfo = await clearGameChoice();
-      gameChoicePath = null;
+      await updateGame(clearGameChoice);
     } catch (e) {
       reportError(e, "Using the Steam install");
     }
@@ -3890,8 +3910,7 @@
         await loadSources();
         await setStore.load();
         await loadSavegames();
-        gameInfo = await detectGame();
-        gameChoicePath = await gameChoice();
+        await updateGame(detectGame);
         userDir = await userDirPath();
         appVer = await appVersion();
         // Fire-and-forget: never let a slow/absent update endpoint delay startup.
@@ -3965,6 +3984,8 @@
         focusUnlisten = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
           // Back from the game (or anywhere): did the last run crash? A cheap stat first.
           if (focused) void crashWatch.check();
+          // A chosen game (#461) on a drive that was unplugged, or moved: show what's there now.
+          if (focused && gameChoicePath) void updateGame(detectGame).catch(() => {});
           if (
             focused &&
             focusRescanAllowed({

@@ -217,7 +217,7 @@ describe("ModsFolderSettings", () => {
     unmount();
     const steam = { ...dvd, store: "steam" as const, installDir: "E:/SteamLibrary/steamapps/common/Farming Simulator 25" };
     render(ModsFolderSettings, { ...props, gameInfo: steam, gameChoice: steam.exe });
-    expect(screen.getByText(/in a Steam library, so Play starts it through Steam/)).toBeInTheDocument();
+    expect(screen.getByText(/in a Steam library, so Silo starts it as it starts a Steam install/)).toBeInTheDocument();
   });
 
   it("says when the chosen game is gone and what Silo uses meanwhile (#461)", () => {

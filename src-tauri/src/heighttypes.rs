@@ -23,7 +23,6 @@
 use crate::moddesc::ModDesc;
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
-use std::sync::OnceLock;
 
 /// Channels the base maps use, and the default when a list doesn't say.
 pub const DEFAULT_CHANNELS: u32 = 6;
@@ -565,14 +564,11 @@ impl GameData {
         }
     }
 
-    /// [`load`](Self::load) once per run, for the game Silo detects. The install and its DLCs
-    /// rarely change while Silo is open.
+    /// [`load`](Self::load) once per install, for the game Silo detects now: its DLCs rarely
+    /// change while Silo is open, but choosing another install (#461) reads that one's.
     pub fn cached() -> &'static GameData {
-        static DATA: OnceLock<GameData> = OnceLock::new();
-        DATA.get_or_init(|| {
-            let dir = crate::gamelaunch::detect().map(|g| std::path::PathBuf::from(g.install_dir));
-            GameData::load(dir.as_deref())
-        })
+        static DATA: crate::gamelaunch::PerInstall<GameData> = crate::gamelaunch::PerInstall::new();
+        DATA.get(GameData::load)
     }
 }
 

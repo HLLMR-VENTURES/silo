@@ -181,7 +181,7 @@
     {#if gameInfo.chosen}
       <p class="hint">
         Chosen in Silo. {gameInfo.store === "steam"
-          ? "It's in a Steam library, so Play starts it through Steam."
+          ? "It's in a Steam library, so Silo starts it as it starts a Steam install."
           : "Play starts it directly, not through Steam."}
       </p>
     {/if}

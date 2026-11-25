@@ -30,7 +30,6 @@ use crate::heighttypes::{
 };
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
-use std::sync::OnceLock;
 
 /// The most fill types the game supports.
 pub const CAP: usize = 255;
@@ -164,14 +163,12 @@ impl GameData {
         })
     }
 
-    /// [`load`](Self::load) once per run, for the game Silo detects.
+    /// [`load`](Self::load) once per install, for the game Silo detects now: choosing another
+    /// install (#461) reads that one's lists and DLCs.
     pub fn cached() -> Option<&'static GameData> {
-        static DATA: OnceLock<Option<GameData>> = OnceLock::new();
-        DATA.get_or_init(|| {
-            let dir = crate::gamelaunch::detect().map(|g| std::path::PathBuf::from(g.install_dir));
-            GameData::load(dir.as_deref())
-        })
-        .as_ref()
+        static DATA: crate::gamelaunch::PerInstall<Option<GameData>> =
+            crate::gamelaunch::PerInstall::new();
+        DATA.get(GameData::load).as_ref()
     }
 
     /// The fill types known for certain to exist: the base list and the mods' declared lists.

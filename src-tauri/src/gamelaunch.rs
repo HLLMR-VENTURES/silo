@@ -93,12 +93,16 @@ pub fn choice_problem(exe: &Path, exists: impl Fn(&Path) -> bool) -> Option<&'st
 }
 
 /// Pure: the install the chosen `exe` makes. It's the Steam install when its folder is one of
-/// `steam_dirs` (Steam's FS25 install folders), so Play still goes through Steam; anywhere else
-/// it's started directly.
+/// `steam_dirs` (Steam's FS25 install folders) by `same`, so Silo starts it as it starts a Steam
+/// install; anywhere else it's started directly.
 #[cfg(any(not(target_os = "macos"), test))]
-fn chosen_install(exe: &Path, steam_dirs: &[PathBuf]) -> GameInfo {
+fn chosen_install(
+    exe: &Path,
+    steam_dirs: &[PathBuf],
+    same: impl Fn(&Path, &Path) -> bool,
+) -> GameInfo {
     let dir = exe.parent().unwrap_or(exe);
-    let store = if steam_dirs.iter().any(|d| same_folder(d, dir)) {
+    let store = if steam_dirs.iter().any(|d| same(d, dir)) {
         Store::Steam
     } else {
         Store::Standalone
@@ -123,6 +127,63 @@ fn same_folder(a: &Path, b: &Path) -> bool {
             .to_ascii_lowercase()
     };
     norm(a) == norm(b)
+}
+
+/// A value read from the game install, kept per install folder: one Silo detects now (which a
+/// chosen exe, #461, can change while Silo runs) gets its own. Few installs are ever seen in a
+/// run, so each value is kept for the rest of it.
+pub struct PerInstall<T: 'static> {
+    seen: std::sync::Mutex<Vec<(Option<PathBuf>, &'static T)>>,
+}
+
+impl<T: Send + Sync + 'static> Default for PerInstall<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Send + Sync + 'static> PerInstall<T> {
+    pub const fn new() -> Self {
+        Self {
+            seen: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The value for the install [`detect`] finds now (`None`: no install), loaded by `load` the
+    /// first time that install is seen.
+    pub fn get(&'static self, load: impl FnOnce(Option<&Path>) -> T) -> &'static T {
+        let dir = detect().map(|g| PathBuf::from(g.install_dir));
+        self.get_for(dir, load)
+    }
+
+    /// [`get`](Self::get) for a given install folder.
+    fn get_for(
+        &'static self,
+        dir: Option<PathBuf>,
+        load: impl FnOnce(Option<&Path>) -> T,
+    ) -> &'static T {
+        let mut seen = self
+            .seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, v)) = seen.iter().find(|(d, _)| *d == dir) {
+            return v;
+        }
+        let v: &'static T = Box::leak(Box::new(load(dir.as_deref())));
+        seen.push((dir, v));
+        v
+    }
+}
+
+/// Two folders are the same folder on disk: [`same_folder`] by spelling, or the same once
+/// resolved (a junction, a short 8.3 name, or another spelling of the path into a Steam library).
+#[cfg(not(target_os = "macos"))]
+fn same_folder_on_disk(a: &Path, b: &Path) -> bool {
+    same_folder(a, b)
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
 }
 
 /// Cheap, name-only pre-filter: could a process with this name be FS25 (or a host for it)?
@@ -295,7 +356,7 @@ pub fn detect() -> Option<GameInfo> {
     let steam_dirs = steam_install_dirs();
     if cfg!(windows) {
         if let Some(exe) = choice().filter(|e| choice_problem(e, |p| p.is_file()).is_none()) {
-            return Some(chosen_install(&exe, &steam_dirs));
+            return Some(chosen_install(&exe, &steam_dirs, same_folder_on_disk));
         }
     }
     steam_dirs.into_iter().find_map(|install| {
@@ -440,7 +501,22 @@ fn pick_mac_install(steam_dirs: &[PathBuf], bundles: &[PathBuf]) -> Option<(Path
 /// the same arguments is the fallback (`steam://run/<id>//<args>/`, Valve's documented form;
 /// Steam asks the user to confirm launch arguments). Never the plain `rungameid` URL: that
 /// would start the main profile, with the wrong mods.
+///
+/// A chosen exe that's gone, with no Steam install to fall back on, is refused with a reason
+/// rather than handed to Steam (#461). A Steam start after Silo started the game directly this
+/// run follows the same one-at-a-time rule ([`steam_launch_refusal`]): the copy Silo started
+/// may still be running, and Steam doesn't know it.
 pub fn launch(profile: Option<&Path>) -> Result<(), String> {
+    if cfg!(windows) {
+        if let Some(exe) = choice() {
+            if detect().is_none() {
+                return Err(format!(
+                    "The game you chose isn't there anymore: {}. Choose it again in Settings → Mods folder.",
+                    exe.display()
+                ));
+            }
+        }
+    }
     if let Some(dir) = profile {
         return launch_profile(dir);
     }
@@ -460,8 +536,28 @@ pub fn launch(profile: Option<&Path>) -> Result<(), String> {
             })
         });
     }
+    {
+        let last = LAST_DIRECT_LAUNCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let since = last.map(|t| t.elapsed());
+        // The process list only when Silo started the game directly: Steam handles its own.
+        if let Some(why) = since.and_then(|s| steam_launch_refusal(Some(s), fs25_running())) {
+            return Err(why.into());
+        }
+    }
     let url = format!("steam://rungameid/{APP_ID}");
     open_url(&url)
+}
+
+/// Pure: why a Steam start must not go out now. Only once Silo started the game directly this run
+/// (`since_direct`, how long ago): then, as for a direct start, not while FS25 runs, nor just
+/// after that start. Without one, Steam decides (it doesn't start its own game twice).
+pub fn steam_launch_refusal(
+    since_direct: Option<std::time::Duration>,
+    running: bool,
+) -> Option<&'static str> {
+    since_direct.and_then(|s| direct_launch_refusal(running, Some(s)))
 }
 
 /// How a profile launch starts the game.
@@ -871,42 +967,107 @@ mod tests {
 
     #[test]
     fn a_chosen_exe_in_a_steam_library_stays_the_steam_install() {
+        // Forward slashes: these paths split the same on every OS the tests run on.
         let steam = vec![PathBuf::from(
             "E:/SteamLibrary/steamapps/common/Farming Simulator 25",
         )];
         let in_steam = Path::new(
-            r"e:\steamlibrary\steamapps\common\Farming Simulator 25\FarmingSimulator2025.exe",
+            "e:/steamlibrary/steamapps/common/Farming Simulator 25/FarmingSimulator2025.exe",
         );
-        let picked = chosen_install(in_steam, &steam);
+        let picked = chosen_install(in_steam, &steam, same_folder);
         assert_eq!(picked.store, Store::Steam);
         assert!(picked.chosen);
         assert_eq!(
             picked.install_dir,
-            r"e:\steamlibrary\steamapps\common\Farming Simulator 25"
+            "e:/steamlibrary/steamapps/common/Farming Simulator 25"
         );
-        let dvd = Path::new(r"E:\Farming Simulator 2025\FarmingSimulator2025.exe");
-        let picked = chosen_install(dvd, &steam);
+        let dvd = Path::new("E:/Farming Simulator 2025/FarmingSimulator2025.exe");
+        let picked = chosen_install(dvd, &steam, same_folder);
         assert_eq!(picked.store, Store::Standalone);
         assert_eq!(picked.exe, dvd.to_string_lossy());
-        assert_eq!(picked.install_dir, r"E:\Farming Simulator 2025");
+        assert_eq!(picked.install_dir, "E:/Farming Simulator 2025");
+        // The same folder reached another way (a junction, a short name) counts by `same`.
+        let via_junction = Path::new("D:/Games/FS25/FarmingSimulator2025.exe");
+        let resolved = |a: &Path, b: &Path| {
+            a == Path::new("E:/SteamLibrary/steamapps/common/Farming Simulator 25")
+                && b == Path::new("D:/Games/FS25")
+        };
+        assert_eq!(
+            chosen_install(via_junction, &steam, resolved).store,
+            Store::Steam
+        );
         assert!(same_folder(Path::new("E:/Lib/"), Path::new(r"e:\lib")));
         assert!(!same_folder(Path::new("E:/Lib"), Path::new(r"E:\Lib2")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_dialog_path_into_a_steam_library_is_the_steam_install() {
+        // A file dialog's backslashes, against libraryfolders.vdf's forward slashes.
+        let steam = vec![PathBuf::from(
+            "E:/SteamLibrary/steamapps/common/Farming Simulator 25",
+        )];
+        let picked = chosen_install(
+            Path::new(
+                r"e:\steamlibrary\steamapps\common\Farming Simulator 25\FarmingSimulator2025.exe",
+            ),
+            &steam,
+            same_folder,
+        );
+        assert_eq!(picked.store, Store::Steam);
+        assert_eq!(
+            picked.install_dir,
+            r"e:\steamlibrary\steamapps\common\Farming Simulator 25"
+        );
     }
 
     #[test]
     fn a_profile_launch_runs_a_chosen_exe_outside_steam() {
         let dvd = chosen_install(
-            Path::new(r"E:\Farming Simulator 2025\FarmingSimulator2025.exe"),
+            Path::new("E:/Farming Simulator 2025/FarmingSimulator2025.exe"),
             &[],
+            same_folder,
         );
         let dir = Path::new(r"F:\FS25 Profiles\smoke");
         assert_eq!(
             profile_launch_plan(Some(&dvd), dir),
             LaunchPlan::Exe {
-                program: PathBuf::from(r"E:\Farming Simulator 2025\FarmingSimulator2025.exe"),
+                program: PathBuf::from("E:/Farming Simulator 2025/FarmingSimulator2025.exe"),
                 args: vec!["-profile".into(), r"F:\FS25 Profiles\smoke".into()],
-                cwd: PathBuf::from(r"E:\Farming Simulator 2025"),
+                cwd: PathBuf::from("E:/Farming Simulator 2025"),
             }
+        );
+    }
+
+    #[test]
+    fn values_read_from_the_game_load_once_per_install() {
+        static V: PerInstall<String> = PerInstall::new();
+        let a = V.get_for(Some(PathBuf::from("E:/FS25")), |d| format!("{d:?}"));
+        let again = V.get_for(Some(PathBuf::from("E:/FS25")), |_| -> String {
+            unreachable!("loaded once")
+        });
+        assert!(std::ptr::eq(a, again));
+        // Another install (a chosen DVD copy) gets its own.
+        assert_eq!(
+            V.get_for(Some(PathBuf::from("F:/DVD")), |_| "dvd".into()),
+            "dvd"
+        );
+        assert_eq!(V.get_for(None, |d| format!("{}", d.is_none())), "true");
+    }
+
+    #[test]
+    fn a_steam_start_waits_only_for_a_game_silo_started_directly() {
+        use std::time::Duration;
+        // Never started directly: Steam decides, even with FS25 (or its server) running.
+        assert_eq!(steam_launch_refusal(None, true), None);
+        assert_eq!(steam_launch_refusal(None, false), None);
+        // Started directly (a chosen DVD install), then back to Steam: not beside that copy.
+        let long_ago = Some(DIRECT_LAUNCH_HOLD * 30);
+        assert_eq!(steam_launch_refusal(long_ago, true), Some(ALREADY_RUNNING));
+        assert_eq!(steam_launch_refusal(long_ago, false), None);
+        assert_eq!(
+            steam_launch_refusal(Some(Duration::from_secs(1)), false),
+            Some(JUST_STARTED)
         );
     }
 
