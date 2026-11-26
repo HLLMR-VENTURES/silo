@@ -223,6 +223,9 @@ export interface GameInfo {
   store: "steam" | "standalone";
   /** The install is the game exe the user chose (#461), not one Silo found. */
   chosen: boolean;
+  /** Found through the game installer's entry in Windows' installed programs (a DVD install,
+   *  #476); started directly. */
+  registered?: boolean;
 }
 
 export interface SettingsField {

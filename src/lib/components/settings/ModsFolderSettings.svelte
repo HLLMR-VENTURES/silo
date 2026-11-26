@@ -185,6 +185,8 @@
           ? "It's in a Steam library, so Silo starts it as it starts a Steam install."
           : "Play starts it directly, not through Steam."}
       </p>
+    {:else if gameInfo.registered}
+      <p class="hint">Found in Windows' installed programs. Play starts it directly, not through Steam.</p>
     {/if}
   {:else}
     <p class="path muted">Farming Simulator 25 install not found. The Play button is hidden.</p>
@@ -196,7 +198,11 @@
     <p class="hint">
       The game you chose isn't there anymore, or doesn't look like Farming Simulator 25: {displayPath(
         gameChoice,
-      )}{gameInfo ? ". Silo is using the Steam install meanwhile." : "."}
+      )}{gameInfo
+        ? gameInfo.registered
+          ? ". Silo is using the install Windows lists meanwhile."
+          : ". Silo is using the Steam install meanwhile."
+        : "."}
     </p>
   {/if}
   {#if onChooseGame}

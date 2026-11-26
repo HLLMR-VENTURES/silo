@@ -239,6 +239,19 @@ describe("ModsFolderSettings", () => {
     expect(screen.getByText(/isn't there anymore/)).toBeInTheDocument();
   });
 
+  it("says a DVD install was found in Windows' installed programs (#476)", () => {
+    const found = { ...dvd, chosen: false, registered: true };
+    const props = { ...base, modsStatus: null, onChooseGame: vi.fn(), onForgetGame: vi.fn() };
+    const { unmount } = render(ModsFolderSettings, { ...props, gameInfo: found, gameChoice: null });
+    expect(screen.getByText(/^E:.Farming Simulator 2025$/)).toBeInTheDocument();
+    expect(screen.getByText(/Found in Windows' installed programs. Play starts it directly/)).toBeInTheDocument();
+    expect(screen.queryByText(/install not found|Chosen in Silo/)).toBeNull();
+    unmount();
+    // A chosen exe that's gone: Silo says it uses the listed install, not a Steam one.
+    render(ModsFolderSettings, { ...props, gameInfo: found, gameChoice: "D:/Old/FarmingSimulator2025.exe" });
+    expect(screen.getByText(/isn't there anymore.*using the install Windows lists meanwhile/)).toBeInTheDocument();
+  });
+
   it("offers to launch FS25 with the folder's profile and says what it changes (#387)", async () => {
     const user = userEvent.setup();
     const onSetGameProfile = vi.fn();
