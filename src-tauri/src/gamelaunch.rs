@@ -720,7 +720,7 @@ pub fn direct_launch_refusal(
 /// would start a new, empty profile there instead of the user's setup. One launch at a time,
 /// checked against the process list right before the spawn ([`direct_launch_refusal`]).
 fn launch_profile(dir: &Path) -> Result<(), String> {
-    if let Some(why) = crate::gameprofile::launch_problem(dir) {
+    if let Some(why) = crate::gameprofile::launch_problem(dir, true) {
         return Err(why);
     }
     if !dir.is_dir() {
