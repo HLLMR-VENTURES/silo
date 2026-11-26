@@ -3679,14 +3679,35 @@ fn game_profile_for(
 /// claim to know where the game reads.
 ///
 /// `map` reads the setting's drive letters on Linux (the Proton prefix the game starts in,
-/// refusing `..`); `None` takes the path as it is (Windows).
+/// refusing `..`); `None` takes the path as it is (Windows). On Linux the game (through Wine)
+/// also finds `gameSettings.xml` and `mods` under another case when the exact name isn't there,
+/// so such a near match is an error rather than a guess (#417).
 fn profile_game_reads(
     dir: &std::path::Path,
     map: Option<&modsroot::PathMap>,
 ) -> Result<PathBuf, String> {
+    let near_match = |name: &str| map.is_some() && case_twin(dir, name);
+    let default_mods = || {
+        if near_match("mods") {
+            Err(format!(
+                "This profile's mods folder isn't named exactly `mods` ({}), so Silo can't be sure which folder the game loads. Rename it to `mods`.",
+                dir.display()
+            ))
+        } else {
+            Ok(dir.join("mods"))
+        }
+    };
     let xml = match std::fs::read_to_string(dir.join("gameSettings.xml")) {
         Ok(x) => x,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(dir.join("mods")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if near_match("gameSettings.xml") {
+                return Err(format!(
+                    "This profile's game settings file isn't named exactly `gameSettings.xml` ({}), so Silo can't be sure which mods folder the game loads.",
+                    dir.display()
+                ));
+            }
+            return default_mods();
+        }
         Err(e) => {
             return Err(format!(
                 "Silo couldn't read this profile's game settings ({e}), so it can't tell which mods folder the game loads."
@@ -3707,7 +3728,7 @@ fn profile_game_reads(
         );
     }
     match modsroot::read_override(&xml).filter(|o| o.active) {
-        None => Ok(dir.join("mods")),
+        None => default_mods(),
         // Only a full path is a folder Silo can place (`C:\…` or `\\server\share\…`): an empty,
         // relative or drive-relative one would be read against some working folder FS25 and
         // Silo needn't share.
@@ -3725,6 +3746,21 @@ fn profile_game_reads(
             )
         }),
     }
+}
+
+/// Whether `dir` holds an entry named like `name` in another case only (no exact `name`): one
+/// Wine would take for `name` and Linux wouldn't.
+fn case_twin(dir: &std::path::Path, name: &str) -> bool {
+    if dir.join(name).exists() {
+        return false;
+    }
+    std::fs::read_dir(dir).is_ok_and(|rd| {
+        rd.flatten().any(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        })
+    })
 }
 
 fn path_map(loc: &fsgame::GameLocation) -> modsroot::PathMap {
@@ -11125,6 +11161,30 @@ mod tests {
         ] {
             assert!(reads(bad).is_err(), "{bad:?}");
         }
+        if cfg!(target_os = "linux") {
+            // Wine would find these under another case; Silo doesn't guess (#417).
+            let twin = base.join("twin");
+            std::fs::create_dir_all(twin.join("Mods")).unwrap();
+            assert!(super::profile_game_reads(&twin, Some(&map)).is_err());
+            std::fs::write(
+                twin.join("GameSettings.xml"),
+                game_settings("true", "D:/fs25/mods", "1"),
+            )
+            .unwrap();
+            assert!(super::profile_game_reads(&twin, Some(&map)).is_err());
+            // On Windows-style reading (no map) nothing changes.
+            assert_eq!(
+                super::profile_game_reads(&twin, None),
+                Ok(twin.join("mods"))
+            );
+        }
+        // No settings file and no `mods` yet: the default, which the game creates.
+        let fresh = base.join("fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
+        assert_eq!(
+            super::profile_game_reads(&fresh, Some(&map)),
+            Ok(fresh.join("mods"))
+        );
         // Off: the profile's own `mods` folder, whatever the map.
         std::fs::write(
             prof.join("gameSettings.xml"),
