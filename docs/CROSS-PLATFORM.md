@@ -141,6 +141,13 @@ FS25 is sold via **Steam**, **Epic**, and the **GIANTS** launcher. Detect, don't
 - **Epic (?):** `%ProgramData%\Epic\EpicGamesLauncher\Data\Manifests\*.item` (JSON)
   lists install locations.
 - **GIANTS launcher (?):** its own install path + registry entry on Windows.
+- **DVD (Windows, done #476):** the game's Inno Setup installer registers
+  `…\CurrentVersion\Uninstall\FarmingSimulator2025_is1` with `InstallLocation`
+  (`E:\Farming Simulator 2025\` on a tester's DVD install, #316). Silo reads it from HKLM,
+  HKLM\WOW6432Node and HKCU after the chosen exe and the Steam libraries come up empty, and accepts
+  it only by the chosen-exe check (`FarmingSimulator2025.exe` with `dataS.gar` beside it). Only
+  that exact key: Steam's own `Steam App 2300320` entry has the same display name. Whether the
+  GIANTS-shop installer writes the same key is unverified.
 - **Always allow manual override** — the user points Silo at the folder; detection
   is a convenience, never a hard dependency. `gameSettings.xml`'s
   `<modsDirectoryOverride>` can also redirect the mods folder anywhere.

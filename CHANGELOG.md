@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the launch options each time: choose **Continue**. With the Flatpak version of Steam the switch
   stays hidden, with a note saying why, because its games run in a sandbox that may not see the
   folder. Thanks to @Blarneysaurus for testing it on Linux Mint. (#417)
+- Silo now finds a Farming Simulator 25 **DVD install** on Windows by itself, through the
+  entry its installer adds to Windows' installed programs, and **Play** starts it directly. You
+  no longer have to pick the exe with **Choose the game…**, though that still works. As with a
+  chosen exe, Silo only accepts the install when `FarmingSimulator2025.exe` and the game's
+  `dataS.gar` are both there. A Steam install still comes first. Thanks to @LAWI-Game for the
+  details from their DVD install. (#476)
 
 ## [1.0.7] - 2026-11-25
 

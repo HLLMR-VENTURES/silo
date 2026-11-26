@@ -51,6 +51,9 @@ pub struct GameInfo {
     pub store: Store,
     /// The install is the exe the user chose (#461), not one Silo found.
     pub chosen: bool,
+    /// Found through the game installer's entry in Windows' installed programs (a DVD install,
+    /// #476), not in a Steam library or chosen by the user. Started directly, like a chosen exe.
+    pub registered: bool,
 }
 
 /// The app setting holding the game exe the user chose (#461).
@@ -113,7 +116,68 @@ fn chosen_install(
         install_dir: dir.to_string_lossy().into_owned(),
         store,
         chosen: true,
+        registered: false,
     }
+}
+
+/// The uninstall entry the game's own Windows installer writes (Inno Setup's `<AppId>_is1`),
+/// seen on a DVD install (#316). Only this exact key: Steam's entry for the game
+/// ("Steam App 2300320") has the same display name and publisher.
+#[cfg(windows)]
+const INSTALLER_KEY: &str = "FarmingSimulator2025_is1";
+
+/// The `InstallLocation`s of [`INSTALLER_KEY`] in Windows' installed programs: machine-wide (64-
+/// and 32-bit views), then per-user. Unreadable or missing entries are skipped.
+#[cfg(windows)]
+fn installer_locations() -> Vec<String> {
+    use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
+    let path = |view: &str| {
+        format!(r"SOFTWARE\{view}Microsoft\Windows\CurrentVersion\Uninstall\{INSTALLER_KEY}")
+    };
+    [
+        (LOCAL_MACHINE, path("")),
+        (LOCAL_MACHINE, path(r"WOW6432Node\")),
+        (CURRENT_USER, path("")),
+    ]
+    .iter()
+    .filter_map(|(hive, p)| {
+        hive.open(p)
+            .and_then(|k| k.get_string("InstallLocation"))
+            .ok()
+    })
+    .collect()
+}
+
+/// `s` is an absolute Windows path: a drive (`E:\`, `E:/`) or a network share (`\\server\`).
+/// A relative or drive-relative (`E:games`) location would depend on Silo's working folder.
+#[cfg(any(windows, test))]
+fn windows_absolute(s: &str) -> bool {
+    let b = s.as_bytes();
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
+        || s.starts_with(r"\\")
+}
+
+/// Pure: the install in the first of `locations` (the installer entries' `InstallLocation`s)
+/// whose `FarmingSimulator2025.exe` passes the same check as a chosen exe ([`choice_problem`]:
+/// there, with `dataS.gar` beside it). It's started directly, not through Steam. `exists` is
+/// injected so this unit-tests without a real install.
+#[cfg(any(windows, test))]
+fn registered_install(locations: &[String], exists: impl Fn(&Path) -> bool) -> Option<GameInfo> {
+    let exe = locations
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| windows_absolute(l))
+        .map(|l| Path::new(l).join(EXE_WINDOWS))
+        .find(|exe| choice_problem(exe, &exists).is_none())?;
+    let dir = exe.parent()?;
+    Some(GameInfo {
+        app_id: APP_ID.to_string(),
+        exe: exe.to_string_lossy().into_owned(),
+        install_dir: dir.to_string_lossy().into_owned(),
+        store: Store::Standalone,
+        chosen: false,
+        registered: true,
+    })
 }
 
 /// Two Windows folder paths name the same folder: case, slash direction and a trailing slash
@@ -367,7 +431,8 @@ fn steam_install_dirs() -> Vec<PathBuf> {
 }
 
 /// Locate the FS25 install: on Windows the exe the user chose, while it's still a valid game exe
-/// (#461); otherwise the first across all Steam libraries.
+/// (#461); otherwise the first across all Steam libraries; otherwise, on Windows, the one the
+/// game's own installer registered (a DVD install, #476).
 #[cfg(not(target_os = "macos"))]
 pub fn detect() -> Option<GameInfo> {
     let steam_dirs = steam_install_dirs();
@@ -376,16 +441,32 @@ pub fn detect() -> Option<GameInfo> {
             return Some(chosen_install(&exe, &steam_dirs, same_folder_on_disk));
         }
     }
-    steam_dirs.into_iter().find_map(|install| {
-        let exe = find_game_exe(&install, EXES, |p| p.is_file())?;
-        Some(GameInfo {
-            app_id: APP_ID.to_string(),
-            exe: exe.to_string_lossy().into_owned(),
-            install_dir: install.to_string_lossy().into_owned(),
-            store: Store::Steam,
-            chosen: false,
+    steam_dirs
+        .into_iter()
+        .find_map(|install| {
+            let exe = find_game_exe(&install, EXES, |p| p.is_file())?;
+            Some(GameInfo {
+                app_id: APP_ID.to_string(),
+                exe: exe.to_string_lossy().into_owned(),
+                install_dir: install.to_string_lossy().into_owned(),
+                store: Store::Steam,
+                chosen: false,
+                registered: false,
+            })
         })
-    })
+        .or_else(registered_now)
+}
+
+/// The install the game's own Windows installer registered (a DVD install, #476).
+#[cfg(windows)]
+fn registered_now() -> Option<GameInfo> {
+    registered_install(&installer_locations(), |p| p.is_file())
+}
+
+/// Only Windows has an installer entry to read.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn registered_now() -> Option<GameInfo> {
+    None
 }
 
 /// The first of `names` that is a file directly in `install`. `is_file` is injected so this
@@ -426,6 +507,7 @@ pub fn detect() -> Option<GameInfo> {
         install_dir: install_dir.to_string_lossy().into_owned(),
         store,
         chosen: false,
+        registered: false,
     })
 }
 
@@ -599,11 +681,12 @@ pub fn profile_args(dir: &Path) -> Vec<String> {
 }
 
 /// Pure: the plan for starting FS25 on profile `dir`, given the detected install. A Steam
-/// install, or a game exe the user chose (#461, Windows), with an executable: run it directly.
-/// Otherwise the Steam URL fallback.
+/// install, a game exe the user chose (#461, Windows) or one its installer registered (#476),
+/// with an executable: run it directly. Otherwise the Steam URL fallback.
 pub fn profile_launch_plan(info: Option<&GameInfo>, dir: &Path) -> LaunchPlan {
+    let direct = |i: &GameInfo| i.store == Store::Steam || i.chosen || i.registered;
     match info {
-        Some(i) if (i.store == Store::Steam || i.chosen) && !i.exe.is_empty() => LaunchPlan::Exe {
+        Some(i) if direct(i) && !i.exe.is_empty() => LaunchPlan::Exe {
             program: PathBuf::from(&i.exe),
             args: profile_args(dir),
             cwd: PathBuf::from(&i.install_dir),
@@ -975,6 +1058,7 @@ mod tests {
             install_dir: install.into(),
             store: Store::Steam,
             chosen: false,
+            registered: false,
         }
     }
 
@@ -1073,6 +1157,78 @@ mod tests {
                 cwd: PathBuf::from("E:/Farming Simulator 2025"),
             }
         );
+    }
+
+    #[test]
+    fn an_installer_registered_install_is_found_when_it_is_the_game() {
+        // Forward slashes: these paths split the same on every OS the tests run on.
+        let game = |dir: &str| {
+            let d = Path::new(dir);
+            [d.join("FarmingSimulator2025.exe"), d.join("dataS.gar")]
+        };
+        let dvd = game("E:/Farming Simulator 2025");
+        let found = registered_install(&["E:/Farming Simulator 2025/".into()], |p| {
+            dvd.iter().any(|f| f == p)
+        })
+        .expect("the DVD install");
+        assert_eq!(found.store, Store::Standalone);
+        assert!(found.registered && !found.chosen);
+        assert_eq!(
+            Path::new(&found.exe),
+            Path::new("E:/Farming Simulator 2025/FarmingSimulator2025.exe")
+        );
+        assert_eq!(
+            Path::new(&found.install_dir),
+            Path::new("E:/Farming Simulator 2025")
+        );
+        // Only an absolute location counts: empty, relative, or drive-relative is skipped.
+        for odd in [
+            "",
+            "  ",
+            "Farming Simulator 2025",
+            "E:Farming Simulator 2025",
+            "E:",
+        ] {
+            assert!(
+                registered_install(&[odd.into()], |_| true).is_none(),
+                "{odd:?}"
+            );
+        }
+        assert!(windows_absolute(r"\\nas\games\FS25") && windows_absolute("e:/x"));
+        // A location left behind (the game moved or was removed), or without dataS.gar: not the
+        // game. The next entry still counts.
+        let moved = game("D:/Games/FS25");
+        let only_moved = |p: &Path| moved.iter().any(|f| f == p);
+        let locations = [
+            "E:/Farming Simulator 2025".to_string(),
+            "D:/Games/FS25".into(),
+        ];
+        assert_eq!(
+            registered_install(&locations, only_moved).map(|g| g.install_dir),
+            Some("D:/Games/FS25".into())
+        );
+        let exe_only = |p: &Path| p == dvd[0];
+        assert!(registered_install(&locations[..1], exe_only).is_none());
+        // Its profile launches run the exe directly too: Steam doesn't know a DVD install.
+        let dir = Path::new(r"F:\FS25 Profiles\smoke");
+        assert!(matches!(
+            profile_launch_plan(Some(&found), dir),
+            LaunchPlan::Exe { program, .. } if program == Path::new(&found.exe)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_installer_location_with_its_trailing_backslash_is_the_install_folder() {
+        // As the DVD installer writes it (#316).
+        let exe = Path::new(r"E:\Farming Simulator 2025\FarmingSimulator2025.exe");
+        let data = Path::new(r"E:\Farming Simulator 2025\dataS.gar");
+        let found = registered_install(&[r"E:\Farming Simulator 2025\".into()], |p| {
+            p == exe || p == data
+        })
+        .expect("the DVD install");
+        assert_eq!(found.exe, exe.to_string_lossy());
+        assert_eq!(found.install_dir, r"E:\Farming Simulator 2025");
     }
 
     #[test]
