@@ -52,15 +52,12 @@ impl Os {
 /// for each platform is in `docs/CROSS-PLATFORM.md` (#405).
 /// - Windows: the game executable is started directly with `-profile` (hands-on test 2026-11-01).
 /// - macOS: no source shows that the Mac build reads `-profile`.
-/// - Linux: the Windows game reads `-profile`, but it runs through Proton, so only Steam can start
-///   it, and nothing shows that Steam on Linux hands a `steam://run` link's arguments to the game
-///   (one report says it ignores them).
+/// - Linux: Steam starts the Windows game through Proton, and a tester confirmed a
+///   `steam://run` link with `-profile "Z:\…"` reaches it (#417). Whether it works on a given
+///   setup is decided at run time ([`launch_problem`], `protonlaunch`).
 pub const fn unsupported_reason(os: Os) -> Option<&'static str> {
     match os {
-        Os::Windows => None,
-        Os::Linux => Some(
-            "Silo can't start Farming Simulator 25 with a separate profile on Linux yet: it isn't confirmed that Steam passes the profile on to the game through Proton.",
-        ),
+        Os::Windows | Os::Linux => None,
         Os::MacOs => Some(
             "Silo can't start Farming Simulator 25 with a separate profile on macOS yet: it isn't confirmed that the Mac version of the game supports one.",
         ),
@@ -73,9 +70,43 @@ pub const fn unsupported_reason(os: Os) -> Option<&'static str> {
 /// Why a profile launch doesn't work on this platform ([`unsupported_reason`]), if it doesn't.
 pub const UNSUPPORTED: Option<&str> = unsupported_reason(Os::CURRENT);
 
-/// Whether Silo can launch FS25 on a separate profile on this platform. Where it can't, the
-/// setting is hidden, with a note ([`UNSUPPORTED`]), and is always off.
+/// Whether Silo can launch FS25 on a separate profile on this platform at all. Where it can't,
+/// the setting is hidden, with a note ([`UNSUPPORTED`]), and is always off. On Linux the setup
+/// decides too: see [`launch_problem`].
 pub const SUPPORTED: bool = UNSUPPORTED.is_none();
+
+/// The line shown under the switch while it's on, where launching needs the user's part:
+/// on Linux, Steam's confirmation of the launch options (`protonlaunch::LAUNCH_NOTE`).
+pub const LAUNCH_NOTE: Option<&str> = if cfg!(target_os = "linux") {
+    Some(crate::protonlaunch::LAUNCH_NOTE)
+} else {
+    None
+};
+
+/// Whether Play can start FS25 on the profile in `dir` here: `Err` with the reason when it
+/// can't (the platform, [`UNSUPPORTED`], and on Linux the Steam install, which Steam client, its
+/// Proton prefix and the folder's name: `protonlaunch::assess_now`, #417). `Ok` carries how the
+/// game's drive letters map to folders for that profile: the Proton prefix's map on Linux,
+/// `None` (paths as they are) on Windows. One look gives both, so they can't disagree. `fresh`
+/// looks again at the Steam setup (Play); otherwise a recent look is reused (folder checks).
+pub fn assess(dir: &Path, fresh: bool) -> Result<Option<crate::modsroot::PathMap>, String> {
+    if let Some(why) = UNSUPPORTED {
+        return Err(why.into());
+    }
+    #[cfg(target_os = "linux")]
+    return crate::protonlaunch::assess_now(dir, fresh).map(Some);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (dir, fresh);
+        Ok(None)
+    }
+}
+
+/// Why Play can't start FS25 on the profile in `dir` here, if it can't ([`assess`]). Where
+/// there's a reason, the setting is hidden, with it as the note, and always off.
+pub fn launch_problem(dir: &Path, fresh: bool) -> Option<String> {
+    assess(dir, fresh).err()
+}
 
 /// The `app_setting` key holding the choice for the mods folder with identity key `mods_key`.
 pub fn setting_key(mods_key: &str) -> String {
@@ -176,8 +207,10 @@ pub struct GameProfileStatus {
     pub chosen: bool,
     /// Launching on a profile works on this platform ([`SUPPORTED`]).
     pub supported: bool,
-    /// Where it doesn't, why, in plain words ([`UNSUPPORTED`]): the Settings note shows it.
+    /// Where it doesn't, why, in plain words ([`launch_problem`]): the Settings note shows it.
     pub unsupported_reason: Option<String>,
+    /// What the user has to do when Play starts it, if anything ([`LAUNCH_NOTE`]).
+    pub launch_note: Option<String>,
 }
 
 /// The current mods folder's FS25 profile, as published with the folder's layout.
@@ -496,6 +529,7 @@ mod tests {
             chosen: false,
             supported: true,
             unsupported_reason: None,
+            launch_note: None,
         };
         assert!(belongs(&st(true, true)));
         assert!(belongs(&st(true, false)));
@@ -506,24 +540,22 @@ mod tests {
     }
 
     #[test]
-    fn profile_launch_works_on_windows_and_says_why_not_elsewhere() {
+    fn profile_launch_works_on_windows_and_linux_and_says_why_not_elsewhere() {
         assert_eq!(unsupported_reason(Os::Windows), None);
+        // Linux: decided by the setup at run time (#417).
+        assert_eq!(unsupported_reason(Os::Linux), None);
         // Each "not yet" names the platform and the part that isn't confirmed (#405).
         let mac = unsupported_reason(Os::MacOs).expect("macOS stays off until it's confirmed");
         assert!(
             mac.contains("macOS") && mac.contains("isn't confirmed that the Mac version"),
             "{mac}"
         );
-        let linux = unsupported_reason(Os::Linux).expect("Linux stays off until it's confirmed");
-        assert!(
-            linux.contains("Linux") && linux.contains("isn't confirmed that Steam passes"),
-            "{linux}"
-        );
         assert!(unsupported_reason(Os::Other).is_some());
         // The constants follow the build's own platform.
         assert_eq!(SUPPORTED, unsupported_reason(Os::CURRENT).is_none());
         assert_eq!(UNSUPPORTED, unsupported_reason(Os::CURRENT));
-        assert_eq!(SUPPORTED, cfg!(windows));
+        assert_eq!(SUPPORTED, cfg!(any(windows, target_os = "linux")));
+        assert_eq!(LAUNCH_NOTE.is_some(), cfg!(target_os = "linux"));
     }
 
     #[test]

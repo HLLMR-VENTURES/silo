@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Launch FS25 with this folder's profile** now works on Linux with the native Steam. Play asks
+  Steam to start the game through Proton with your profile folder, and Steam asks you to confirm
+  the launch options each time: choose **Continue**. With the Flatpak version of Steam the switch
+  stays hidden, with a note saying why, because its games run in a sandbox that may not see the
+  folder. Thanks to @Blarneysaurus for testing it on Linux Mint. (#417)
+
 ## [1.0.7] - 2026-11-25
 
 ### Added

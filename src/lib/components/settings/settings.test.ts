@@ -256,8 +256,22 @@ describe("ModsFolderSettings", () => {
     const sw = screen.getByRole("switch", { name: "Launch FS25 with this folder's profile" });
     expect(sw).toHaveAttribute("aria-checked", "true");
     expect(screen.getByText(/Play starts Farming Simulator 25 with the profile in/)).toBeInTheDocument();
+    expect(screen.queryByText(/confirm the launch options/)).toBeNull();
     await user.click(sw);
     expect(onSetGameProfile).toHaveBeenCalledWith(false);
+  });
+
+  it("says what the user does when Steam starts the profile (Linux, #417)", () => {
+    const p = {
+      dir: "/home/evan/FS25 Profiles/smoke",
+      enabled: true,
+      detected: true,
+      chosen: false,
+      supported: true,
+      launchNote: "Steam asks you to confirm the launch options each time; choose Continue.",
+    };
+    render(ModsFolderSettings, { ...base, modsStatus: profileStatus(p) });
+    expect(screen.getByText(/Steam asks you to confirm the launch options each time; choose Continue\./)).toBeInTheDocument();
   });
 
   it("says a detected profile is off, and hides the switch where it isn't supported (#387)", () => {

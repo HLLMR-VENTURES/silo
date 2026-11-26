@@ -143,10 +143,12 @@ export interface GameProfileStatus {
   detected: boolean;
   /** The user turned it on or off; otherwise it follows `detected`. */
   chosen: boolean;
-  /** Launching on a profile works on this platform (Windows only for now). */
+  /** Launching on this profile works here (Windows; Linux through Steam's Proton, #417). */
   supported: boolean;
   /** Where it doesn't, why, in plain words (shown as the note under the folder). */
   unsupportedReason?: string | null;
+  /** What the user has to do when Play starts it, if anything (Linux: confirm in Steam). */
+  launchNote?: string | null;
 }
 
 export function modsRootStatus(): Promise<ModsRootStatus> {

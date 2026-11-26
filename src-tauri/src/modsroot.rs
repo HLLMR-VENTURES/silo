@@ -393,6 +393,11 @@ impl PathMap {
         }
     }
 
+    /// The drive letters and the host folders they map to.
+    pub fn drives(&self) -> Vec<(char, PathBuf)> {
+        self.drives.clone()
+    }
+
     /// Wine's drive map: each `<prefix>/dosdevices/<x>:` entry is a symlink to that drive's root.
     pub fn from_prefix(prefix: &Path) -> Self {
         let dd = prefix.join("dosdevices");

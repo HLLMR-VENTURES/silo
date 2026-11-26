@@ -57,7 +57,7 @@ hidden and always off, and the note under the folder gives `gameprofile::unsuppo
 | OS | Profile launch | Why |
 |----|----------------|-----|
 | Windows | on | The game executable directly (each argument quoted by the Windows command-line rules, no shell). If it can't be started: `steam://run/2300320//<percent-encoded args>/`, opened without a shell; Steam asks the user to confirm launch arguments. A hands-on test loaded the profile (2026-11-01, #390). |
-| Linux (Proton) | hidden | The game reads `-profile`, but only Steam can start it, and nothing shows that Steam on Linux passes a `steam://run` link's arguments to the game. |
+| Linux (Proton) | on (native Steam) | Only Steam can start the game, so Silo opens `steam://run/2300320//-profile "Z:\…"/` (fully percent-encoded, no shell); Steam asks the user to confirm the launch options. A tester confirmed this loads the profile (2026-11-14, #417). `protonlaunch` holds the rules, so that the folder Silo manages is the one the game is given: the install is the one library with `appmanifest_2300320.acf` (a leftover copy elsewhere doesn't count; two registrations are refused), and the prefix is that library's `compatdata`, unless the game's launch options set `STEAM_COMPAT_DATA_PATH` (refused); that library must be listed by a native Steam only, and `steam://` links must open the native Steam, judged by the `Exec=` of the `.desktop` file `xdg-mime` names (2 s limit; an unknown or unrecognized handler is fine only when no Flatpak Steam is installed); the prefix's `dosdevices/z:` must be missing (Proton creates it as `/`) or a link reaching `/`, anything else is refused rather than guessed; the folder goes as `Z:\…` in double quotes, must be valid UTF-8, and names with `\`, `$`, a backtick, `<>:"|?*`, a control character, a trailing dot or space, `.`/`..` or a Windows device name (`CON`, `NUL`, `COM1`…) are refused, because Wine would read some of them as another folder; the profile's own mods-folder setting must be a full path (`C:mods` is drive-relative), is read through that prefix's drive map with the same name rules, and is trusted only when that folder exists under exactly that name (Wine also matches other cases and short names); for the same reason a profile whose `gameSettings.xml` or `mods` is there only under another case (`GameSettings.xml`, `Mods`) is refused rather than guessed. The setup look is reused for 10 s by folder checks; Play always looks again. Hidden, with the reason as the note, when any of these fails, notably for the Flatpak Steam (its sandbox may not see the folder; untested). |
 | macOS | hidden | No source shows the Mac build reads `-profile`. |
 
 **Evidence (checked 2026-11-01, FS25 1.25.0.0 on Windows):**
@@ -74,6 +74,12 @@ hidden and always off, and the note under the folder gives `gameprofile::unsuppo
   `steam.exe` converts only the program path and passes the rest of the command line to the game
   unchanged
   ([`steam_helper/steam.c`](https://github.com/ValveSoftware/Proton/blob/proton_10.0/steam_helper/steam.c)).
+- **Linux confirmed (2026-11-14, #417):** on native Steam (Linux Mint 22.3, Proton Experimental,
+  Steam client 1794536281), `-profile "Z:\home\…\FS25 Profiles\smoke"` in Steam's launch options made
+  the game write `log.txt` and `gameSettings.xml` there and read that folder's `mods/`, and
+  `xdg-open 'steam://run/2300320//-profile%20%22Z%3A%5C…%22/'` showed Steam's "Launch Game with
+  custom arguments" prompt with the backslashes kept and no `%20` left; after Continue the game
+  used the profile. The points below are what was known before that test.
 - **The missing link on Linux is Steam itself.** Silo can't start the `.exe` without Proton, so it
   would have to ask Steam (`steam://run/2300320//<args>/`, or `steam -applaunch 2300320 <args>`).
   Valve's page says only that `run`'s "args are passed to the application as launch parameters"
