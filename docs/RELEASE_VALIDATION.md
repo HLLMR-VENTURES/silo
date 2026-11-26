@@ -6,6 +6,36 @@ gap between the RC protocol and visible proof it ran.
 
 ---
 
+## v1.0.7 — 2026-11-25 (Choose the game for DVD and GIANTS-shop installs, url/cookie advisories)
+
+Validated by hand (not an HLLMRD run). No database change. Published 2026-11-26 01:26:30Z on the owner's instruction ("Publish it").
+
+### Artifact identity
+| Field | Value |
+|---|---|
+| Version | 1.0.7 |
+| Source | Tag `v1.0.7` (annotated, pushed by the owner as HLLMR) on `d5389e8`, the merge of #473; main's CI green on it |
+| Release run | [45733806996](https://github.com/HLLMR-VENTURES/silo/actions/runs/45733806996): guard passed, owner approved the `release` environment, all 4 builds + sbom + checksums green on the first attempt |
+| Release | draft id 458830801, prerelease=false, published as Latest; `/releases/latest` → v1.0.7 |
+| Assets | 19 (as 1.0.6) |
+| Installers | `SHA256SUMS.txt` SHA-256 `4fcecb686917ac4546d71a9d605dd38f9020f0d2619a4c48c80516a8e05383a1`; `Silo_1.0.7_x64-setup.exe` SHA-256 `e9618fa795c496d202df692a7d4fa9e9cfbc1be1eeb2d60f9def815073bf7b28`; `latest.json` SHA-256 `4b4c69b834f9709bf2b643a77c43e2b1d88e10eea01ac21a22d37d2902fed1d7` |
+
+### Checks
+| Check | Result |
+|---|---|
+| macOS signing and notarization | both mac legs: "Set up macOS signing and notarization" and "Verify macOS signature and notarization" passed |
+| Windows Authenticode | `Get-AuthenticodeSignature` on the setup `.exe` and on the installed `silo.exe`: Valid, `CN=David Hellmer, O=David Hellmer, L=Grand Prairie, S=tx, C=US`, Microsoft timestamp |
+| Updater manifest | `latest.json` version 1.0.7; 11/11 platform entries. Every bundle's minisign signature verified against the `pubkey` in `tauri.conf.json` (key id match, file and trusted-comment signatures): NSIS, MSI, AppImage, deb, rpm, both `.app.tar.gz`. After publish, both `HLLMR-VENTURES/silo` and the old `HLLMR/silo` `releases/latest/download/latest.json` serve 1.0.7 with 11 platforms |
+| Checksums | every file listed in `SHA256SUMS.txt` (setup `.exe`, `.msi`, both `.dmg`, AppImage, deb, rpm, both `.app.tar.gz`, their `.sig` files, `latest.json` and `silo-sbom.cdx.json`; 18/18) matches |
+| Provenance | `gh attestation verify --repo HLLMR-VENTURES/silo --format json` on the setup `.exe`: 2 attestations, source `refs/tags/v1.0.7` at `d5389e8381ee0abcac28a4f41414fe91b1cb9e80`, signer `release.yml@refs/tags/v1.0.7` |
+| Upgrade over 1.0.6 | silent per-user install (`/S`, exit 0) over 1.0.6 on the owner's PC; uninstall entry and `silo.exe` report 1.0.7; launched to "All good" (checked over DevTools), log "Silo 1.0.7 starting on windows", then stopped with `Stop-Process`; `mods/` size+mtime baseline (762 entries): 0 differences; `gameSettings.xml` and `game.xml` hashes unchanged; `silo://` handler registry export identical; DB `integrity_check` ok before and after, `user_version` 6 (unchanged), every table's row count unchanged. DB copy kept outside the repo before installing |
+| Local gate (release branch) | `npm ci`; vitest 1301 passed; svelte-check 0 errors, 0 warnings; `cargo fmt --check`; clippy `--locked --all-targets -D warnings`; `cargo test --locked` 1065 passed, 2 ignored; `tauri build --no-bundle` with an isolated identifier; `cargo audit` green in PR CI |
+| RC test (before tagging) | the release build in isolation (its own identifier and app data): version 1.0.7, Steam install found, no game chosen; the owner's real mods folder (762 entries) showed 0 differences. Choose the game itself was tested hands-on in an isolated build before #472 merged (wrong file name and a missing `dataS.gar` refused, card text, a moved install falling back to Steam, **Use the Steam install**); Play was never clicked |
+| Discord | Farm Bell's #changelog post appeared within a minute of publishing and renders correctly (also the application acceptance for silo-api 882d48f) |
+| Not done | clean install; in-app update 1.0.6 → 1.0.7 not yet observed; Choose the game on a real DVD install (asked of @LAWI-Game on #316); macOS and Linux installs on real machines by us (#417) |
+
+---
+
 ## v1.0.6 — 2026-11-21 (SQLite 3.54.1 security fix, installed version in Check these yourself)
 
 Validated by hand (not an HLLMRD run). No database change. The first release run failed only at Apple notarization ("A required agreement is missing or has expired"); the owner accepted Apple's updated agreement and the failed jobs were re-run (attempt 2), with no change to the source. Published 2026-11-21 14:53:54Z on the owner's instruction.
