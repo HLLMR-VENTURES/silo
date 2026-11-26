@@ -511,8 +511,8 @@ fn pick_mac_install(steam_dirs: &[PathBuf], bundles: &[PathBuf]) -> Option<(Path
 /// outside Steam on Windows (#461) — by starting it directly, one start at a time
 /// ([`start_once`]). Guided bisection uses this same entry point.
 ///
-/// With `profile` (an FS25 profile folder, #387, Windows only: see `gameprofile::unsupported_reason`)
-/// the game executable is started directly with `-profile "<dir>"`, so FS25 uses that folder's
+/// With `profile` (an FS25 profile folder, #387; on Linux through Steam, #417, see
+/// `protonlaunch`) the game executable is started directly with `-profile "<dir>"`, so FS25 uses that folder's
 /// mods, settings, savegames and log. A hands-on test (2026-11-01) confirmed this loads the
 /// profile with Steam running. If the executable can't be found or started, the Steam URL with
 /// the same arguments is the fallback (`steam://run/<id>//<args>/`, Valve's documented form;
@@ -720,8 +720,8 @@ pub fn direct_launch_refusal(
 /// would start a new, empty profile there instead of the user's setup. One launch at a time,
 /// checked against the process list right before the spawn ([`direct_launch_refusal`]).
 fn launch_profile(dir: &Path) -> Result<(), String> {
-    if let Some(why) = crate::gameprofile::UNSUPPORTED {
-        return Err(why.into());
+    if let Some(why) = crate::gameprofile::launch_problem(dir) {
+        return Err(why);
     }
     if !dir.is_dir() {
         return Err(format!(
@@ -765,6 +765,12 @@ fn with_debug_exe(info: Option<GameInfo>, over: Option<String>, debug: bool) -> 
 }
 
 fn launch_profile_now(dir: &Path) -> Result<(), String> {
+    // Linux (#417): only Steam can start the game (through Proton), so ask it with the profile
+    // as the game sees it. Steam asks the user to confirm the launch options first.
+    if cfg!(target_os = "linux") {
+        let game = crate::protonlaunch::game_dir(&dir.to_string_lossy())?;
+        return open_url_safely(&crate::protonlaunch::steam_profile_url(&game));
+    }
     let info = with_debug_exe(
         detect(),
         std::env::var("SILO_DEBUG_FS25_EXE").ok(),

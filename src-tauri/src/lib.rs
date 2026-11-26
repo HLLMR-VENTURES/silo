@@ -32,6 +32,7 @@ pub mod organize;
 pub mod paths;
 mod picked;
 pub mod profile;
+pub mod protonlaunch;
 pub mod provenance;
 mod recycle;
 pub mod relocate;
@@ -3643,17 +3644,21 @@ fn game_profile_for(
         }
     }
     let detected = gameprofile::detected(looks_now, seen_before);
+    // Whether Play can start the game on this folder here (on Linux: the Steam install, its
+    // Proton prefix and the folder's name decide, #417).
+    let why = gameprofile::launch_problem(&dir);
     let chosen = matches!(
         stored.as_deref(),
         Some(gameprofile::ON) | Some(gameprofile::OFF)
     );
     Some(gameprofile::GameProfileStatus {
         dir: dir.to_string_lossy().into_owned(),
-        enabled: gameprofile::enabled(stored.as_deref(), detected, gameprofile::SUPPORTED),
+        enabled: gameprofile::enabled(stored.as_deref(), detected, why.is_none()),
         detected,
         chosen,
-        supported: gameprofile::SUPPORTED,
-        unsupported_reason: gameprofile::UNSUPPORTED.map(str::to_string),
+        supported: why.is_none(),
+        launch_note: gameprofile::LAUNCH_NOTE.map(str::to_string),
+        unsupported_reason: why,
     })
 }
 
@@ -3662,7 +3667,13 @@ fn game_profile_for(
 /// the file isn't there yet: FS25 then starts with its default). An error when the settings file
 /// is there but can't be read, or its setting can't be turned into a folder: Silo then doesn't
 /// claim to know where the game reads.
-fn profile_game_reads(dir: &std::path::Path) -> Result<PathBuf, String> {
+///
+/// `map` reads the setting's drive letters on Linux (the Proton prefix the game starts in,
+/// refusing `..`); `None` takes the path as it is (Windows).
+fn profile_game_reads(
+    dir: &std::path::Path,
+    map: Option<&modsroot::PathMap>,
+) -> Result<PathBuf, String> {
     let xml = match std::fs::read_to_string(dir.join("gameSettings.xml")) {
         Ok(x) => x,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(dir.join("mods")),
@@ -3690,15 +3701,17 @@ fn profile_game_reads(dir: &std::path::Path) -> Result<PathBuf, String> {
         // Only a full path is a folder Silo can place (`C:\…` or `\\server\share\…`): an empty,
         // relative or drive-relative one would be read against some working folder FS25 and
         // Silo needn't share.
-        Some(o) => modsroot::PathMap::identity()
-            .to_host(&o.directory)
-            .filter(|p| p.is_absolute())
-            .ok_or_else(|| {
-                format!(
-                    "This profile's game settings name a mods folder Silo can't find: {}",
-                    o.directory
-                )
-            }),
+        Some(o) => match map {
+            Some(m) => protonlaunch::host_path(m, &o.directory),
+            None => modsroot::PathMap::identity().to_host(&o.directory),
+        }
+        .filter(|p| p.is_absolute())
+        .ok_or_else(|| {
+            format!(
+                "This profile's game settings name a mods folder Silo can't find: {}",
+                o.directory
+            )
+        }),
     }
 }
 
@@ -3982,10 +3995,10 @@ fn resolve_mods_root(conn: &rusqlite::Connection, publish: bool) -> ModsRootStat
         .filter(|g| gameprofile::belongs(g))
         .map(|g| {
             let dir = PathBuf::from(&g.dir);
-            // Only where Silo launches profiles (Windows): elsewhere (Proton) its setting is in the
-            // game's drive letters, which Silo doesn't translate for a profile, so it isn't judged.
-            let reads = if gameprofile::SUPPORTED {
-                profile_game_reads(&dir).map(Some)
+            // Only where Silo launches this profile: on Linux its setting is in the game's drive
+            // letters, read through the Proton prefix Steam starts it in (#417).
+            let reads = if g.supported {
+                profile_game_reads(&dir, gameprofile::game_path_map(&dir).as_ref()).map(Some)
             } else {
                 Ok(None)
             };
@@ -4186,13 +4199,13 @@ async fn set_game_profile(
         let _write = mods_root_switch_lock()?;
         let conn = db::open(&db)?;
         let st = resolve_mods_root(&conn, false);
-        let (Some(path), Some(_)) = (st.path.as_deref(), st.game_profile.as_ref()) else {
+        let (Some(path), Some(g)) = (st.path.as_deref(), st.game_profile.as_ref()) else {
             return Err(
                 "This mods folder isn't inside a separate Farming Simulator 25 profile.".into(),
             );
         };
-        if let Some(why) = gameprofile::UNSUPPORTED {
-            return Err(why.into());
+        if let Some(why) = gameprofile::launch_problem(std::path::Path::new(&g.dir)) {
+            return Err(why);
         }
         let value = if enabled {
             gameprofile::ON
@@ -11018,13 +11031,16 @@ mod tests {
         .unwrap();
         let st = super::game_profile_for(&conn, &mods, Some(&main)).unwrap();
         assert!(st.detected && !st.chosen);
-        assert_eq!(st.enabled, crate::gameprofile::SUPPORTED);
+        assert_eq!(st.enabled, st.supported);
         // Where it isn't supported, the status says why (the Settings note shows it).
-        assert_eq!(st.supported, crate::gameprofile::SUPPORTED);
+        assert_eq!(st.unsupported_reason.is_none(), st.supported);
         assert_eq!(
-            st.unsupported_reason.as_deref(),
-            crate::gameprofile::UNSUPPORTED
+            st.unsupported_reason,
+            crate::gameprofile::launch_problem(&prof)
         );
+        if cfg!(windows) {
+            assert!(st.supported);
+        }
 
         // Turned off for this folder: stays off though it's detected.
         let key = crate::gameprofile::setting_key(&crate::modsroot::canonical_key(&mods));
@@ -11048,7 +11064,10 @@ mod tests {
         let prof = base.join("prof");
         std::fs::create_dir_all(prof.join("mods")).unwrap();
         // No settings yet, or the override is off: `<profile>/mods`.
-        assert_eq!(super::profile_game_reads(&prof), Ok(prof.join("mods")));
+        assert_eq!(
+            super::profile_game_reads(&prof, None),
+            Ok(prof.join("mods"))
+        );
         let elsewhere = base.join("elsewhere");
         let dir = elsewhere.to_string_lossy().replace('\\', "/");
         std::fs::write(
@@ -11056,7 +11075,10 @@ mod tests {
             game_settings("false", &dir, "1"),
         )
         .unwrap();
-        assert_eq!(super::profile_game_reads(&prof), Ok(prof.join("mods")));
+        assert_eq!(
+            super::profile_game_reads(&prof, None),
+            Ok(prof.join("mods"))
+        );
         // The profile's own override is on: that folder.
         std::fs::write(
             prof.join("gameSettings.xml"),
@@ -11064,7 +11086,7 @@ mod tests {
         )
         .unwrap();
         assert!(crate::modsroot::same_folder(
-            &super::profile_game_reads(&prof).unwrap(),
+            &super::profile_game_reads(&prof, None).unwrap(),
             &elsewhere
         ));
         // An override that isn't a full path can't be placed: unknown.
@@ -11074,16 +11096,19 @@ mod tests {
                 game_settings("true", odd, "1"),
             )
             .unwrap();
-            assert!(super::profile_game_reads(&prof).is_err(), "{odd:?}");
+            assert!(super::profile_game_reads(&prof, None).is_err(), "{odd:?}");
         }
         // Turned on without naming a folder: unknown too. Off without one: the default.
         let half = |active: &str| {
             format!("<gameSettings><modsDirectoryOverride active=\"{active}\"/></gameSettings>")
         };
         std::fs::write(prof.join("gameSettings.xml"), half("true")).unwrap();
-        assert!(super::profile_game_reads(&prof).is_err());
+        assert!(super::profile_game_reads(&prof, None).is_err());
         std::fs::write(prof.join("gameSettings.xml"), half("false")).unwrap();
-        assert_eq!(super::profile_game_reads(&prof), Ok(prof.join("mods")));
+        assert_eq!(
+            super::profile_game_reads(&prof, None),
+            Ok(prof.join("mods"))
+        );
         // Empty, or cut off before or after the override: damaged, so unknown.
         let whole = game_settings("true", &dir, "1");
         let cut = whole.find("<modsDirectoryOverride").unwrap();
@@ -11093,12 +11118,15 @@ mod tests {
             whole[..whole.len() - 20].to_string(),
         ] {
             std::fs::write(prof.join("gameSettings.xml"), &damaged).unwrap();
-            assert!(super::profile_game_reads(&prof).is_err(), "{damaged:?}");
+            assert!(
+                super::profile_game_reads(&prof, None).is_err(),
+                "{damaged:?}"
+            );
         }
         // Settings that are there but can't be read: unknown, not "its own mods folder".
         std::fs::remove_file(prof.join("gameSettings.xml")).unwrap();
         std::fs::create_dir_all(prof.join("gameSettings.xml")).unwrap();
-        assert!(super::profile_game_reads(&prof).is_err());
+        assert!(super::profile_game_reads(&prof, None).is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -11117,7 +11145,8 @@ mod tests {
         // Described only (no publish): reads the main user folder, writes nothing there.
         let st = super::resolve_mods_root(&conn, false);
         // Only judged where Silo launches profiles; elsewhere the folder is managed as before.
-        let want = crate::gameprofile::SUPPORTED.then_some(crate::modsroot::BlockCause::ReadError);
+        let supported = crate::gameprofile::launch_problem(&prof).is_none();
+        let want = supported.then_some(crate::modsroot::BlockCause::ReadError);
         assert_eq!(st.layout_problem_cause, want);
         // Still a profile's folder everywhere: the main game setting is left alone.
         assert!(!st.can_write_game_setting);
@@ -11270,7 +11299,7 @@ mod tests {
         std::fs::remove_dir_all(&prof).unwrap();
         let st = super::game_profile_for(&conn, &mods, Some(&main)).unwrap();
         assert!(st.detected);
-        assert_eq!(st.enabled, crate::gameprofile::SUPPORTED);
+        assert_eq!(st.enabled, st.supported);
         // Back, but its settings files are gone (or can't be seen right now): still a profile.
         std::fs::create_dir_all(&mods).unwrap();
         assert!(super::game_profile_for(&conn, &mods, Some(&main)).is_some_and(|g| g.detected));

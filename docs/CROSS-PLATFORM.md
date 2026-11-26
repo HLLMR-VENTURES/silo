@@ -57,7 +57,7 @@ hidden and always off, and the note under the folder gives `gameprofile::unsuppo
 | OS | Profile launch | Why |
 |----|----------------|-----|
 | Windows | on | The game executable directly (each argument quoted by the Windows command-line rules, no shell). If it can't be started: `steam://run/2300320//<percent-encoded args>/`, opened without a shell; Steam asks the user to confirm launch arguments. A hands-on test loaded the profile (2026-11-01, #390). |
-| Linux (Proton) | hidden | The game reads `-profile`, but only Steam can start it, and nothing shows that Steam on Linux passes a `steam://run` link's arguments to the game. |
+| Linux (Proton) | on (native Steam) | Only Steam can start the game, so Silo opens `steam://run/2300320//-profile "Z:\…"/` (fully percent-encoded, no shell); Steam asks the user to confirm the launch options. A tester confirmed this loads the profile (2026-11-14, #417). `protonlaunch` holds the rules: the prefix is the `compatdata` of the game's library, its `Z:` must reach `/`, the folder goes as `Z:\…` in double quotes (names with `"`, `\`, `$`, a backtick or a control character are refused), and the profile's own mods-folder setting is read through that prefix's drive map, refusing `..`. Hidden, with the reason as the note, for the Flatpak Steam (its sandbox may not see the folder; untested), when no Steam install is found, or when the prefix's `Z:` points elsewhere. |
 | macOS | hidden | No source shows the Mac build reads `-profile`. |
 
 **Evidence (checked 2026-11-01, FS25 1.25.0.0 on Windows):**
@@ -74,6 +74,12 @@ hidden and always off, and the note under the folder gives `gameprofile::unsuppo
   `steam.exe` converts only the program path and passes the rest of the command line to the game
   unchanged
   ([`steam_helper/steam.c`](https://github.com/ValveSoftware/Proton/blob/proton_10.0/steam_helper/steam.c)).
+- **Linux confirmed (2026-11-14, #417):** on native Steam (Linux Mint 22.3, Proton Experimental,
+  Steam client 1794536281), `-profile "Z:\home\…\FS25 Profiles\smoke"` in Steam's launch options made
+  the game write `log.txt` and `gameSettings.xml` there and read that folder's `mods/`, and
+  `xdg-open 'steam://run/2300320//-profile%20%22Z%3A%5C…%22/'` showed Steam's "Launch Game with
+  custom arguments" prompt with the backslashes kept and no `%20` left; after Continue the game
+  used the profile. The points below are what was known before that test.
 - **The missing link on Linux is Steam itself.** Silo can't start the `.exe` without Proton, so it
   would have to ask Steam (`steam://run/2300320//<args>/`, or `steam -applaunch 2300320 <args>`).
   Valve's page says only that `run`'s "args are passed to the application as launch parameters"

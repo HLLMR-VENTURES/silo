@@ -113,6 +113,7 @@
       {#if profile.enabled}
         Play starts Farming Simulator 25 with the profile in <span class="tnum">{profile.dir}</span>.
         Diagnose, savegames and game settings use that profile's files.
+        {#if profile.launchNote}{profile.launchNote}{/if}
       {:else if profile.detected}
         This folder is in a separate FS25 profile (<span class="tnum">{profile.dir}</span>). Turn this
         on so Play starts the game with it. Otherwise the game loads your main profile's mods.
