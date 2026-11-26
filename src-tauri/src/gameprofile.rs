@@ -83,32 +83,28 @@ pub const LAUNCH_NOTE: Option<&str> = if cfg!(target_os = "linux") {
     None
 };
 
-/// Why Play can't start FS25 on the profile in `dir` here, if it can't: the platform
-/// ([`UNSUPPORTED`]), and on Linux the Steam install, its Proton prefix and the folder's name
-/// (`protonlaunch::problem_now`, #417). Where there's a reason, the setting is hidden, with it as
-/// the note, and always off.
-pub fn launch_problem(dir: &Path) -> Option<String> {
+/// Whether Play can start FS25 on the profile in `dir` here: `Err` with the reason when it
+/// can't (the platform, [`UNSUPPORTED`], and on Linux the Steam install, which Steam client, its
+/// Proton prefix and the folder's name: `protonlaunch::assess_now`, #417). `Ok` carries how the
+/// game's drive letters map to folders for that profile: the Proton prefix's map on Linux,
+/// `None` (paths as they are) on Windows. One look gives both, so they can't disagree.
+pub fn assess(dir: &Path) -> Result<Option<crate::modsroot::PathMap>, String> {
     if let Some(why) = UNSUPPORTED {
-        return Some(why.into());
+        return Err(why.into());
     }
     #[cfg(target_os = "linux")]
-    if let Err(why) = crate::protonlaunch::problem_now(dir) {
-        return Some(why);
-    }
-    let _ = dir;
-    None
-}
-
-/// How the game's drive letters map to folders for the profile in `dir`: through the Proton
-/// prefix Steam starts it in on Linux; `None` (paths as they are) elsewhere.
-pub fn game_path_map(dir: &Path) -> Option<crate::modsroot::PathMap> {
-    #[cfg(target_os = "linux")]
-    return crate::protonlaunch::problem_now(dir).ok();
+    return crate::protonlaunch::assess_now(dir).map(Some);
     #[cfg(not(target_os = "linux"))]
     {
         let _ = dir;
-        None
+        Ok(None)
     }
+}
+
+/// Why Play can't start FS25 on the profile in `dir` here, if it can't ([`assess`]). Where
+/// there's a reason, the setting is hidden, with it as the note, and always off.
+pub fn launch_problem(dir: &Path) -> Option<String> {
+    assess(dir).err()
 }
 
 /// The `app_setting` key holding the choice for the mods folder with identity key `mods_key`.

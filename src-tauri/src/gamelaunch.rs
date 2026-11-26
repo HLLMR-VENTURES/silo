@@ -340,7 +340,7 @@ fn windows_steam_roots(registry: Option<PathBuf>) -> Vec<PathBuf> {
 }
 
 /// Library paths from a Steam root's `libraryfolders.vdf` (plus the root itself).
-fn library_paths(steam_root: &Path) -> Vec<PathBuf> {
+pub(crate) fn library_paths(steam_root: &Path) -> Vec<PathBuf> {
     let mut paths = vec![steam_root.to_path_buf()];
     let vdf = steam_root.join("steamapps/libraryfolders.vdf");
     if let Ok(content) = std::fs::read_to_string(&vdf) {
@@ -768,7 +768,13 @@ fn launch_profile_now(dir: &Path) -> Result<(), String> {
     // Linux (#417): only Steam can start the game (through Proton), so ask it with the profile
     // as the game sees it. Steam asks the user to confirm the launch options first.
     if cfg!(target_os = "linux") {
-        let game = crate::protonlaunch::game_dir(&dir.to_string_lossy())?;
+        let host = dir.to_str().ok_or_else(|| {
+            format!(
+                "Silo can't pass this profile folder to the game: its path isn't valid text ({}).",
+                dir.display()
+            )
+        })?;
+        let game = crate::protonlaunch::game_dir(host)?;
         return open_url_safely(&crate::protonlaunch::steam_profile_url(&game));
     }
     let info = with_debug_exe(

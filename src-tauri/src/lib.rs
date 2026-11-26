@@ -3998,7 +3998,10 @@ fn resolve_mods_root(conn: &rusqlite::Connection, publish: bool) -> ModsRootStat
             // Only where Silo launches this profile: on Linux its setting is in the game's drive
             // letters, read through the Proton prefix Steam starts it in (#417).
             let reads = if g.supported {
-                profile_game_reads(&dir, gameprofile::game_path_map(&dir).as_ref()).map(Some)
+                // A look that fails now is a read error, never paths taken as they are.
+                gameprofile::assess(&dir)
+                    .and_then(|map| profile_game_reads(&dir, map.as_ref()))
+                    .map(Some)
             } else {
                 Ok(None)
             };
@@ -11055,6 +11058,56 @@ mod tests {
         std::fs::create_dir_all(&other).unwrap();
         assert_eq!(super::game_profile_for(&conn, &other, Some(&main)), None);
         drop(conn);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_proton_profiles_own_mods_folder_reads_through_the_prefix_map() {
+        // Linux (#417): the profile's setting is in the game's drive letters, read through the
+        // Proton prefix's map. A drive-relative or `..` path is unknown, never taken as it is.
+        let base = temp_base("gameprofile_proton_reads");
+        let prof = base.join("prof");
+        let data = base.join("data");
+        std::fs::create_dir_all(&prof).unwrap();
+        let map = crate::protonlaunch::drive_map(
+            "/pfx",
+            vec![('d', data.clone())],
+            &crate::protonlaunch::Drive::Missing,
+            &crate::protonlaunch::Drive::Missing,
+        );
+        let reads = |dir: &str| {
+            std::fs::write(
+                prof.join("gameSettings.xml"),
+                game_settings("true", dir, "1"),
+            )
+            .unwrap();
+            super::profile_game_reads(&prof, Some(&map))
+        };
+        assert_eq!(
+            reads("D:/fs25/other mods"),
+            Ok(data.join("fs25/other mods"))
+        );
+        assert_eq!(reads(r"D:\fs25\mods"), Ok(data.join("fs25/mods")));
+        for bad in [
+            "C:mods",
+            "D:",
+            "D:/fs25/../../etc",
+            "E:/nowhere",
+            "D:/Farm./mods",
+            "mods",
+        ] {
+            assert!(reads(bad).is_err(), "{bad:?}");
+        }
+        // Off: the profile's own `mods` folder, whatever the map.
+        std::fs::write(
+            prof.join("gameSettings.xml"),
+            game_settings("false", "C:mods", "1"),
+        )
+        .unwrap();
+        assert_eq!(
+            super::profile_game_reads(&prof, Some(&map)),
+            Ok(prof.join("mods"))
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
