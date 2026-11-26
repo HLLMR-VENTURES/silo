@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.8] - 2026-11-26
+
 ### Added
 
 - **Launch FS25 with this folder's profile** now works on Linux with the native Steam. Play asks
@@ -1448,7 +1450,8 @@ First public beta.
   game-install discovery. Automatic mods-folder detection covers Windows and macOS;
   on Linux (Proton) the mods folder is set manually for now.
 
-[Unreleased]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.7...HEAD
+[Unreleased]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.8...HEAD
+[1.0.8]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.7...v1.0.8
 [1.0.7]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/HLLMR-VENTURES/silo/compare/v1.0.4...v1.0.5
